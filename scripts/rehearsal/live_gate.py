@@ -85,14 +85,60 @@ So the gate does not ask "did the knowledge change?" — the live system
 legitimately changes it.  It asks a question that CAN be answered:
 
     THE ACCOUNTING RULE.  Every write the live system makes goes
-    through MPM, and MPM records the invocation in its audit trail.
-    So a change to the live database that the audit trail does NOT
-    account for is UNATTRIBUTED — and the rehearsal's own writes would
-    be unattributed too.  An unattributed change is a FAILURE.
+    through MPM, and MPM records the ORIGIN of what it wrote.  So a
+    change to the live database whose origin the substrate does not
+    record is UNATTRIBUTED — and the rehearsal's own writes would be
+    unattributed too.  An unattributed change is a FAILURE.
 
-The rule is narrow, explicit and fail-closed: knowledge and
-bookkeeping changes are permitted only while the audit trail recorded
-something in the same window; anything else fails.
+THE ORIGIN CHAIN — WHY "THE AUDIT TRAIL MOVED" IS NOT ENOUGH
+--------------------------------------------------------------
+The previous version of this rule asked a WEAKER question: "did the
+audit trail record ANY invocation in this window?"  That is temporal
+correlation, not attribution.  ONE unrelated legitimate invocation — a
+wake-context read, a scheduler health check — satisfied the rule for
+EVERY concurrent change, including an unauthorised one, and the gate
+then reported that unauthorised write as "ACCOUNTED FOR by the live
+system's own audit trail".  That is a false claim, and an isolation
+gate that makes false claims is worse than no gate at all.
+
+The substrate records the origin of every artifact it writes:
+
+    artifact_provenance.artifact_id -> invocation_id
+                                    -> tool_invocations.invocation_id
+
+That chain is the real primitive, and the rehearsal's own writes never
+pass through it: they are raw SQL, they carry no provenance row, and
+the chain does not name them.  So the chain can tell the live system's
+writes from the rehearsal's.
+
+THE RULE NOW.  Every change to the operator's knowledge is attributed
+to a recorded invocation, or it is UNVERIFIED.  There is no third
+answer, and no change is ever described as "accounted for" unless the
+evidence establishes its origin:
+
+    ATTRIBUTED   the substrate's origin chain names a recorded
+                 invocation for THIS row (or a recorded call's
+                 execution window covers the moment it changed).  The
+                 invocation is named.
+
+    UNVERIFIED   the origin cannot be established.  In a KNOWLEDGE
+                 table this is a FAILURE — the gate cannot certify
+                 that the rehearsal did not make it, and a gate that
+                 cannot certify must not pass.
+
+    CORRELATED   the movement is of a class the recorded invocations
+                 produce, but the substrate binds those rows to no
+                 invocation individually.  This is reported as
+                 unverified-but-consistent.  It is NEVER called
+                 "accounted for", and it is a KNOWN LIMITATION, stated
+                 in the report rather than hidden.
+
+The KNOWLEDGE tables are therefore strict; the bookkeeping tables are
+reported with their limitation named.  And the rehearsal's own
+independent syscall detector is what covers the case neither class can
+prove on its own: a write the rehearsal made.  The two detectors are
+reported separately, and the syscall detector's absence is reported as
+an absence — never as "zero hits".
 
 THE RELEASE POINTER
 -------------------
@@ -137,8 +183,9 @@ import json
 import os
 import sqlite3
 import sys
+import time
 
-VERSION = 2
+VERSION = 3
 
 # ── the protected artifacts ────────────────────────────────────────────────
 #
@@ -226,6 +273,54 @@ VOLATILE_COLUMNS = {
     "call_count",
     "last_called_at",
 }
+
+# ── the attribution ────────────────────────────────────────────────────────
+#
+# The id column of each knowledge table.  `lessons` is a VIEW over
+# `lessons_base`, and a view has no primary key, so the gate keys the
+# knowledge rows by this column instead of by the view's empty primary
+# key — which is what made the per-row delta of `lessons` meaningless.
+DOMAIN_ID_COLUMN = {
+    "memories": "id",
+    "lessons": "id",
+    "evidence": "id",
+}
+
+# The columns that record WHEN the row was written.  A mutation's own
+# timestamp is what binds it to the recorded call that made it: the
+# substrate stamps `unixepoch()` into the columns it sets, and a tool
+# call runs between its own `started_at` and `completed_at`.
+DOMAIN_TIME_COLUMNS = {
+    "memories": ("created_at", "updated_at", "deleted_at"),
+    "lessons": ("created", "updated_at", "deleted_at"),
+    "evidence": ("created_at", "updated_at", "deleted_at"),
+}
+
+# The surfaces that can produce each kind of knowledge change.
+#
+# `mpm_memory` with action `delete` is the only writer that sets
+# `memories.deleted_at`: the soft delete is one UPDATE that stops at
+# `deleted_at` and does not re-record the artifact's provenance, so it
+# is the one knowledge mutation the origin chain cannot bind on its own.
+MEMORY_DELETE_SURFACE = ("mpm_memory", "delete")
+
+# An explicitly delivered observation: the substrate records NO
+# provenance for the evidence row itself (only the auto-capture rows,
+# which a trigger creates inside the artifact's own transaction, carry
+# a link).  The delivery is therefore bound to the recorded
+# `mpm_evidence` call whose execution window covers it.
+EVIDENCE_WRITE_SURFACE = ("mpm_evidence", "add")
+
+# How far back the attribution index reaches.  The window the gate
+# compares is minutes long; the index exists so that a provenance row
+# naming an invocation can be resolved, and so that the recorded calls
+# near the window can be bound to the mutations they made.
+#
+# The bound is a TIME window, not a count, and that matters: a bounded
+# set that moves forward with the clock can only LOSE old entries, so
+# "present in the later snapshot, absent from the earlier one" means
+# exactly "new in the window" and never "aged out".
+ATTRIBUTION_WINDOW_SECONDS = 6 * 3600
 
 
 class MeasurementError(Exception):
@@ -443,6 +538,220 @@ def table_rows(c: sqlite3.Connection, table: str, drop_volatile: bool = False) -
     return out
 
 
+def domain_row_map(c: sqlite3.Connection, table: str) -> dict:
+    """{row id: {"hash": h, "created": ts, "updated": ts, "deleted": ts}}.
+
+    The hash is computed over exactly the columns the DOMAIN fingerprint
+    uses — the volatile bookkeeping columns excluded — so this map and
+    the fingerprint are the SAME instrument: a read that bumps
+    `last_accessed_at` is not a change to the operator's knowledge.
+
+    The map is keyed by the row's own id rather than by the table's
+    primary key, because `lessons` is a VIEW: a view has no primary
+    key, so the generic row map collapses the whole table into one
+    entry and its per-row delta is meaningless.  Keying by the id is
+    what makes "this row appeared" and "this row changed" answerable
+    per row — which is the whole point of an attribution.
+
+    The timestamps are the row's own record of when it was written.
+    """
+    cols, _ = table_columns(c, table)
+    if not cols:
+        return {}
+    keep = [x for x in cols if x not in VOLATILE_COLUMNS]
+    if not keep:
+        return {}
+    idcol = DOMAIN_ID_COLUMN.get(table)
+    tcols = [x for x in DOMAIN_TIME_COLUMNS.get(table, ()) if x in cols]
+    want = list(keep)
+    for x in ([idcol] if idcol and idcol in cols else []) + tcols:
+        if x not in want:
+            want.append(x)
+    sel = ", ".join(f'"{x}"' for x in want)
+    try:
+        rows = c.execute(f'SELECT {sel} FROM "{table}"').fetchall()
+    except Exception as e:
+        raise MeasurementError(
+            f"cannot read the live table {table}: {e}"
+        ) from e
+    idx = {name: i for i, name in enumerate(want)}
+    out: dict[str, dict] = {}
+    for r in rows:
+        h = hashlib.sha256(repr(tuple(r[idx[c]] for c in keep)).encode()).hexdigest()[:32]
+        d: dict = {"hash": h}
+        for x in tcols:
+            v = r[idx[x]]
+            if isinstance(v, (int, float)):
+                d[x] = int(v)
+        rid = r[idx[idcol]] if idcol in idx else None
+        out[str(rid) if rid is not None else h] = d
+    return out
+
+
+def attribution_state(c: sqlite3.Connection) -> dict:
+    """The origin chain, captured as the snapshot's attribution index.
+
+    Four pieces, each read from the substrate's own tables:
+
+      invocations   invocation_id -> the calls it covers.  A CALL is one
+                    row of `tool_invocations`: the substrate records one
+                    per tool invocation, and one invocation_id may
+                    cover several calls (the OpenCode plugin stamps one
+                    invocation id per host session).
+
+      calls         the individual calls with the execution window
+                    [started_at, completed_at] each one covers.  A
+                    mutation's own timestamp falls inside the window of
+                    the call that made it.
+
+      origins       artifact_id -> the provenance row that records the
+                    artifact's origin, with the key of that row so the
+                    comparison can tell a provenance row that was
+                    WRITTEN IN THIS WINDOW from one that predates it.
+
+      evidence      evidence_id -> the row's own link to the artifact it
+                    supports, and whether it was auto-captured (a
+                    trigger wrote it inside the artifact's transaction)
+                    or explicitly delivered.
+
+      bindings      table -> row key -> invocation_id, for every table
+                    that carries an invocation id of its own.  These
+                    are the tables whose rows can be attributed
+                    individually without the provenance chain.
+    """
+    state: dict = {"invocations": {}, "calls": {}, "origins": {},
+                   "evidence": {}, "bindings": {}, "binding_tables": []}
+    cutoff = int(time.time()) - ATTRIBUTION_WINDOW_SECONDS
+
+    cols, _ = table_columns(c, "tool_invocations")
+    if cols:
+        want = [x for x in ("invocation_id", "tool_name", "action", "actor_kind",
+                            "framework_name", "started_at", "completed_at",
+                            "result_status") if x in cols]
+        sel = ", ".join(f'"{x}"' for x in want)
+        try:
+            rows = c.execute(f'SELECT {sel} FROM "tool_invocations"').fetchall()
+        except Exception as e:
+            raise MeasurementError(
+                f"cannot read the live audit trail: {e}") from e
+        for r in rows:
+            d = dict(zip(want, r))
+            iid = d.get("invocation_id")
+            started = _as_int(d.get("started_at"))
+            if not iid or started is None or started < cutoff:
+                continue
+            completed = _as_int(d.get("completed_at"))
+            inv = state["invocations"].setdefault(iid, {
+                "calls": 0, "last": 0, "tools": [], "frameworks": [],
+                "actors": [], "actions": [], "statuses": []})
+            inv["calls"] += 1
+            inv["last"] = max(inv["last"], completed or started)
+            for key, dest in (("tool_name", "tools"), ("framework_name", "frameworks"),
+                              ("actor_kind", "actors"), ("action", "actions"),
+                              ("result_status", "statuses")):
+                v = d.get(key)
+                if v is not None and v not in inv[dest]:
+                    inv[dest].append(v)
+            state["calls"].setdefault(iid, []).append([
+                started, completed if completed is not None else started,
+                d.get("tool_name"), d.get("action"), d.get("framework_name"),
+                d.get("actor_kind"), d.get("result_status")])
+
+    cols, pk = table_columns(c, "artifact_provenance")
+    if cols:
+        want = [x for x in ("artifact_id", "artifact_type", "invocation_id") if x in cols]
+        # The primary key travels with the row so that the comparison
+        # can tell a provenance row written in this window from one that
+        # predates it.  The key is in the SAME form the generic row map
+        # uses, so the two maps can be compared directly.
+        pkcols = [cols[i] for i in (pk or [])]
+        sel = ", ".join(f'"{x}"' for x in (want + [x for x in pkcols if x not in want]))
+        try:
+            rows = c.execute(f'SELECT {sel} FROM "artifact_provenance"').fetchall()
+        except Exception as e:
+            raise MeasurementError(
+                f"cannot read the live provenance ledger: {e}") from e
+        names = want + [x for x in pkcols if x not in want]
+        for r in rows:
+            d = dict(zip(names, r))
+            aid = d.get("artifact_id")
+            if not aid:
+                continue
+            o = {"invocation_id": d.get("invocation_id"),
+                 "artifact_type": d.get("artifact_type")}
+            if pkcols:
+                o["key"] = "|".join(repr(d.get(x)) for x in pkcols)
+            state["origins"][str(aid)] = o
+
+    cols, _ = table_columns(c, "evidence")
+    if cols:
+        want = [x for x in ("id", "artifact_id", "source_group", "created_by",
+                            "created_at") if x in cols]
+        sel = ", ".join(f'"{x}"' for x in want)
+        try:
+            rows = c.execute(f'SELECT {sel} FROM "evidence"').fetchall()
+        except Exception as e:
+            raise MeasurementError(
+                f"cannot read the live evidence table: {e}") from e
+        for r in rows:
+            d = dict(zip(want, r))
+            if d.get("id") is None:
+                continue
+            state["evidence"][str(d["id"])] = {
+                "artifact_id": d.get("artifact_id"),
+                "source_group": d.get("source_group"),
+                "created_by": d.get("created_by"),
+                "created_at": _as_int(d.get("created_at")),
+            }
+
+    # Every table that carries an invocation id of its own can bind its
+    # rows to a recorded invocation without the provenance chain.
+    try:
+        names = [r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+    except Exception as e:
+        raise MeasurementError(
+            f"cannot enumerate the live database's tables: {e}") from e
+    for t in names:
+        if t.startswith("sqlite_") or t in AUDIT_TABLES:
+            continue
+        cols, pk = table_columns(c, t)
+        if not cols or "invocation_id" not in cols or not pk:
+            continue
+        sel = ", ".join(f'"{x}"' for x in cols)
+        try:
+            rows = c.execute(f'SELECT {sel} FROM "{t}"').fetchall()
+        except Exception as e:
+            raise MeasurementError(
+                f"cannot read the live table {t}: {e}") from e
+        ii = cols.index("invocation_id")
+        binds: dict[str, str] = {}
+        for r in rows:
+            iid = r[ii]
+            if not iid:
+                continue
+            key = "|".join(repr(r[i]) for i in pk if i < len(r))
+            binds[key] = iid
+        state["bindings"][t] = binds
+        state["binding_tables"].append(t)
+
+    return state
+
+
+def _as_int(v):
+    """An int, or None.  SQLite columns are not typed by the schema."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v)
+    try:
+        return int(str(v))
+    except (TypeError, ValueError):
+        return None
+
+
 def config_state(c: sqlite3.Connection) -> dict:
     """{key: {column: value}} for the configuration table."""
     cols, _ = table_columns(c, "system_config")
@@ -475,7 +784,8 @@ def database_state(db_path: str) -> dict:
         raise MeasurementError(f"cannot open the live database {db_path}: {e}") from e
 
     state: dict = {"present": True, "path": db_path, "tables": {}, "rows": {},
-                   "domain": {}, "schema": {}, "config": {}}
+                   "domain": {}, "schema": {}, "config": {}, "domain_rows": {},
+                   "attribution": {}}
     try:
         names = [r[0] for r in c.execute(
             "SELECT name FROM sqlite_master WHERE type IN ('table','view') ORDER BY name")]
@@ -497,7 +807,9 @@ def database_state(db_path: str) -> dict:
                 state["domain"][t] = None
             else:
                 state["domain"][t] = fp[0]
+            state["domain_rows"][t] = domain_row_map(c, t)
         state["config"] = config_state(c)
+        state["attribution"] = attribution_state(c)
     except MeasurementError:
         raise
     except Exception as e:
@@ -522,6 +834,10 @@ def do_snapshot(args) -> int:
     db_path = args.db or os.path.join(args.live_mpm, "src", "db", "mpm.db")
     snap = {
         "version": VERSION,
+        # WHEN the snapshot was taken.  The attribution needs it: a
+        # recorded invocation counts as active in the window when its
+        # last activity is at or after the earlier snapshot's moment.
+        "at": int(time.time()),
         "protected": protected_inventory(args.live_mpm, args.oc_config, args.systemd_user),
         "pointers": pointer_inventory(args.live_mpm),
         "db": database_state(db_path),
@@ -667,17 +983,244 @@ def row_delta(before: dict, after: dict) -> dict:
     return out
 
 
-def audit_accounted(before: dict, after: dict) -> bool:
-    """Did the live system's own audit trail record anything in the window?
+def row_delta_keys(before: dict, after: dict) -> dict:
+    """{table: {"added": [...], "changed": [...], "removed": [...]}}.
 
-    Every write the live system makes goes through MPM, and MPM records
-    the invocation in `tool_invocations`.  So an audit row appearing in
-    the window is what makes the window's other movement attributable
-    to the live system rather than to something the rehearsal did.
+    The same delta as `row_delta`, but with the KEYS.  A count cannot be
+    attributed; a key can.
     """
-    b = (before or {}).get("tool_invocations") or {}
-    a = (after or {}).get("tool_invocations") or {}
-    return len(a) > len(b) or bool(set(a) - set(b))
+    out = {}
+    b = before or {}
+    a = after or {}
+    for t in sorted(set(b) | set(a)):
+        B = b.get(t) or {}
+        A = a.get(t) or {}
+        added = sorted(set(A) - set(B))
+        removed = sorted(set(B) - set(A))
+        changed = sorted(k for k in set(A) & set(B) if A[k] != B[k])
+        if added or removed or changed:
+            out[t] = {"added": added, "changed": changed, "removed": removed}
+    return out
+
+
+class Attribution:
+    """The window's evidence about WHO WROTE WHAT — and where it stops.
+
+    The substrate records the origin of every artifact it writes:
+
+        artifact_provenance.artifact_id -> invocation_id
+                                        -> tool_invocations.invocation_id
+
+    This class follows that chain, and it answers three questions about
+    the changes the two snapshots describe:
+
+      * is there a recorded invocation behind this change, and which one?
+      * was that invocation ACTIVE inside this window?
+      * what can be said when the answer is no?
+
+    The answers are deliberately not symmetric.  A knowledge change with
+    no established origin is a FAILURE: the gate cannot certify that the
+    rehearsal did not make it, and a gate that cannot certify must not
+    pass.  A bookkeeping change with no per-row origin is CORRELATED:
+    the substrate writes those rows as a side effect of an invocation
+    and binds no individual row to one, so the gate reports the
+    limitation instead of pretending to an attribution it does not have.
+    """
+
+    def __init__(self, before: dict, after: dict):
+        self.bdb = before.get("db") or {}
+        self.adb = after.get("db") or {}
+        self.b = self.bdb.get("attribution") or {}
+        self.a = self.adb.get("attribution") or {}
+        self.before_at = _as_int(before.get("at")) or 0
+        self.after_at = _as_int(after.get("at")) or 0
+        self.b_rows = self.bdb.get("rows") or {}
+        self.a_rows = self.adb.get("rows") or {}
+        self.b_dom = self.bdb.get("domain_rows") or {}
+        self.a_dom = self.adb.get("domain_rows") or {}
+        self.b_inv = self.b.get("invocations") or {}
+        self.a_inv = self.a.get("invocations") or {}
+
+    # ── the recorded invocations ─────────────────────────────────────────
+
+    def active_invocations(self) -> dict:
+        """The invocations that did something inside this window.
+
+        An invocation is active when its last recorded activity is at
+        or after the earlier snapshot.  A time-bounded index can only
+        lose old entries as the clock moves forward, so an invocation
+        that is present in the later snapshot and absent from the
+        earlier one is genuinely new — never one that merely aged out.
+        """
+        out = {}
+        for iid, inv in self.a_inv.items():
+            if _as_int(inv.get("last")) is not None and _as_int(inv.get("last")) >= self.before_at:
+                out[iid] = inv
+        return out
+
+    def recorded_invocation(self, iid) -> bool:
+        """Is this invocation id one the live audit trail records?"""
+        return bool(iid) and iid in self.a_inv
+
+    # ── the origin chain ─────────────────────────────────────────────────
+
+    def provenance_written_in_window(self, artifact_id) -> bool:
+        """Did the substrate record this artifact's origin IN THE WINDOW?
+
+        The provenance row is written in the same transaction as the
+        artifact it describes.  So a provenance row that appeared or was
+        rewritten inside the window is the substrate's own record that
+        IT wrote the artifact inside the window.
+        """
+        o = (self.a.get("origins") or {}).get(str(artifact_id))
+        if not o:
+            return False
+        key = o.get("key")
+        if not key:
+            return False
+        b = (self.b_rows.get("artifact_provenance") or {}).get(key)
+        a = (self.a_rows.get("artifact_provenance") or {}).get(key)
+        if a is None:
+            return False
+        if b is None:
+            return True          # the provenance row is NEW
+        return b != a            # or it was rewritten in place
+
+    def origin_of(self, artifact_id):
+        """(invocation_id, why) for an artifact's recorded origin."""
+        o = (self.a.get("origins") or {}).get(str(artifact_id))
+        if not o:
+            return None, "the substrate recorded no provenance for it"
+        iid = o.get("invocation_id")
+        if not self.recorded_invocation(iid):
+            return None, (f"its provenance names invocation {iid}, which the "
+                          "live audit trail does not record")
+        return iid, f"invocation {iid}"
+
+    # ── the per-row attribution ──────────────────────────────────────────
+
+    def attribute_by_containment(self, ts, surface):
+        """(invocation_id, why) for a mutation bound to a call's window.
+
+        The substrate stamps `unixepoch()` into the columns it sets, and
+        a tool call runs between its own `started_at` and `completed_at`.
+        A mutation whose own timestamp falls inside the execution window
+        of exactly one recorded call of the surface that can produce it
+        was made by that call.
+
+        EXACTLY one.  Two candidate calls means the origin is not
+        established: the gate says so rather than picking one.
+        """
+        tool, action = surface
+        if ts is None:
+            return None, "the row carries no timestamp that could bind it to a call"
+        candidates = []
+        for iid, calls in (self.a.get("calls") or {}).items():
+            for call in calls:
+                started, completed = call[0], call[1]
+                if call[2] != tool:
+                    continue
+                if action is not None and call[3] != action:
+                    continue
+                if started is None or completed is None:
+                    continue
+                if started <= ts <= completed:
+                    candidates.append((iid, call))
+        if not candidates:
+            return None, f"no recorded {tool} call covers the moment it changed"
+        if len(candidates) > 1:
+            return None, (f"{len(candidates)} recorded {tool} calls cover the "
+                          "moment it changed, so its origin is not established")
+        iid, call = candidates[0]
+        return iid, (f"the recorded {tool}/{call[3]} call at {call[0]} covers "
+                     "the moment it changed")
+
+    def attribute_added(self, table: str, key: str):
+        """(invocation_id, why) for a knowledge row that APPEARED."""
+        if table == "evidence":
+            link = (self.a.get("evidence") or {}).get(key) or {}
+            if link.get("source_group") == "auto_capture":
+                # The auto-capture row is written by an AFTER INSERT
+                # trigger on `memories`, INSIDE the artifact's own
+                # transaction.  Its origin is therefore its parent's
+                # origin — not a correlation, a shared transaction.
+                parent = link.get("artifact_id")
+                iid, why = self.origin_of(parent)
+                if iid and self.provenance_written_in_window(parent):
+                    return iid, (f"the auto-capture row was written in the same "
+                                 f"transaction as {parent} ({why})")
+                return None, (f"its auto-capture parent {parent} was not itself "
+                              "written in this window"
+                              if iid else
+                              f"its auto-capture parent {parent} has no recorded origin")
+            # An explicitly delivered observation.  The substrate records
+            # no provenance for the evidence row itself, so the origin is
+            # bound to the recorded `mpm_evidence` call whose execution
+            # window covers the delivery.
+            return self.attribute_by_containment(link.get("created_at"),
+                                                  EVIDENCE_WRITE_SURFACE)
+        iid, why = self.origin_of(key)
+        if iid and self.provenance_written_in_window(key):
+            return iid, f"the substrate recorded its origin in this window ({why})"
+        if iid:
+            return None, ("its provenance predates this window, so the write that "
+                          "added it was not the substrate's own")
+        return None, why
+
+    def attribute_changed(self, table: str, key: str):
+        """(invocation_id, why) for a knowledge row that CHANGED."""
+        B = (self.b_dom.get(table) or {}).get(key) or {}
+        A = (self.a_dom.get(table) or {}).get(key) or {}
+        iid, why = self.origin_of(key)
+        if iid and self.provenance_written_in_window(key):
+            return iid, f"the substrate re-recorded its origin in this window ({why})"
+        # The soft delete is the one knowledge mutation the origin chain
+        # cannot bind on its own: the substrate sets `deleted_at` and
+        # stops there, without re-recording the artifact's provenance.
+        b_del, a_del = B.get("deleted"), A.get("deleted")
+        if a_del is not None and a_del != b_del:
+            return self.attribute_by_containment(a_del, MEMORY_DELETE_SURFACE)
+        # A write that bumped `updated_at` is bound by that timestamp.
+        b_upd, a_upd = B.get("updated"), A.get("updated")
+        if a_upd is not None and a_upd != b_upd:
+            return self.attribute_by_containment(a_upd, ("mpm_memory", None))
+        return None, ("its provenance predates this window and no recorded call "
+                      "covers the moment it changed")
+
+    def domain_delta(self, table: str):
+        """(added, changed, removed) row ids for one knowledge table."""
+        B = (self.b_dom.get(table) or {})
+        A = (self.a_dom.get(table) or {})
+        added = sorted(k for k in A if k not in B)
+        removed = sorted(k for k in B if k not in A)
+        changed = sorted(k for k in A if k in B and A[k].get("hash") != B[k].get("hash"))
+        return added, changed, removed
+
+    def attribute_bookkeeping(self, table: str, moved_keys):
+        """(attributed, unverified) for the rows of a bookkeeping table.
+
+        A table that carries its own `invocation_id` binds each of its
+        rows to the invocation that wrote it, so the rows can be
+        attributed individually.  A table that does not is a SIDE-EFFECT
+        table: the substrate writes it as a consequence of an invocation
+        and binds no individual row to one.  That is reported as a
+        correlation with its limitation named — never as an attribution.
+        """
+        if table not in (self.a.get("binding_tables") or []):
+            return [], []
+        binds = (self.a.get("bindings") or {}).get(table) or {}
+        attributed = []
+        unverified = []
+        for key in moved_keys:
+            iid = binds.get(key)
+            if iid and self.recorded_invocation(iid):
+                attributed.append((key, iid))
+            elif iid:
+                unverified.append((key, f"it names invocation {iid}, which the live "
+                                        "audit trail does not record"))
+            else:
+                unverified.append((key, "no recorded invocation is bound to it"))
+        return attributed, unverified
 
 
 def compare(before: dict, after: dict):
@@ -744,12 +1287,20 @@ def compare(before: dict, after: dict):
                 f"live system's own record of what it did"
             )
 
-    # The KNOWLEDGE tables, and everything else, are permitted only
-    # while the audit trail accounts for the window.
+    # The KNOWLEDGE tables.  Every change is attributed to a recorded
+    # invocation or it is UNVERIFIED — and an UNVERIFIED change in a
+    # knowledge table is a FAILURE.  There is no "the audit trail moved,
+    # so it must have been the live system": that is the false claim
+    # this rule used to make.
+    attr = Attribution(before, after)
     delta = row_delta(b_rows, a_rows)
-    accounted = audit_accounted(b_rows, a_rows)
+    delta_keys = row_delta_keys(b_rows, a_rows)
 
-    knowledge_moved = {t: d for t, d in delta.items() if t in DOMAIN_TABLES}
+    knowledge_moved = {}
+    for t in DOMAIN_TABLES:
+        added, changed, removed = attr.domain_delta(t)
+        if added or changed or removed:
+            knowledge_moved[t] = (added, changed, removed)
     # The domain fingerprint is the substrate's own definition; it is
     # the thing the SIMULATED database is compared with.
     bdom = bdb.get("domain") or {}
@@ -757,24 +1308,43 @@ def compare(before: dict, after: dict):
     domain_moved = [t for t in sorted(set(bdom) | set(adom))
                     if bdom.get(t) != adom.get(t)]
     for t in domain_moved:
-        knowledge_moved.setdefault(t, (0, 0, 0))
+        knowledge_moved.setdefault(t, ([], [], []))
 
-    if knowledge_moved and not accounted:
-        for t, (added, changed, removed) in sorted(knowledge_moved.items()):
+    for t in sorted(knowledge_moved):
+        added, changed, removed = knowledge_moved[t]
+        for key in added:
+            origin, why = attr.attribute_added(t, key)
+            if origin:
+                evidence.append(
+                    f"the operator's knowledge moved in {t}: the row {key} "
+                    f"appeared, and {why} — ATTRIBUTED"
+                )
+            else:
+                failures.append(
+                    f"the operator's knowledge changed and its origin is "
+                    f"UNVERIFIED: the row {key} appeared in {t}, and {why}"
+                )
+        for key in changed:
+            origin, why = attr.attribute_changed(t, key)
+            if origin:
+                evidence.append(
+                    f"the operator's knowledge moved in {t}: the row {key} "
+                    f"changed, and {why} — ATTRIBUTED"
+                )
+            else:
+                failures.append(
+                    f"the operator's knowledge changed and its origin is "
+                    f"UNVERIFIED: the row {key} changed in {t}, and {why}"
+                )
+        for key in removed:
             failures.append(
-                f"the operator's knowledge changed and NOTHING in the live "
-                f"system's audit trail accounts for it: {t} "
-                f"(+{added} added, ~{changed} changed, -{removed} removed)"
-            )
-    elif knowledge_moved:
-        for t, (added, changed, removed) in sorted(knowledge_moved.items()):
-            evidence.append(
-                f"the operator's knowledge moved in {t} "
-                f"(+{added} added, ~{changed} changed, -{removed} removed) "
-                f"— ACCOUNTED FOR by the live system's own audit trail"
+                f"the operator's knowledge changed and its origin is "
+                f"UNVERIFIED: the row {key} DISAPPEARED from {t}, and the "
+                "substrate records no origin for a removal"
             )
 
     # Everything else is the live system's bookkeeping.
+    active = attr.active_invocations()
     for t, (added, changed, removed) in sorted(delta.items()):
         if t in DOMAIN_TABLES or t in AUDIT_TABLES:
             continue
@@ -783,16 +1353,41 @@ def compare(before: dict, after: dict):
             # table, key by key.  It is not also bookkeeping.
             continue
         line = (f"{t}: rows +{added} ~{changed} -{removed}")
-        if accounted:
+        keys = delta_keys.get(t) or {}
+        moved = list(keys.get("added") or []) + list(keys.get("changed") or [])
+        attributed, unverified = attr.attribute_bookkeeping(t, moved)
+        if unverified:
+            for key, why in unverified:
+                failures.append(
+                    f"the live database changed and the origin is UNVERIFIED: "
+                    f"the row {key} of {t} moved, and {why}"
+                )
+            continue
+        if attributed:
+            named = sorted({iid for _, iid in attributed})
             evidence.append(
-                f"the live system's own bookkeeping moved — {line} "
-                f"— ACCOUNTED FOR by the audit trail"
+                f"the live system's own bookkeeping moved — {line} — "
+                f"ATTRIBUTED to {len(named)} recorded invocation(s): "
+                f"{', '.join(named[:4])}"
+            )
+            continue
+        # A side-effect table: the substrate writes it as a consequence
+        # of an invocation and binds no individual row to one.  That is
+        # a CORRELATION, and it is reported as one — with the
+        # limitation named, and never as "accounted for".
+        if active:
+            evidence.append(
+                f"the live system's own bookkeeping moved — {line} — "
+                f"CORRELATED with {len(active)} recorded invocation(s); the "
+                "substrate binds these rows to no invocation individually, so "
+                "this is NOT an attribution"
             )
         else:
             failures.append(
                 f"the live database changed and NOTHING in the live system's "
                 f"audit trail accounts for it: {line}"
             )
+
 
     # The database FILE's size and mtime are reported, never asserted:
     # the live scheduler writes to it and SQLite checkpoints the WAL.

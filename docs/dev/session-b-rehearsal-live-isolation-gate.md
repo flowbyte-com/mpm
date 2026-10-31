@@ -255,6 +255,130 @@ corresponding test fail.
 
 ---
 
+## 3B. The attribution correction — this supersedes §3 where they differ
+
+### 3B.1 The defect: temporal correlation was reported as attribution
+
+§3A's accounting rule asked a weaker question than the one the gate
+needed to answer — *"did the live system's own audit trail record
+anything in the window?"* — and answered it with:
+
+```python
+def audit_accounted(before: dict, after: dict) -> bool:
+    b = (before or {}).get("tool_invocations") or {}
+    a = (after or {}).get("tool_invocations") or {}
+    return len(a) > len(b) or bool(set(a) - set(b))
+```
+
+That is **temporal correlation, not attribution**. The presence of ANY
+new `tool_invocations` row satisfied the rule for EVERY concurrent
+change in the window, including an unauthorised one. An unrelated
+legitimate agent invocation — the plugin's wake-context poll, a
+scheduler health check — arriving at the same moment as a
+rehearsal-induced write to the operator's knowledge was enough for the
+gate to ACCEPT that write, and to report it as:
+
+> *"the operator's knowledge moved in memories … — ACCOUNTED FOR by the
+> live system's own audit trail"*
+
+That sentence was **false**. It claimed an origin the evidence did not
+establish, and it did so in exactly the case the gate exists to catch.
+
+### 3B.2 The measurement
+
+Against the deployed runtime's own live database (read-only), with a
+disposable copy as the write target, the defect reproduces and the
+correction is measurable:
+
+| Scenario | Before | After |
+|---|---|---|
+| a legitimate write through the substrate | reported **ACCOUNTED FOR** | reported **ATTRIBUTED** to the invocation that wrote it |
+| an unrelated wake-context read + an unauthorised raw-SQL insert into `memories` | **PASS** — "ACCOUNTED FOR by the live system's own audit trail" | **FAIL** — "its origin is UNVERIFIED … the substrate recorded no provenance for it" |
+| an unrelated wake-context read + an unauthorised `UPDATE` of an existing memory | **PASS** | **FAIL** |
+| an unrelated wake-context read + an unauthorised insert into `evidence` | **PASS** | **FAIL** |
+
+The word "ACCOUNTED FOR" no longer appears in the gate's output at all.
+
+### 3B.3 The origin chain — the substrate's real primitive
+
+The substrate already records the origin of every artifact it writes:
+
+```
+artifact_provenance.artifact_id -> invocation_id
+                                -> tool_invocations.invocation_id
+```
+
+The rehearsal's own writes never pass through it: they are raw SQL, they
+carry no provenance row, and the chain does not name them. So the chain
+is the discriminator — and it was sitting in the live database,
+unused.
+
+Measured coverage on the deployed runtime's database: `memory` 94,
+`decision` 51, `lesson` 40, `theory` 8, `work` 6, `handoff` 1
+provenance rows; 426 of them join a real invocation. Every
+agent-written knowledge artifact is covered. The five bootstrap
+directives are not, and they are not written during a window.
+
+**Evidence rows carry no provenance of their own** — the substrate does
+not record one. Two mechanisms cover them, and both are causal rather
+than temporal:
+
+* An **auto-capture** row is created by the `memory_source_evidence_ai`
+  AFTER INSERT trigger on `memories`, *inside the artifact's own
+  transaction*. Its origin is therefore its parent's origin.
+* An **explicitly delivered** observation is bound to the recorded
+  `mpm_evidence` call whose execution window covers the delivery. The
+  substrate stamps `unixepoch()` into the columns it sets, and a tool
+  call runs between its own `started_at` and `completed_at`.
+
+### 3B.4 The rule now
+
+Every change to the operator's knowledge is attributed to a recorded
+invocation, or it is **UNVERIFIED**. There is no third answer, and no
+change is ever described as "accounted for" unless the evidence
+establishes its origin.
+
+| Verdict | What it means | What it does to the gate |
+|---|---|---|
+| **ATTRIBUTED** | the origin chain names a recorded invocation for THIS row | evidence — the invocation is named |
+| **UNVERIFIED** | the origin cannot be established | **FAILURE** in a knowledge table: the gate cannot certify that the rehearsal did not make it, and a gate that cannot certify must not pass |
+| **CORRELATED** | the movement is of a class the recorded invocations produce, but the substrate binds those rows to no invocation individually | reported as unverified-but-consistent, with the limitation named. **NEVER** "accounted for" |
+
+The knowledge tables are strict. The bookkeeping tables are reported
+with their limitation stated rather than hidden, because the substrate
+writes them as a side effect of an invocation and binds no individual
+row to one. The snapshot's version moves 2 → 3, so a snapshot taken by
+the old gate cannot be compared with one taken by the new.
+
+### 3B.5 The two detectors, reported separately
+
+The rehearsal has two independent detectors against the live tree, and
+they prove different things:
+
+* the **snapshot detector** proves the live tree's **state** did not
+  change in a way the live system cannot account for;
+* the **syscall detector** proves the migration made **no syscall**
+  against the live tree **at all** — including a **read**, which changes
+  no state and which the snapshot detector is blind to.
+
+The syscall detector was **skipped** when `strace` was not installed,
+and the suite then reported *"0 hits"* — a vacuous pass, and the same
+failure shape as the false attribution above: a detector reporting
+success without having looked. It now has three outcomes, and the
+third is a failure:
+
+| Outcome | Meaning |
+|---|---|
+| `0` | the trace exists, and no syscall touched the live tree |
+| `N` | the trace exists, and N syscalls touched the live tree |
+| `unavailable` | there was no trace: **the detector did not look** |
+
+`unavailable` **fails the obligation** and says why. `strace` is
+already a documented prerequisite of the rehearsal
+(`scripts/rehearsal/README.md`).
+
+---
+
 ## 4. Where the change lands
 
 | File | Change |
@@ -578,11 +702,31 @@ precisely the condition under which the combined verification runs.
 * **The domain fingerprint is the substrate's established definition**
   (`memories`, `lessons`, `evidence`, volatile columns excluded). A
   domain change outside those three tables is reported, not failed.
-* **The strace detector is still skipped when `strace` is not
-  installed**, and the suite then reports *"0 hits"* — a vacuous pass.
-  That is pre-existing and is **not** changed here; it is recorded
-  because it is the same failure shape as the one this change fixes: a
-  detector that reports success without having looked.
+* **The strace detector's absence was a vacuous pass.** That WAS the
+  same failure shape as the one this change fixes: a detector that
+  reports success without having looked. It is now **repaired** — see
+  §3B.5. The detector reports `unavailable`, and the obligation fails.
+* **The bookkeeping class is a CORRELATION, not an attribution.** The
+  substrate writes its bookkeeping tables as a side effect of an
+  invocation and binds no individual row to one, so the gate cannot
+  name the invocation that wrote a given bookkeeping row. The movement
+  is reported as correlated with the recorded invocations, and the
+  limitation is stated in the report rather than hidden. The knowledge
+  tables — the ones the rehearsal could actually damage — are strict.
+* **A soft delete is bound by containment, not by the origin chain.**
+  The substrate sets `memories.deleted_at` and stops there, without
+  re-recording the artifact's provenance, so that one mutation is bound
+  to the recorded `mpm_memory`/`delete` call whose execution window
+  covers the timestamp. A decay-driven soft delete (a different
+  surface) inside the window would be reported as UNVERIFIED. The decay
+  pass is off by default.
+* **An explicitly delivered observation is bound by containment.** The
+  substrate records no provenance for an evidence row of its own, so
+  the origin comes from the `mpm_evidence` call that delivered it. An
+  unauthorised raw insert into `evidence` whose timestamp happened to
+  fall inside a recorded `mpm_evidence` call's window would be
+  attributed. That is the narrowest remaining gap, and it is stated
+  here rather than left implicit.
 
 ---
 

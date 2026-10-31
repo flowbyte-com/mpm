@@ -51,6 +51,7 @@ import sqlite3
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -83,15 +84,27 @@ CREATE TABLE evidence (
   artifact_id TEXT NOT NULL,
   artifact_type TEXT NOT NULL,
   content TEXT,
+  source_group TEXT,
   created_at INTEGER
 );
 CREATE TABLE tool_invocations (
   id TEXT PRIMARY KEY,
   session_id TEXT,
   tool_name TEXT,
+  action TEXT,
   actor_kind TEXT,
   framework_name TEXT,
-  started_at INTEGER
+  invocation_id TEXT,
+  started_at INTEGER,
+  completed_at INTEGER,
+  result_status TEXT
+);
+CREATE TABLE artifact_provenance (
+  id TEXT PRIMARY KEY,
+  artifact_id TEXT NOT NULL,
+  artifact_type TEXT NOT NULL,
+  invocation_id TEXT,
+  created_at INTEGER
 );
 CREATE TABLE system_config (
   key TEXT PRIMARY KEY,
@@ -152,6 +165,53 @@ class LiveGateFixture(unittest.TestCase):
                   ("scheduler_active_uptime", '{"active_seconds":10}', 1))
         c.execute("INSERT INTO system_config (key, raw_json, updated_at) VALUES (?,?,?)",
                   ("compaction.last_run", '{"last_run_at":"2026-10-30T00:00:00Z"}', 1))
+        c.commit()
+        c.close()
+
+    # ------------------------------------------------------------------
+    # writing the way the substrate writes
+    # ------------------------------------------------------------------
+    def _now(self) -> int:
+        return int(time.time())
+
+    def _recorded_call(self, invocation_id="inv_1", tool="mpm_memory",
+                       action="save", started=None, finished=None,
+                       actor="agent", framework="opencode", status="success"):
+        """One recorded tool call, exactly as the substrate records it.
+
+        The substrate writes a `tool_invocations` row for every tool
+        invocation, and it stamps the call's execution window.  The
+        gate binds a mutation to a call through that window, so a
+        faithful stand-in has to carry it.
+        """
+        started = self._now() if started is None else started
+        finished = started if finished is None else finished
+        c = sqlite3.connect(self.db)
+        c.execute(
+            "INSERT INTO tool_invocations (id, tool_name, action, actor_kind,"
+            " framework_name, invocation_id, started_at, completed_at,"
+            " result_status) VALUES (?,?,?,?,?,?,?,?,?)",
+            (f"call-{invocation_id}-{tool}-{action}-{started}", tool, action,
+             actor, framework, invocation_id, started, finished, status))
+        c.commit()
+        c.close()
+        return invocation_id
+
+    def _recorded_artifact(self, artifact_id, invocation_id,
+                           artifact_type="memory", created_at=None):
+        """The provenance row the substrate writes beside every artifact.
+
+        This is the ORIGIN CHAIN: `artifact_provenance.artifact_id` names
+        the invocation that wrote the artifact.  A write that does not
+        pass through the substrate has no such row, and that is what
+        makes it unattributable.
+        """
+        c = sqlite3.connect(self.db)
+        c.execute(
+            "INSERT INTO artifact_provenance (id, artifact_id, artifact_type,"
+            " invocation_id, created_at) VALUES (?,?,?,?,?)",
+            (f"prov-{artifact_id}", artifact_id, artifact_type, invocation_id,
+             self._now() if created_at is None else created_at))
         c.commit()
         c.close()
 
@@ -385,8 +445,20 @@ class TestTheAccountingRule(LiveGateFixture):
     system — the same defect this gate exists to remove.
 
     So the gate does not ask "did the knowledge change?".  It asks a
-    question that CAN be answered: does the live system's own audit
-    trail account for the change?
+    question that CAN be answered: does the substrate's own ORIGIN
+    CHAIN establish who wrote this change?
+
+        artifact_provenance.artifact_id -> invocation_id
+                                        -> tool_invocations.invocation_id
+
+    THE DEFECT THIS CLASS NOW PINS.  The previous rule asked a weaker
+    question — "did the audit trail record ANY invocation in this
+    window?" — and answered it with a temporal correlation.  One
+    unrelated legitimate invocation satisfied that rule for EVERY
+    concurrent change, including an unauthorised one, and the gate then
+    reported the unauthorised write as "ACCOUNTED FOR by the live
+    system's own audit trail".  That is a false claim, and these tests
+    exist so that it can never come back.
     """
 
     def _add_audit_row(self, n="t2"):
@@ -398,32 +470,185 @@ class TestTheAccountingRule(LiveGateFixture):
         c.commit()
         c.close()
 
-    def test_a_knowledge_change_accounted_for_by_the_audit_trail_is_not_a_failure(self):
-        before = self.snapshot("before")
+    def _add_memory(self, mid, content="a memory", created=None):
         c = sqlite3.connect(self.db)
         c.execute(
             "INSERT INTO memories (id, collection, content, created_at) VALUES (?,?,?,?)",
-            ("m2", "memories", "a decision the agent recorded", 2))
+            (mid, "memories", content, self._now() if created is None else created))
         c.commit()
         c.close()
-        self._add_audit_row()
+
+    # ── the legitimate case ────────────────────────────────────────────
+
+    def test_a_knowledge_change_with_a_recorded_origin_is_not_a_failure(self):
+        """A memory the live system wrote, with its origin recorded.
+
+        This is what the live system's own writes look like: the
+        artifact appears AND the substrate records the invocation that
+        wrote it.  The gate must permit it — and it must say so in
+        terms that name the origin.
+        """
+        before = self.snapshot("before")
+        inv = self._recorded_call(invocation_id="inv_agent", tool="mpm_memory",
+                                  action="save")
+        self._add_memory("m2", "a decision the agent recorded")
+        self._recorded_artifact("m2", inv)
         after = self.snapshot("after")
         r = self.assert_clean(before, after)
-        self.assertIn("ACCOUNTED FOR", r.stdout,
-                      "the accounting must be REPORTED, so a reader can see "
+        self.assertIn("ATTRIBUTED", r.stdout,
+                      "the attribution must be REPORTED, so a reader can see "
                       "why the change was permitted")
+        self.assertNotIn("ACCOUNTED FOR", r.stdout + r.stderr,
+                         "the gate must never claim an accounting it did not "
+                         "establish")
+
+    def test_an_auto_capture_evidence_row_is_attributed_to_its_artifact(self):
+        """An auto-captured observation shares its artifact's transaction.
+
+        The substrate creates the auto-capture row from an AFTER INSERT
+        trigger on `memories`, inside the artifact's own transaction.
+        Its origin is therefore its parent's origin — a shared
+        transaction, not a correlation in time.
+        """
+        before = self.snapshot("before")
+        inv = self._recorded_call(invocation_id="inv_agent", tool="mpm_memory",
+                                  action="save")
+        self._add_memory("m2", "a memory the agent recorded")
+        self._recorded_artifact("m2", inv)
+        c = sqlite3.connect(self.db)
+        c.execute(
+            "INSERT INTO evidence (id, artifact_id, artifact_type, content,"
+            " source_group, created_at) VALUES (?,?,?,?,?,?)",
+            ("auto-1-m2", "m2", "memory", "auto", "auto_capture", self._now()))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        r = self.assert_clean(before, after)
+        self.assertIn("ATTRIBUTED", r.stdout)
+
+    def test_an_explicit_observation_is_bound_to_the_call_that_delivered_it(self):
+        """An explicitly delivered observation is bound by its call.
+
+        The substrate records no provenance for an evidence row of its
+        own, so the origin comes from the `mpm_evidence` call whose
+        execution window covers the delivery.
+        """
+        before = self.snapshot("before")
+        at = self._now()
+        self._recorded_call(invocation_id="inv_agent", tool="mpm_evidence",
+                            action="add", started=at, finished=at + 1)
+        c = sqlite3.connect(self.db)
+        c.execute(
+            "INSERT INTO evidence (id, artifact_id, artifact_type, content,"
+            " source_group, created_at) VALUES (?,?,?,?,?,?)",
+            ("obv1-1", "m1", "memory", "supports", "git", at))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        r = self.assert_clean(before, after)
+        self.assertIn("ATTRIBUTED", r.stdout)
+
+    def test_the_audit_trail_growing_alone_is_not_an_attribution(self):
+        """The audit trail moving is NOT an attribution.
+
+        This is the defect, stated as a test: a knowledge change with
+        an audit row and nothing else must still be UNVERIFIED.
+        """
+        before = self.snapshot("before")
+        self._add_memory("m2", "an unattributed memory")
+        self._add_audit_row()
+        after = self.snapshot("after")
+        r = self.assert_detected(before, after, "UNVERIFIED")
+        self.assertNotIn("ACCOUNTED FOR", r.stdout + r.stderr)
+
+    # ── THE ADVERSARIAL REGRESSION ─────────────────────────────────────
+
+    def test_an_unrelated_invocation_cannot_conceal_an_unauthorised_change(self):
+        """THE ADVERSARIAL CASE.
+
+        An UNRELATED legitimate agent invocation arrives in the same
+        window as an UNAUTHORISED write to the operator's knowledge.
+        The previous rule was satisfied by the unrelated invocation and
+        the gate ACCEPTED the unauthorised write, reporting it as
+        "ACCOUNTED FOR by the live system's own audit trail".
+
+        It must now FAIL, and it must say the change is UNVERIFIED.
+        """
+        before = self.snapshot("before")
+        # A completely unrelated legitimate invocation: the host
+        # plugin's wake-context poll.  It writes nothing to the
+        # knowledge tables.
+        self._recorded_call(invocation_id="inv_unrelated", tool="mpm_context",
+                            action="read_wake_context")
+        # An unauthorised write to the operator's knowledge: raw SQL,
+        # with no provenance row, exactly what a rehearsal-induced
+        # write looks like.
+        self._add_memory("m-unauthorised", "a write the rehearsal made")
+        after = self.snapshot("after")
+        r = self.assert_detected(before, after, "UNVERIFIED")
+        self.assertNotIn("ACCOUNTED FOR", r.stdout + r.stderr,
+                         "the gate must never call an unattributed change "
+                         "accounted for")
+
+    def test_an_unrelated_invocation_cannot_conceal_an_unauthorised_change_of_a_lesson(self):
+        """The same adversarial case, on a different knowledge table."""
+        before = self.snapshot("before")
+        self._recorded_call(invocation_id="inv_unrelated", tool="mpm_context",
+                            action="read_wake_context")
+        c = sqlite3.connect(self.db)
+        c.execute("INSERT INTO lessons_base (id, body, created_at) VALUES (?,?,?)",
+                  ("l-unauthorised", "a lesson the rehearsal made", self._now()))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        r = self.assert_detected(before, after, "UNVERIFIED")
+        self.assertNotIn("ACCOUNTED FOR", r.stdout + r.stderr)
+
+    def test_an_unrelated_invocation_cannot_conceal_an_unauthorised_observation(self):
+        """The same adversarial case, on the evidence table."""
+        before = self.snapshot("before")
+        self._recorded_call(invocation_id="inv_unrelated", tool="mpm_context",
+                            action="read_wake_context")
+        c = sqlite3.connect(self.db)
+        c.execute(
+            "INSERT INTO evidence (id, artifact_id, artifact_type, content,"
+            " source_group, created_at) VALUES (?,?,?,?,?,?)",
+            ("obv1-unauthorised", "m1", "memory", "an observation the rehearsal made",
+             "git", self._now()))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        r = self.assert_detected(before, after, "UNVERIFIED")
+        self.assertNotIn("ACCOUNTED FOR", r.stdout + r.stderr)
+
+    def test_an_unrelated_invocation_cannot_conceal_an_unauthorised_modification(self):
+        """The same adversarial case, on a row that CHANGED.
+
+        The unauthorised write here MODIFIES an existing memory rather
+        than adding one, and it does not move the row's `updated_at` —
+        which is what makes it distinguishable from the substrate's own
+        writes.
+        """
+        before = self.snapshot("before")
+        self._recorded_call(invocation_id="inv_unrelated", tool="mpm_context",
+                            action="read_wake_context")
+        c = sqlite3.connect(self.db)
+        c.execute("UPDATE memories SET content = ? WHERE id = ?",
+                  ("content the rehearsal rewrote", "m1"))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        r = self.assert_detected(before, after, "UNVERIFIED")
+        self.assertNotIn("ACCOUNTED FOR", r.stdout + r.stderr)
+
+    # ── the unattributed cases ─────────────────────────────────────────
 
     def test_an_unattributed_knowledge_change_is_a_failure(self):
         # The same knowledge change, with NOTHING in the audit trail to
         # account for it.  This is the shape a rehearsal-induced write
         # would have, and it must fail.
         before = self.snapshot("before")
-        c = sqlite3.connect(self.db)
-        c.execute(
-            "INSERT INTO memories (id, collection, content, created_at) VALUES (?,?,?,?)",
-            ("m2", "memories", "an unattributed memory", 2))
-        c.commit()
-        c.close()
+        self._add_memory("m2", "an unattributed memory")
         after = self.snapshot("after")
         self.assert_detected(before, after, "memories")
 
@@ -440,6 +665,32 @@ class TestTheAccountingRule(LiveGateFixture):
         c.close()
         after = self.snapshot("after")
         self.assert_detected(mid, after, "topics")
+
+    def test_bookkeeping_movement_is_reported_as_a_correlation_not_an_attribution(self):
+        """The bookkeeping class states its own limitation.
+
+        The substrate writes its bookkeeping tables as a side effect of
+        an invocation and binds no individual row to one, so the gate
+        reports a CORRELATION and says plainly that it is not an
+        attribution.  It must never use the word "accounted for".
+        """
+        before = self.snapshot("before")
+        c = sqlite3.connect(self.db)
+        c.execute("CREATE TABLE topics (id TEXT PRIMARY KEY, name TEXT)")
+        c.commit()
+        c.close()
+        mid = self.snapshot("mid")
+        self._recorded_call(invocation_id="inv_agent", tool="mpm_memory",
+                            action="save")
+        c = sqlite3.connect(self.db)
+        c.execute("INSERT INTO topics (id, name) VALUES (?,?)", ("t1", "a topic"))
+        c.commit()
+        c.close()
+        after = self.snapshot("after")
+        r = self.assert_clean(mid, after)
+        self.assertIn("CORRELATED", r.stdout)
+        self.assertNotIn("ACCOUNTED FOR", r.stdout + r.stderr)
+
 
 
 class TestTheReleasePointer(LiveGateFixture):
@@ -900,6 +1151,79 @@ class TestTheDomainIsMeasuredByTheSameInstrument(LiveGateFixture):
                 )
         finally:
             c.close()
+
+
+class TestTheSyscallDetector(LiveGateFixture):
+    """The INDEPENDENT detector must not report success without looking.
+
+    The snapshot detector proves the live tree's STATE did not change.
+    The syscall detector proves something the snapshot is blind to: that
+    the migration made no syscall against the live tree AT ALL,
+    including a READ — a read changes no state, so no snapshot can see
+    it.
+
+    The detector can be unavailable: `strace` is a documented
+    prerequisite of the rehearsal, and a host without it (or without
+    the privilege to use it) produces no trace.  A detector that reports
+    "0 hits" in that case is reporting success without having looked,
+    which is the same failure shape as the false attribution this gate
+    used to make.
+    """
+
+    def _bash(self, snippet: str):
+        env = dict(os.environ)
+        env.update({
+            "LIVE_MPM": str(self.live_mpm),
+            "LIVE_OC_CONFIG": str(self.oc_config),
+            "LIVE_SYSTEMD_USER": str(self.systemd_user),
+        })
+        return subprocess.run(["bash", "-c", snippet], capture_output=True,
+                              text=True, timeout=120, env=env)
+
+    def test_the_detector_reports_unavailable_when_there_is_no_trace(self):
+        r = self._bash(f'. "{LIB}"; strace_live_hits "{self._tmp}/no-such.trace"')
+        self.assertEqual(
+            r.stdout.strip(), "unavailable",
+            "a detector with no trace must say it did not look, not that it "
+            f"found nothing:\n{r.stdout}\n{r.stderr}")
+
+    def test_the_detector_reports_the_hit_count_when_there_is_a_trace(self):
+        trace = self._tmp / "t.strace"
+        trace.write_text(
+            f'openat(AT_FDCWD, "{self.live_mpm}/src/db/mpm.db", O_RDWR) = 3\n'
+            f'openat(AT_FDCWD, "{self.oc_config}/opencode.jsonc", O_RDONLY) = 3\n')
+        r = self._bash(f'. "{LIB}"; strace_live_hits "{trace}"')
+        self.assertEqual(r.stdout.strip(), "2",
+                         "the detector must count the syscalls it saw")
+
+    def test_an_unavailable_detector_fails_the_obligation(self):
+        r = self._bash(f'. "{LIB}"; reh_assert_no_live_syscalls unavailable; '
+                       'echo "PASS=$REH_PASS FAIL=$REH_FAIL"')
+        self.assertIn("PASS=0", r.stdout,
+                      "an unavailable detector must not record a pass:\n"
+                      f"{r.stdout}\n{r.stderr}")
+        self.assertIn("FAIL=1", r.stdout,
+                      "an unavailable detector must record a failure:\n"
+                      f"{r.stdout}\n{r.stderr}")
+        self.assertIn("did not run", r.stdout,
+                      "the failure must name the limitation:\n"
+                      f"{r.stdout}\n{r.stderr}")
+
+    def test_a_clean_trace_passes_the_obligation(self):
+        r = self._bash(f'. "{LIB}"; reh_assert_no_live_syscalls 0; '
+                       'echo "PASS=$REH_PASS FAIL=$REH_FAIL"')
+        self.assertIn("PASS=1", r.stdout,
+                      f"a clean trace must pass:\n{r.stdout}\n{r.stderr}")
+        self.assertIn("FAIL=0", r.stdout,
+                      f"a clean trace must not fail:\n{r.stdout}\n{r.stderr}")
+
+    def test_a_dirty_trace_fails_the_obligation(self):
+        r = self._bash(f'. "{LIB}"; reh_assert_no_live_syscalls 7; '
+                       'echo "PASS=$REH_PASS FAIL=$REH_FAIL"')
+        self.assertIn("PASS=0", r.stdout,
+                      f"a trace with hits must not pass:\n{r.stdout}\n{r.stderr}")
+        self.assertIn("FAIL=1", r.stdout,
+                      f"a trace with hits must fail:\n{r.stdout}\n{r.stderr}")
 
 
 class TestTheSuitesFailClosed(LiveGateFixture):
