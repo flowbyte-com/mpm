@@ -93,6 +93,8 @@ Exit codes:
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
 from typing import Any
 
@@ -477,6 +479,62 @@ def _adapter_segment(path: str) -> str | None:
     return None
 
 
+def _identity(path: str) -> str:
+    """The identity of a filesystem path: what it really names.
+
+    Two spellings of ONE directory have ONE identity. The versioned
+    bundle layout is built on that fact: `~/.mpm/agent_installation` is
+    a symlink into the active release, so the stable registration
+
+        file://<home>/.mpm/agent_installation/mpm-opencode
+
+    and the physical
+
+        file://<home>/.mpm/releases/<rev>/agent_installation/mpm-opencode
+
+    name the SAME directory through DIFFERENT strings. Comparing the
+    strings compares the spelling, and the spelling is exactly what the
+    layout changes — so a string comparison misses the duplicate and
+    lets one plugin be registered, and loaded, twice.
+
+    A path that does not exist resolves to its own lexical form, which
+    is the right answer for comparison: two paths that do not exist are
+    the same only when they are spelled the same way.
+    """
+    if not path:
+        return path
+    try:
+        return os.path.realpath(path)
+    except OSError:  # pragma: no cover - realpath does not raise on a missing path
+        return os.path.normpath(path)
+
+
+def _is_adapter_payload(path: str) -> bool:
+    """True when the path names an adapter package MPM installed.
+
+    MPM keeps its host adapters under a directory named
+    `agent_installation`, and the package directory inside it carries an
+    adapter basename. A path with that shape is MPM's own payload, at
+    whatever path the current installation layout put it.
+
+    This is what recognises the registration the versioned-bundle layout
+    produces. The stable path and the revision-pinned path are the same
+    directory NOW, so an identity comparison collapses them — but after
+    the next upgrade the revision-pinned path names a DIFFERENT
+    directory, and it must still be recognised as MPM's registration
+    rather than left behind as a second copy of the plugin.
+
+    The shape is deliberately narrow: it names MPM's install root, so a
+    third-party plugin that merely shares the adapter's basename is not
+    mistaken for MPM's payload.
+    """
+    parts = _entry_path(path).split("/")
+    for i in range(len(parts) - 1):
+        if parts[i] == "agent_installation" and parts[i + 1] in ADAPTER_BASENAMES:
+            return True
+    return False
+
+
 def _canonical_dir(canonical: str) -> str:
     """The plugin package directory a canonical registration points at.
 
@@ -524,12 +582,25 @@ def is_mpm_entry(entry: Any, canonical: str) -> bool:
     return _adapter_segment(path) is not None
 
 
-def _dedupe(entries: list) -> list:
-    """Keep first occurrence of each entry value, preserving order."""
+def _dedupe(entries: list, canonical: str | None = None) -> list:
+    """Keep first occurrence of each entry value, preserving order.
+
+    An MPM-owned entry is keyed by its RESOLVED IDENTITY, not by its
+    spelling: two spellings of one directory are one registration, and
+    keeping both is the duplicate-registration defect. Unrelated entries
+    are keyed by their own text — this function does not reorganise the
+    operator's config, and two of their entries are theirs to keep.
+    """
     seen: set = set()
     out: list = []
     for item in entries:
-        key = item if isinstance(item, str) else json.dumps(item, sort_keys=True)
+        if isinstance(item, str):
+            if canonical is not None and is_mpm_entry(item, canonical):
+                key: object = ("identity", _identity(_entry_path(item)))
+            else:
+                key = ("text", item)
+        else:
+            key = ("text", json.dumps(item, sort_keys=True))
         if key in seen:
             continue
         seen.add(key)
@@ -664,10 +735,20 @@ def _merged_entries(
     re-keyed from the original entry text onto the rendered entry text, so
     a comment attached to a replaced MPM entry follows the canonical entry
     it became.
+
+    MPM OWNS EXACTLY ONE REGISTRATION. An entry is MPM's when it is the
+    canonical path, one of the historical stale shapes, the same
+    directory reached by a different route (the versioned-bundle layout
+    makes the stable path and the revision-pinned path one directory
+    under two names), or MPM's own adapter payload at some other path.
+    Every one of them is rendered as the canonical registration, so the
+    result carries one registration of the plugin rather than several
+    spellings of it.
     """
     arrays = _plugin_arrays(data)
     _, stale_paths = _stale_and_canonical_paths(canonical)
     canonical_path = _canonical_dir(canonical)
+    canonical_identity = _identity(canonical_path)
     raw_comments = raw_comments or {}
 
     union: list = list(arrays["plugins"]) + list(arrays["plugin"])
@@ -685,7 +766,20 @@ def _merged_entries(
     for entry in union:
         if isinstance(entry, str):
             path = _entry_path(entry)
-            if path == canonical_path or path in stale_paths:
+            if (
+                path == canonical_path
+                or path in stale_paths
+                # The same directory, reached by a different route. The
+                # versioned-bundle layout produces exactly this: the
+                # stable path and the revision-pinned path name one
+                # directory, and a spelling comparison would keep both.
+                or _identity(path) == canonical_identity
+                # MPM's own payload at some other path — a previous
+                # release's copy, left behind by an earlier install.
+                # It is MPM's registration, so it is normalised to the
+                # canonical one rather than left as a second copy.
+                or _is_adapter_payload(path)
+            ):
                 # Normalize every MPM-owned spelling (stale shapes and
                 # same-directory registrations under either scheme) to
                 # the canonical package URL this installer writes.
@@ -703,7 +797,7 @@ def _merged_entries(
         isinstance(e, str) and _entry_path(e) == canonical_path for e in mapped
     ):
         mapped.append(canonical)
-    return _dedupe(mapped), replaced, comments
+    return _dedupe(mapped, canonical), replaced, comments
 
 
 def migrate(text: str, canonical: str) -> tuple[str, bool, str]:
@@ -1018,17 +1112,41 @@ def main(argv: list[str]) -> int:
 
     # Write via a sibling temp file + atomic replace so an interrupted
     # install cannot leave a truncated config behind.
+    #
+    # THE MODE MUST SURVIVE. `os.replace()` installs a NEW inode, so the
+    # original file's permissions are gone and the replacement takes the
+    # default umask's mode instead. Measured on a live host during the
+    # aeec40f1 deployment: an operator's `opencode.jsonc` was 0600
+    # before the install and 0664 after it — a file the operator had
+    # deliberately restricted, silently widened by an installer run.
+    # The original mode is copied onto the replacement explicitly.
+    #
+    # The replacement is created PRIVATE (0600) and given the original's
+    # mode only once its content is complete, so the config's content is
+    # never briefly exposed at the default umask's mode either.
     tmp_path = config_path + ".mpm-tmp"
     try:
-        with open(tmp_path, "w", encoding="utf-8", newline="") as fh:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(updated)
-        import os
+
+        try:
+            original_mode = stat.S_IMODE(os.stat(config_path).st_mode)
+        except OSError:
+            # The config vanished between the read and this write. There
+            # is no mode to preserve, and the private 0600 the
+            # replacement was created with is the safe answer.
+            original_mode = None
+        if original_mode is not None:
+            os.chmod(tmp_path, original_mode)
 
         os.replace(tmp_path, config_path)
     except OSError as exc:
         try:
-            import os
-
             os.unlink(tmp_path)
         except OSError:
             pass
