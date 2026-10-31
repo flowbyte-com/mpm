@@ -174,6 +174,16 @@ seed_lesson() {
   printf '  [sim] seeded the synthetic trusted lesson: %s\n' "$(printf '%s' "$out" | tail -1)"
 }
 seed_lesson "REHEARSAL LESSON: a migration that cannot be rolled back must be preceded by a backup that has been verified by restoring it."
+#
+# (PR #191 reached the same conclusion independently, and its rationale is
+# folded in here: the rehearsal copies the LIVE binaries into the
+# simulated workspace, so it exercises whatever runtime is installed.
+# From the runtime that introduced the lesson trust gate, `mpm_lessons
+# action=save` is refused at the execution point on the agent surface —
+# nothing is written — so a rehearsal that seeded its lesson through
+# `mpm call` produced an empty `lessons` table and the "the synthetic
+# lesson survived" assertion failed.)
+
 
 "$SIM_WS/bin/mpm" call mpm_decisions --payload '{"action":"record","params":{"choice":"REHEARSAL DECISION: keep the data root at ~/.mpm so no host configuration changes.","context":"Runtime layout migration","rationale":"The database path, the systemd unit, the PATH symlink and the MCP client wiring all name that path already.","outcome":"accepted for the rehearsal","tags":["rehearsal"]}}' >/dev/null 2>&1
 
