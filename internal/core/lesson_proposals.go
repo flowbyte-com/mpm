@@ -267,6 +267,42 @@ func (dm *DatabaseManager) ListLessonProposals(status string, limit int) ([]*Les
 	return out, nil
 }
 
+// CountPendingLessonProposals returns the TOTAL number of proposals
+// awaiting operator review.
+//
+// WHY THIS IS NOT len(ListLessonProposals("pending", 0))
+// ------------------------------------------------------
+// ListLessonProposals is an INBOX, not a total: it is bounded (default
+// 50, and `--limit` can lower it further) because an operator reviews
+// the recent ones rather than the whole backlog. Using the length of
+// the returned slice as the backlog would silently cap the number at
+// the limit — 120 pending proposals would report as "50", and the one
+// number an operator needs in order to notice that a queue is
+// accumulating would be wrong in exactly the situation that matters.
+//
+// So the count is its own query: COUNT(*) over the whole table, with
+// no LIMIT and nothing truncating it.
+//
+// READ-ONLY, AND NOT A HEALTH SIGNAL. This never promotes, rejects,
+// rewrites or otherwise touches a proposal, and never reads or writes
+// a trusted lesson. A pending proposal is a decision the operator has
+// not made yet — not a fault — so callers must surface it as
+// operator-attention, never as a failure.
+//
+// The error is returned rather than swallowed. Zero is a meaningful
+// answer here (it is the healthy state), so a query that could not run
+// must not be allowed to masquerade as one: callers render
+// "unavailable", never "0".
+func (dm *DatabaseManager) CountPendingLessonProposals() (int, error) {
+	var n int
+	if err := dm.db.QueryRow(
+		`SELECT COUNT(*) FROM lesson_proposals WHERE status = 'pending'`,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count pending lesson proposals: %w", err)
+	}
+	return n, nil
+}
+
 // PromoteLessonProposal turns a pending proposal into a TRUSTED lesson.
 //
 // This is the operator path, and it is the ONLY path from a proposal to

@@ -83,10 +83,18 @@ var cliOptionFamilies = []string{
 func init() {
 	registry := map[string][]string{
 		// ── Information and diagnostics ────────────────────────────────
-		"version":     {"check", "json"},
-		"help":        {"all"},
-		"doctor":      {"json", "j", "explain", "deep-scan", "fix", "all"},
-		"status":      {},
+		"version": {"check", "json"},
+		"help":    {"all"},
+		"doctor":  {"json", "j", "explain", "deep-scan", "fix", "all"},
+		// 2026-10-31: --json/-j were implemented in handleStatus
+		// (ExtractJSONFlag → printStatusJSON) but never declared here,
+		// so the router's option guard rejected the flag before the
+		// handler could see it: `mpm status --json` answered
+		// "Unknown option: --json" while the code and the JSON
+		// contract both assumed it worked. The machine-readable status
+		// was unreachable from the CLI. Declared rather than removed
+		// because the JSON surface is the one this change extends.
+		"status":      {"json", "j"},
 		"info":        {"user", "value"},
 		"wake":        {"compact", "strict"},
 		"why":         {"kind"},

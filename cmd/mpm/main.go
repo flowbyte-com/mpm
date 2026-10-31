@@ -689,11 +689,23 @@ type DoctorUsedTool struct {
 //     (sensitive_content_blocked, poison_content_blocked). These
 //     are intentional, NOT MPM failures.
 type DoctorAttention struct {
-	OperationalIssues7d int                          `json:"operational_issues_7d"`
-	OperationalEvents   []DoctorOperationalEvent     `json:"operational_events"`
-	AuditClusters       []DoctorAuditCluster         `json:"audit_clusters"`
-	SecurityEvents7d    int                          `json:"security_events_7d"`
-	Unavailable         *DoctorAttentionSectionError `json:"unavailable,omitempty"`
+	OperationalIssues7d int                      `json:"operational_issues_7d"`
+	OperationalEvents   []DoctorOperationalEvent `json:"operational_events"`
+	AuditClusters       []DoctorAuditCluster     `json:"audit_clusters"`
+	SecurityEvents7d    int                      `json:"security_events_7d"`
+
+	// LessonProposals is the operator-attention backlog, in the SAME
+	// wire shape `mpm status --json` uses (`pending` + `unavailable`)
+	// so the two surfaces cannot report the queue differently.
+	//
+	// It is not a health signal: a pending proposal is a decision the
+	// operator has not made yet, so this field never contributes to
+	// Passed/Warnings/Failed and never changes Doctor's verdict.
+	// Additive — omitempty keeps old consumers working, and a reader
+	// that ignores it sees exactly the report it saw before.
+	LessonProposals *pendingLessonProposalsJSON `json:"lesson_proposals,omitempty"`
+
+	Unavailable *DoctorAttentionSectionError `json:"unavailable,omitempty"`
 }
 
 // DoctorOperationalEvent is one (component, event_code) row from
