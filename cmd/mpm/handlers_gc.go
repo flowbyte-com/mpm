@@ -17,7 +17,36 @@ import (
 // Handler: gc (garbage collection / memory decay)
 // ============================================================================
 
+// gcOptions declares every option `mpm gc` accepts.
+//
+// The command read its arguments by SCANNING for known spellings, so an
+// unrecognised option was silently ignored and the sweep RAN: `mpm gc
+// --anything` performed the decay sweep over the operator's memories.
+// The declaration below lets the shared helper reject it.
+//
+// The set is the scanner's set, exactly: --dry-run, --aggressive,
+// --review, --purge, --shred-negative and --max-age=N, plus the --json
+// output flag the command already honoured.
+func gcOptions() []OptionSpec {
+	return []OptionSpec{
+		HelpOption,
+		{Name: "json", Aliases: []string{"j"}, Usage: "Output JSON for tool integration", Kind: OptBool},
+		{Name: "dry-run", Usage: "Report what would change, without changing it", Kind: OptBool},
+		{Name: "aggressive", Usage: "Also decay long-term memories", Kind: OptBool},
+		{Name: "review", Usage: "Soft-delete the dead and zombie memories", Kind: OptBool},
+		{Name: "purge", Usage: "Hard-delete the reviewed memories", Kind: OptBool},
+		{Name: "shred-negative", Usage: "Hard-delete negative-weight memories", Kind: OptBool},
+		{Name: "max-age", Usage: "The age, in hours, above which a memory is dead", Kind: OptInt, ValueName: "N", ValueForm: "=N", DefaultText: "default 24"},
+	}
+}
+
 func handleGC(args []string) int {
+	// An unrecognised option is rejected BEFORE the sweep runs. The
+	// command used to ignore it and decay the operator's memories.
+	if rc := RejectUnknownOptionInArgs("gc", "mpm gc [options]", gcOptions(), args); rc != 0 {
+		return rc
+	}
+
 	jsonOutput, _ := ExtractJSONFlag(args)
 	dryRun := false
 	aggressive := false

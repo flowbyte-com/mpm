@@ -318,31 +318,43 @@ func handleMaintain(args []string) int {
 	}
 
 	if *review {
-		// Show memories for spaced reinforcement review
-		memories, err := dm.GetSpacedReinforcementReview(*days, 20)
+		// Show memories for spaced reinforcement review.
+		//
+		// The canonical rule (internal/core/review.go) — the same one
+		// the doctor and `mpm ops review` use. This used to call
+		// GetSpacedReinforcementReview(*days, 20), which applied a
+		// different eligibility rule (a never-accessed memory was due
+		// immediately) and reported a nullable timestamp through a
+		// formatter that rendered it as "106751d ago".
+		memories, err := dm.MemoriesDueForReview(*days, 20)
 		if err != nil {
 			usererror.Error("%v", err)
+			return 1
 		}
 
 		if len(memories) == 0 {
-			fmt.Println("No memories need reinforcement review")
+			fmt.Printf("No memories need reinforcement review (window: %d days)\n", *days)
 			return 0
 		}
 
-		fmt.Printf("\n📋 Memories for Spaced Reinforcement Review (not accessed in %d days):\n", *days)
+		fmt.Printf("\n📋 Memories for Spaced Reinforcement Review (window: %d days):\n", *days)
 		fmt.Println("───────────────────────────────────────────────────────────────")
 		for i, m := range memories {
-			content := m["content"].(string)
+			content := m.Content
 			if len(content) > 80 {
 				content = content[:80] + "..."
 			}
-			w := safeInt(m["weight"])
-			rc := safeInt(m["reinforcement_count"])
-			la := ""
-			if lat, ok := m["last_accessed_at"].(string); ok && lat != "" {
-				la = lat
+			// The age is honest: a memory that was never accessed says
+			// so, and names its creation date instead of inventing an
+			// age for it.
+			last := "never accessed"
+			if m.LastAccessedAt != nil {
+				last = humanDaysAgo(*m.LastAccessedAt)
+			} else {
+				last = fmt.Sprintf("never accessed (created %s)", humanDaysAgo(m.CreatedAt))
 			}
-			fmt.Printf("%d. [w=%d rc=%d last=%s] %s\n", i+1, w, rc, la, content)
+			fmt.Printf("%d. [w=%d reinforcement=%d last=%s] %s\n",
+				i+1, m.Weight, m.ReinforcementCount, last, content)
 		}
 		return 0
 	}

@@ -18,6 +18,12 @@ import (
 )
 
 func handleProposeTheory(args []string) int {
+	// An unrecognised option is rejected before anything is written.
+	// The command used to treat it as the hypothesis's own text.
+	if rc := RejectUnknownOptionInArgsFreeText("propose_theory", "mpm propose_theory [options]", proposeTheoryOptions(), args); rc != 0 {
+		return rc
+	}
+
 	// W-001: --json flag for machine-readable output.
 	jsonOutput := false
 	filteredArgs := make([]string, 0, len(args))
@@ -311,7 +317,60 @@ func splitResolveTheoryArgs(args []string) (id, conclusion, winnerID, note strin
 }
 
 // handleRecordDecision parses structured decision text and saves to the decisions collection.
+// recordDecisionOptions declares every option `mpm decide` /
+// `mpm record_decision` accepts.
+//
+// The command reads its arguments POSITIONALLY, so an unrecognised
+// option used to be consumed as DATA: `mpm decide --anything` recorded
+// a decision whose choice was "--anything". The declaration below is
+// what lets the shared helper reject it.
+//
+// The set is the parser's set, exactly: parseDecisionArgs recognises
+// --context/-c, --choice, --rationale/-r and --tags/-t, and
+// handleRecordDecision recognises --json and --supersedes. Nothing is
+// advertised that is not accepted, and nothing accepted is unadvertised.
+func recordDecisionOptions() []OptionSpec {
+	return []OptionSpec{
+		HelpOption,
+		{Name: "json", Usage: "Output JSON for tool integration", Kind: OptBool},
+		{Name: "context", Aliases: []string{"c"}, Usage: "The decision's context", Kind: OptString, ValueName: "TEXT"},
+		{Name: "choice", Usage: "The decision itself", Kind: OptString, ValueName: "TEXT"},
+		{Name: "rationale", Aliases: []string{"r"}, Usage: "Why the decision was made", Kind: OptString, ValueName: "TEXT"},
+		{Name: "tags", Aliases: []string{"t"}, Usage: "Comma-separated tags", Kind: OptString, ValueName: "CSV"},
+		{Name: "supersedes", Usage: "Replace an existing decision (its id)", Kind: OptString, ValueName: "ID"},
+	}
+}
+
+// proposeTheoryOptions declares every option `mpm theorize` /
+// `mpm propose_theory` accepts.
+//
+// The same defect as the decision command: `mpm theorize --anything`
+// proposed a theory named "--anything".
+//
+// The "h" spelling of --hypothesis is advertised as "--h", NOT as
+// "-h". The router consumes the exact token "-h" as a help request
+// before any handler sees it, so that spelling cannot reach this
+// command — and a help page must not advertise an option that is
+// unreachable. The handler has always accepted "--h"; advertising it
+// under its reachable spelling is the whole fix.
+func proposeTheoryOptions() []OptionSpec {
+	return []OptionSpec{
+		HelpOption,
+		{Name: "json", Usage: "Output JSON for tool integration", Kind: OptBool},
+		{Name: "hypothesis", LongAliases: []string{"h"}, Usage: "The hypothesis to propose", Kind: OptString, ValueName: "TEXT"},
+		{Name: "validation", Aliases: []string{"v"}, LongAliases: []string{"validation-criteria"}, Usage: "The criteria that would validate it", Kind: OptString, ValueName: "TEXT"},
+		{Name: "status", Aliases: []string{"s"}, Usage: "The initial status", Kind: OptString, ValueName: "STATUS"},
+		{Name: "tags", Aliases: []string{"t"}, Usage: "Comma-separated tags", Kind: OptString, ValueName: "CSV"},
+	}
+}
+
 func handleRecordDecision(args []string) int {
+	// An unrecognised option is rejected before anything is written.
+	// The command used to treat it as the decision's own text.
+	if rc := RejectUnknownOptionInArgsFreeText("record_decision", "mpm record_decision [options]", recordDecisionOptions(), args); rc != 0 {
+		return rc
+	}
+
 	// W-001: --json flag for machine-readable output (parity with `mpm call`).
 	jsonOutput := false
 	filteredArgs := make([]string, 0, len(args))
@@ -434,15 +493,15 @@ func handleRecordDecision(args []string) int {
 			return respond("", fmt.Sprintf("Failed to supersede decision: no id in result %v\n", res), 1)
 		}
 		if jsonOutput {
-		out, _ := json.Marshal(map[string]interface{}{
-			"success":     true,
-			"id":          newID,
-			"supersedes":  supersedes,
-			"action":      "supersede",
-		})
-		return respond("", string(out)+"\n", 0)
-	}
-	return respond("", fmt.Sprintf("✅ Decision superseded: %s (was %s)\n", newID, supersedes), 0)
+			out, _ := json.Marshal(map[string]interface{}{
+				"success":    true,
+				"id":         newID,
+				"supersedes": supersedes,
+				"action":     "supersede",
+			})
+			return respond("", string(out)+"\n", 0)
+		}
+		return respond("", fmt.Sprintf("✅ Decision superseded: %s (was %s)\n", newID, supersedes), 0)
 	}
 
 	mem, err := store.AddMemory(content, "decisions", tags, meta, "", "cli")
@@ -949,15 +1008,15 @@ func backfillEpistemologyTopics() {
 			if tErr != nil {
 				continue
 			}
-		res, execErr := dm.SQLDB().Exec(
-			`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
-			id, topicID, now, "primary",
-		)
-		if execErr == nil {
-			if ra, _ := res.RowsAffected(); ra > 0 {
-				linked++
+			res, execErr := dm.SQLDB().Exec(
+				`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
+				id, topicID, now, "primary",
+			)
+			if execErr == nil {
+				if ra, _ := res.RowsAffected(); ra > 0 {
+					linked++
+				}
 			}
-		}
 		}
 		return nil
 	}()

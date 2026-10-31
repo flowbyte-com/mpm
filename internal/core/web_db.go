@@ -1926,6 +1926,50 @@ func (dm *DatabaseManager) GetSpacedReinforcementReview(daysSinceAccess, limit i
 	return result, nil
 }
 
+// MemoriesDueForReview returns the memories whose spaced review is due.
+//
+// This is the DatabaseManager-level entry point for the canonical review
+// rule (see review.go). The doctor, the dashboard and the review command
+// all call it, so the three cannot disagree about the threshold, the
+// eligibility rule or the candidate set.
+func (dm *DatabaseManager) MemoriesDueForReview(days int, limit int) ([]ReviewCandidate, error) {
+	store, err := dm.getSharedStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.MemoriesDueForReview(days, limit)
+}
+
+// CountMemoriesDueForReview returns the TOTAL number of memories whose
+// review is due — not the length of a sample. A surface that reports a
+// backlog size must use this, or it under-reports once the backlog
+// exceeds its sample size.
+func (dm *DatabaseManager) CountMemoriesDueForReview(days int) (int, error) {
+	store, err := dm.getSharedStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.CountMemoriesDueForReview(days)
+}
+
+// RecordMemoryReview records the operator's review of a memory.
+func (dm *DatabaseManager) RecordMemoryReview(memoryID string, decision string, note string) error {
+	store, err := dm.getSharedStore()
+	if err != nil {
+		return err
+	}
+	return store.RecordMemoryReview(memoryID, decision, note)
+}
+
+// MemoryReview returns the recorded review for a memory, or nil.
+func (dm *DatabaseManager) MemoryReview(memoryID string) (*MemoryReviewRecord, error) {
+	store, err := dm.getSharedStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.MemoryReview(memoryID)
+}
+
 // GetContextualMemories returns memories relevant to a given context.
 func (dm *DatabaseManager) GetContextualMemories(contextTags []string, sessionContext string, limit int) ([]map[string]interface{}, error) {
 	store, err := dm.getSharedStore()

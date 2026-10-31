@@ -2815,9 +2815,44 @@ For the schema, fan-out algorithm, test matrix, and smoke behind this section, s
 *Surface forgotten LTM memories for re-touch — knowledge decays if not exercised.*
 
 ```bash
-mpm ops review --promoted   # Show recently elevated LTM memories
-mpm ops review --stale      # Surface forgotten LTM memories
+mpm ops review --stale              # List the memories whose review is DUE
+mpm ops review --promoted           # Show recently elevated LTM memories (a different question)
+mpm ops review --ack <id>           # Record the operator's review of one memory
+mpm ops review --ack-all            # Record the operator's review of everything due
+mpm ops review --stale --days 30    # Widen the review window
+mpm ops review --stale --limit 5    # Bound the listing
+mpm ops review --ack <id> --decision weaken   # Review it and weaken it
 ```
+
+**The eligibility rule.** A memory is due for review when all of these hold:
+
+1. it is not soft-deleted, and it is not a directive;
+2. it is durable enough to be worth reviewing — `is_long_term = 1` or
+   `weight >= 5`;
+3. its **review clock** is older than the window.
+
+The review clock is `COALESCE(reviewed_at, last_accessed_at, created_at)`:
+an explicit operator review if there is one, else the last retrieval, else
+the creation. The `created_at` fallback is what keeps a **brand-new,
+never-accessed memory from being instantly due** — it is not stale, it is
+new — while a genuinely old, never-accessed memory still is.
+
+`last_accessed_at` is a *proxy*, not a review: an agent can retrieve a
+memory a thousand times, and a backlog that an agent's retrieval can silently
+clear is not an operator backlog. The explicit review is what clears it.
+
+**The window is one constant** (14 days), shared by the doctor's backlog
+check, the dashboard's readiness row, this command and the MCP
+`ReviewMemories` tool. The operator who follows the doctor's recommendation
+is therefore looking at the same set the doctor counted.
+
+**A review is an explicit operator act.** Listing never marks anything
+reviewed; only `--ack` / `--ack-all` write. The review is recorded durably in
+the `memory_reviews` ledger. The decision is `keep` (the default: the memory
+was reviewed and stands — its weight, reinforcement count and content are
+untouched) or `weaken`, which routes through the existing `WeakenMemory`
+path. There is deliberately **no "delete" decision**: deletion has its own
+command, its own confirmation semantics and its own irreversibility.
 
 The stale queue covers **memories**, not directives. A directive is standing
 policy read at wake time; it is never a vector-search candidate, and its
@@ -2826,6 +2861,11 @@ be cleared by doing the work. Directives are therefore excluded from the
 review candidate set by the canonical directive predicate — the same one the
 active-memory metric uses — while ordinary high-weight memories stay in the
 queue untouched.
+
+The doctor reports the backlog as a **count**, not as the length of a
+candidate sample, and its recommendation names both steps — list, then
+record — because a recommendation that only names a lister does not clear
+anything.
 
 
 ---

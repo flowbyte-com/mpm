@@ -20,6 +20,18 @@ import (
 //	mpm synthesize status         Show recent synthesis telemetry (last 20)
 //	mpm synthesize failures       Show only failed/skipped synthesis events
 //	mpm synthesize --dry-run      Scan without calling the LLM
+// synthesizeOptions declares every option `mpm synthesize` accepts.
+//
+// The command read its arguments by SCANNING for known spellings, so an
+// unrecognised option was ignored and the synthesis ran: `mpm synthesize
+// --anything` synthesised over the operator's memories.
+func synthesizeOptions() []OptionSpec {
+	return []OptionSpec{
+		HelpOption,
+		{Name: "dry-run", Aliases: []string{"dryrun"}, Usage: "Report what would be synthesised, without synthesising it", Kind: OptBool},
+	}
+}
+
 func handleSynthesize(args []string) int {
 	// Subcommand dispatch: status / failures route to watchdog reader.
 	if len(args) > 0 {
@@ -32,6 +44,13 @@ func handleSynthesize(args []string) int {
 			fmt.Println("Usage: mpm synthesize [status|failures] [--dry-run]")
 			return 0
 		}
+	}
+
+	// An unrecognised option is rejected BEFORE the synthesis runs. The
+	// command used to ignore it and synthesise over the operator's
+	// memories.
+	if rc := RejectUnknownOptionInArgs("synthesize", "mpm synthesize [status|failures] [--dry-run]", synthesizeOptions(), args); rc != 0 {
+		return rc
 	}
 
 	dryRun := false
