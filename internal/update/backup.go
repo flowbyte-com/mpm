@@ -179,8 +179,10 @@ func tableRowCounts(path string) (map[string]int64, error) {
 	for _, t := range tables {
 		var n int64
 		// Table names come from sqlite_master, not operator input.
+		// An unreadable table fails verification: a backup whose
+		// contents cannot be fully compared is not a verified backup.
 		if err := db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, t)).Scan(&n); err != nil {
-			continue
+			return nil, fmt.Errorf("could not count table %s: %w", t, err)
 		}
 		out[t] = n
 	}
