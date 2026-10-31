@@ -2328,10 +2328,10 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 			continue
 		}
 		alter := fmt.Sprintf("ALTER TABLE shared.%s ADD COLUMN %s %s", m[0], m[1], m[2])
-		if _, err := dm.ExecTracked(alter, 5); err != nil {
-			if !isDuplicateColumnError(err) {
+		if out := execTracked(dm.db, alter, 5, func() { dm.busyRetries.Add(1) }); out.Err != nil {
+			if !isDuplicateColumnError(out.Err) {
 				slog.Warn("shared migration failed",
-					"table", m[0], "column", m[1], "error", err.Error())
+					"table", m[0], "column", m[1], "error", out.Err.Error())
 			}
 		}
 	}
@@ -2968,9 +2968,9 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		if m[0] == "lessons" {
 			continue // lessons: handled by migrateLessonsToView before rename; skip here
 		}
-		if _, err := dm.ExecTracked(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2]), 5); err != nil {
-			if !isDuplicateColumnError(err) {
-				slog.Warn("migration failed", "table", m[0], "column", m[1], "error", err.Error())
+		if out := execTracked(dm.db, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2]), 5, func() { dm.busyRetries.Add(1) }); out.Err != nil {
+			if !isDuplicateColumnError(out.Err) {
+				slog.Warn("migration failed", "table", m[0], "column", m[1], "error", out.Err.Error())
 			}
 		}
 	}
@@ -3223,10 +3223,10 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// covers fresh DBs, and this ALTER covers existing databases
 	// whose lessons_base was created by an earlier boot. Idempotent
 	// via isDuplicateColumnError.
-	if _, err := dm.ExecTracked(`ALTER TABLE lessons_base ADD COLUMN deleted_at INTEGER`, 5); err != nil {
-		if !isDuplicateColumnError(err) {
+	if out := execTracked(dm.db, `ALTER TABLE lessons_base ADD COLUMN deleted_at INTEGER`, 5, func() { dm.busyRetries.Add(1) }); out.Err != nil {
+		if !isDuplicateColumnError(out.Err) {
 			slog.Warn("migrateLessonsToView: post-add deleted_at failed",
-				"error", err.Error())
+				"error", out.Err.Error())
 		}
 	}
 
@@ -3607,8 +3607,8 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 		// ALTER in initUnifiedSchema.
 		{"deleted_at", "INTEGER"},
 	} {
-		if _, err := dm.ExecTracked(fmt.Sprintf("ALTER TABLE lessons ADD COLUMN %s %s", col.name, col.def), 5); err != nil && !isDuplicateColumnError(err) {
-			slog.Warn("migrateLessonsToView: inline add column failed", "column", col.name, "error", err.Error())
+		if out := execTracked(dm.db, fmt.Sprintf("ALTER TABLE lessons ADD COLUMN %s %s", col.name, col.def), 5, func() { dm.busyRetries.Add(1) }); out.Err != nil && !isDuplicateColumnError(out.Err) {
+			slog.Warn("migrateLessonsToView: inline add column failed", "column", col.name, "error", out.Err.Error())
 		}
 	}
 
@@ -3781,10 +3781,10 @@ func (dm *DatabaseManager) finishOrRepairLessonsView() {
 	// branch covers the case where lessons_base already existed
 	// (and was renamed from `lessons` by a prior boot) without the
 	// tombstone. Idempotent via isDuplicateColumnError.
-	if _, err := dm.ExecTracked(`ALTER TABLE lessons_base ADD COLUMN deleted_at INTEGER`, 5); err != nil {
-		if !isDuplicateColumnError(err) {
+	if out := execTracked(dm.db, `ALTER TABLE lessons_base ADD COLUMN deleted_at INTEGER`, 5, func() { dm.busyRetries.Add(1) }); out.Err != nil {
+		if !isDuplicateColumnError(out.Err) {
 			slog.Warn("migrateLessonsToView: repair add deleted_at failed",
-				"error", err.Error())
+				"error", out.Err.Error())
 		}
 	}
 
