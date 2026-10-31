@@ -2328,7 +2328,7 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 			continue
 		}
 		alter := fmt.Sprintf("ALTER TABLE shared.%s ADD COLUMN %s %s", m[0], m[1], m[2])
-		if _, err := dm.db.Exec(alter); err != nil {
+		if _, err := dm.ExecTracked(alter, 5); err != nil {
 			if !isDuplicateColumnError(err) {
 				slog.Warn("shared migration failed",
 					"table", m[0], "column", m[1], "error", err.Error())
