@@ -11,8 +11,11 @@
 #
 # Three independent detectors, because one is not enough:
 #
-#   1. A SNAPSHOT of the live tree (path, size, mtime), before and after.
-#      Any difference is a failure.
+#   1. A CLASSIFIED SNAPSHOT of the live tree, before and after.  The
+#      protected artifacts are compared BY BYTES; the live database is
+#      compared BY CLASS, because the live scheduler legitimately writes
+#      to it and a blanket size/mtime comparison is a false positive.
+#      See live_gate.py.
 #   2. A STRACE of every open/stat/access in the test's process tree,
 #      grepped for the live paths. This catches a READ that a snapshot
 #      cannot see.
@@ -124,49 +127,63 @@ safe_rm() {
   return 0
 }
 
-# ── the live-tree snapshot ────────────────────────────────────────────────
-live_snapshot_paths() {
-  printf '%s\n' \
-    "$LIVE_MPM/bin" \
-    "$LIVE_MPM/src/db/mpm.db" \
-    "$LIVE_MPM/agent_installation" \
-    "$LIVE_SYSTEMD_USER/mpm-scheduler.service" \
-    "$LIVE_OC_CONFIG/opencode.jsonc" \
-    "$LIVE_OC_CONFIG/AGENTS.md"
+# ── the live-tree isolation gate ───────────────────────────────────────────
+#
+# The gate is a Python helper, because it has to read the live database
+# and hash trees, and because it must be testable on its own: the
+# negative control in scripts/tests/test_rehearsal_live_gate.py drives
+# it against a DISPOSABLE stand-in for the live tree, so the gate's own
+# behaviour is proven without touching production.
+#
+# live_gate_snapshot <out-file>   — write a classified snapshot
+# live_gate_compare <before> <after> — compare two snapshots
+#                                    0 = clean, 1 = unauthorised change,
+#                                    2 = could not measure
+#
+# The old live_snapshot() — a hash of (path, size, mtime) over a list of
+# live paths, INCLUDING the live database file — was removed. It was
+# invalid: the live scheduler records health checks and SQLite
+# checkpoints the WAL, so the database's size and mtime move for reasons
+# that have nothing to do with the rehearsal, and the suite reported a
+# failure that had no cause. A false positive in an isolation gate is
+# worse than no gate, because it teaches the operator to ignore it.
+
+live_gate_snapshot() { # live_gate_snapshot <out-file>
+  python3 "$REH_DIR/live_gate.py" snapshot \
+    --live-mpm "$LIVE_MPM" \
+    --oc-config "$LIVE_OC_CONFIG" \
+    --systemd-user "$LIVE_SYSTEMD_USER" \
+    --out "$1"
 }
 
-live_snapshot() {
-  { for p in $(live_snapshot_paths); do
-      if [ -e "$p" ]; then
-        if [ -d "$p" ]; then
-          find "$p" -printf '%p %s %T@\n' 2>/dev/null | sort
-        else
-          printf '%s %s %s\n' "$p" "$(stat -c%s "$p" 2>/dev/null || echo -)" "$(stat -c%Y "$p" 2>/dev/null || echo -)"
-        fi
-      else
-        printf '%s ABSENT\n' "$p"
-      fi
-    done; } | sha256sum | cut -d' ' -f1
-}
-
-live_snapshot_detail() {
-  { for p in $(live_snapshot_paths); do
-      if [ -e "$p" ]; then
-        if [ -d "$p" ]; then
-          find "$p" -printf '%p %s %T@\n' 2>/dev/null | sort
-        else
-          printf '%s %s %s\n' "$p" "$(stat -c%s "$p" 2>/dev/null || echo -)" "$(stat -c%Y "$p" 2>/dev/null || echo -)"
-        fi
-      else
-        printf '%s ABSENT\n' "$p"
-      fi
-    done; }
+live_gate_compare() { # live_gate_compare <before> <after>
+  python3 "$REH_DIR/live_gate.py" compare "$1" "$2"
 }
 
 # ── the strace detector ───────────────────────────────────────────────────
+#
+# THE INDEPENDENT DETECTOR.  The snapshot detector proves the live tree's
+# STATE did not change.  This one proves something the snapshot cannot
+# see at all: that the migration made no syscall against the live tree,
+# including a READ.  A read changes no state, so the snapshot is blind
+# to it; the syscall trace is not.
+#
+# It can also be UNAVAILABLE.  `strace` is a documented prerequisite of
+# the rehearsal (scripts/rehearsal/README.md), and on a host without it
+# there is no trace to read.  So this detector has THREE possible
+# outcomes, and it must report all three honestly:
+#
+#   0            the trace exists, and no syscall touched the live tree
+#   N            the trace exists, and N syscalls touched the live tree
+#   unavailable  there was no trace: THE DETECTOR DID NOT LOOK
+#
+# The third is NOT a pass.  A detector that reports success without
+# having looked is the same failure shape as a gate that reports a
+# change as accounted for without establishing its origin.  The caller
+# fails closed on it.
 strace_live_hits() {
   local trace="$1"
-  [ -f "$trace" ] || { echo "0"; return; }
+  [ -f "$trace" ] || { echo "unavailable"; return; }
   grep -E "openat|open\(|stat|statx|access|getdents" "$trace" 2>/dev/null \
     | grep -F -e "$LIVE_MPM" -e "$LIVE_OC_CONFIG" -e "$LIVE_SYSTEMD_USER" \
     | grep -v -F "$LIVE_MPM-dogfood" \
@@ -227,6 +244,31 @@ reh_note() { printf '       %s\n' "$1"; }
 
 reh_assert() { # reh_assert <rc> <description>
   if [ "$1" = "0" ]; then reh_pass "$2"; else reh_fail "$2"; fi
+}
+
+# ── the independent syscall detector's verdict ────────────────────────────
+#
+# FAIL CLOSED, and say which detector is speaking.  The detector has
+# three possible outcomes, and only two of them are passes:
+#
+#   0            the trace exists, and no syscall touched the live tree
+#   N            the trace exists, and N syscalls touched the live tree
+#   unavailable  there was no trace: THE DETECTOR DID NOT LOOK
+#
+# The third is NOT a pass.  The guarantee it covers — that the
+# migration made no syscall against the live tree, including a READ,
+# which the snapshot detector is blind to because a read changes no
+# state — was simply not established.  Reporting "0 hits" for a
+# detector that never looked is the same failure shape as a gate that
+# reports a change as accounted for without establishing its origin.
+reh_assert_no_live_syscalls() { # reh_assert_no_live_syscalls <hits>
+  local hits="${1:-unavailable}"
+  if [ "$hits" = "unavailable" ]; then
+    reh_fail "the independent syscall detector did not run (strace is not installed), so the guarantee that the migration made NO syscall against the live tree — a read included — is NOT established. A detector that reports success without having looked is not a pass."
+    return 1
+  fi
+  [ "$hits" = "0" ]
+  reh_assert $? "no syscall in the migration touched the live tree (the independent syscall detector: ${hits} hits)"
 }
 
 reh_summary() {

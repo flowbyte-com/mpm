@@ -52,7 +52,7 @@ for a different section below:
 | F4 | Validation converts that sanctioned refusal into an error | `CompactLesson.Validate()` → `title required` (`internal/core/compact.go:89-100`), wrapped as `lesson_validation_failed` (`compact.go:248`) |
 | F5 | Batch selection is oldest-first, stateless, and unmarked on failure | `ORDER BY created_at ASC LIMIT ?` with no bookmark or offset (`compact.go:473-479`) |
 | F6 | Therefore a refused batch is reselected verbatim, forever | F5 combined with F4: the rows are never marked, so the predicate still matches them |
-| F7 | `compacted_into` is written only inside the lesson-insert transaction | `commitLessonAndMark` (`compact.go:512-575`) — the `json_insert` marking and the `INSERT INTO lessons` share one `tx` |
+| F7 | `compacted_into` is written only inside the derivation-insert transaction | `commitProposalAndMark` — the `json_insert` marking and the `INSERT INTO lesson_proposals` share one `tx`. (Since the trust correction of 2026-10-30 the derivation is a PENDING PROPOSAL rather than a trusted lesson; the invariant is unchanged: `compacted_into` is written only in the transaction that inserts the artifact it points at, and a refused batch writes neither.) |
 | F8 | A drain invocation is bounded to 8 batches | `compactDrainMaxBatchesDefault = 8`, `compactDrainMaxBatchesHardCap = 8` (`compact.go:130,136`) |
 
 F1+F2 against F4 is the core contradiction this document resolves: the
@@ -63,8 +63,10 @@ call on the identical 50 rows (F6). Nothing ever drains.
 
 **Invariant that must survive every option below (F7):**
 `compacted_into` is never written except in the same transaction that
-inserts the lesson it points at. A refused batch therefore *cannot* use
-that field to record its own outcome — there is no lesson. Any design
+inserts the artifact it points at (a pending lesson proposal, since the
+2026-10-30 trust correction — a lesson, before it). A refused batch
+therefore *cannot* use that field to record its own outcome — there is no
+such artifact. Any design
 that needs a marker for "handled but not compacted" must introduce a
 *different* field. This is why §2 adds a new metadata key rather than
 reusing the existing one.

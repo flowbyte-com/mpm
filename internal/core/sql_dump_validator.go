@@ -155,6 +155,12 @@ var CanonicalMPMSchema = []string{
 	"evidence",
 	"external_db_cursors",
 	"lessons",
+	// lesson_proposals (2026-10-30): the PENDING surface for a lesson
+	// an agent has proposed and an operator has not yet accepted. MPM
+	// creates it, so a dump declaring it is legitimate and it belongs in
+	// the restore allow-list — the same reason every other
+	// schema-declared table is here.
+	"lesson_proposals",
 	// lifecycle_events: the mpm-event/0.1 lifecycle store (P5). MPM
 	// creates it, so a dump declaring it is legitimate and it belongs in
 	// the restore allow-list — the same reason every other

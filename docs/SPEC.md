@@ -1338,7 +1338,7 @@ Adding a new tool: write `handleFoo` in `internal/core/tools/handlers.go` (one f
 
 #### Partial results on the error path
 
-A handler may return **both** a structured result and a non-nil error. `mpm_system action=compact` does this on a mid-drain batch failure, returning the full drain result — `batches_processed`, `raw_processed`, `lessons_created`, `raw_remaining`, `actionable_pending`, `semantic_stages_spent`, `rows_deferred`, `stop_reason`, `failed_batch`, `failure_reason` — alongside the error. That result is the only way a caller learns *which* batch failed and *how much* work already committed; earlier batches are durable and must not be re-attempted. The same projection is used on the success path and the failure path, so a field is never missing precisely when a caller most needs it.
+A handler may return **both** a structured result and a non-nil error. `mpm_system action=compact` does this on a mid-drain batch failure, returning the full drain result — `batches_processed`, `raw_processed`, `lessons_created` (always 0 — the drain records pending proposals, not trusted lessons), `proposals_created`, `proposal_ids`, `raw_remaining`, `actionable_pending`, `semantic_stages_spent`, `rows_deferred`, `stop_reason`, `failed_batch`, `failure_reason` — alongside the error. That result is the only way a caller learns *which* batch failed and *how much* work already committed; earlier batches are durable and must not be re-attempted. The same projection is used on the success path and the failure path, so a field is never missing precisely when a caller most needs it.
 
 Both transports preserve it:
 
@@ -1968,6 +1968,57 @@ written:
   shown, rather than saved and left to fail later. An empty base URL
   stays legal: the providers normalise it to their own default
   endpoint.
+
+The wizard does **not** ask for the model request timeout
+(`timeout_seconds`). That is an advanced setting: it only matters in a
+failure mode most operators never see, and it cannot be chosen
+sensibly before they have watched a slow provider. What the wizard
+does instead is make the value explicit and correct — a fresh profile
+is written with the substrate default (300s), an existing configured
+value is preserved unchanged, and an invalid existing value (zero or
+negative) is replaced by the default with the replacement reported.
+`timeout_seconds` remains a manually editable field in
+`mpm_config.json` and remains settable from a terminal with
+`mpm config profile set <name> timeout_seconds <value>`.
+
+The default and the validation policy live in one place — see
+`internal/core/config/timeout.go` — and the wizard, the generated
+configuration and the runtime all resolve through it, so they cannot
+disagree. Only a positive value is valid: Go's `http.Client` treats a
+non-positive `Timeout` as unlimited, so a negative value would mean
+"no timeout at all" rather than "not configured".
+
+The CONNECTION-VERIFICATION timeout is a separate thing and is never
+inherited from the profile: the probe uses its own bound, ONE number
+for every verification surface — 15 seconds — and the whole
+verification is bounded by a larger budget (40 seconds) that covers
+the first attempt and the one bounded recovery attempt it may make.
+A provider that does not answer in time is reported as a **timeout**,
+never as an invalid credential.
+
+The bound is a measurement, not a preference. Against the live MiniMax
+Anthropic-compatible surface, the canonical probe path measured a
+median of 560–700ms (`MiniMax-M3`) and 603–1007ms (`MiniMax-M2.7`), with a
+slowest observed call of 4761ms. The bound this replaced was 1.5
+seconds — below the slowest healthy call — so a valid credential was
+reported as a timeout. A verification bound shorter than the
+provider's own latency turns a working credential into a reported
+failure, and on a credential surface an operator reads a timeout as
+"my key is wrong".
+
+A profile's `api_key` is a **literal secret**: it is presented to the
+provider exactly as written and is never expanded. A value shaped like
+an environment variable (`"$NAME"` / `"${NAME}"`) is the one
+exception and is resolved as a **reference** — which is what stops a
+placeholder like `"$MINIMAX_API_KEY"` from shadowing a perfectly good
+environment credential and being reported as an invalid key. The
+expansion is **closed** over the substrate's own table: a reference
+resolves only when it names a credential variable the endpoint itself
+declares, and a reference to anything else is refused rather than
+expanded. MPM does not perform arbitrary environment expansion, and no
+secret — the configured value, the resolved value, or a name the
+operator typed — ever appears in a message. Every prompt that asks
+for a credential states the distinction before it asks.
 
 #### How a component resolves to a profile, and what Doctor reports
 
@@ -2869,7 +2920,7 @@ Relevant Context: [IDs of memories/skills in use]
 Exit Criteria: [What constitutes completion? When do we wipe this?]
 ```
 
-The `Exit Criteria` line is the discipline that prevents context crunch: without an explicit completion definition, agents keep working past the goal and accrue context needlessly. When the Exit Criteria is met, **wipe the scratchpad clean by passing an empty string** to `flush_scratchpad`. If you learned something durable during the task, `mpm_lessons action=save` before wiping.
+The `Exit Criteria` line is the discipline that prevents context crunch: without an explicit completion definition, agents keep working past the goal and accrue context needlessly. When the Exit Criteria is met, **wipe the scratchpad clean by passing an empty string** to `flush_scratchpad`. If you learned something durable during the task, `mpm_lessons action=propose` before wiping.
 
 **The atomic rollback is the entire point.** `promote_scratchpad` runs the security scanner against the synthesized memory *inside* the same transaction as the memory INSERT and the scratchpad DELETE. If the scanner rejects (poison-phrase match, sensitive content, etc.), the entire transaction aborts: the scratchpad row survives for the agent to amend, and no memory row is created. A thought that fails the scanner is **not lost** — it is preserved for revision.
 
@@ -2886,7 +2937,9 @@ The `retrieval_metadata` table is a 1:1 mapping with any cognitive node (Memory,
 
 **Automatic instrumentation.** The agent never manages these stats explicitly. Every `mpm_context action=read_wake_context` boot, every `mpm_memory action=query` result, every `mpm_lessons action=search` result, and every `mpm_skills action=read` call increments `reuse_count` and updates `last_retrieved_at` via `RecordRetrieval` — fire-and-forget, errors swallowed so telemetry never blocks the user-facing path.
 
-**Provenance Proxy via `mpm_lessons action=save`.** When the agent distils a lesson, the optional `source_ids` array credits each cited node with a `success_count` increment via `IncrementSuccess` (INSERT-or-UPDATE). A node that was already retrieved has its `success_count` bumped; a node cited from prior-session memory but not surfaced this turn gets a fresh row with `success_count=1, reuse_count=0`. The "Provenance Proxy" name reflects the design intent: from any successful lesson, the system can trace back to the cognitive nodes that informed it, even when those nodes were never re-read in the session where the lesson was synthesized.
+**Provenance Proxy via `mpm_lessons action=propose`.** When the agent distils a lesson, the optional `source_ids` array records each cited node on the proposal, and the promotion credits each cited node with a `success_count` increment via `IncrementSuccess` (INSERT-or-UPDATE). A node that was already retrieved has its `success_count` bumped; a node cited from prior-session memory but not surfaced this turn gets a fresh row with `success_count=1, reuse_count=0`. The "Provenance Proxy" name reflects the design intent: from any successful lesson, the system can trace back to the cognitive nodes that informed it, even when those nodes were never re-read in the session where the lesson was synthesized.
+
+The credit lands at the **promotion**, not at the proposal. `success_count` means "this node helped produce durable knowledge", and a pending proposal is not durable knowledge — so a proposal that is never promoted must not inflate the retrieval signal of the nodes it drew on.
 
 ```json
 {
@@ -2897,7 +2950,7 @@ The `retrieval_metadata` table is a 1:1 mapping with any cognitive node (Memory,
 }
 ```
 
-The handler infers `node_type` from the id prefix (`skill:`, `lesson:` / `les-`, `memory:`, `dec-`, `theory:` / `the-`) and falls back to `memory` for unknown formats. The response includes a `credited_sources` count so the agent can verify the provenance was wired.
+The promotion resolves each cited id's `node_type` against the database (the artifact's own collection, or the lessons table) and falls back to `memory` for an id that names no known artifact. The promotion's response includes a `credited_sources` count so the operator can verify the provenance was wired.
 
 **Diagnose with `explain_retrieval`.** The MCP tool `mpm call explain_retrieval --payload '{"query":"..."}'` runs a standard FTS search and returns a per-node diagnostic markdown block: Base FTS Match score, Reuse Count, Last Retrieved timestamp, Success Count. The retrieval ordering is identical to `mpm_memory action=query` — the `bm25()` rank is preserved. `explain_retrieval` layers observability on top; it does not alter ranking.
 

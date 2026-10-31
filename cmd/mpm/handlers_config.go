@@ -86,7 +86,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/config"
@@ -919,6 +918,7 @@ func handleConfigInteractive(c *config.Config) (int, bool) {
 	// for Ollama/local). Honour existing key on empty input
 	// unless (unchanged) is shown.
 	if protocol.needsAPIKey {
+		printCredentialGuidance(prof.BaseURL)
 		var keyDefault string
 		if hadKey {
 			keyDefault = "(unchanged)"
@@ -935,18 +935,48 @@ func handleConfigInteractive(c *config.Config) (int, bool) {
 		}
 	}
 
-	// Timeout (rarely customised, default-only). 2026-09-14
-	// final-simplification: Max tokens is NOT user-configurable;
-	// the substrate supplies its own internal value at wire time.
-	// The wizard does not prompt for it and the profile value is
-	// never honoured.
-	timeout := promptString(rwFromStdin(), "Timeout seconds", intToStr(prof.TimeoutSecs))
-	if timeout != "" {
-		if n, err := strconvAtoi(timeout); err == nil && n > 0 {
-			prof.TimeoutSecs = n
-		}
-	} else if existing.TimeoutSecs > 0 {
+	// Timeout — NOT an onboarding question.
+	//
+	// The request timeout is an ADVANCED setting. A number that only
+	// matters when a provider is slow is not a decision an operator
+	// can make before they have watched a slow provider; asking for it
+	// during setup put a meaningless default in front of every user
+	// and let a typo (`3` instead of `30`) become a live fault.
+	//
+	// The operator can still set it, two ways:
+	//
+	//   - by hand in mpm_config.json:
+	//       "timeout_seconds": 300
+	//   - from a terminal:
+	//       mpm config profile set default timeout_seconds 300
+	//
+	// What onboarding DOES do is make the value explicit and correct:
+	//
+	//   - a fresh profile is written with the substrate default, so the
+	//     configuration says what will actually be used;
+	//   - an existing profile KEEPS whatever the operator already set —
+	//     an upgrade never silently replaces a configured value;
+	//   - an INVALID existing value (zero or negative) is replaced by
+	//     the default, and the replacement is REPORTED. Silently
+	//     rewriting the operator's setting would be the same class of
+	//     surprise this change exists to remove.
+	//
+	// The default and the validation policy live in
+	// internal/core/config/timeout.go, so the number written here, the
+	// number the runtime uses and the number the example configuration
+	// documents cannot disagree.
+	switch {
+	case config.TimeoutSecondsIsValid(existing.TimeoutSecs):
 		prof.TimeoutSecs = existing.TimeoutSecs
+	case existing.TimeoutSecs == 0:
+		// Not configured at all: write the default explicitly.
+		prof.TimeoutSecs = config.DefaultTimeoutSeconds
+	default:
+		fmt.Println()
+		fmt.Printf("  Note: the configured timeout_seconds (%d) is not a valid request timeout; using %d instead.",
+			existing.TimeoutSecs, config.DefaultTimeoutSeconds)
+		fmt.Println()
+		prof.TimeoutSecs = config.DefaultTimeoutSeconds
 	}
 
 	// Refuse to save when the wizard collected no usable profile
@@ -1276,6 +1306,7 @@ func wizardEmbeddingCustomWith(rw *bufio.Reader, c *config.Config) {
 	}
 
 	if protocol.needsAPIKey {
+		printCredentialGuidance(prof.BaseURL)
 		key, err := promptSecret("API key (leave empty if not required)", "")
 		if err != nil {
 			usererror.Error("%v", err)
@@ -1514,7 +1545,12 @@ func configLookup(c *config.Config, key string) (string, error) {
 		case "max_tokens":
 			return "(removed)", nil
 		case "timeout_seconds":
-			return intToStr(prof.TimeoutSecs), nil
+			// The EFFECTIVE value, not the raw one. The runtime
+			// resolves an unset or invalid value to the substrate
+			// default (config.EffectiveTimeoutSeconds), so reporting
+			// the raw value here would let the CLI and the runtime
+			// disagree about the timeout that will actually be used.
+			return strconv.Itoa(config.EffectiveTimeoutSeconds(prof.TimeoutSecs)), nil
 		}
 	}
 	// Legacy fallback — Synth block when Profiles["default"] is missing.
@@ -1529,7 +1565,8 @@ func configLookup(c *config.Config, key string) (string, error) {
 		case "max_tokens":
 			return "(removed)", nil
 		case "timeout_seconds":
-			return intToStr(c.Synth.TimeoutSecs), nil
+			// Same effective-value rule as the profile branch above.
+			return strconv.Itoa(config.EffectiveTimeoutSeconds(c.Synth.TimeoutSecs)), nil
 		}
 	}
 	return "", fmt.Errorf("mpm config get: unknown key %q (valid keys: model, api_key, base_url, timeout_seconds, synthesis_enabled)", key)
@@ -1862,15 +1899,6 @@ func confirmPrompt(rw *bufio.Reader, label string) bool {
 // Small helpers (kept package-private to avoid touching stdlib imports)
 // ---------------------------------------------------------------------------
 
-// intToStr formats an int as a string, returning "" for 0. Used to
-// surface a default placeholder only.
-func intToStr(n int) string {
-	if n == 0 {
-		return ""
-	}
-	return fmt.Sprintf("%d", n)
-}
-
 // strconvAtoi wraps strconv.Atoi to keep imports slim. The wizard
 // uses this only for the two int fields.
 func strconvAtoi(s string) (int, error) {
@@ -2154,11 +2182,21 @@ func handleConfigProfile(args []string) int {
 		normalized := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
 		isSecretField := normalized == "api_key" || normalized == "token" || normalized == "apikey"
 		if isSecretField {
-			value, errCode := resolveSecretFieldValue(rest)
+			// The profile's endpoint is needed so the guidance can name
+			// the credential VARIABLE this endpoint declares. An
+			// operator cannot act on "the environment variable" without
+			// knowing which one it is, and the answer depends on the
+			// endpoint's wire.
+			cfg := loadOrInitConfig()
+			baseURL := ""
+			if prof, ok := cfg.Profiles[name]; ok {
+				baseURL = prof.BaseURL
+			}
+			value, errCode := resolveSecretFieldValue(rest, baseURL)
 			if errCode != 0 {
 				return errCode
 			}
-			return handleProfileSet(loadOrInitConfig(), name, key, value, true /*silenceValue*/)
+			return handleProfileSet(cfg, name, key, value, true /*silenceValue*/)
 		}
 		if len(rest) == 0 {
 			usererror.Error("mpm config profile set <name> <key> <value>\n  keys: provider, model, base_url, temperature, timeout_seconds, reasoning, auth_scheme")
@@ -2190,10 +2228,14 @@ func handleConfigProfile(args []string) int {
 // actionable error; the secret itself is NEVER interpolated into the
 // error text, never logged, and never passed into the config save path.
 //
+// baseURL is the profile's endpoint, when it is known. It is used only
+// to NAME the credential variable the endpoint declares, so the hidden
+// prompt can say what a value will mean — see printCredentialGuidance.
+//
 // The function name intentionally avoids the word "api_key" so it does
 // not appear in greppable security assertions that would also match the
 // legitimate field name.
-func resolveSecretFieldValue(rest []string) (string, int) {
+func resolveSecretFieldValue(rest []string, baseURL string) (string, int) {
 	rest, useStdin := stripMemoryFlagToken(rest, "--stdin")
 	if useStdin {
 		v, err := readSecretFromStdin()
@@ -2214,6 +2256,10 @@ func resolveSecretFieldValue(rest []string) (string, int) {
 		usererror.Error("refusing API key on command line; stdin is not a terminal; use --stdin for non-interactive secret input")
 		return "", 1
 	}
+	// This is where an operator is most likely to type "$MINIMAX_API_KEY"
+	// believing it names their environment credential. Say what the
+	// value will mean BEFORE the hidden prompt takes it.
+	printCredentialGuidance(baseURL)
 	v, err := promptSecret("API key", "")
 	if err != nil {
 		usererror.Error("%v", err)
@@ -2340,6 +2386,7 @@ func handleProfileAdd(c *config.Config, name string, opts ...profileAddOpts) int
 			p.BaseURL = strings.TrimSpace(baseURL)
 		}
 		if protocol.needsAPIKey {
+			printCredentialGuidance(p.BaseURL)
 			key, err := promptSecret("API key (leave empty if not required)", "")
 			if err != nil {
 				usererror.Error("%v", err)
@@ -2611,7 +2658,15 @@ func probeProfileAfterSave(p config.Profile, isMaterialChange bool) {
 	if dm == nil {
 		dm = getDBConcrete()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	// The verification's budget is the PROBE PACKAGE's number, not one
+	// written here. The probe owns two bounds — one per request, and one
+	// for the whole verification — and the second MUST exceed the first,
+	// or the outer deadline fires first and the operator is told the
+	// endpoint was unreachable when the truth is that it answered too
+	// late to satisfy the per-request bound. Two numbers, two places, one
+	// of them able to contradict the other: that is how the 1.5s bound
+	// became shorter than the provider's own latency in the first place.
+	ctx, cancel := context.WithTimeout(context.Background(), probe.ProbeTotalBudget)
 	defer cancel()
 	// ProbeSingle operates on the supplied profile directly. We
 	// deliberately do NOT require component routing here — a complete
@@ -2641,8 +2696,65 @@ func extractStringFlag(args []string, name string) ([]string, string) {
 	return out, value
 }
 
+// printCredentialGuidance explains what the two answers to the API-key
+// prompt MEAN, before the prompt is asked.
+//
+// It is ONE function for every prompt that asks for a credential, so
+// the three onboarding entry points cannot drift into telling an
+// operator three different things.
+//
+// At the prompt the answers are indistinguishable, and they are not the
+// same kind of thing:
+//
+//   - EMPTY  → the provider's own environment variable supplies the
+//     credential. Nothing is written to the configuration, and no secret
+//     is stored on disk.
+//   - A VALUE → stored as a LITERAL SECRET and presented to the provider
+//     as-is. It is never expanded.
+//   - "$VAR" → a reference to an environment variable. It is resolved
+//     ONLY when VAR is one of the credential variables this endpoint
+//     declares; otherwise MPM refuses it rather than sending the
+//     placeholder text to a provider.
+//
+// The distinction was invisible, and it was expensive: a profile
+// carrying the literal string "$MINIMAX_API_KEY" SHADOWS a perfectly
+// good environment credential, and the provider's refusal of that
+// literal is reported to the operator as an invalid credential. They
+// rotate a working key, and the configuration keeps the placeholder.
+//
+// The endpoint's declared variable is named, because the operator cannot
+// act on "the environment variable" without knowing which one it is.
+func printCredentialGuidance(baseURL string) {
+	fmt.Println()
+	if envVar := synth.PrimaryAPIKeyEnvVar(baseURL); envVar != "" {
+		fmt.Printf("  Leave this empty to use the environment variable %s.\n", envVar)
+		fmt.Println("  A value you type is stored as a literal secret and is never expanded;")
+		fmt.Printf("  %s is a reference to that variable, not a secret.\n", envVar)
+	} else {
+		fmt.Println("  Leave this empty to use the provider's own environment variable.")
+		fmt.Println("  A value you type is stored as a literal secret and is never expanded.")
+	}
+	fmt.Println()
+}
+
 // printProbeOnSaveHint emits the user-facing verification line. Saved
 // the profile regardless of probe outcome; the hint is best-effort.
+//
+// THE DISTINCTION THE OPERATOR MUST BE ABLE TO MAKE
+// ---------------------------------------------------
+// Four outcomes need four different sentences, and the two that get
+// confused are the worst pair:
+//
+//   - a TIMEOUT means the endpoint did not answer in time. The
+//     credential was never judged. Telling the operator their key is
+//     wrong here sends them to rotate a working credential;
+//   - an AUTH FAILURE means the endpoint answered and refused the
+//     credential.
+//
+// A timeout is therefore rendered as a timeout, in words, with the
+// bound that was exceeded — and never with the raw transport error,
+// whose message is long, endpoint-shaped noise that the operator cannot
+// act on.
 func printProbeOnSaveHint(r probe.ProbeResult) {
 	switch r.Status {
 	case probe.ProbeHealthy:
@@ -2655,6 +2767,19 @@ func printProbeOnSaveHint(r probe.ProbeResult) {
 			return
 		}
 		fmt.Printf("✓ Connection verified · %s · %s · %dms\n", r.Provider, r.Model, r.LatencyMs)
+	case probe.ProbeTimeout:
+		// A deadline, stated as a deadline. The credential was NOT
+		// judged: the endpoint simply did not answer within the
+		// verification bound.
+		fmt.Printf("✗ Verification timed out · %s did not answer within %s · "+
+			"this is a timeout, not a credential problem\n",
+			r.Provider, probe.ProbeTimeoutForVerification)
+		fmt.Println("Configuration was saved.")
+	case probe.ProbeUnreachable:
+		fmt.Printf("✗ Verification failed · %s could not be reached · "+
+			"this is a connection problem, not a credential problem\n",
+			r.Provider)
+		fmt.Println("Configuration was saved.")
 	default:
 		summary := r.ErrorSummary
 		if summary == "" {

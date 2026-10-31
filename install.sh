@@ -240,6 +240,36 @@ resolve_paths() {
     SERVICE_DST="$HOME/.config/systemd/user/${SERVICE_NAME}.service"
 }
 
+# require_bundle_layout_paths
+#
+# The versioned bundle layout has ONE root: the install prefix and the
+# data root must be the SAME directory.
+#
+# The stable paths are written with the RELATIVE target "current/<name>",
+# so they resolve inside the install prefix, while the active pointer
+# lives at <data root>/current. With two different directories the
+# conversion would create a `current/<name>` symlink that resolves
+# against a `current` that does not exist — a dangling symlink naming no
+# binary and no host asset — while the conversion reported success.
+#
+# This refusal happens BEFORE the installer touches the filesystem, so
+# an unsupported combination costs nothing: the installation is exactly
+# as it was.
+#
+# It applies to the bundle layout only. The DEFAULT install path puts
+# the binaries in the prefix and the state in the data root, and a
+# split there is supported and unchanged.
+require_bundle_layout_paths() {
+    [ "$USE_BUNDLE" = "1" ] || return 0
+    if ! load_bundle_lib; then
+        die "the runtime bundle library could not be loaded — refusing to continue." 1
+    fi
+    if ! rb_layout_paths_compatible "$DATA_ROOT" "$PREFIX"; then
+        die "the versioned bundle layout requires --prefix and --data-root to name the SAME directory.
+Nothing was changed." 1
+    fi
+}
+
 # ---------- detection ----------
 detect_os() {
     if [ -r /etc/os-release ]; then
@@ -371,6 +401,10 @@ preflight() {
     log "project:      $PROJECT_ROOT"
     log "prefix:       $PREFIX"
     log "data root:    $DATA_ROOT"
+    # The bundle layout's stable paths are written relative to the
+    # prefix, so the prefix and the data root must be one directory.
+    # Refused here — before anything is built, staged or promoted.
+    require_bundle_layout_paths
     log "install mode: USER-SPACE (no sudo required)"
     log "  systemd unit: $SERVICE_DST"
 
@@ -753,6 +787,12 @@ phase_bundle() {
 
     load_promotion_lib || die "the transactional promotion library could not be loaded" 3
     load_bundle_lib || die "the runtime bundle library could not be loaded" 3
+
+    # The layout has ONE root. This phase refuses an incompatible
+    # prefix/data-root pair BEFORE it creates the lock file, the
+    # staging area or the release — so an unsupported combination
+    # leaves the filesystem exactly as it was.
+    require_bundle_layout_paths
 
     # ---- the release identity ----
     #

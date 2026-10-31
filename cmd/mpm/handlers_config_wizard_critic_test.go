@@ -307,12 +307,14 @@ func writeConfiguredCriticConfig(t *testing.T) {
 //	Protocol            → Ollama (no credential prompt)
 //	Model               → left empty
 //	Base URL            → the protocol's default
-//	Timeout seconds     → the default
 //	Embedding           → leave unchanged
 //	Separate critic?    → yes
 //	Profile name        → the conventional name
 //	Replace it?         → no (the existing profile is preserved)
-const criticSessionAnswers = "1\n3\n\n\n\n1\ny\ncritic\nn\n"
+//
+// There is NO line for a request timeout: the wizard does not ask for one
+// (see internal/core/config/timeout.go for the policy).
+const criticSessionAnswers = "1\n3\n\n\n1\ny\ncritic\nn\n"
 
 // TestWizardCritic_SessionPreservesTheConfiguredCritic is the
 // session-level regression test.

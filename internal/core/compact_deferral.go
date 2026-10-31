@@ -9,10 +9,15 @@
 //
 // The state lives in the existing `metadata` JSON column, alongside
 // `compacted_into`, for the reason F7 gives: compacted_into may only
-// be written when a lesson actually exists, and a refusal creates no
-// lesson. A separate key family is required regardless of storage
-// choice, and a metadata key means no schema migration for the rows
-// themselves — only for the pressure view that counts them.
+// be written when a durable artifact that HOLDS the folded content
+// exists, and a refusal creates none. (Since the compaction's trust
+// correction, that artifact is a PENDING LESSON PROPOSAL rather than
+// a trusted lesson — the proposal retains the synthesis, and the
+// operator's promotion creates the lesson. The invariant is the same:
+// `compacted_into` never points at nothing.) A separate key family is
+// required regardless of storage choice, and a metadata key means no
+// schema migration for the rows themselves — only for the pressure
+// view that counts them.
 
 package internal
 

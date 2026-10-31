@@ -20,7 +20,6 @@
 package synth
 
 import (
-	"os"
 	"strings"
 )
 
@@ -33,6 +32,14 @@ import (
 //     mpm_config.json is authoritative and the environment is never
 //     consulted. This preserves every install that stored a key on
 //     disk and keeps those configs working unchanged.
+//
+//     ONE EXCEPTION: a configured value shaped like an environment
+//     reference ("$NAME" / "${NAME}") is resolved AS a reference — see
+//     credential_reference.go. A literal placeholder such as
+//     "$MINIMAX_API_KEY" used to be sent to the provider verbatim,
+//     shadowing the very environment credential it named. A value that
+//     is not reference-shaped is still a literal secret.
+//
 //  2. Otherwise, the provider-specific environment variable for
 //     baseURL, tried in the order APIKeyEnvVars returns.
 //
@@ -42,18 +49,16 @@ import (
 // while the orchestration model factory and the probe treat it as a
 // hard error. The resolver itself never guesses.
 //
+// This function discards the REASON a credential could not be resolved.
+// A caller that needs to tell the operator WHY — a reference to a
+// variable that is not set, a reference to a variable this endpoint
+// does not declare — must call ResolveCredential instead.
+//
 // The return value is the secret. Callers must not log it, format it
 // into an error message, or persist it anywhere.
 func ResolveAPIKey(configuredKey, baseURL string) string {
-	if configuredKey != "" {
-		return configuredKey
-	}
-	for _, name := range APIKeyEnvVars(baseURL) {
-		if key := os.Getenv(name); key != "" {
-			return key
-		}
-	}
-	return ""
+	key, _ := ResolveCredential(configuredKey, baseURL)
+	return key
 }
 
 // APIKeyEnvVars returns the environment variables that may supply a

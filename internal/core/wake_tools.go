@@ -188,13 +188,17 @@ func (dm *DatabaseManager) LastCascadeSummaryMetrics(ctx context.Context) (mater
 //
 // WHY
 // ---
-// The critic's hunts emit `mpm_lessons save` findings: they write TRUSTED
-// lessons directly, with no evidence citation, no review, and no pending
-// state, and they tag each finding with `cycle_<n>` so a repeated finding is
-// never recognised as the same one. Meanwhile duplicate evidence inflates
-// confidence. That combination makes an automatically-scheduled critic
-// unsound: it would manufacture corroborated-looking knowledge from
-// uncorroborated observations.
+// The critic's hunts USED TO emit `mpm_lessons save` findings: they wrote
+// TRUSTED lessons directly, with no evidence citation, no review, and no
+// pending state, and they tagged each finding with `cycle_<n>` so a
+// repeated finding was never recognised as the same one. Meanwhile duplicate
+// evidence inflated confidence. That combination made an
+// automatically-scheduled critic unsound: it would manufacture
+// corroborated-looking knowledge from uncorroborated observations.
+//
+// The hunts now emit `mpm_theories propose` — a PENDING proposal that
+// carries its evidence — and the agent-reachable lesson write is refused
+// outright. The arming rule below stands regardless.
 //
 // The critic's automatic path is a HANDLER, not a scheduler: the scheduler
 // fires any due wake whose kind has a registered handler. The handler for
