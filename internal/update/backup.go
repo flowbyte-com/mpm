@@ -1,7 +1,6 @@
 package update
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,7 +73,7 @@ func BackupLiveDB(dataRoot string, now time.Time) (BackupResult, error) {
 // data root and not a read-only mount.
 func vacuumInto(src, dst string) error {
 	rmSiblingJournals(dst)
-	db, err := sql.Open("sqlite3", "file:"+src+"?mode=ro")
+	db, err := openSQLiteRO(src)
 	if err != nil {
 		return err
 	}
@@ -135,7 +134,7 @@ func rmSiblingJournals(dst string) {
 // Row counts are not compared. A concurrent insert or delete between
 // the snapshot and any live read is normal operation, not corruption.
 func verifyBackup(live, backup string) error {
-	bdb, err := sql.Open("sqlite3", "file:"+backup+"?mode=ro")
+	bdb, err := openSQLiteRO(backup)
 	if err != nil {
 		return fmt.Errorf("could not open the backup for verification: %w", err)
 	}
@@ -182,7 +181,7 @@ func equalStrings(a, b []string) bool {
 }
 
 func tableNames(path string) ([]string, error) {
-	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
+	db, err := openSQLiteRO(path)
 	if err != nil {
 		return nil, err
 	}

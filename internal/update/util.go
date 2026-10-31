@@ -1,9 +1,32 @@
 package update
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
+
+// openSQLiteRO opens a database read-only with a bounded busy wait.
+//
+// Every live-database read in the update path goes through this: a
+// backup, preflight or fingerprint taken while another process writes
+// must WAIT for the lock (bounded), not fail instantly with
+// SQLITE_BUSY and not wait forever. Ten seconds bounds the worst case
+// while surviving a checkpoint burst.
+func openSQLiteRO(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA busy_timeout = 10000"); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
 
 // epochToRFC3339 renders a build epoch the way rb_write_release does.
 func epochToRFC3339(epoch int64) string {

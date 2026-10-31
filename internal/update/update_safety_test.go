@@ -298,6 +298,8 @@ func TestBackup_ToleratesConcurrentWriters(t *testing.T) {
 	root := testLayout(t, "")
 	live := NewLayout(root).LiveDB()
 	stop := make(chan struct{})
+	var stopOnce sync.Once
+	closeStop := func() { stopOnce.Do(func() { close(stop) }) }
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -315,18 +317,14 @@ func TestBackup_ToleratesConcurrentWriters(t *testing.T) {
 			}
 		}
 	}()
-	defer func() { close(stop); wg.Wait() }()
+	defer func() { closeStop(); wg.Wait() }()
 	for i := 0; i < 3; i++ {
 		res, err := BackupLiveDB(root, time.Now())
 		if err != nil {
-			close(stop)
-			wg.Wait()
 			t.Fatalf("backup under concurrent writes failed: %v", err)
 		}
 		// The backup verifies against itself even while live moves.
 		if err := verifyBackup(live, res.DBPath); err != nil {
-			close(stop)
-			wg.Wait()
 			t.Fatalf("backup self-verification failed: %v", err)
 		}
 	}

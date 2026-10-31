@@ -25,7 +25,7 @@ import (
 // (columns incl. type/notnull/default, CHECK exprs, indexes, triggers),
 // hashed to a single string so the history file stays small.
 func SchemaFingerprint(dbPath string) (string, error) {
-	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	db, err := openSQLiteRO(dbPath)
 	if err != nil {
 		return "", err
 	}

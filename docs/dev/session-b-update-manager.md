@@ -109,6 +109,28 @@ branch before merge:
 - `mpm save-skill --version` never reaches its handler (global
   rewrite). Pre-existing; the reason `--to` was chosen.
 
+## CI integration findings (merge with main)
+
+CI builds the PR merged with main, which now contains Session A's
+CLI option registry plus its AST-derived vocabulary test. The first
+merged run failed four ways, all fixed on this branch:
+
+- the vocabulary test demanded registry entries for the updater's
+  six new flags — added `"update"` to both `cliOptionRegistry` and
+  `cliOptionDeferred`, matching the doctor/review pattern (registry
+  entry for coverage, deferral so the handler's own precise
+  rejection wins);
+- the same missing entry made the router guard reject `mpm update
+  --status/--check` before delegation — fixed by the same entry;
+- `TestBackup_ToleratesConcurrentWriters` failed with
+  `database is locked`: read handles had no busy timeout. All
+  live-database reads now go through `openSQLiteRO` (bounded 10 s
+  busy wait). The test also double-closed its stop channel —
+  fixed with `sync.Once`;
+- local contract-test failures during development were a stale
+  `.build/bin/mpm` (pre-merge, no router guard). Lesson: rebuild
+  before running binary-exercising suites after a merge.
+
 ## Coordination
 
 - No changes to `install.sh`, `runtime_bundle.sh`,

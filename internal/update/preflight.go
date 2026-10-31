@@ -23,7 +23,7 @@ func snapshotDB(live string) (string, error) {
 	// destination: the live file is opened read-only and never
 	// modified. (Verified empirically: a mode=ro source vacuums into
 	// a new file without touching the source, WAL included.)
-	src, err := sql.Open("sqlite3", "file:"+live+"?mode=ro")
+	src, err := openSQLiteRO(live)
 	if err != nil {
 		return "", err
 	}
@@ -57,7 +57,7 @@ func checkTableShape(snapPath, table, ddl string) error {
 	if refShape == "" {
 		return fmt.Errorf("the candidate's reference DDL does not create %s", table)
 	}
-	liveDB, err := sql.Open("sqlite3", "file:"+snapPath+"?mode=ro")
+	liveDB, err := openSQLiteRO(snapPath)
 	if err != nil {
 		return err
 	}
