@@ -76,7 +76,6 @@ func Rollback(o Options) (Outcome, error) {
 	var out Outcome
 	out.Action = "rollback"
 	dataRoot := o.root()
-	var dbRestoreAccepted []string
 
 	prevTarget := ReadPreviousRelease(dataRoot)
 	if prevTarget == "" {
@@ -128,11 +127,10 @@ func Rollback(o Options) (Outcome, error) {
 	// Re-evaluate the safety condition against the LOCKED state. The
 	// pre-lock fingerprint above is advisory (a fast, clear refusal);
 	// this is authoritative: the world may have moved between the two
-	// reads — another update, a migration, a restore — and the
-	// discarded liveFP2 this replaces was exactly that hole. If the
-	// live shape no longer matches the recorded pre-update shape, the
+	// reads — another update, a migration, a restore. If the live
+	// shape no longer matches the recorded pre-update shape, the
 	// baseline the rollback decision rested on is gone: refuse and
-	// make the operator re-evaluate, rather than restoring against a
+	// make the operator re-evaluate, rather than acting on a
 	// fingerprint that no longer describes the database.
 	lockedHist, _ := ReadHistory(dataRoot)
 	lockedFP, ferr := SchemaFingerprint(NewLayout(dataRoot).LiveDB())
@@ -147,26 +145,85 @@ func Rollback(o Options) (Outcome, error) {
 		}
 	}
 
+	var backupEntry *HistoryEntry
 	if o.WithDBRestore {
 		hist2, _ := ReadHistory(dataRoot)
-		entry := lastUpdateWithBackup(hist2, out.FromRev)
-		if entry == nil {
+		backupEntry = lastUpdateWithBackup(hist2, out.FromRev)
+		if backupEntry == nil {
 			return out, fmt.Errorf("no verified pre-update backup is recorded for %s; refusing a database restore with no recovery point", out.FromRev)
 		}
-		accepted, err := restoreDatabase(dataRoot, entry.BackupDir, o.services(), o.RestartServices, o.Force)
-		if err != nil {
-			recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, "", "", "", "failed", err.Error())
-			return out, err
+		if backupEntry.PreFP != "" {
+			// Bind the recovery point to its recorded
+			// identity BEFORE anything stops or moves: a
+			// backup that no longer matches the fingerprint
+			// taken at backup time has been replaced or
+			// damaged since, and must not become the live
+			// database.
+			if fp, ferr := SchemaFingerprint(filepath.Join(backupEntry.BackupDir, "mpm.db")); ferr != nil || fp != backupEntry.PreFP {
+				detail := "could not fingerprint the recorded backup"
+				if ferr == nil {
+					detail = "the recorded backup's shape no longer matches its recorded fingerprint"
+				} else {
+					detail += ": " + ferr.Error()
+				}
+				recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, "", "", "", "failed", detail)
+				return out, fmt.Errorf("refusing a database restore: %s (backup: %s)", detail, backupEntry.BackupDir)
+			}
 		}
-		out.BackupDir = entry.BackupDir
+		out.BackupDir = backupEntry.BackupDir
+	}
+
+	// Service quiescence comes AFTER the lock and the safety checks
+	// and BEFORE any mutation: managed units that were active are
+	// stopped, and they stay stopped through the restore, the
+	// pointer swap and the health verification. They restart only
+	// once the intended runtime and database are aligned — or on
+	// any failure path, best-effort, so a failed rollback never
+	// leaves services silently stopped. Previously inactive units
+	// stay inactive: only stopped units are started back.
+	sc := o.services()
+	var stopped []string
+	if o.WithDBRestore && len(sc.ActiveUnits()) > 0 && !o.RestartServices {
+		return out, fmt.Errorf("managed service(s) still running (%s); stop them first or re-run with --restart-services (restoring under writers corrupts)", strings.Join(sc.ActiveUnits(), ", "))
+	}
+	if o.RestartServices {
+		stopped = sc.ActiveUnits()
+		var startedBack []string
+		for _, unit := range stopped {
+			if err := sc.Stop(unit); err != nil {
+				for _, s := range startedBack {
+					_ = sc.Start(s)
+				}
+				recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, out.BackupDir, "", "", "failed", err.Error())
+				return out, err
+			}
+			startedBack = append(startedBack, unit)
+		}
+	}
+	startStopped := func() {
+		for _, s := range stopped {
+			_ = sc.Start(s)
+		}
+	}
+	fail := func(stage string, err error) (Outcome, error) {
+		startStopped()
+		recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, out.BackupDir, "", "", "failed", stage+": "+err.Error())
+		return out, err
+	}
+
+	var dbRestoreAccepted []string
+	if o.WithDBRestore {
+		accepted, err := restoreDatabase(dataRoot, backupEntry.BackupDir, o.Force)
+		if err != nil {
+			return fail("restore", err)
+		}
 		for _, u := range accepted {
 			dbRestoreAccepted = append(dbRestoreAccepted, fmt.Sprintf("pid %d %s (%s)", u.PID, u.Name, u.Reason))
 		}
 	}
 
 	if err := restorePointer(dataRoot, prevTarget); err != nil {
-		recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, out.BackupDir, "", "", "failed", err.Error())
-		return out, fmt.Errorf("could not restore the active pointer: %w", err)
+		return fail("repoint", fmt.Errorf("could not restore the active pointer: %w", err))
 	}
 	// The undone release becomes the new "previous": a second rollback
 	// returns to it, and the record always names the target the
@@ -176,17 +233,37 @@ func Rollback(o Options) (Outcome, error) {
 		_ = RecordPreviousRelease(dataRoot, "releases/"+out.FromRev)
 	}
 	if err := installStableUpdater(dataRoot, prevRev); err != nil {
-		recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, out.BackupDir, "", "", "failed", err.Error())
-		return out, err
+		return fail("stable-updater", err)
 	}
 	live := SmokeLive(dataRoot)
 	if !live.OK {
-		recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, out.BackupDir, "", "", "failed", live.Detail)
-		return out, fmt.Errorf("the restored runtime failed its health check: %s", live.Detail)
+		return fail("health-check", fmt.Errorf("the restored runtime failed its health check: %s", live.Detail))
+	}
+
+	// The intended runtime and database are aligned: restart what was
+	// stopped and verify the running identities, the same partial-
+	// success reporting as the update path. A start failure does not
+	// undo the rollback — the pointer and the database are already
+	// correct — but it is recorded and reported loudly.
+	var identityWarnings []string
+	var verifiedUnits []string
+	for _, u := range stopped {
+		if err := sc.Start(u); err != nil {
+			identityWarnings = append(identityWarnings, fmt.Sprintf("%s: restart requested but the start reported an error (%v); confirm it by hand", u, err))
+			continue
+		}
+		if w := verifyServiceIdentity(dataRoot, prevRev, sc, u); w != "" {
+			identityWarnings = append(identityWarnings, w)
+			continue
+		}
+		verifiedUnits = append(verifiedUnits, u)
 	}
 	detail := dbRestoreNote(o.WithDBRestore)
 	for _, a := range dbRestoreAccepted {
 		detail += "; explicitly accepted unverified process: " + a
+	}
+	if len(identityWarnings) > 0 {
+		detail += "; restart verification warnings: " + strings.Join(identityWarnings, "; ")
 	}
 	recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{Kind: SourceGitHub}, out.BackupDir, "", "", "success", detail)
 
@@ -200,6 +277,21 @@ func Rollback(o Options) (Outcome, error) {
 		}
 	} else {
 		b.WriteString("database untouched (runtime rollback only)\n")
+	}
+	if len(stopped) > 0 {
+		if len(identityWarnings) == 0 {
+			fmt.Fprintf(&b, "restarted: %s (verified against %s)\n", strings.Join(stopped, ", "), prevRev)
+		} else {
+			fmt.Fprintf(&b, "restarted: %s (with verification warnings — partial success, see below)\n", strings.Join(stopped, ", "))
+			if len(verifiedUnits) > 0 {
+				fmt.Fprintf(&b, "verified: %s\n", strings.Join(verifiedUnits, ", "))
+			}
+		}
+	} else if len(sc.ActiveUnits()) > 0 {
+		fmt.Fprintf(&b, "note: managed service(s) still running (%s) were NOT restarted (no --restart-services); they may still use the old executable until restarted\n", strings.Join(sc.ActiveUnits(), ", "))
+	}
+	for _, w := range identityWarnings {
+		fmt.Fprintf(&b, "warning: %s\n", w)
 	}
 	b.WriteString(staleNote(dataRoot))
 	out.Report = b.String()
@@ -309,44 +401,19 @@ func checkWriters(scan HolderScan, force bool) ([]UnverifiableProc, error) {
 	return scan.Unverifiable, nil
 }
 
-func restoreDatabase(dataRoot, backupDir string, sc ServiceControl, restartServices, force bool) ([]UnverifiableProc, error) {
+func restoreDatabase(dataRoot, backupDir string, force bool) ([]UnverifiableProc, error) {
 	l := NewLayout(dataRoot)
 	live := l.LiveDB()
 	raw, err := os.ReadFile(filepath.Join(backupDir, "mpm.db"))
 	if err != nil {
 		return nil, fmt.Errorf("the recovery point has no database copy: %w", err)
 	}
-	active := sc.ActiveUnits()
-	if len(active) > 0 && !restartServices {
-		return nil, fmt.Errorf("managed service(s) still running (%s); stop them first or re-run with --restart-services (restoring under writers corrupts)", strings.Join(active, ", "))
-	}
-	// Authorized managed services stop FIRST: a running scheduler pins
-	// the database by design, so checking holders before stopping
-	// what we may stop would refuse a restore the operator explicitly
-	// authorized.
-	var stopped []string
-	unstop := func() {
-		for _, s := range stopped {
-			_ = sc.Start(s)
-		}
-	}
-	for _, unit := range active {
-		if err := sc.Stop(unit); err != nil {
-			unstop()
-			return nil, err
-		}
-		stopped = append(stopped, unit)
-	}
-	// Only the units this restore stopped are started back. A unit
-	// that was inactive before stays inactive.
-	defer func() {
-		for _, s := range stopped {
-			_ = sc.Start(s)
-		}
-	}()
-	// Now that everything stoppable is stopped, the remaining holders
-	// are unstoppable-by-us: refuse. Named-but-unverifiable processes
-	// are accepted only with --force (recorded, never silent).
+	// The caller stops authorized managed services FIRST (Rollback
+	// owns the service lifecycle around the whole operation) and only
+	// then calls here: by this point every stoppable writer is quiet,
+	// so a remaining holder is unstoppable-by-us and refuses the
+	// restore. Named-but-unverifiable processes are accepted only
+	// with --force (recorded, never silent).
 	accepted, err := checkWriters(ScanDBHolders(live, live+"-wal", live+"-shm"), force)
 	if err != nil {
 		return nil, err

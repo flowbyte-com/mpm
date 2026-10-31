@@ -2,6 +2,7 @@ package update
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -151,40 +152,60 @@ func verifyBackup(live, backup string) error {
 	return nil
 }
 
-// verifyBackupStandalone proves a database file stands alone: it is
-// internally consistent and fully readable. No comparison against any
-// other database — so it is the right check immediately before a
-// destructive restore, where the live shape may legitimately differ
-// (that difference is exactly why the restore is happening). A
-// damaged recovery point must never replace the live database.
 func verifyBackupStandalone(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("could not stat the staged copy: %w", err)
+	}
+	if fi.Size() == 0 {
+		return fmt.Errorf("the staged copy is empty: not a database")
+	}
+	fh, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("could not open the staged copy: %w", err)
+	}
+	magic := make([]byte, 16)
+	if _, err := io.ReadFull(fh, magic); err != nil {
+		fh.Close()
+		return fmt.Errorf("could not read the staged copy: %w", err)
+	}
+	fh.Close()
+	if string(magic) != "SQLite format 3\x00" {
+		return fmt.Errorf("the staged copy is not a SQLite database")
+	}
 	bdb, err := openSQLiteRO(path)
 	if err != nil {
-		return fmt.Errorf("could not open the backup for verification: %w", err)
+		return fmt.Errorf("could not open the staged copy: %w", err)
 	}
 	defer bdb.Close()
 	bdb.SetMaxOpenConns(1)
 	var integrity string
 	if err := bdb.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil {
-		return fmt.Errorf("backup integrity_check failed: %w", err)
+		return fmt.Errorf("staged copy integrity_check failed: %w", err)
 	}
 	if integrity != "ok" {
-		return fmt.Errorf("backup integrity_check: %s", integrity)
+		return fmt.Errorf("staged copy integrity_check: %s", integrity)
 	}
 	tables, err := tableNames(path)
 	if err != nil {
-		return fmt.Errorf("could not list the backup tables: %w", err)
+		return fmt.Errorf("could not list the staged copy tables: %w", err)
 	}
+	found := false
 	for _, tbl := range tables {
+		if tbl == "memories" {
+			found = true
+		}
 		var n int64
 		// Table names come from sqlite_master, not operator input.
 		if err := bdb.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, tbl)).Scan(&n); err != nil {
-			return fmt.Errorf("backup table %s is not readable: %w", tbl, err)
+			return fmt.Errorf("staged copy table %s is not readable: %w", tbl, err)
 		}
+	}
+	if !found {
+		return fmt.Errorf("the staged copy has no memories table: not a recognizable MPM database")
 	}
 	return nil
 }
-
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

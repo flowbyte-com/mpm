@@ -975,7 +975,7 @@ func TestRestore_RefusesUnverifiableWithoutForce(t *testing.T) {
 	writeFakeProc(t, procFSRoot, "700", "UNREADABLE", "ghost-agent", own)
 	writeFakeLocks(t, procFSRoot)
 	err := func() error {
-		_, err := restoreDatabase(root, filepath.Join(root, "backups", "x"), QuietServices{}, false, false)
+		_, err := restoreDatabase(root, filepath.Join(root, "backups", "x"), false)
 		return err
 	}()
 	// No backup dir exists either — either error proves the scan ran
@@ -987,7 +987,7 @@ func TestRestore_RefusesUnverifiableWithoutForce(t *testing.T) {
 	if berr != nil {
 		t.Fatalf("setup backup: %v", berr)
 	}
-	_, rerr := restoreDatabase(root, res.Dir, QuietServices{}, false, false)
+	_, rerr := restoreDatabase(root, res.Dir, false)
 	if rerr == nil {
 		t.Fatal("an unverifiable process must block a restore without --force")
 	}
@@ -998,7 +998,7 @@ func TestRestore_RefusesUnverifiableWithoutForce(t *testing.T) {
 	if len(we.Unverifiable) != 1 || we.Unverifiable[0].PID != 700 {
 		t.Fatalf("the refusal must name the process: %+v", we)
 	}
-	accepted, err := restoreDatabase(root, res.Dir, QuietServices{}, false, true)
+	accepted, err := restoreDatabase(root, res.Dir, true)
 	if err != nil {
 		t.Fatalf("--force accepts the named residual: %v", err)
 	}
@@ -1046,7 +1046,80 @@ func TestScanDBHolders_UnreadableDescriptorIsNotQuiescence(t *testing.T) {
 // TestRestore_RefusesDamagedRecoveryPoint pins pre-restore
 // verification: a recovery point damaged after its backup-time
 // check must not replace the live database.
-func TestRestore_RefusesDamagedRecoveryPoint(t *testing.T) {
+// TestRestore_RefusesEmptyRecoveryPoint pins pre-restore
+// verification for a zero-byte recovery point: it must be refused
+// before replacing the live database, which must stay byte-identical.
+func TestRestore_RefusesEmptyRecoveryPoint(t *testing.T) {
+	root, liveBefore := setupRollbackWithBackup(t)
+	hist, _ := ReadHistory(root)
+	if err := os.Truncate(filepath.Join(hist[0].BackupDir, "mpm.db"), 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Rollback(Options{DataRoot: root, WithDBRestore: true, Force: true, Services: QuietServices{}})
+	if err == nil {
+		t.Fatal("a zero-byte recovery point must fail pre-restore verification")
+	}
+	assertLiveUnchanged(t, root, liveBefore)
+}
+
+// TestRestore_RefusesForeignRecoveryPoint pins pre-restore
+// verification for a valid but unrelated SQLite database (empty
+// schema, no MPM tables): internally consistent, but not a
+// recognizable MPM recovery point, so it must be refused before
+// replacing the live database.
+func TestRestore_RefusesForeignRecoveryPoint(t *testing.T) {
+	root, liveBefore := setupRollbackWithBackup(t)
+	hist, _ := ReadHistory(root)
+	foreign := filepath.Join(t.TempDir(), "foreign.db")
+	fdb, err := sql.Open("sqlite3", "file:"+foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fdb.Exec("CREATE TABLE other (id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	fdb.Close()
+	raw, err := os.ReadFile(foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hist[0].BackupDir, "mpm.db"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Rollback(Options{DataRoot: root, WithDBRestore: true, Force: true, Services: QuietServices{}})
+	if err == nil {
+		t.Fatal("a foreign database must fail pre-restore verification")
+	}
+	assertLiveUnchanged(t, root, liveBefore)
+}
+
+// TestRestore_RefusesTruncatedRecoveryPoint pins pre-restore
+// verification for a recovery point damaged after its backup-time
+// check (truncated copy): the staged-copy check must fail before the
+// rename, leaving the live database byte-identical.
+func TestRestore_RefusesTruncatedRecoveryPoint(t *testing.T) {
+	root, liveBefore := setupRollbackWithBackup(t)
+	hist, _ := ReadHistory(root)
+	// Damage the recovery point after its backup-time verification.
+	raw, err := os.ReadFile(filepath.Join(hist[0].BackupDir, "mpm.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hist[0].BackupDir, "mpm.db"), raw[:len(raw)/2], 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Rollback(Options{DataRoot: root, WithDBRestore: true, Force: true, Services: QuietServices{}})
+	if err == nil {
+		t.Fatal("a damaged recovery point must fail pre-restore verification")
+	}
+	assertLiveUnchanged(t, root, liveBefore)
+}
+
+// setupRollbackWithBackup builds an isolated root with one successful
+// update (hence one verified recovery point) and returns the root
+// plus the live database bytes for later comparison.
+func setupRollbackWithBackup(t *testing.T) (string, []byte) {
+	t.Helper()
 	oldRev := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	root := testLayout(t, oldRev)
 	srcDir := t.TempDir()
@@ -1058,31 +1131,67 @@ func TestRestore_RefusesDamagedRecoveryPoint(t *testing.T) {
 	if len(hist) != 1 || hist[0].BackupDir == "" {
 		t.Fatalf("no recovery point recorded: %+v", hist)
 	}
-	// Damage the recovery point after its backup-time verification.
-	raw, err := os.ReadFile(filepath.Join(hist[0].BackupDir, "mpm.db"))
+	liveBefore, err := os.ReadFile(NewLayout(root).LiveDB())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hist[0].BackupDir, "mpm.db"), raw[:len(raw)/2], 0600); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(NewLayout(root).LiveDB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = Rollback(Options{DataRoot: root, WithDBRestore: true, Force: true, Services: QuietServices{}})
-	if err == nil {
-		t.Fatal("a damaged recovery point must fail pre-restore verification")
-	}
-	if !strings.Contains(err.Error(), "pre-restore verification") {
-		t.Fatalf("the refusal must name the pre-restore check: %v", err)
-	}
+	return root, liveBefore
+}
+
+func assertLiveUnchanged(t *testing.T, root string, before []byte) {
+	t.Helper()
 	after, err := os.ReadFile(NewLayout(root).LiveDB())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(after) != string(before) {
 		t.Fatal("the live database must be untouched by a refused restore")
+	}
+}
+
+// TestVerifyBackupStandalone pins the pre-restore check directly:
+// a zero-byte file, garbage, a truncated copy and a valid-but-foreign
+// database are all refused as recovery material; a healthy backup
+// passes.
+func TestVerifyBackupStandalone(t *testing.T) {
+	dir := t.TempDir()
+	healthy := filepath.Join(dir, "healthy.db")
+	hdb, err := sql.Open("sqlite3", "file:"+healthy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hdb.Exec("CREATE TABLE memories (id TEXT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	hdb.Close()
+	if err := verifyBackupStandalone(healthy); err != nil {
+		t.Fatalf("healthy backup must verify: %v", err)
+	}
+	empty := filepath.Join(dir, "empty.db")
+	if err := os.WriteFile(empty, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBackupStandalone(empty); err == nil {
+		t.Fatal("a zero-byte file is not a database")
+	}
+	garbage := filepath.Join(dir, "garbage.db")
+	if err := os.WriteFile(garbage, []byte("SQLite format 3\x00"+strings.Repeat("x", 5000)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBackupStandalone(garbage); err == nil {
+		t.Fatal("a garbage file with a valid header must fail integrity verification")
+	}
+	foreign := filepath.Join(dir, "foreign.db")
+	fdb, err := sql.Open("sqlite3", "file:"+foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fdb.Exec("CREATE TABLE other (id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	fdb.Close()
+	if err := verifyBackupStandalone(foreign); err == nil {
+		t.Fatal("a valid database without MPM tables is not a recognizable recovery point")
 	}
 }
 
