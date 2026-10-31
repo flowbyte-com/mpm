@@ -141,6 +141,13 @@ var cliContractMatrix = []cliContractCommand{
 	{Args: []string{"topic", "list"}},
 	{Args: []string{"session", "list"}},
 	{Args: []string{"reference", "list"}},
+
+	// Runtime namespaces. Their help is answered without a database and
+	// their option vocabulary belongs to the delegated executable — so
+	// the router must not pre-empt it, and a bad option must still fail.
+	{Args: []string{"telemetry"}},
+	{Args: []string{"critic"}},
+	{Args: []string{"scheduler"}},
 }
 
 // cliContractFixture builds an isolated workspace with an initialised
