@@ -802,6 +802,48 @@ func formatLockLine(pid int, dev, ino uint64) string {
 	return fmt.Sprintf("1: POSIX ADVISORY WRITE %d %x:%x:%d 0 EOF", pid, unix.Major(dev), unix.Minor(dev), ino)
 }
 
+// TestRollback_RefusesMismatchedBackupFingerprint pins the
+// provenance binding: a backup that no longer matches the fingerprint
+// recorded at backup time must not become the live database, even with
+// --force. Unlike a truncated backup (unreadable), this one is a
+// perfectly valid database -- just not the recorded one.
+func TestRollback_RefusesMismatchedBackupFingerprint(t *testing.T) {
+	root, liveBefore := setupRollbackWithBackup(t)
+	hist, _ := ReadHistory(root)
+	if len(hist) != 1 || hist[0].BackupDir == "" {
+		t.Fatalf("no recovery point recorded: %+v", hist)
+	}
+	// Swap in a different but entirely valid database: same tables,
+	// different shape (extra column), so fingerprints diverge.
+	alt := filepath.Join(t.TempDir(), "alt.db")
+	db, err := sql.Open("sqlite3", "file:"+alt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT, extra TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO memories (id, content) VALUES ('m1','hello')"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	raw, err := os.ReadFile(alt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hist[0].BackupDir, "mpm.db"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Rollback(Options{DataRoot: root, WithDBRestore: true, Force: true, Services: QuietServices{}})
+	if err == nil {
+		t.Fatal("a backup that does not match its recorded fingerprint must be refused")
+	}
+	if !strings.Contains(err.Error(), "recorded fingerprint") {
+		t.Fatalf("the refusal must name the provenance binding: %v", err)
+	}
+	assertLiveUnchanged(t, root, liveBefore)
+}
+
 // TestScanDBHolders_LockEvidenceCatchesUninspectable pins the
 // world-readable fallback: a lock on our inode is hard evidence even
 // when the holder's descriptors cannot be read.
