@@ -196,6 +196,12 @@ PATH; there is no wrapper and no `mpm.real`. The three daemon binaries
 (`mpm-scheduler`, `mpm-critic`, `mpm-telemetry`) are invoked from
 `~/.mpm/bin/` by systemd and are not on your PATH.
 
+You can still reach each one through the CLI: `mpm telemetry`,
+`mpm critic run` and `mpm scheduler status|logs|start|stop|restart` run the
+binary **from the same runtime bundle as the `mpm` you invoked** — never one
+found earlier on PATH. A bare `mpm critic` or `mpm scheduler` prints help and
+does nothing else, so neither an audit nor a second daemon starts by accident.
+
 **Advanced:** `install.sh` also supports running from an alternate checkout
 (e.g. `~/projects/mpm`) while still installing binaries and runtime state
 under `~/.mpm`. That is supported but not the primary layout.

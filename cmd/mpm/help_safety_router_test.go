@@ -82,6 +82,17 @@ var helpSafetyMatrix = []helpSafetyCase{
 	{Command: []string{"config", "component", "-h"}, WantNoMutation: true},
 	{Command: []string{"config", "detect-embedding", "--help"}, WantNoMutation: true},
 	{Command: []string{"config", "detect-embedding", "-h"}, WantNoMutation: true},
+
+	// Runtime namespaces. `mpm critic --help` must not run an audit and
+	// `mpm scheduler --help` must not start (or reach) the daemon. The
+	// argv-level proof lives in namespace_cmds_test.go; this sweep adds
+	// them to the router-wide inertness matrix.
+	{Command: []string{"telemetry", "--help"}, WantNoMutation: true},
+	{Command: []string{"telemetry", "-h"}, WantNoMutation: true},
+	{Command: []string{"critic", "--help"}, WantNoMutation: true},
+	{Command: []string{"critic", "-h"}, WantNoMutation: true},
+	{Command: []string{"scheduler", "--help"}, WantNoMutation: true},
+	{Command: []string{"scheduler", "-h"}, WantNoMutation: true},
 }
 
 // TestHelpSafety_RouterLevelSweep proves --help / -h perform no
