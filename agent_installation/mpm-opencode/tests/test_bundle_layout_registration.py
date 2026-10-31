@@ -247,6 +247,38 @@ class BundleLayoutRegistrationTests(unittest.TestCase):
             "a NEW inode through os.replace(), so the original mode has to "
             "be copied onto the replacement.")
 
+    def test_a_brand_new_config_is_created_private(self):
+        """A config the installer CREATES must not be group- or world-readable.
+
+        The config can name provider credentials and host tokens. A file
+        the operator never chose to widen must not start life readable by
+        anyone else — and it must not inherit whatever the ambient umask
+        happens to be, because that is a property of the shell that ran
+        the installer, not a decision anyone made about this file.
+
+        The umask is set to 0 for the run, so the ambient default would
+        be 0666 (world-readable). The created file must still be 0600.
+        """
+        cfg_dir = self.home / ".config" / "opencode"
+        cfg = cfg_dir / "opencode.jsonc"
+        self.assertFalse(cfg.exists(), "the config must not exist yet")
+
+        previous_umask = os.umask(0)
+        try:
+            result = _run([], self.home)
+        finally:
+            os.umask(previous_umask)
+
+        self.assertEqual(result.returncode, 0,
+                         f"the install must succeed:\n{result.stdout}\n{result.stderr}")
+        self.assertTrue(cfg.exists(), "the installer must create the config")
+        mode = os.stat(cfg).st_mode & 0o777
+        self.assertEqual(
+            mode, 0o600,
+            "a brand-new config must be created 0600 — private to the "
+            "operator — not at the ambient umask's mode and not at the "
+            "installer's own choice of a wider mode")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

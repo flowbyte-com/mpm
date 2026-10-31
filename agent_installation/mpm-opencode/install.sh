@@ -599,7 +599,14 @@ migrate_opencode_config() {
         # No config yet — create one with just the plugin entry. The "plugins"
         # key is the OpenCode 2 canonical name ("plugin" is the V1 key the
         # v2 loader still tolerates for compatibility).
-        cat > "$OPENCODE_CONFIG" <<EOF
+        #
+        # The file is created PRIVATE (0600), not at whatever the ambient
+        # umask happens to be. The config can name provider credentials and
+        # host tokens, and a file the operator never chose to widen should
+        # not start life group- or world-readable. The umask is set for the
+        # creation itself, so the file is never briefly visible at the
+        # ambient mode either.
+        ( umask 077 && cat > "$OPENCODE_CONFIG" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
   "plugins": [
@@ -607,7 +614,13 @@ migrate_opencode_config() {
   ]
 }
 EOF
-        log "created ${OPENCODE_CONFIG} with canonical plugin entry"
+        ) || {
+            err "could not create ${OPENCODE_CONFIG}"
+            return 1
+        }
+        # Belt and braces: the mode is stated, not merely inherited.
+        chmod 600 "$OPENCODE_CONFIG" 2>/dev/null || true
+        log "created ${OPENCODE_CONFIG} with canonical plugin entry (mode 0600)"
         return 0
     fi
 

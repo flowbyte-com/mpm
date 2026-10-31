@@ -509,13 +509,67 @@ def _identity(path: str) -> str:
         return os.path.normpath(path)
 
 
-def _is_adapter_payload(path: str) -> bool:
-    """True when the path names an adapter package MPM installed.
+def _install_scope(canonical_path: str) -> list[str]:
+    """The installation roots whose MPM registrations the canonical owns.
+
+    MPM's own registrations live under the canonical's installation
+    root: `<root>/agent_installation/<adapter>` for the active release,
+    and `<root>/releases/<rev>/agent_installation/<adapter>` for a
+    historical one.
+
+    A SEPARATE MPM installation under another workspace has its own
+    root. Its registration is not ours to rewrite: MPM owns one
+    registration in the installation it was pointed at, and rewriting
+    another installation's entry would silently break that
+    installation's plugin.
+    """
+    parts = canonical_path.split("/")
+    try:
+        ai = parts.index("agent_installation")
+    except ValueError:
+        # The canonical does not name an adapter install root — an
+        # unusual but possible spelling. Only the canonical itself is
+        # then in scope.
+        return [os.path.dirname(canonical_path)]
+    scope = ["/".join(parts[:ai]) or "/"]
+    if ai >= 2 and parts[ai - 2] == "releases":
+        # `<root>/releases/<rev>/agent_installation/<adapter>`: the
+        # release directory is a release-scoped copy of one
+        # installation, so the scope reaches the data root above it,
+        # and every sibling release with it.
+        scope.append("/".join(parts[: ai - 2]) or "/")
+    return scope
+
+
+def _in_scope(path: str, scope: list[str]) -> bool:
+    """True when the path lies inside one of the scope's roots.
+
+    The comparison is on path COMPONENTS, not on a string prefix: a
+    root of `<root>/.mpm` does not contain `<root>/.mpm-other`.
+    """
+    candidate = os.path.normpath(path)
+    for root in scope:
+        root = os.path.normpath(root)
+        if candidate == root:
+            return True
+        prefix = root if root.endswith("/") else root + "/"
+        if candidate.startswith(prefix):
+            return True
+    return False
+
+
+def _is_adapter_payload(path: str, scope: list[str]) -> bool:
+    """True when the path names an adapter package in the scoped install.
 
     MPM keeps its host adapters under a directory named
     `agent_installation`, and the package directory inside it carries an
     adapter basename. A path with that shape is MPM's own payload, at
     whatever path the current installation layout put it.
+
+    The shape is necessary but NOT sufficient: the payload must also
+    lie inside the installation the canonical registration names. A
+    second MPM installation under another workspace has the same shape
+    and is not ours to rewrite.
 
     This is what recognises the registration the versioned-bundle layout
     produces. The stable path and the revision-pinned path are the same
@@ -523,15 +577,11 @@ def _is_adapter_payload(path: str) -> bool:
     the next upgrade the revision-pinned path names a DIFFERENT
     directory, and it must still be recognised as MPM's registration
     rather than left behind as a second copy of the plugin.
-
-    The shape is deliberately narrow: it names MPM's install root, so a
-    third-party plugin that merely shares the adapter's basename is not
-    mistaken for MPM's payload.
     """
     parts = _entry_path(path).split("/")
     for i in range(len(parts) - 1):
         if parts[i] == "agent_installation" and parts[i + 1] in ADAPTER_BASENAMES:
-            return True
+            return _in_scope(_entry_path(path), scope)
     return False
 
 
@@ -749,6 +799,7 @@ def _merged_entries(
     _, stale_paths = _stale_and_canonical_paths(canonical)
     canonical_path = _canonical_dir(canonical)
     canonical_identity = _identity(canonical_path)
+    scope = _install_scope(canonical_path)
     raw_comments = raw_comments or {}
 
     union: list = list(arrays["plugins"]) + list(arrays["plugin"])
@@ -778,7 +829,7 @@ def _merged_entries(
                 # release's copy, left behind by an earlier install.
                 # It is MPM's registration, so it is normalised to the
                 # canonical one rather than left as a second copy.
-                or _is_adapter_payload(path)
+                or _is_adapter_payload(path, scope)
             ):
                 # Normalize every MPM-owned spelling (stale shapes and
                 # same-directory registrations under either scheme) to

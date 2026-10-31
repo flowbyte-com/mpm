@@ -204,6 +204,60 @@ class BundleLayoutRegistrationTests(unittest.TestCase):
             "canonical one, not left behind as a second load",
         )
 
+    def test_a_separate_mpm_installation_keeps_its_registration(self):
+        """Another MPM installation under another workspace is NOT ours.
+
+        Its path has the same shape — `agent_installation/mpm-opencode`
+        — but it belongs to a different installation. Rewriting its
+        entry to our canonical would silently break that
+        installation's plugin: it would be pointed at a directory it
+        does not own.
+        """
+        other_root = os.path.join(self.root, "other-workspace", ".mpm")
+        other_package = os.path.join(
+            other_root, "agent_installation", "mpm-opencode")
+        os.makedirs(other_package)
+        other_entry = "file://" + other_package
+
+        # It really does have the shape that marks MPM's own payload.
+        self.assertIn(
+            os.path.join("agent_installation", "mpm-opencode"),
+            other_package,
+            "the other installation must have the same path SHAPE — that is "
+            "what makes the scoping necessary rather than incidental")
+
+        config = json.dumps(
+            {"plugins": [self.stable_entry, other_entry]}, indent=2)
+        updated, changed, _summary = migrate(config, self.stable_entry)
+        self.assertEqual(
+            _parse_entries(updated), [self.stable_entry, other_entry],
+            "another MPM installation's registration must survive untouched. "
+            "MPM owns one registration in the installation it was pointed "
+            f"at. Got: {_parse_entries(updated)!r}",
+        )
+        self.assertIn(other_entry, updated,
+                      "the other installation's entry must be preserved "
+                      "exactly as it was written")
+
+    def test_a_separate_mpm_installations_sibling_root_is_not_in_scope(self):
+        """A sibling root that SHARES a prefix is not in scope either.
+
+        `<root>/.mpm` must not contain `<root>/.mpm-other`: the scope is
+        compared on path COMPONENTS, not on a string prefix.
+        """
+        sibling_root = os.path.join(self.root, ".mpm-other")
+        sibling_package = os.path.join(
+            sibling_root, "agent_installation", "mpm-opencode")
+        os.makedirs(sibling_package)
+        sibling_entry = "file://" + sibling_package
+        config = json.dumps(
+            {"plugins": [self.stable_entry, sibling_entry]}, indent=2)
+        updated, _changed, _summary = migrate(config, self.stable_entry)
+        self.assertEqual(
+            _parse_entries(updated), [self.stable_entry, sibling_entry],
+            "a sibling installation whose path merely shares a prefix must "
+            "keep its registration")
+
     def test_check_entry_reports_the_duplicate(self):
         """`--check-entry` must not report a healthy config as healthy.
 
