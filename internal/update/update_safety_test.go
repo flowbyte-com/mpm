@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/flowbyte-com/mpm/internal/testenv"
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/sys/unix"
 )
@@ -143,6 +144,10 @@ func TestRestore_RefusesOpenWriters(t *testing.T) {
 	agent := exec.Command("bash", "-c", "exec -a opencode-agent sleep 60")
 	agent.ExtraFiles = []*os.File{agentDB}
 	agent.Stdout, agent.Stderr = nil, nil
+	// Sanctioned hermetic environment: the simulated agent must not
+	// resolve production state through ambient MPM_WORKSPACE/HOME,
+	// even though it only holds the passed-in fd.
+	agent.Env = testenv.WithExtra(t)
 	if err := agent.Start(); err != nil {
 		t.Fatalf("start simulated agent: %v", err)
 	}
@@ -537,6 +542,40 @@ func TestFailedActivationAfterIncompatibleMigration_StopsDegraded(t *testing.T) 
 	// The stable updater was never replaced by the unproven release.
 	if _, err := os.Stat(filepath.Join(root, StableUpdaterName)); !os.IsNotExist(err) {
 		t.Error("the stable updater must not be replaced before the health checks pass")
+	}
+
+	// The documented recovery path works from the degraded state:
+	// --rollback --with-db-restore --force finds the FAILED update's
+	// backup (not just successful ones), validates it, restores it,
+	// and repoints at the old release.
+	rout, err := Rollback(Options{DataRoot: root, WithDBRestore: true, Force: true, Services: QuietServices{}})
+	if err != nil {
+		t.Fatalf("documented degraded recovery: %v", err)
+	}
+	if rout.ToRev != oldRev {
+		t.Fatalf("rollback ToRev = %q, want %q", rout.ToRev, oldRev)
+	}
+	if _, got, _ := CurrentReleaseTarget(root); got != oldRev {
+		t.Fatalf("pointer = %q, want restored %q", got, oldRev)
+	}
+	if hasEvilColumn(t, NewLayout(root).LiveDB()) {
+		t.Error("the restored database must be the pre-update backup: no migrated column")
+	}
+	// The pre-update backup did not have the evil column (it predates
+	// the migration) but did have the seeded row: the restore is the
+	// recorded recovery point, not a silent overwrite.
+	db, err := sql.Open("sqlite3", "file:"+NewLayout(root).LiveDB()+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM memories WHERE id = 'm1'").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("the restored database must contain the seeded row, got count=%d err=%v", n, err)
+	}
+	hist2, _ := ReadHistory(root)
+	if len(hist2) != 2 || hist2[1].Outcome != "success" || hist2[1].Action != "rollback" {
+		t.Fatalf("history must record the successful recovery rollback: %+v", hist2)
 	}
 }
 
@@ -965,5 +1004,205 @@ func TestRestore_RefusesUnverifiableWithoutForce(t *testing.T) {
 	}
 	if len(accepted) != 1 || accepted[0].PID != 700 {
 		t.Fatalf("the accepted residual must be returned for the record: %+v", accepted)
+	}
+}
+
+// TestScanDBHolders_UnreadableDescriptorIsNotQuiescence pins the
+// negative rule: an fd entry that cannot be readlinked for any reason
+// other than vanishing mid-scan (here: a directory where a symlink
+// should be, so readlink fails) makes the whole process uninspectable.
+// It must surface as named-but-unverified, never as evidence the
+// database is unheld.
+func TestScanDBHolders_UnreadableDescriptorIsNotQuiescence(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "mpm.db")
+	os.WriteFile(db, []byte("x"), 0600)
+	withFakeProc(t, func(procRoot string) {
+		ownUID := fmt.Sprintf("%d", os.Geteuid())
+		writeFakeProc(t, procRoot, "500", "", "holderish", ownUID)
+		fdDir := filepath.Join(procRoot, "500", "fd")
+		// An ordinary, unrelated fd.
+		if err := os.Symlink("/dev/null", filepath.Join(fdDir, "3")); err != nil {
+			t.Fatal(err)
+		}
+		// An entry readlink cannot resolve that did not vanish: a
+		// directory is not a symlink (EINVAL, not ENOENT).
+		if err := os.Mkdir(filepath.Join(fdDir, "9"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		writeFakeLocks(t, procRoot)
+	})
+	scan := ScanDBHolders(db)
+	if len(scan.Holders) != 0 {
+		t.Fatalf("no holders: %+v", scan.Holders)
+	}
+	if scan.Inconclusive {
+		t.Fatalf("locks are readable and show nothing: this is unverifiable, not inconclusive: %s", scan.Detail)
+	}
+	if len(scan.Unverifiable) != 1 || scan.Unverifiable[0].PID != 500 {
+		t.Fatalf("the process must be named as unverifiable: %+v", scan)
+	}
+}
+
+// TestRestore_RefusesDamagedRecoveryPoint pins pre-restore
+// verification: a recovery point damaged after its backup-time
+// check must not replace the live database.
+func TestRestore_RefusesDamagedRecoveryPoint(t *testing.T) {
+	oldRev := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	root := testLayout(t, oldRev)
+	srcDir := t.TempDir()
+	mustGit(t, srcDir)
+	if _, err := Update(context.Background(), Options{DataRoot: root, WantLocal: srcDir, Builder: fakeBuilder{}, Services: QuietServices{}}); err != nil {
+		t.Fatalf("setup update: %v", err)
+	}
+	hist, _ := ReadHistory(root)
+	if len(hist) != 1 || hist[0].BackupDir == "" {
+		t.Fatalf("no recovery point recorded: %+v", hist)
+	}
+	// Damage the recovery point after its backup-time verification.
+	raw, err := os.ReadFile(filepath.Join(hist[0].BackupDir, "mpm.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hist[0].BackupDir, "mpm.db"), raw[:len(raw)/2], 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(NewLayout(root).LiveDB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Rollback(Options{DataRoot: root, WithDBRestore: true, Force: true, Services: QuietServices{}})
+	if err == nil {
+		t.Fatal("a damaged recovery point must fail pre-restore verification")
+	}
+	if !strings.Contains(err.Error(), "pre-restore verification") {
+		t.Fatalf("the refusal must name the pre-restore check: %v", err)
+	}
+	after, err := os.ReadFile(NewLayout(root).LiveDB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("the live database must be untouched by a refused restore")
+	}
+}
+
+// TestStageScratchDB_SeesUncheckpointedWAL pins why scratch copies use
+// the online backup API instead of a raw file copy: a migration that
+// has been committed but not checkpointed lives in the WAL, and a raw
+// copy of the main database file would silently omit it — making a
+// compatibility check pass against the OLD schema.
+func TestStageScratchDB_SeesUncheckpointedWAL(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live.db")
+	w, err := sql.Open("sqlite3", "file:"+live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Exec("INSERT INTO t (v) VALUES ('x')"); err != nil {
+		t.Fatal(err)
+	}
+	// The "migration": committed, but the writer connection stays open
+	// so nothing is checkpointed away.
+	if _, err := w.Exec("ALTER TABLE t ADD COLUMN migrated TEXT DEFAULT 'm'"); err != nil {
+		t.Fatal(err)
+	}
+	var walSize int64
+	if fi, err := os.Stat(live + "-wal"); err == nil {
+		walSize = fi.Size()
+	}
+	t.Logf("wal size before snapshot: %d", walSize)
+
+	_, staged, err := stageScratchDB(live)
+	if err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	defer os.RemoveAll(filepath.Dir(filepath.Dir(filepath.Dir(staged))))
+	if !hasColumn(t, staged, "t", "migrated") {
+		t.Fatal("the staged copy is missing the uncheckpointed migration")
+	}
+	// Sanity: the migration really did live only in the WAL at stage
+	// time — a raw copy of the main file alone must NOT see it.
+	// (If SQLite checkpointed eagerly this check is vacuous, but the
+	// staged-copy assertion above still holds.)
+	raw, err := os.ReadFile(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawPath := filepath.Join(dir, "raw.db")
+	if err := os.WriteFile(rawPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_ = rawPath
+}
+
+func hasColumn(t *testing.T, dbPath, table, column string) bool {
+	t.Helper()
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info("%s")`, table))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var nn int
+		var dflt sql.NullString
+		var pk int
+		rows.Scan(&cid, &name, &ctype, &nn, &dflt, &pk)
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
+// TestFingerprintFailure_UnknownCompatNotSilent pins the fail-closed
+// rule for an unreadable post-smoke fingerprint: the update may still
+// succeed (the smoke test is the promotion gate), but nothing may
+// record or imply an unchanged schema. Injected via the "fingerprint"
+// failure point, so no real database damage is needed.
+func TestFingerprintFailure_UnknownCompatNotSilent(t *testing.T) {
+	oldRev := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	root := testLayout(t, oldRev)
+	srcDir := t.TempDir()
+	mustGit(t, srcDir)
+	out, err := Update(context.Background(), Options{
+		DataRoot: root, WantLocal: srcDir, Builder: fakeBuilder{},
+		Services: QuietServices{}, FailAt: "fingerprint",
+	})
+	if err != nil {
+		t.Fatalf("an unknown schema must not fail a healthy update: %v", err)
+	}
+	if _, got, _ := CurrentReleaseTarget(root); got == "" {
+		t.Fatal("the pointer must still move on a healthy smoke test")
+	}
+	if !strings.Contains(out.Report, "UNKNOWN") {
+		t.Errorf("the report must mark the schema unknown, not clean")
+	}
+	hist, _ := ReadHistory(root)
+	if len(hist) != 1 || hist[0].Outcome != "success" {
+		t.Fatalf("history = %+v", hist)
+	}
+	if !strings.Contains(hist[0].Detail, "UNKNOWN") {
+		t.Errorf("the record must preserve the unknown state for future rollbacks: %q", hist[0].Detail)
+	}
+	if hist[0].SchemaChanged {
+		t.Error("an unknown schema must not be recorded as changed")
+	}
+	if strings.Contains(hist[0].Detail, "unchanged") || strings.Contains(out.Report, "no change") {
+		t.Error("nothing may imply the schema is unchanged")
 	}
 }

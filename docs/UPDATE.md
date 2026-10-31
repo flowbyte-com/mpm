@@ -111,13 +111,21 @@ router reserves it for build-identity reporting, so the update flag is
    report says they may still use the old executable.
 9. Verify the new identity, smoke-test against a scratch copy, then
    health-check the live runtime while watching for schema migration.
-   Any failure restores the pointer (and restarts what was stopped).
+   Scratch copies are staged with the SQLite online backup, not a raw
+   file copy, so a migration still sitting in an uncheckpointed WAL
+   is visible to the check instead of silently missing. Any failure
+   restores the pointer (and restarts what was stopped). If the
+   post-smoke schema fingerprint itself cannot be read,
+   compatibility is UNKNOWN: the update does not claim "unchanged",
+   and no automatic fallback happens on an unverified shape.
    The stable `mpm-update` copy is replaced only after the health
    checks pass, so a failed activation never leaves an unproven
    recovery binary behind. If the new binary migrated the database
    before a later failure, the record says so explicitly and names the
-   recovery point — the old binaries are restored, but the migrated
-   data is never silently overwritten.
+   recovery point — the old binaries are restored only after the
+   previous release verifies clean against the migrated shape;
+   otherwise the update stops degraded and the migrated data is
+   never silently overwritten.
 10. Record the outcome and preserve rollback material (the previous
     release dir, the backup).
 
@@ -167,7 +175,10 @@ database by design), and a second scan runs immediately before the
 swap to narrow the check-then-act window to the rename itself. That
 window cannot be closed by a one-time scan, so the `--force`
 confirmation and the recorded outcome remain the backstop — the scan
-is not claimed to be atomic.
+is not claimed to be atomic. Immediately before the swap, the staged
+copy is re-verified standalone (integrity + readability, no live
+comparison): a recovery point damaged after its backup-time check
+must never replace the live database.
 
 ## Stale processes
 

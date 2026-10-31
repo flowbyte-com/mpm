@@ -134,18 +134,8 @@ func rmSiblingJournals(dst string) {
 // Row counts are not compared. A concurrent insert or delete between
 // the snapshot and any live read is normal operation, not corruption.
 func verifyBackup(live, backup string) error {
-	bdb, err := openSQLiteRO(backup)
-	if err != nil {
-		return fmt.Errorf("could not open the backup for verification: %w", err)
-	}
-	defer bdb.Close()
-	bdb.SetMaxOpenConns(1)
-	var integrity string
-	if err := bdb.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil {
-		return fmt.Errorf("backup integrity_check failed: %w", err)
-	}
-	if integrity != "ok" {
-		return fmt.Errorf("backup integrity_check: %s", integrity)
+	if err := verifyBackupStandalone(backup); err != nil {
+		return err
 	}
 	liveTables, err := tableNames(live)
 	if err != nil {
@@ -158,7 +148,34 @@ func verifyBackup(live, backup string) error {
 	if !equalStrings(liveTables, backupTables) {
 		return fmt.Errorf("backup tables %v do not match live tables %v", backupTables, liveTables)
 	}
-	for _, tbl := range backupTables {
+	return nil
+}
+
+// verifyBackupStandalone proves a database file stands alone: it is
+// internally consistent and fully readable. No comparison against any
+// other database — so it is the right check immediately before a
+// destructive restore, where the live shape may legitimately differ
+// (that difference is exactly why the restore is happening). A
+// damaged recovery point must never replace the live database.
+func verifyBackupStandalone(path string) error {
+	bdb, err := openSQLiteRO(path)
+	if err != nil {
+		return fmt.Errorf("could not open the backup for verification: %w", err)
+	}
+	defer bdb.Close()
+	bdb.SetMaxOpenConns(1)
+	var integrity string
+	if err := bdb.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil {
+		return fmt.Errorf("backup integrity_check failed: %w", err)
+	}
+	if integrity != "ok" {
+		return fmt.Errorf("backup integrity_check: %s", integrity)
+	}
+	tables, err := tableNames(path)
+	if err != nil {
+		return fmt.Errorf("could not list the backup tables: %w", err)
+	}
+	for _, tbl := range tables {
 		var n int64
 		// Table names come from sqlite_master, not operator input.
 		if err := bdb.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, tbl)).Scan(&n); err != nil {

@@ -45,7 +45,7 @@ func printUpdateHelp() int {
 	fmt.Println("  --from <dir>        build a local checkout outside the installed runtime")
 	fmt.Println("  --check             resolve the candidate and report; change nothing")
 	fmt.Println("  --status            report local state only; change nothing, no network")
-	fmt.Println("  --dry-run           validate the candidate without activating it")
+	fmt.Println("  --dry-run           validate the candidate without changing or keeping anything (no backup, no staging in the data root, nothing recorded)")
 	fmt.Println("  --rollback          return to the previous release (runtime only)")
 	fmt.Println("  --with-db-restore   with --rollback: also restore the pre-update backup")
 	fmt.Println("  --allow-dirty       build a dirty local checkout (development override)")

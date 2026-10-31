@@ -226,13 +226,16 @@ type HolderScan struct {
 // any holder — including, hypothetically, this process — is a real
 // writer and must block the restore.
 //
-// Fail-closed rule: a process whose file descriptors cannot be read is
-// assumed to be a holder UNLESS it can be positively ruled out — its
-// uid is neither ours nor root's, while the database file itself is
-// closed to group and other. (The data root is created 0700 and the
+// Fail-closed rule: a process whose file descriptors cannot be read
+// is assumed to be a holder UNLESS it can be positively ruled out —
+// its uid is neither ours nor root's, while the database file itself
+// is closed to group and other. (The data root is created 0700 and the
 // installer auto-corrects wider permissions, so the common case rules
 // foreign processes out; anything else refuses.) A vanished process
-// (the pid is gone mid-scan) is a benign race and is skipped.
+// (the pid is gone mid-scan) or a vanished single descriptor
+// (ENOENT on one readlink) is a benign race and is skipped. Any other
+// inspection failure makes the whole process uninspectable: an
+// unreadable descriptor is never evidence of quiescence.
 func ScanDBHolders(dbFiles ...string) HolderScan {
 	var scan HolderScan
 	want := map[string]bool{}
@@ -277,11 +280,41 @@ func ScanDBHolders(dbFiles ...string) HolderScan {
 			continue
 		}
 		fdDir := filepath.Join(procFSRoot, e.Name(), "fd")
-		fds, err := os.ReadDir(fdDir)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue // exited mid-scan: benign race
+		fds, dirErr := os.ReadDir(fdDir)
+		if dirErr != nil && !os.IsNotExist(dirErr) {
+			fds = nil
+		} else if dirErr != nil {
+			continue // exited mid-scan: benign race
+		}
+		held := ""
+		// An unreadable descriptor is NOT evidence of quiescence.
+		// Only a vanished fd (ENOENT: closed mid-scan) is a benign
+		// race and skippable; any other readlink failure makes the
+		// whole process uninspectable and takes the decision path
+		// below. A missing fd directory is the same case.
+		var fdErr error
+		if fds != nil {
+			for _, fd := range fds {
+				target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+				if err != nil {
+					if os.IsNotExist(err) {
+						continue // fd closed mid-scan: benign race
+					}
+					fdErr = err
+					break
+				}
+				// A deleted-but-held file reads as "path (deleted)".
+				// It still pins the inode, so it still counts.
+				target = strings.TrimSuffix(target, " (deleted)")
+				if want[target] {
+					held = target
+					break
+				}
 			}
+		} else {
+			fdErr = dirErr
+		}
+		if held == "" && fdErr != nil {
 			if isKernelThread(e.Name()) {
 				scan.Skipped++
 				continue
@@ -306,7 +339,7 @@ func ScanDBHolders(dbFiles ...string) HolderScan {
 				// no second source to consult: quiescence cannot
 				// be established at all.
 				if firstUninspectable == "" {
-					firstUninspectable = fmt.Sprintf("cannot inspect pid %d (%v) and the lock table is unreadable", pid, err)
+					firstUninspectable = fmt.Sprintf("cannot inspect pid %d (%v) and the lock table is unreadable", pid, fdErr)
 				}
 				continue
 			}
@@ -322,23 +355,9 @@ func ScanDBHolders(dbFiles ...string) HolderScan {
 			scan.Unverifiable = append(scan.Unverifiable, UnverifiableProc{
 				PID:    pid,
 				Name:   procComm(pid),
-				Reason: fmt.Sprintf("descriptors unreadable (%v); no lock on the database was found", err),
+				Reason: fmt.Sprintf("descriptors unreadable (%v); no lock on the database was found", fdErr),
 			})
 			continue
-		}
-		held := ""
-		for _, fd := range fds {
-			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil {
-				continue // fd closed mid-scan: benign race
-			}
-			// A deleted-but-held file reads as "path (deleted)".
-			// It still pins the inode, so it still counts.
-			target = strings.TrimSuffix(target, " (deleted)")
-			if want[target] {
-				held = target
-				break
-			}
 		}
 		if held == "" {
 			continue

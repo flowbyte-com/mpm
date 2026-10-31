@@ -7,6 +7,36 @@ import (
 	"strings"
 )
 
+// lastUpdateWithBaseline returns the most recent update attempt to
+// the given revision that recorded a pre-update schema fingerprint —
+// successful or failed. The failed case matters: a degraded stop
+// records a failed update whose backup and fingerprint are exactly
+// what a later rollback must find. Without this, the recovery point
+// from a failed update would be invisible to the documented recovery
+// path.
+func lastUpdateWithBaseline(hist []HistoryEntry, toRev string) *HistoryEntry {
+	for i := len(hist) - 1; i >= 0; i-- {
+		if hist[i].Action == "update" && hist[i].ToRev == toRev && hist[i].PreFP != "" {
+			e := hist[i]
+			return &e
+		}
+	}
+	return nil
+}
+
+// lastUpdateWithBackup returns the most recent update attempt to the
+// given revision that recorded a verified backup — successful or
+// failed, for the same reason as above.
+func lastUpdateWithBackup(hist []HistoryEntry, toRev string) *HistoryEntry {
+	for i := len(hist) - 1; i >= 0; i-- {
+		if hist[i].Action == "update" && hist[i].ToRev == toRev && hist[i].BackupDir != "" {
+			e := hist[i]
+			return &e
+		}
+	}
+	return nil
+}
+
 // rollbackBaselineDrift enforces the rollback safety rule against a
 // given history snapshot and live fingerprint: a runtime rollback to
 // a previous release is safe only while the live database still has
@@ -14,14 +44,14 @@ import (
 //
 // It returns the governing history entry (possibly nil) and whether
 // the live shape drifted from the recorded pre-update shape. A nil
-// entry or an entry without a fingerprint means no recorded baseline —
-// there is nothing to compare against, so no drift. Callers decide
-// what drift means: without --with-db-restore it is a refusal, with
-// it the restore overwrites the drift explicitly.
+// entry means no recorded baseline — there is nothing to compare
+// against, so no drift. Callers decide what drift means: without
+// --with-db-restore it is a refusal, with it the restore overwrites
+// the drift explicitly.
 func rollbackBaselineDrift(hist []HistoryEntry, liveFP, fromRev string) (*HistoryEntry, bool) {
-	entry := LastSuccessfulUpdateTo(hist, fromRev)
-	if entry == nil || entry.PreFP == "" {
-		return entry, false
+	entry := lastUpdateWithBaseline(hist, fromRev)
+	if entry == nil {
+		return nil, false
 	}
 	return entry, liveFP != entry.PreFP
 }
@@ -119,8 +149,8 @@ func Rollback(o Options) (Outcome, error) {
 
 	if o.WithDBRestore {
 		hist2, _ := ReadHistory(dataRoot)
-		entry := LastSuccessfulUpdateTo(hist2, out.FromRev)
-		if entry == nil || entry.BackupDir == "" {
+		entry := lastUpdateWithBackup(hist2, out.FromRev)
+		if entry == nil {
 			return out, fmt.Errorf("no verified pre-update backup is recorded for %s; refusing a database restore with no recovery point", out.FromRev)
 		}
 		accepted, err := restoreDatabase(dataRoot, entry.BackupDir, o.services(), o.RestartServices, o.Force)
@@ -338,6 +368,17 @@ func restoreDatabase(dataRoot, backupDir string, sc ServiceControl, restartServi
 	if err := os.Chmod(tmpName, 0600); err != nil {
 		os.Remove(tmpName)
 		return nil, err
+	}
+	// Verify the staged copy immediately before the destructive
+	// rename: the recovery point may have been damaged after it was
+	// verified at backup time (bit rot, a half-written copy, operator
+	// error). A damaged recovery point must never replace the live
+	// database. This deliberately does NOT compare against the live
+	// shape — after a migration they are supposed to differ, and that
+	// difference is the reason for the restore.
+	if err := verifyBackupStandalone(tmpName); err != nil {
+		os.Remove(tmpName)
+		return nil, fmt.Errorf("the recovery point failed pre-restore verification: %w", err)
 	}
 	// Re-check immediately before the swap: a connection opened after
 	// the first scan must abort the restore rather than race it. This

@@ -153,29 +153,58 @@ func SmokeLive(dataRoot string) SmokeResult {
 	return SmokeResult{OK: true, Detail: "health_check through the active runtime"}
 }
 
+// stageScratchDB copies srcDB into a scratch canonical workspace and
+// returns the workspace and the staged path.
+//
+// The copy uses the SQLite online backup path (VACUUM INTO), not a raw
+// file copy: a raw copy of the main database file omits committed
+// transactions still sitting in an uncheckpointed WAL, so a migration
+// that has not been checkpointed yet would be invisible in the
+// scratch copy. A compatibility check against a copy that silently
+// drops the newest schema is worse than no check: it verifies the old
+// runtime against the OLD schema and reports compatibility that does
+// not exist.
+func stageScratchDB(srcDB string) (scratch, dbPath string, err error) {
+	scratch, err = os.MkdirTemp("", "mpm-update-smoke.")
+	if err != nil {
+		return "", "", fmt.Errorf("could not create scratch: %w", err)
+	}
+	dbDir := filepath.Join(scratch, "src", "db")
+	if err := os.MkdirAll(dbDir, 0700); err != nil {
+		os.RemoveAll(scratch)
+		return "", "", fmt.Errorf("could not create scratch: %w", err)
+	}
+	dbPath = filepath.Join(dbDir, "mpm.db")
+	src, err := openSQLiteRO(srcDB)
+	if err != nil {
+		os.RemoveAll(scratch)
+		return "", "", fmt.Errorf("could not open the source database: %w", err)
+	}
+	defer src.Close()
+	if _, err := src.Exec(fmt.Sprintf("VACUUM INTO '%s'", escapeSingleQuote(dbPath))); err != nil {
+		os.RemoveAll(scratch)
+		return "", "", fmt.Errorf("could not snapshot the database: %w", err)
+	}
+	// VACUUM INTO creates the destination with default permissions;
+	// the database may hold secrets, so tighten it.
+	if err := os.Chmod(dbPath, 0600); err != nil {
+		os.RemoveAll(scratch)
+		return "", "", fmt.Errorf("could not secure the scratch copy: %w", err)
+	}
+	return scratch, dbPath, nil
+}
+
 // SmokeScratch runs health_check through a CANDIDATE binary against a
 // SCRATCH copy of state. The scratch is a canonical workspace (the
 // database sits at <scratch>/src/db/mpm.db and MPM_DB_PATH restates
 // exactly that path), because the substrate refuses a divergent
 // MPM_DB_PATH. The live database is never opened by the candidate.
 func SmokeScratch(candidateMPM, backupDB string) SmokeResult {
-	scratch, err := os.MkdirTemp("", "mpm-update-smoke.")
+	scratch, dbPath, err := stageScratchDB(backupDB)
 	if err != nil {
-		return SmokeResult{Detail: fmt.Sprintf("could not create scratch: %v", err)}
+		return SmokeResult{Detail: err.Error()}
 	}
 	defer os.RemoveAll(scratch)
-	dbDir := filepath.Join(scratch, "src", "db")
-	if err := os.MkdirAll(dbDir, 0700); err != nil {
-		return SmokeResult{Detail: fmt.Sprintf("could not create scratch: %v", err)}
-	}
-	dbPath := filepath.Join(dbDir, "mpm.db")
-	raw, err := os.ReadFile(backupDB)
-	if err != nil {
-		return SmokeResult{Detail: fmt.Sprintf("could not read the backup copy: %v", err)}
-	}
-	if err := os.WriteFile(dbPath, raw, 0600); err != nil {
-		return SmokeResult{Detail: fmt.Sprintf("could not stage the scratch copy: %v", err)}
-	}
 	cmd := exec.Command(candidateMPM, "call", "mpm_system", "--payload", `{"action":"health_check"}`) //nolint:gosec
 	cmd.Env = append(os.Environ(), "MPM_WORKSPACE="+scratch, "MPM_DB_PATH="+dbPath)
 	out, err := cmd.CombinedOutput()

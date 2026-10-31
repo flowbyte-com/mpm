@@ -337,8 +337,27 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 	// A failure after the pointer moved either falls back or stops
 	// degraded (see below). A failure before needs no rollback:
 	// nothing was changed.
-	failAfterActivate := func(postFP string, schemaChanged bool, err error) (Outcome, error) {
-		if !schemaChanged {
+	// compatClass classifies what is known about the live schema
+	// after the new runtime ran. It is the whole fallback policy:
+	// UNCHANGED means falling back restores a consistent state;
+	// anything else must verify the previous release against the
+	// live shape first, and never assumes.
+	type compatState int
+	const (
+		compatUnchanged compatState = iota
+		compatChanged
+		compatUnknown
+	)
+
+	// A failure after the pointer moved either falls back or stops
+	// degraded (see below). A failure before needs no rollback:
+	// nothing was changed.
+	// compatUnknownReason carries the fingerprint failure that made
+	// compatibility unknown, for the degraded record. Empty unless the
+	// post-smoke fingerprint failed.
+	var compatUnknownReason string
+	failAfterActivate := func(postFP string, cs compatState, err error) (Outcome, error) {
+		if cs == compatUnchanged {
 			// The live schema is untouched: falling back restores a
 			// consistent state (old binaries on the old shape).
 			_ = restorePointer(dataRoot, prevTarget)
@@ -346,37 +365,60 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 			recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "failed", err.Error())
 			return out, err
 		}
-		// The new runtime changed the live schema before failing.
-		// Restoring the old pointer blindly would strand old binaries
-		// on a shape they never knew — a second outage manufactured
-		// by the recovery procedure. Verify the previous release can
-		// actually read the migrated shape (against a scratch copy,
-		// never the live file) before falling back.
+		// The new runtime may have changed the live schema before
+		// failing (compatChanged), or the schema state is UNKNOWN
+		// because the post-smoke fingerprint failed (compatUnknown).
+		// Either way, restoring the old pointer blindly would risk
+		// stranding old binaries on a shape they never knew — a
+		// second outage manufactured by the recovery procedure.
+		// Verify the previous release can actually read the live
+		// shape (against a scratch copy, never the live file)
+		// before falling back.
 		if cerr := oldRuntimeReadsNewSchema(dataRoot, out.FromRev); cerr != nil {
 			// DEGRADED STOP. Keep the new pointer: the binaries match
-			// the migrated data. Restart what was stopped so the
-			// managed services are consistent with the KEPT pointer.
-			// Record everything, touch nothing else — in particular,
-			// never silently restore the database.
+			// the data as far as anyone can tell. Restart what was
+			// stopped so the managed services are consistent with
+			// the KEPT pointer. Record everything, touch nothing
+			// else — in particular, never silently restore the
+			// database.
 			restoreStopped()
-			degraded := fmt.Errorf("%v\nDEGRADED: the live database's shape changed and the previous release cannot read it (%v). The active pointer stays at %s (binaries match the data). Recover with: mpm-update --rollback --with-db-restore --force (restores the pre-update backup %s, overwriting newer data), or fix %s forward", err, cerr, src.Rev, backupDir, src.Rev)
+			var why string
+			if cs == compatUnknown {
+				why = fmt.Sprintf("the live database's shape after the smoke test is UNKNOWN (fingerprint failed: %s) and the previous release could not be verified against it (%v)", compatUnknownReason, cerr)
+			} else {
+				why = fmt.Sprintf("the live database's shape changed and the previous release cannot read it (%v)", cerr)
+			}
+			degraded := fmt.Errorf("%v\nDEGRADED: %s. The active pointer stays at %s (binaries match the data). Recover with: mpm-update --rollback --with-db-restore --force (restores the pre-update backup %s, overwriting newer data), or fix %s forward", err, why, src.Rev, backupDir, src.Rev)
 			recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "failed", degraded.Error())
 			return out, degraded
 		}
 		_ = restorePointer(dataRoot, prevTarget)
 		restoreStopped()
-		verified := fmt.Errorf("%v\nNote: the live database's shape changed during this update, but the previous release verified clean against the migrated schema, so the fallback was restored", err)
+		note := "the live database's shape changed during this update, but the previous release verified clean against the migrated schema, so the fallback was restored"
+		if cs == compatUnknown {
+			note = "the live database's shape after the smoke test is UNKNOWN (fingerprint failed); the previous release nevertheless verified clean against the live shape, so the fallback was restored"
+		}
+		verified := fmt.Errorf("%v\nNote: %s", err, note)
 		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "failed", verified.Error())
 		return out, verified
 	}
+	compatOf := func(changed bool) compatState {
+		if compatUnknownReason != "" {
+			return compatUnknown
+		}
+		if changed {
+			return compatChanged
+		}
+		return compatUnchanged
+	}
 	if err := failPoint(o.failAt(), "activate"); err != nil {
-		return failAfterActivate("", false, err)
+		return failAfterActivate("", compatUnchanged, err)
 	}
 
 	smoke := SmokeScratch(filepath.Join(NewLayout(dataRoot).ReleaseDir(src.Rev), "bin", "mpm"), filepath.Join(backupDir, "mpm.db"))
 	if !smoke.OK {
 		err := fmt.Errorf("the candidate failed its smoke test (%s); the previous runtime is active again", smoke.Detail)
-		return failAfterActivate("", false, err)
+		return failAfterActivate("", compatUnchanged, err)
 	}
 
 	// The live smoke is the point of no return for the SCHEMA: the new
@@ -384,13 +426,25 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 	// pending migrations just by opening it. The fingerprint watch
 	// observes that, so a later failure cannot pretend the database is
 	// untouched.
-	live, postFP, schemaChanged := smokeLiveWatched(dataRoot, preFP)
+	//
+	// A fingerprint failure is an unknown schema state, never an
+	// "unchanged" one: falling back requires a compatibility the scan
+	// could not establish. "fingerprint" is also a failure-injection
+	// point (MPM_UPDATE_TEST_FAIL_AT), so tests can prove the unknown
+	// path without breaking a real database.
+	live, postFP, schemaChanged, fpErr := smokeLiveWatched(dataRoot, preFP)
+	if fpErr != nil {
+		compatUnknownReason = fpErr.Error()
+	}
+	if fperr := failPoint(o.failAt(), "fingerprint"); fperr != nil && compatUnknownReason == "" {
+		compatUnknownReason = fperr.Error()
+	}
 	if !live.OK {
 		err := fmt.Errorf("the promoted runtime failed its health check (%s)", live.Detail)
-		return failAfterActivate(postFP, schemaChanged, err)
+		return failAfterActivate(postFP, compatOf(schemaChanged), err)
 	}
 	if err := failPoint(o.failAt(), "smoke"); err != nil {
-		return failAfterActivate(postFP, schemaChanged, err)
+		return failAfterActivate(postFP, compatOf(schemaChanged), err)
 	}
 
 	// The promoted release passed. Only now is the stable updater
@@ -398,7 +452,7 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 	// place, so recovery never depends on a release that never proved
 	// itself.
 	if err := installStableUpdater(dataRoot, src.Rev); err != nil {
-		return failAfterActivate(postFP, schemaChanged, err)
+		return failAfterActivate(postFP, compatOf(schemaChanged), err)
 	}
 
 	// Restart what was stopped, then verify the running identities:
@@ -419,13 +473,28 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 		}
 		verifiedUnits = append(verifiedUnits, u)
 	}
-	recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "success", successDetail(schemaChanged, identityWarnings))
+	// A healthy smoke test with an unknown schema state is still a
+	// success — the smoke test, not the fingerprint, is the promotion
+	// gate — but it must never be recorded as a KNOWN-unchanged
+	// schema. The warning travels into the history record (so a
+	// later rollback cannot assume cleanliness) and the report.
+	successNote := successDetail(schemaChanged, identityWarnings)
+	if compatUnknownReason != "" {
+		if successNote != "" {
+			successNote += "; "
+		}
+		successNote += "the live database's shape after the smoke test is UNKNOWN (fingerprint failed: " + compatUnknownReason + "); do not assume a runtime-only rollback is safe"
+	}
+	recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "success", successNote)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "updated %s -> %s\n", displayRev(out.FromRev), src.Rev)
 	fmt.Fprintf(&b, "recovery point: %s\n", backupDir)
 	if schemaChanged {
 		b.WriteString("note: the live database's shape changed during this update; a runtime rollback will require a database restore (see `mpm update --rollback`)\n")
+	}
+	if compatUnknownReason != "" {
+		b.WriteString("note: the live database's shape after this update is UNKNOWN (the post-smoke fingerprint failed); do not assume a runtime-only rollback is safe — re-verify first\n")
 	}
 	if len(stoppedSoFar) > 0 {
 		if len(identityWarnings) == 0 {
@@ -482,13 +551,18 @@ func dryRunUpdate(ctx context.Context, o Options, dataRoot string, src Source, o
 // smokeLiveWatched runs the live health check and fingerprints the
 // database before and after, so a migration applied by the new binary
 // is observed rather than assumed away.
-func smokeLiveWatched(dataRoot string, preFP string) (smoke SmokeResult, postFP string, changed bool) {
+//
+// A fingerprint failure is returned as an error, never as
+// "unchanged": an unknown schema state must not silently become a
+// clean bill of health (which is exactly what the old code did by
+// returning changed=false on error).
+func smokeLiveWatched(dataRoot string, preFP string) (smoke SmokeResult, postFP string, changed bool, fpErr error) {
 	smoke = SmokeLive(dataRoot)
 	post, err := SchemaFingerprint(NewLayout(dataRoot).LiveDB())
 	if err != nil {
-		return smoke, "", false
+		return smoke, "", false, fmt.Errorf("could not fingerprint the live database after the smoke test: %w", err)
 	}
-	return smoke, post, preFP != "" && post != "" && post != preFP
+	return smoke, post, preFP != "" && post != "" && post != preFP, nil
 }
 
 // oldRuntimeReadsNewSchema verifies the previous release can read

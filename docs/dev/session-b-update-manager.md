@@ -146,6 +146,42 @@ merged run failed four ways, all fixed on this branch:
   `.build/bin/mpm` (pre-merge, no router guard). Lesson: rebuild
   before running binary-exercising suites after a merge.
 
+## Round-3 review corrections (this session)
+
+1. **Degraded-state recovery end to end.** `Rollback()` only
+   consulted successful updates, so a failed update's backup was
+   unreachable by the documented path. Now: `rollbackBaselineDrift`
+   extracted as a unit-tested predicate; failed updates leave a
+   recovery point the explicit `--rollback --with-db-restore
+   --force` path can find; a dedicated test drives failure to
+   degraded state and back to a verified-clean restore.
+2. **Consistent snapshot for compat checks.** Scratch copies use
+   `VACUUM INTO`, not raw file copies, so an uncheckpointed-WAL
+   migration is visible to the old binary's health check. Pinned by
+   a test that stages while a WAL holds the migration.
+3. **Unknown fingerprint fails closed.** `smokeLiveWatched` returns
+   the fingerprint error; the update never auto-falls-back on an
+   unverified shape. Verified clean → fallback says so; unverified
+   → degraded stop; healthy smoke → success with an explicit
+   unknown-schema warning (recorded, so future rollbacks re-verify
+   rather than assume). Failure-injected via `FailAt: "fingerprint"`.
+4. **testenv guard covers `mpm-update`.** Added to the DB-capable
+   binary list plus an unisolated-invocation fixture proving the
+   scanner catches it; subprocess tests use sanctioned hermetic envs.
+5. **Uninspectable single descriptors.** A non-ENOENT readlink
+   failure now poisons the whole process (uninspectable), not just
+   the fd — with a fake-proc negative test proving an unreadable
+   descriptor is never read as quiescence.
+6. **Pre-restore verification.** The staged copy is re-verified
+   standalone immediately before the rename; a damaged recovery
+   point fails instead of replacing the live database (tested by
+   corrupting the backup post-verification).
+
+CI caught its own gap here too: the first merged run failed the
+vocabulary test (`update` missing from the router registry), one
+backup test on the SQLITE_BUSY path (fixed with bounded busy
+timeouts on all live reads), and a double-closed test channel.
+
 ## Coordination
 
 - No changes to `install.sh`, `runtime_bundle.sh`,
