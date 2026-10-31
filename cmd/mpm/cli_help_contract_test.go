@@ -148,6 +148,11 @@ var cliContractMatrix = []cliContractCommand{
 	{Args: []string{"telemetry"}},
 	{Args: []string{"critic"}},
 	{Args: []string{"scheduler"}},
+
+	// The update manager. Help is answered without a database and the
+	// handler rejects unknown options itself — a bad option must fail,
+	// and help must mutate nothing.
+	{Args: []string{"update"}},
 }
 
 // cliContractFixture builds an isolated workspace with an initialised
