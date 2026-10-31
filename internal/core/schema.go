@@ -306,6 +306,48 @@ var BaseTables = []string{
 		FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
 	);`,
 
+	// Memory reviews — the operator's spaced-repetition ledger.
+	//
+	// WHY A RELATION AND NOT A COLUMN ON memories: the same reason
+	// memory_settling_baselines is a relation — a review is written by
+	// the OPERATOR on demand, never by the memory creation path, so a
+	// column would widen the 19-site memory INSERT fan-out (memory.go,
+	// db.go, watchdog_v2.go, hitl_log.go, fts_recovery.go,
+	// handlers_challenge.go, self_heal.go) for a value that is NULL on
+	// almost every row.
+	//
+	// WHAT IT RECORDS: that a human looked at this memory and decided.
+	// The row is the review; the decision is what the operator chose to
+	// do about the memory ("keep" / "weaken").
+	//
+	// WHY IT IS NOT `last_accessed_at`: the retrieval clock and the
+	// review clock are different facts. An agent retrieving a memory
+	// 200 times says nothing about whether a human has looked at it, and
+	// a review backlog that an agent's retrieval can silently clear is
+	// not an operator backlog. The review clock is read as
+	// COALESCE(reviewed_at, last_accessed_at, created_at) — the explicit
+	// review if there is one, else the last access, else the creation —
+	// so a brand-new, never-accessed memory is NOT instantly due, and a
+	// genuinely old, never-accessed one still is.
+	//
+	// ONE ROW PER MEMORY: the table holds the LATEST review, so
+	// re-reviewing replaces the row (UPSERT) rather than appending. The
+	// history of reviews is not the product here; the current review
+	// state is.
+	//
+	// ON DELETE CASCADE mirrors memory_revisions: a hard-deleted memory
+	// takes its review with it. A soft delete (deleted_at) does NOT fire
+	// the cascade, so a review survives a soft-delete round trip.
+	`CREATE TABLE IF NOT EXISTS memory_reviews (
+		memory_id   TEXT PRIMARY KEY,
+		reviewed_at INTEGER NOT NULL,
+		decision    TEXT NOT NULL CHECK (decision IN ('keep','weaken')),
+		note        TEXT,
+		FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+	);`,
+
+	`CREATE INDEX IF NOT EXISTS idx_memory_reviews_reviewed_at ON memory_reviews(reviewed_at);`,
+
 	// Evidence table — typed, source-grouped evidence for confidence calculation.
 	`CREATE TABLE IF NOT EXISTS evidence (
 		id                  TEXT PRIMARY KEY,

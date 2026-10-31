@@ -14,10 +14,14 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // TestTheoryList_ExactHeading asserts `mpm theory list` (and the
@@ -61,17 +65,25 @@ func TestDecisionList_HumanReadableDate(t *testing.T) {
 		t.Skip("mpm binary not found; run `make build` first")
 	}
 	workspace := t.TempDir()
-	// Seed a decision with a Unix-epoch created_at string (matches
-	// the legacy rows observed in the production DB).
+	// Seed a decision, then rewrite its created_at to a Unix-epoch
+	// STRING — the shape of the legacy rows observed in the production
+	// DB.
+	//
+	// The rewrite is done in the database rather than with a
+	// `--created-at` flag because no such flag exists: the decision
+	// write path always stamps the current time. The flag was once
+	// accepted and silently ignored, and the CLI consistency pass
+	// (2026-10-30) removed the silent acceptance — so the legacy shape
+	// is seeded the way the legacy rows actually exist.
 	stdout, _, _ := runMpmParity(t, bin, workspace, "decide",
 		"context=epoch probe",
 		"choice=epoch probe choice",
 		"rationale=epoch probe rationale",
-		"--created-at=1789319779",
 	)
 	if stdout == nil {
-		// tolerate older --created-at absence; fall back to listing.
+		t.Fatalf("seeding the decision produced no output")
 	}
+	backdateDecisionToEpochString(t, workspace)
 	listOut, _, _ := runMpmParity(t, bin, workspace, "decision", "list")
 	out := string(listOut)
 	// The bare epoch must NOT appear in the human output.
@@ -83,6 +95,28 @@ func TestDecisionList_HumanReadableDate(t *testing.T) {
 		t.Fatalf("decision list must include a human-readable date label.\nGot:\n%s", out)
 	}
 	_ = stdout
+}
+
+// backdateDecisionToEpochString rewrites the created_at of the seeded
+// decision to a Unix-epoch STRING, which is the shape of the legacy
+// rows observed in the production DB.
+//
+// The renderer has to recognise both shapes (an ISO datetime and an
+// epoch string) and show a human-readable date for each. Seeding the
+// legacy shape directly is what makes this test exercise that path.
+func backdateDecisionToEpochString(t *testing.T, workspace string) {
+	t.Helper()
+	dbPath := filepath.Join(workspace, "src", "db", "mpm.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open the fixture database: %v", err)
+	}
+	defer db.Close()
+	_, err = db.Exec(
+		`UPDATE memories SET created_at = '1789319779' WHERE collection = 'decisions'`)
+	if err != nil {
+		t.Fatalf("backdate the seeded decision: %v", err)
+	}
 }
 
 // TestTopicList_ExactHeading asserts `mpm topic list` opens with

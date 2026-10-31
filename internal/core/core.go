@@ -134,6 +134,25 @@ type CoreDB interface {
 	VectorSearch(tier string, queryEmbedding []float32, limit int) ([]map[string]interface{}, error)
 	GetSpacedReinforcementReview(daysSinceAccess, limit int) ([]map[string]interface{}, error)
 
+	// ─── Review (spaced repetition) ───────────────────────────────────
+	//
+	// MemoriesDueForReview is THE review-eligibility query. The
+	// operator-facing surfaces (doctor's backlog check, the dashboard's
+	// readiness row, `mpm ops review`) all use it, so they cannot
+	// disagree about what "due" means. CountMemoriesDueForReview is the
+	// TOTAL, not a sample. RecordMemoryReview is the only way a review
+	// is created — never a read, a display or a sweep.
+	MemoriesDueForReview(days int, limit int) ([]ReviewCandidate, error)
+	CountMemoriesDueForReview(days int) (int, error)
+	RecordMemoryReview(memoryID string, decision string, note string) error
+	// RecordMemoryReviewsAndApply records the review of a BATCH and
+	// applies the weight change a "weaken" decision asks for, in ONE
+	// transaction. The decision and the mutation are one operator act:
+	// recording one without the other leaves the operator's intent
+	// half applied. The batch is atomic as a unit.
+	RecordMemoryReviewsAndApply(memoryIDs []string, decision string, note string) error
+	MemoryReview(memoryID string) (*MemoryReviewRecord, error)
+
 	// ─── Memory Mutations ────────────────────────────────────────────
 	ReinforceMemory(id string, delta int) error
 	ReinforceMemoryTool(memoryID string, delta int) (map[string]interface{}, error)

@@ -796,31 +796,52 @@ func overdueSeverityToStatus(sev int) string {
 	}
 }
 
-// checkReviewBacklog counts memories due for spaced reinforcement
-// (last_accessed_at IS NULL or > 14 days).
+// checkReviewBacklog counts the memories due for spaced review.
+//
+// The rule is the substrate's ONE rule (internal/core/review.go), and
+// the window is its ONE constant. The check used to call
+// GetSpacedReinforcementReview(14, 100) and report len(candidates) as
+// the backlog size — which was a SAMPLE reported as a TOTAL, so a
+// backlog of 160 was reported as "60 memories due" (the 100-candidate
+// sample, truncated by the query's own ordering) and clearing it
+// changed nothing.
+//
+// The count is now a real count, and the recommendation names the
+// commands that actually do the work.
 func (s *DoctorService) checkReviewBacklog() DoctorCheck {
 	check := DoctorCheck{Name: "Review backlog"}
-	items, err := s.dm.GetSpacedReinforcementReview(14, 100)
+	dm := s.dm
+	if dm == nil {
+		check.Status = "WARN"
+		check.Message = "could not query review candidates: no database"
+		return check
+	}
+
+	n, err := dm.CountMemoriesDueForReview(mpminternal.ReviewDueAfterDays)
 	if err != nil {
 		check.Status = "WARN"
 		check.Message = fmt.Sprintf("could not query review candidates: %v", err)
 		return check
 	}
-	n := len(items)
 	if n == 0 {
 		check.Status = "PASS"
-		check.Message = "no memories due for review (last-accessed < 14d threshold)"
-		return check
-	}
-	if n <= 5 {
-		check.Status = "WARN"
-		check.Message = fmt.Sprintf("%d memories due for spaced review", n)
-		check.Details = []string{"Run 'mpm ops review' to clear the backlog."}
+		check.Message = fmt.Sprintf("no memories due for review (window: %dd)", mpminternal.ReviewDueAfterDays)
 		return check
 	}
 	check.Status = "WARN"
-	check.Message = fmt.Sprintf("%d memories due for spaced review (>5 considered backlog)", n)
-	check.Details = []string{"Run 'mpm ops review --stale' to clear the backlog."}
+	if n <= 5 {
+		check.Message = fmt.Sprintf("%d memories due for spaced review", n)
+	} else {
+		check.Message = fmt.Sprintf("%d memories due for spaced review (>5 considered backlog)", n)
+	}
+	// The recommendation has to be TRUE. "Run this to clear the
+	// backlog" pointed at a command that only LISTED the backlog, so
+	// following the instruction changed nothing and the warning
+	// returned. It now names the two steps: list, then record.
+	check.Details = []string{
+		fmt.Sprintf("Run 'mpm ops review --stale' to list them (window: %dd).", mpminternal.ReviewDueAfterDays),
+		"Then 'mpm ops review --ack <id>' (or '--ack-all') records the review and clears it.",
+	}
 	return check
 }
 

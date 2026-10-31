@@ -67,8 +67,7 @@ import (
 func handleDoctor(args []string) int {
 	opts, err := parseDoctorFlags(args)
 	if err != nil {
-		usererror.Error("%v", err)
-		return 1
+		return doctorFlagError(err)
 	}
 
 	// --explain and --deep-scan are handled by runDoctorCommand's

@@ -245,11 +245,52 @@ func TestDoctorFlag_UnknownFlagRejected(t *testing.T) {
 	if exit == 0 {
 		t.Errorf("an unknown flag exited 0:\n%s", out)
 	}
-	if !strings.Contains(out, "unknown flag") {
-		t.Errorf("unknown flag must be named in the error; got:\n%s", out)
+	// The rejection names the option and echoes the offending flag.
+	//
+	// The wording changed from "unknown flag" to "Unknown option" when
+	// the rejection gained the usage block and the typo suggestion
+	// (2026-10-30): the standard library's "flag provided but not
+	// defined" told the operator nothing about what to do next.
+	if !strings.Contains(out, "Unknown option") {
+		t.Errorf("unknown option must be named in the error; got:\n%s", out)
 	}
 	if !strings.Contains(out, "--definitely-not-a-real-flag") {
 		t.Errorf("error must echo the offending flag; got:\n%s", out)
+	}
+	// The rejection carries the option block, so the operator can see
+	// what the command DOES accept without running it again.
+	if !strings.Contains(out, "--deep-scan") {
+		t.Errorf("the rejection must list the accepted options; got:\n%s", out)
+	}
+}
+
+// H2 — a single-dash spelling of a long option is rejected WITH a
+// suggestion. `mpm doctor -help` was the report that started this
+// work: the rejection named a list that mixed individual options with
+// a valid combination, omitted the -j alias, and never mentioned
+// --help.
+func TestDoctorFlag_SingleDashHelpSuggestsLongForm(t *testing.T) {
+	bin, ws := doctorFixture(t)
+
+	out, exit := runDoctorFixture(t, bin, ws, "doctor", "-help")
+
+	if exit == 0 {
+		t.Errorf("`-help` exited 0; an unrecognised option must fail:\n%s", out)
+	}
+	if !strings.Contains(out, "Unknown option: -help") {
+		t.Errorf("the rejection must name the offending option; got:\n%s", out)
+	}
+	if !strings.Contains(out, "Did you mean --help?") {
+		t.Errorf("the rejection must suggest --help; got:\n%s", out)
+	}
+	// The suggestion must be the REAL option, not a guess: the help
+	// page has to advertise it too.
+	helpOut, helpExit := runDoctorFixture(t, bin, ws, "doctor", "--help")
+	if helpExit != 0 {
+		t.Fatalf("doctor --help exited %d:\n%s", helpExit, helpOut)
+	}
+	if !strings.Contains(helpOut, "--help") {
+		t.Errorf("the suggested option must be advertised on the help page; got:\n%s", helpOut)
 	}
 }
 
@@ -316,10 +357,16 @@ func TestDoctorFlag_HelpMatchesSupportedSurface(t *testing.T) {
 	// generic help footer legitimately mentions `mpm help --all` (a
 	// different command), so assert on the usage block specifically
 	// rather than the whole output.
+	//
+	// The usage block is the USAGE LINE plus the OPTIONS block. The
+	// extraction used to stop at the first blank line, which — before
+	// the help page grew an options block — was the whole thing. It now
+	// has to cover the options too, or the supported flags are
+	// invisible to this assertion.
 	usage := out
 	if i := strings.Index(out, "Usage: mpm doctor"); i >= 0 {
 		usage = out[i:]
-		if j := strings.Index(usage, "\n\n"); j > 0 {
+		if j := strings.Index(usage, "\n\nThe deep-scan modes"); j > 0 {
 			usage = usage[:j]
 		}
 	}
@@ -327,7 +374,12 @@ func TestDoctorFlag_HelpMatchesSupportedSurface(t *testing.T) {
 		t.Errorf("doctor --help advertises --all, which is rejected:\n%s", usage)
 	}
 	// --fix must appear only with its required --deep-scan pairing.
-	if strings.Contains(usage, "--fix") && !strings.Contains(usage, "--deep-scan --fix") {
+	//
+	// The pairing is expressed on the option's own line ("requires
+	// --deep-scan"), not as a separate "--deep-scan --fix" entry: an
+	// option list that mixes an option with a valid COMBINATION of two
+	// options is what the old rejection message did wrong.
+	if strings.Contains(usage, "--fix") && !strings.Contains(usage, "requires --deep-scan") {
 		t.Errorf("doctor --help advertises --fix without its required pairing:\n%s", usage)
 	}
 	// The supported flags should be discoverable.

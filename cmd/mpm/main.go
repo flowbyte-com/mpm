@@ -761,8 +761,7 @@ func runDoctorCommand(args []string) {
 	//      missing-database severity and exit code.
 	opts, err := parseDoctorFlags(args)
 	if err != nil {
-		usererror.Error("%v", err)
-		os.Exit(1)
+		os.Exit(doctorFlagError(err))
 	}
 
 	if opts.explain {

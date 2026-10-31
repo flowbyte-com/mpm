@@ -24,7 +24,28 @@ import (
 // `mpm backup [path]` exports the SQLite database to a .sql dump (the same
 // format produced by `sqlite3 .dump`). Default path is `<db-dir>/mpm-backup-<UTC-timestamp>.sql`.
 // Requires the `sqlite3` CLI to be on PATH (see doctor warning otherwise).
+// backupOptions declares every option `mpm backup` accepts.
+//
+// The command took an OPTIONAL POSITIONAL path and read its arguments
+// positionally, so an unrecognised option became the backup's output
+// path: `mpm backup --anything` wrote a SQL dump to a file literally
+// named "--anything" in the operator's working directory.
+//
+// The command accepts no options of its own, so the declared set is
+// empty apart from the router-owned help option. That is the honest
+// declaration: the shared helper then rejects ANY option-looking token
+// rather than treating it as a path.
+func backupOptions() []OptionSpec {
+	return []OptionSpec{HelpOption}
+}
+
 func handleBackup(args []string) int {
+	// An unrecognised option is rejected BEFORE anything is written.
+	// The command used to use it as the backup's output path.
+	if rc := RejectUnknownOptionInArgs("backup", "mpm backup [path]", backupOptions(), args); rc != 0 {
+		return rc
+	}
+
 	dm := getDB()
 	if dm == nil {
 		return 1
