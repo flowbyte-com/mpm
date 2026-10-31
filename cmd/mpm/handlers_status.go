@@ -52,6 +52,21 @@ type statusData struct {
 	synthMerged   int
 	synthLast     string
 	recentEvents  []watchdogEvent
+
+	// pendingLessonProposals is the canonical backlog of lesson
+	// proposals awaiting operator review.
+	//
+	// A POINTER, because nil and 0 are different answers. Zero is the
+	// healthy state; nil means the count could not be established, and
+	// must be rendered as "unavailable" rather than as an all-clear.
+	// Both the text dashboard and the JSON output read this one field,
+	// so the two cannot disagree about it.
+	//
+	// This is NOT a health signal. A pending proposal is a decision the
+	// operator has not made yet, not a fault — it must never reach the
+	// PASS/WARN/FAIL tally. MPM may surface work that needs a human; it
+	// must never make the human's decision.
+	pendingLessonProposals *int
 }
 
 // stateForMode classifies active.json's modes slice into a {state, values}
@@ -120,6 +135,15 @@ func buildStatusData(dm *mpminternal.DatabaseManager, startTime time.Time) statu
 	d.theoryResolv = proven + disproven
 	d.synthMerged, d.synthLast = getSynthesisStats(dm)
 	d.recentEvents = getRecentWatchdogEvents(dm, 3)
+
+	// Operator-attention backlog. A failed count leaves the pointer
+	// nil, which both renderers print as "unavailable" — never as 0.
+	// Swallowing the error into a zero would turn "we could not look"
+	// into "nothing is waiting", which is the one mistake this row
+	// exists to prevent.
+	if n, err := dm.CountPendingLessonProposals(); err == nil {
+		d.pendingLessonProposals = &n
+	}
 
 	// Defect M (2026-09-13 acceptance): pre-fix this used a parallel
 	// fallback ("none" when active.json was empty) that disagreed with
@@ -332,6 +356,25 @@ func printStatusDashboard(dm *mpminternal.DatabaseManager, startTime time.Time) 
 	render.KeyValue(os.Stdout, "Theories", fmt.Sprintf("%d total | %d pending | %d resolved", d.theoryTotal, d.theoryPend, d.theoryResolv))
 	render.KeyValue(os.Stdout, "Decisions", fmt.Sprintf("%d total", d.decisions))
 	render.KeyValue(os.Stdout, "Synthesis", fmt.Sprintf("%d merged | last: %s", d.synthMerged, d.synthLast))
+
+	// Operator-attention block. Its own section rather than one more
+	// counter row: a pending lesson proposal is a decision the operator
+	// owes the substrate, and mixing it into Theories/Decisions made it
+	// read as inventory. The section renders even at zero, so "nothing
+	// is waiting" is a thing the operator can SEE rather than infer.
+	render.Divider(os.Stdout)
+	render.Section(os.Stdout, "Attention")
+	switch {
+	case d.pendingLessonProposals == nil:
+		render.KeyValue(os.Stdout, "Lesson proposals", "unavailable")
+	case *d.pendingLessonProposals == 0:
+		render.KeyValue(os.Stdout, "Lesson proposals", "0 pending")
+	default:
+		render.KeyValue(os.Stdout, "Lesson proposals",
+			fmt.Sprintf("%d pending review", *d.pendingLessonProposals))
+		render.Hint(os.Stdout, "Run `mpm lesson proposals` to review them.")
+	}
+
 	if len(d.recentEvents) > 0 {
 		render.Divider(os.Stdout)
 		render.Section(os.Stdout, "Recent events")
@@ -365,6 +408,30 @@ type personaStateJSON struct {
 	Source string   `json:"source,omitempty"`
 }
 
+// pendingLessonProposalsJSON is the wire shape for the operator-attention
+// backlog, shared by `mpm status --json` and `mpm doctor --json` so the
+// two surfaces cannot report the queue differently.
+//
+// Pending is a POINTER so the encoding distinguishes the two answers
+// that matter: `{"pending": 3}` when the count was established, and
+// `{"pending": null, "unavailable": true}` when it was not. A plain int
+// would encode a failed count as 0 — the healthy state — which is the
+// one way this row could actively mislead.
+type pendingLessonProposalsJSON struct {
+	Pending     *int `json:"pending"`
+	Unavailable bool `json:"unavailable,omitempty"`
+}
+
+// newPendingLessonProposalsJSON builds the wire shape from the canonical
+// count (nil = could not be established).
+func newPendingLessonProposalsJSON(pending *int) pendingLessonProposalsJSON {
+	out := pendingLessonProposalsJSON{Pending: pending}
+	if pending == nil {
+		out.Unavailable = true
+	}
+	return out
+}
+
 // printStatusJSON emits the status dashboard as a JSON object.
 // Mode and persona are first-class {state, values} objects —
 // cardinality (none|one|many|auto for mode, none|one|auto for persona)
@@ -377,24 +444,28 @@ func printStatusJSON(dm *mpminternal.DatabaseManager, startTime time.Time) int {
 		Detail string `json:"detail"`
 	}
 	out := struct {
-		Uptime       string           `json:"uptime"`
-		Mode         modeStateJSON    `json:"mode"`
-		Persona      personaStateJSON `json:"persona"`
-		Memories     memCounts        `json:"memories"`
-		Directives   int              `json:"directives"`
-		Theories     thCounts         `json:"theories"`
-		Decisions    int              `json:"decisions"`
-		Synthesis    synthCounts      `json:"synthesis"`
-		RecentEvents []jsonEvent      `json:"recent_events,omitempty"`
+		Uptime     string           `json:"uptime"`
+		Mode       modeStateJSON    `json:"mode"`
+		Persona    personaStateJSON `json:"persona"`
+		Memories   memCounts        `json:"memories"`
+		Directives int              `json:"directives"`
+		Theories   thCounts         `json:"theories"`
+		Decisions  int              `json:"decisions"`
+		Synthesis  synthCounts      `json:"synthesis"`
+		// Additive (2026-10-31). Existing consumers read the fields
+		// above by name and are unaffected by a new sibling key.
+		LessonProposals pendingLessonProposalsJSON `json:"lesson_proposals"`
+		RecentEvents    []jsonEvent                `json:"recent_events,omitempty"`
 	}{
-		Uptime:     d.uptime,
-		Mode:       modeStateJSON{State: d.modeState, Values: d.modeValues, Source: trimBrackets(d.modeSource)},
-		Persona:    personaStateJSON{State: d.personaState, Values: d.personaValues, Source: trimBrackets(d.personaSource)},
-		Memories:   memCounts{Total: d.memTotal, LTM: d.memLTM},
-		Directives: d.directives,
-		Theories:   thCounts{Total: d.theoryTotal, Pending: d.theoryPend, Resolved: d.theoryResolv},
-		Decisions:  d.decisions,
-		Synthesis:  synthCounts{Merged: d.synthMerged, Last: d.synthLast},
+		Uptime:          d.uptime,
+		Mode:            modeStateJSON{State: d.modeState, Values: d.modeValues, Source: trimBrackets(d.modeSource)},
+		Persona:         personaStateJSON{State: d.personaState, Values: d.personaValues, Source: trimBrackets(d.personaSource)},
+		Memories:        memCounts{Total: d.memTotal, LTM: d.memLTM},
+		Directives:      d.directives,
+		Theories:        thCounts{Total: d.theoryTotal, Pending: d.theoryPend, Resolved: d.theoryResolv},
+		Decisions:       d.decisions,
+		Synthesis:       synthCounts{Merged: d.synthMerged, Last: d.synthLast},
+		LessonProposals: newPendingLessonProposalsJSON(d.pendingLessonProposals),
 	}
 	for _, e := range d.recentEvents {
 		out.RecentEvents = append(out.RecentEvents, jsonEvent{Op: e.op, Detail: e.detail})

@@ -1258,6 +1258,27 @@ func (s *DoctorService) computeAttention() (*DoctorAttention, error) {
 	now := time.Now().UTC()
 	cutoff7d := now.Add(-7 * 24 * time.Hour).Unix()
 
+	// 0. Operator-attention backlog: lesson proposals awaiting review.
+	//
+	//     Counted FIRST and independently, because its failure mode is
+	//     different from the audit-log queries below. Those describe
+	//     operational history; this describes work the operator owes
+	//     the substrate. A count that cannot be taken must degrade to
+	//     "unavailable" FOR THIS FIELD ONLY — it must not take the
+	//     operational and cluster sections down with it, and it must
+	//     never be reported as 0.
+	//
+	//     A pending proposal is a DECISION NOT YET MADE, not a fault:
+	//     it is deliberately not a Check, contributes nothing to
+	//     Passed/Warnings/Failed, and cannot change the health verdict.
+	if n, err := s.dm.CountPendingLessonProposals(); err == nil {
+		a.LessonProposals = &pendingLessonProposalsJSON{Pending: &n}
+	} else {
+		slog.Warn("doctor lesson proposal count failed", "component", "lesson_proposals", "err", err.Error())
+		unavailable := newPendingLessonProposalsJSON(nil)
+		a.LessonProposals = &unavailable
+	}
+
 	// 1. Operational events: bounded recent audit_log rows where
 	//    level IN (error, fatal, critical). Caller / policy failures
 	//    (validation / not_found / conflict) and intentional security
