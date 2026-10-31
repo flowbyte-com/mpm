@@ -45,7 +45,21 @@ echo "  OBLIGATIONS — the runtime migration, rehearsed in isolation"
 echo "══════════════════════════════════════════════════════════════"
 
 # ── the live-tree snapshot, BEFORE ────────────────────────────────────────
-LIVE_BEFORE="$(live_snapshot)"
+#
+# A CLASSIFIED snapshot, not a hash of (path, size, mtime): the live
+# scheduler writes to the live database and SQLite checkpoints the WAL,
+# so the database's size and mtime move on their own. The protected
+# artifacts are compared by content; the database is compared by class.
+#
+# If the snapshot cannot be taken, the isolation gate CANNOT MEASURE,
+# and a gate that cannot measure must not report success. The suite
+# fails here rather than proceeding to a vacuous assertion.
+LIVE_BEFORE="$REH_WORK/live-before.json"
+if ! live_gate_snapshot "$LIVE_BEFORE"; then
+  reh_fail "the live-tree snapshot could not be taken — the isolation gate cannot measure"
+  reh_summary "obligations"
+  exit 1
+fi
 echo "  live snapshot before: $LIVE_BEFORE"
 
 FP_BEFORE="$(python3 "$REH_DIR/state_fingerprint.py" "$SIM_WS/src/db/mpm.db" --content)"
@@ -64,8 +78,15 @@ else
   bash "$DRIVER" --workspace "$SIM_WS" --bundle "$BUNDLE" --rev "$REV" \
     > "$REH_WORK/migration.log" 2>&1
   RC=$?
-  REH_LIVE_HITS=0
+  # The INDEPENDENT detector did not run.  It is NOT a pass: the
+  # guarantee it covers — that the migration made no syscall against
+  # the live tree, including a READ — was not established, and the
+  # snapshot detector cannot establish it, because a read changes no
+  # state.  The obligation below fails closed on this.
+  REH_LIVE_HITS="unavailable"
   sed 's/^/  /' "$REH_WORK/migration.log"
+  reh_note "strace is not installed on this host: the INDEPENDENT syscall detector did not run."
+  reh_note "The guarantee it covers — no syscall against the live tree, including a read — is NOT established."
 fi
 reh_assert "$RC" "the migration driver completed successfully (rc=$RC)"
 
@@ -369,8 +390,29 @@ reh_note "release directories retained: $RELEASES (old revisions are kept for ro
 
 # ═══ the live installation was never touched ═════════════════════════════
 reh_head "THE LIVE INSTALLATION WAS NEVER TOUCHED"
-LIVE_AFTER="$(live_snapshot)"
-[ "$LIVE_BEFORE" = "$LIVE_AFTER" ]; reh_assert $? "the live tree's snapshot is unchanged"
-[ "${REH_LIVE_HITS:-0}" = "0" ]; reh_assert $? "no syscall in the migration touched the live tree (${REH_LIVE_HITS:-0} hits)"
-
+#
+# TWO DETECTORS, TWO DIFFERENT GUARANTEES.  They are reported
+# separately, because they prove different things and neither stands in
+# for the other.
+#
+#   THE SNAPSHOT DETECTOR (the gate above) proves the live tree's
+#   STATE did not change in a way the live system cannot account for.
+#   Every change to the operator's knowledge is attributed to a
+#   recorded invocation or reported as UNVERIFIED and failed.
+#
+#   THE SYSCALL DETECTOR (below) proves the migration made no syscall
+#   against the live tree AT ALL — including a read, which changes no
+#   state and which the snapshot detector is blind to.
+#
+# If the syscall detector could not run, that second guarantee was not
+# established, and the suite says so rather than reporting "0 hits".
+LIVE_AFTER="$REH_WORK/live-after.json"
+if ! live_gate_snapshot "$LIVE_AFTER"; then
+  reh_fail "the live-tree snapshot could not be taken — the isolation gate cannot measure"
+else
+  live_gate_compare "$LIVE_BEFORE" "$LIVE_AFTER" 2>&1 | sed 's/^/  /'
+  GATE_RC=${PIPESTATUS[0]}
+  reh_assert "$GATE_RC" "the live installation was not modified by the migration (the snapshot detector's verdict, gate rc=$GATE_RC)"
+fi
+reh_assert_no_live_syscalls "${REH_LIVE_HITS:-unavailable}"
 reh_summary "obligations"

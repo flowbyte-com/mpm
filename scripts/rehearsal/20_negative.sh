@@ -83,6 +83,19 @@ guard_harness() {
 }
 trap 'guard_harness' EXIT
 
+# ── the live-tree snapshot, BEFORE ────────────────────────────────────────
+#
+# Taken HERE, at the start of the suite, so that the comparison at the
+# end spans the WHOLE suite. Two snapshots taken back to back at the
+# end would only prove that the live tree did not change between two
+# adjacent instants, which is not what the assertion claims.
+NEG_BEFORE="$REH_WORK/live-neg-before.json"
+if ! live_gate_snapshot "$NEG_BEFORE"; then
+  reh_fail "the live-tree snapshot could not be taken — the isolation gate cannot measure"
+  reh_summary "negative tests"
+  exit 1
+fi
+
 PREV_REV="$(basename "$(readlink -f "$SIM_WS/current" 2>/dev/null)" 2>/dev/null || echo '')"
 reh_note "the migrated simulation is on revision $PREV_REV"
 
@@ -235,8 +248,18 @@ done
 [ "$CORRUPT" = "0" ]; reh_assert $? "every workspace still passes integrity_check"
 
 # The live installation, once more.
-LIVE_NOW="$(live_snapshot)"
-LIVE_THEN="$(live_snapshot)"
-[ "$LIVE_NOW" = "$LIVE_THEN" ]; reh_assert $? "the live tree is untouched by the negative tests"
+#
+# The classified gate, not a hash of (path, size, mtime): the live
+# scheduler writes to the live database and SQLite checkpoints the WAL,
+# so the database's size and mtime move on their own — a blanket
+# comparison fails for a reason that has nothing to do with this suite.
+NEG_AFTER="$REH_WORK/live-neg-after.json"
+if ! live_gate_snapshot "$NEG_AFTER"; then
+  reh_fail "the live-tree snapshot could not be taken — the isolation gate cannot measure"
+else
+  live_gate_compare "$NEG_BEFORE" "$NEG_AFTER" 2>&1 | sed 's/^/  /'
+  NEG_RC=${PIPESTATUS[0]}
+  reh_assert "$NEG_RC" "the live installation is untouched by the negative tests (gate rc=$NEG_RC)"
+fi
 
 reh_summary "negative tests"

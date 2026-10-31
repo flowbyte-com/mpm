@@ -53,8 +53,9 @@ has proved nothing.
 
 One detector is not enough, so there are three, and they are independent:
 
-1. **A snapshot** of the live tree (path, size, mtime) before and after.
-   Any difference is a failure.
+1. **A classified snapshot** of the live tree, before and after. The
+   protected artifacts are compared **by content**; the live database is
+   compared **by class**. See below.
 2. **A `strace`** of every `open`/`stat`/`access`/`execve` in the test's
    process tree, grepped for the live paths. This catches a *read* that a
    snapshot cannot see.
@@ -69,6 +70,97 @@ $HOME/.mpm                  the live workspace
 $HOME/.config/opencode      the live OpenCode configuration
 $HOME/.config/systemd/user  the live systemd user units
 ```
+
+### Why the snapshot is classified, and not one hash
+
+The gate this replaces hashed `(path, size, mtime)` over a list of live
+paths, **including the live database file**. That assertion was invalid.
+The live scheduler records health checks and SQLite checkpoints the WAL,
+so the live database's size and mtime move on their own:
+
+```
+t=0    content-fingerprint=5882dd04…  size=22536192
+t=60   content-fingerprint=5882dd04…  size=22556672
+t=240  content-fingerprint=5882dd04…  size=22622208
+```
+
+The database grew by 86 KB over four minutes while the operator's
+knowledge did not change by one bit, and the suite reported *"the live
+tree's snapshot is unchanged"* **FAILED**. A false positive in an
+isolation gate is worse than no gate: it teaches the operator to ignore
+the check, and that is exactly how a real change gets missed.
+
+So the gate classifies:
+
+| Class | What it is | The rule |
+|---|---|---|
+| **PROTECTED** | the installed runtime payload, the host assets, the systemd unit, the OpenCode configuration, the managed instructions | **byte identity** — the path set, the mode, and the sha256. Their *mtime* is not part of it: mtime records when a file was written, not what it contains |
+| **POINTER** | the release pointer — `current`, `bin`, `agent_installation` — and the active release's `RELEASE.json` | **the literal link target must not change.** The same bytes behind a different pointer are a *different installation*, and a content hash cannot see it |
+| **CONFIGURATION** | `system_config` | **must not change**, with one narrow, measured exception: the run-marker keys (`scheduler_active_uptime`, `compaction.last_run`), and only in their `raw_json`/`updated_at`. Every other key is a failure |
+| **AUDIT** | `tool_invocations`, `system_audit_log` | **append-only.** Rows may be added; a row that is modified or removed is a failure |
+| **KNOWLEDGE** | `memories`, `lessons`, `evidence`, with the volatile bookkeeping columns excluded | the substrate's own definition of "the operator's knowledge" (`state_fingerprint.py --content`) — the same instrument the simulated database is measured with |
+| **BOOKKEEPING** | everything else — the live system's counters, its model-utility views, its work records | the live system's own state |
+
+### The accounting rule — why KNOWLEDGE and BOOKKEEPING are not hard failures
+
+The live database has **legitimate, continuous writers**: the scheduler,
+the host's other agent sessions, the operator. Measured over four
+45-second windows against the deployed candidate:
+
+```
+memories             +8   +1      the agent sessions record decisions and theories
+evidence             +1            continuously
+lesson_proposals     +4            the compaction drain's proposals
+memory_revisions     +8   +2      every write carries a revision
+tool_invocations    +26  +10      the audit trail of those writes
+system_config        +1   +1      the run markers, rewritten in place
+```
+
+`memories` and `evidence` **are** the knowledge tables, and they grew.
+A gate that failed on any knowledge change would fail on an idle live
+system — the very defect this gate exists to remove.
+
+So the gate asks a question that **can** be answered:
+
+> **THE ACCOUNTING RULE.** Every write the live system makes goes
+> through MPM, and MPM records the invocation in its audit trail. So a
+> change to the live database that the audit trail does **not** account
+> for is **unattributed** — and the rehearsal's own writes would be
+> unattributed too. **An unattributed change is a failure.**
+
+The rule is narrow, explicit and fail-closed. Knowledge and bookkeeping
+movement is permitted only while the audit trail recorded something in
+the same window, and the report says so, with the delta, every time.
+
+### The release pointer
+
+The versioned layout resolves the runtime through symlinks:
+
+```
+$HOME/.mpm/current -> releases/<rev>
+$HOME/.mpm/bin -> current/bin
+$HOME/.mpm/agent_installation -> current/agent_installation
+```
+
+Hashing the resolved files alone cannot see the pointer move. The gate
+records each path's **literal link target** and the active release's
+`RELEASE.json`, so repointing the active revision is a failure even
+when the content behind it is byte-identical — which is exactly the
+case a content hash cannot see.
+
+### The gate fails closed
+
+If the live database cannot be read, the gate says it could not measure;
+it never reports "nothing changed". A table that exists but cannot be
+read is also a measurement failure: it used to be skipped silently,
+which would have let the gate report "nothing changed" about a table it
+had never actually read.
+
+The gate's own behaviour is proved in
+[`scripts/tests/test_rehearsal_live_gate.py`](../../scripts/tests/test_rehearsal_live_gate.py),
+which drives it against a **disposable stand-in** for the live tree — so
+the negative control introduces an unauthorised change without touching
+production.
 
 ---
 
@@ -120,6 +212,7 @@ scripts/rehearsal/
 ├── 20_negative.sh      the negative suite and the harness-integrity guards
 ├── 30_schemas.sh       the representative-schema upgrade tests
 ├── state_fingerprint.py  the state fingerprint used to prove "unchanged"
+├── live_gate.py           the live-installation isolation gate (classified)
 ├── read_jsonc.py         reads a value out of the host's JSONC configuration
 └── schema_shape.py       a table's canonical shape, for schema comparison
 ```
