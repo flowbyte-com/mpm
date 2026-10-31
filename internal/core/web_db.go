@@ -1288,10 +1288,10 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 // Errors are swallowed: a failure to record an interaction must not break
 // the search results, and the audit table is not on the critical path.
 func (dm *DatabaseManager) recordReferenceInteraction(docID string, chunkID *string, query, searchKind string, rank int, score sql.NullFloat64) {
-	_, _ = dm.db.Exec(`
+	_, _ = dm.ExecTracked(`
 		INSERT INTO reference_interactions (id, doc_id, chunk_id, query, search_kind, rank, score, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, GenerateID(), docID, chunkID, query, searchKind, rank, score, time.Now().Unix())
+	`, 5, GenerateID(), docID, chunkID, query, searchKind, rank, score, time.Now().Unix())
 }
 
 // GetRecentInteractions returns the N most recent reference interactions.

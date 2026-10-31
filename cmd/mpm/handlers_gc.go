@@ -301,7 +301,7 @@ func handleGC(args []string) int {
 	// wall-clock and zero runtime; they don't get a free decay hit on the
 	// first gc tick.
 	if !dryRun {
-		if _, err := dm.SQLDB().Exec(`
+		if _, err := dm.ExecTracked(`
 			UPDATE memories
 			SET runtime_seconds_since_access = CASE
 				WHEN runtime_last_accrued_at IS NULL OR runtime_last_accrued_at <= 0 THEN 0
@@ -312,7 +312,7 @@ func handleGC(args []string) int {
 			END,
 			runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE deleted_at IS NULL
-		`, int64(monotonicNow.Sub(mpminternal.GCProcessStart()).Seconds())); err != nil {
+		`, 5, int64(monotonicNow.Sub(mpminternal.GCProcessStart()).Seconds())); err != nil {
 			// The runtime accrual is the INPUT to the whole decay
 			// computation. If it fails, the weights computed below are
 			// derived from stale accumulators — a maintenance sweep that
@@ -461,7 +461,7 @@ func handleGC(args []string) int {
 		softDeleted, softDeleteFailures := 0, 0
 		for _, m := range deadMemories {
 			id, _ := m["id"].(string)
-			res, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`, id)
+			res, err := dm.ExecTracked(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL`, 5, id)
 			if err != nil {
 				softDeleteFailures++
 				slog.Warn("gc soft-delete failed", "id", id, "error", err)
@@ -484,7 +484,7 @@ func handleGC(args []string) int {
 			}
 		}
 		// Clean any lingering zombies not caught by this pass
-		if _, err := dm.SQLDB().Exec(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`); err != nil {
+		if _, err := dm.ExecTracked(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE weight <= 0 AND is_long_term = 0 AND deleted_at IS NULL`, 5); err != nil {
 			softDeleteFailures++
 			slog.Warn("gc zombie cleanup failed", "error", err)
 			usererror.Error("gc --review: zombie cleanup failed: %v", err)

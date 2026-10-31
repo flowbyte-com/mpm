@@ -306,10 +306,10 @@ func handleIngestCleanup(args []string) int {
 
 	// Hard delete old rejected entries (7+ days old)
 	oldThreshold := now - (7 * 24 * 60 * 60)
-	result2, err := dm.SQLDB().Exec(`
+	result2, err := dm.ExecTracked(`
 		DELETE FROM raw_memories
 		WHERE status = 'rejected' AND updated_at < ?
-	`, oldThreshold)
+	`, 5, oldThreshold)
 	if err == nil {
 		if deleted, _ := result2.RowsAffected(); deleted > 0 {
 			fmt.Printf("Deleted %d old rejected entries (VACUUM recommended).\n", deleted)
