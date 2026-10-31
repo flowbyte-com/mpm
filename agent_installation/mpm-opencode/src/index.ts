@@ -533,7 +533,7 @@ There is NO params.shred: permanent shredding is operator-only and is refused on
 	registerDomainTool(bin, tools, {
 		name: "mpm_lessons",
 		description: `Lesson lifecycle. Literal actions:
-  save — Required params.fact. Optional: params.type ("warning"|"practice"|"insight"), params.tags, params.source_ids.
+  propose — Record a PENDING lesson proposal for operator review. Required params.fact. Optional: params.type ("warning"|"practice"|"insight"), params.tags. A proposal is NOT a trusted lesson: it stays out of lesson search, lesson list and the wake context until an operator runs 'mpm lesson promote <id>'. Creating a trusted lesson directly is operator-only and is refused on every agent surface.
   search — Search lessons by FTS5. Required params.query.
   list — List lessons. Optional: params.type.
   delete — Reversible soft-delete of a lesson. Required params.id (the alias lesson_id is also accepted).

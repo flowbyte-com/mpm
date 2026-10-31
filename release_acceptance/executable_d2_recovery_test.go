@@ -181,10 +181,15 @@ func TestExecutableD2_ObservationalDoctorAndExplicitInit(t *testing.T) {
 	// (F) Verify a write through the lessons view succeeds via a
 	// SECOND subprocess invocation. This exercises the recovery
 	// under load (writers come in after init topics already ran).
-	// The lessons save surface expects `fact` (the lesson body),
-	// with `type` and `tags` as optional fields.
-	insertCmd := exec.Command(mpmBin, "call", "mpm_lessons",
-		`--payload`, `{"action":"save","params":{"type":"insight","fact":"executable D-2 write probe","tags":"[]"}}`)
+	//
+	// The write goes through the OPERATOR path (`mpm lesson add`). The
+	// agent-reachable lesson write is refused — a lesson is trusted on
+	// arrival, so only an operator may create one — and what this test
+	// is about is the VIEW and its INSTEAD OF trigger chain, which the
+	// operator path exercises identically: both write through the
+	// `lessons` view.
+	insertCmd := exec.Command(mpmBin, "lesson", "add",
+		"executable D-2 write probe", "--type", "insight")
 	insertCmd.Env = append(os.Environ(), "MPM_WORKSPACE="+workspace)
 	out2, err2 := insertCmd.CombinedOutput()
 	if err2 != nil {

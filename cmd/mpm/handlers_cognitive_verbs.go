@@ -10,7 +10,7 @@
 //
 //   AGENTS use the consolidated mpm_* aggregator tool contracts:
 //     mpm call mpm_memory '{"action":"save",...}'
-//     mpm call mpm_lessons '{"action":"save",...}'
+//     mpm call mpm_lessons '{"action":"propose",...}'
 //     mpm call mpm_decisions '{"action":"save","params":{"context":...}}'
 //     mpm call mpm_theories '{"action":"propose","params":{"hypothesis":...}}'
 //     (the substrate aggregator names are stable; the actions inside
@@ -517,7 +517,7 @@ Usage:
 
 Examples:
   mpm learn "Always run ` + "`go vet -tags fts5`" + ` before committing" --type warning
-  mpm call mpm_lessons --payload '{"action":"save","params":{"fact":"...","type":"warning"}}'`)
+  mpm call mpm_lessons --payload '{"action":"propose","params":{"fact":"...","type":"warning"}}'`)
 }
 
 // printDecideHelp prints the mpm decide / mpm record_decision help block.

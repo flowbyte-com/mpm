@@ -52,6 +52,11 @@ func resetSubstate(t *testing.T, dm *DatabaseManager) {
 	if _, err := dm.SQLDB().Exec(`DELETE FROM lessons_base`); err != nil {
 		t.Fatalf("clear lessons_base: %v", err)
 	}
+	// The compaction records its synthesis as a PENDING proposal, so the
+	// review queue is part of the substrate this helper resets.
+	if _, err := dm.SQLDB().Exec(`DELETE FROM lesson_proposals`); err != nil {
+		t.Fatalf("clear lesson_proposals: %v", err)
+	}
 	// Reset any stale compaction config from prior tests.
 	if _, err := dm.SQLDB().Exec(`DELETE FROM system_config WHERE key IN ('compaction','compaction.last_run')`); err != nil {
 		t.Fatalf("clear compaction config: %v", err)
@@ -149,8 +154,8 @@ func TestDrain_SmallBatch(t *testing.T) {
 	if res.RawProcessed != 30 {
 		t.Errorf("RawProcessed: got %d, want 30", res.RawProcessed)
 	}
-	if res.LessonsCreated != 1 {
-		t.Errorf("LessonsCreated: got %d, want 1", res.LessonsCreated)
+	if res.ProposalsCreated != 1 {
+		t.Errorf("ProposalsCreated: got %d, want 1", res.ProposalsCreated)
 	}
 	if res.RawRemaining != 0 {
 		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
@@ -158,8 +163,8 @@ func TestDrain_SmallBatch(t *testing.T) {
 	if res.StopReason != "completed" {
 		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
 	}
-	if len(res.LessonIDs) != 1 {
-		t.Errorf("LessonIDs: got %d, want 1", len(res.LessonIDs))
+	if len(res.ProposalIDs) != 1 {
+		t.Errorf("ProposalIDs: got %d, want 1", len(res.ProposalIDs))
 	}
 }
 
@@ -209,8 +214,8 @@ func TestDrain_TwoFullBatches(t *testing.T) {
 	if res.RawProcessed != 100 {
 		t.Errorf("RawProcessed: got %d, want 100", res.RawProcessed)
 	}
-	if res.LessonsCreated != 2 {
-		t.Errorf("LessonsCreated: got %d, want 2", res.LessonsCreated)
+	if res.ProposalsCreated != 2 {
+		t.Errorf("ProposalsCreated: got %d, want 2", res.ProposalsCreated)
 	}
 	if res.RawRemaining != 0 {
 		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
@@ -218,8 +223,8 @@ func TestDrain_TwoFullBatches(t *testing.T) {
 	if res.StopReason != "completed" {
 		t.Errorf("StopReason: got %q, want %q", res.StopReason, "completed")
 	}
-	if len(res.LessonIDs) != 2 {
-		t.Errorf("LessonIDs: got %d, want 2", len(res.LessonIDs))
+	if len(res.ProposalIDs) != 2 {
+		t.Errorf("ProposalIDs: got %d, want 2", len(res.ProposalIDs))
 	}
 }
 
@@ -243,8 +248,8 @@ func TestDrain_WithRemainder(t *testing.T) {
 	if res.RawProcessed != 101 {
 		t.Errorf("RawProcessed: got %d, want 101", res.RawProcessed)
 	}
-	if res.LessonsCreated != 3 {
-		t.Errorf("LessonsCreated: got %d, want 3", res.LessonsCreated)
+	if res.ProposalsCreated != 3 {
+		t.Errorf("ProposalsCreated: got %d, want 3", res.ProposalsCreated)
 	}
 	if res.RawRemaining != 0 {
 		t.Errorf("RawRemaining: got %d, want 0", res.RawRemaining)
@@ -405,11 +410,16 @@ func TestDrain_LLMFailureMidDrain_PartialCommit(t *testing.T) {
 		t.Errorf("unmarked rows: got %d, want 70 (batch 2 = 50 + remaining 20)", unmarked)
 	}
 
-	// Verify the lesson from batch 1 is durable.
-	var lessonCount int
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lessons`).Scan(&lessonCount)
-	if lessonCount != 1 {
-		t.Errorf("lessons: got %d, want 1 (only batch 1)", lessonCount)
+	// Verify the derivation from batch 1 is durable — as a PENDING
+	// proposal, awaiting an operator. The compaction writes no trusted
+	// lesson, so the lesson table must stay empty.
+	var proposalCount int
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lesson_proposals WHERE status = 'pending'`).Scan(&proposalCount)
+	if proposalCount != 1 {
+		t.Errorf("pending proposals: got %d, want 1 (only batch 1)", proposalCount)
+	}
+	if lessonCount := countLessons(t, dm); lessonCount != 0 {
+		t.Errorf("lessons: got %d, want 0 — the compaction writes no trusted lesson", lessonCount)
 	}
 }
 
@@ -508,12 +518,12 @@ func TestDrain_RetryAfterFailure_ResumesFromRemaining(t *testing.T) {
 		t.Errorf("second drain RawRemaining: got %d, want 0", res2.RawRemaining)
 	}
 
-	// Verify: total lessons = 3 (1 from first drain + 2 from second),
+	// Verify: total proposals = 3 (1 from first drain + 2 from second),
 	// no duplicates in compacted_into across the 120 raw rows.
-	var lessonCount int
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lessons`).Scan(&lessonCount)
-	if lessonCount != 3 {
-		t.Errorf("lessons: got %d, want 3", lessonCount)
+	var proposalCount int
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lesson_proposals WHERE status = 'pending'`).Scan(&proposalCount)
+	if proposalCount != 3 {
+		t.Errorf("pending proposals: got %d, want 3", proposalCount)
 	}
 	var unmarked int
 	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories WHERE json_extract(metadata,'$.compacted_into') IS NULL AND deleted_at IS NULL`).Scan(&unmarked)
@@ -670,11 +680,11 @@ func TestDrain_IdempotentAfterFullSuccess(t *testing.T) {
 		t.Errorf("second drain StopReason: got %q, want %q (substrate already empty)", res2.StopReason, "no_work")
 	}
 
-	// Lesson count unchanged: exactly 2 lessons, not 4.
-	var lessonCount int
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lessons`).Scan(&lessonCount)
-	if lessonCount != 2 {
-		t.Errorf("lessons after repeat: got %d, want 2 (no duplicate synthesis)", lessonCount)
+	// Proposal count unchanged: exactly 2 proposals, not 4.
+	var proposalCount int
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lesson_proposals WHERE status = 'pending'`).Scan(&proposalCount)
+	if proposalCount != 2 {
+		t.Errorf("proposals after repeat: got %d, want 2 (no duplicate synthesis)", proposalCount)
 	}
 }
 
@@ -764,8 +774,8 @@ func TestDrain_PrimitiveStillCallable(t *testing.T) {
 	if res.Compacted != 5 {
 		t.Errorf("primitive Compacted: got %d, want 5", res.Compacted)
 	}
-	if res.LessonsCreated != 1 {
-		t.Errorf("primitive LessonsCreated: got %d, want 1", res.LessonsCreated)
+	if res.ProposalsCreated != 1 {
+		t.Errorf("primitive ProposalsCreated: got %d, want 1", res.ProposalsCreated)
 	}
 }
 
@@ -1040,12 +1050,12 @@ func TestDrain_ConcurrentArrival_BoundedByCap(t *testing.T) {
 		t.Errorf("StopReason: got %q, want max_batches_reached or completed (bounded stop)", res.StopReason)
 	}
 
-	// Verify one lesson per batch (no duplicate synthesis from the
+	// Verify one derivation per batch (no duplicate synthesis from the
 	// injection — each batch extracts distinct eligible rows).
-	var lessonCount int
-	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lessons`).Scan(&lessonCount)
-	if lessonCount != res.BatchesProcessed {
-		t.Errorf("lessons: got %d, want %d (one lesson per batch)", lessonCount, res.BatchesProcessed)
+	var proposalCount int
+	_ = dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM lesson_proposals WHERE status = 'pending'`).Scan(&proposalCount)
+	if proposalCount != res.BatchesProcessed {
+		t.Errorf("proposals: got %d, want %d (one proposal per batch)", proposalCount, res.BatchesProcessed)
 	}
 
 	// Verify processed + remaining accounts for every row.
