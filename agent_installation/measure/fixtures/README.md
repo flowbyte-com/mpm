@@ -23,7 +23,7 @@ tells it to do.
 
 That was measured, not assumed. A first run of the "old" arm had no
 `~/.mpm` at all, so the agent went looking for the protocol, found the
-real repository's copy, and read the **4.0.0** commitments it was
+real repository's copy, and read the **5.0.0** commitments it was
 supposed to be compared against. The cell was contaminated, and the
 harness now reports contamination rather than counting it.
 
@@ -32,12 +32,12 @@ these fixtures:
 
 - **old arm** → the 3.0.0 protocol and the 3.0.0 canonical source.
   That is the world that shipped.
-- **new arm** → the 4.0.0 protocol and the 4.0.0 canonical source.
+- **new arm** → the 5.0.0 protocol and the 5.0.0 canonical source.
   That is the world this branch proposes.
 
 Comparing the two **worlds** is the question the release decision asks.
 Comparing two *blocks* over one fixed reference stack would flatter the
-old arm: the 4.0.0 protocol carries the C1–C12 commitments that the
+old arm: the 5.0.0 protocol carries the C1–C12 commitments that the
 old block used to carry in prose, so serving it to the old arm would
 hand that arm the very content under test.
 

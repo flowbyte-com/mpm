@@ -1,4 +1,4 @@
-<!-- mpm_agent_integration_version: 4.0.0 -->
+<!-- mpm_agent_integration_version: 5.0.0 -->
 
 # MPM Agent Integration — Canonical Managed Instruction Snippets
 
@@ -408,13 +408,13 @@ matters to consumers. The marker does **not** replace byte-for-byte
 parity; the render script's `--check` mode remains the authoritative
 drift detector.
 
-### Why the current marker is `4.0.0`
+### Why the current marker is `5.0.0`
 
 The contract was `3.0.0` from October 2026, when the managed block was
 replaced wholesale by an inheritance-oriented contract: ten prose
 responsibilities in place of the previous seven invariants.
 
-It is `4.0.0` from 2026-10-28, when the managed block was replaced
+It was `4.0.0` from 2026-10-28, when the managed block was replaced
 wholesale again — this time by the **compact behaviour-matrix** block.
 Two things changed at once, and both are major-bump criteria:
 
@@ -445,6 +445,34 @@ exactly the major-bump criterion. The MPM **product** version did not
 move with it: this marker versions the behavioural contract, not the
 software, and changing the text agents read is not a release of the
 binaries.
+
+It is `5.0.0` from 2026-10-30, when the **lesson trust boundary**
+changed the lesson surface's contract. Two things changed at once, and
+both are major-bump criteria:
+
+1. **An action was renamed.** `mpm_lessons` action `save` is now
+   `propose`. The old action is refused at the execution point on every
+   agent surface — a lesson is trusted on arrival and the lesson surface
+   has no pending state — so an agent that still sends `save` does not
+   get a lesson; it gets a refusal. No payload field unlocks it, because
+   a value the caller supplies is not operator intent. The
+   tool-reference stability contract table carries the new name.
+
+2. **A new state exists.** A proposal is a PENDING artifact in its own
+   table, invisible to every trusted read path until an operator
+   promotes it with `mpm lesson promote <id>`. The compaction drain
+   matches: it records its synthesis as a proposal, so `lessons_created`
+   is always 0 and the result is read from `proposals_created` and
+   `proposal_ids`.
+
+Both are breaking. A host adapter verified against `4.0.0` resolves a
+different document, and an agent that sends `save` receives a refusal
+rather than a lesson. That is the major-bump criterion exactly — "action
+rename, render-contract change that would force adapter re-verification"
+— so the marker moves to `5.0.0` and every host adapter must be
+re-verified against the new contract. The MPM **product** version did
+not move with it, for the same reason as before: this marker versions
+the behavioural contract, not the software.
 
 ## Installed-block provenance (added at install time)
 
