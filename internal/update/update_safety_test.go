@@ -1017,7 +1017,7 @@ func TestRestore_RefusesUnverifiableWithoutForce(t *testing.T) {
 	writeFakeProc(t, procFSRoot, "700", "UNREADABLE", "ghost-agent", own)
 	writeFakeLocks(t, procFSRoot)
 	err := func() error {
-		_, err := restoreDatabase(root, filepath.Join(root, "backups", "x"), false)
+		_, err := restoreDatabase(root, filepath.Join(root, "backups", "x"), "", false)
 		return err
 	}()
 	// No backup dir exists either — either error proves the scan ran
@@ -1029,7 +1029,7 @@ func TestRestore_RefusesUnverifiableWithoutForce(t *testing.T) {
 	if berr != nil {
 		t.Fatalf("setup backup: %v", berr)
 	}
-	_, rerr := restoreDatabase(root, res.Dir, false)
+	_, rerr := restoreDatabase(root, res.Dir, res.Fingerprint, false)
 	if rerr == nil {
 		t.Fatal("an unverifiable process must block a restore without --force")
 	}
@@ -1040,7 +1040,7 @@ func TestRestore_RefusesUnverifiableWithoutForce(t *testing.T) {
 	if len(we.Unverifiable) != 1 || we.Unverifiable[0].PID != 700 {
 		t.Fatalf("the refusal must name the process: %+v", we)
 	}
-	accepted, err := restoreDatabase(root, res.Dir, true)
+	accepted, err := restoreDatabase(root, res.Dir, res.Fingerprint, true)
 	if err != nil {
 		t.Fatalf("--force accepts the named residual: %v", err)
 	}
@@ -1202,7 +1202,7 @@ func TestVerifyBackupStandalone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := hdb.Exec("CREATE TABLE memories (id TEXT PRIMARY KEY)"); err != nil {
+	if _, err := hdb.Exec("CREATE TABLE memories (id TEXT PRIMARY KEY, content TEXT)"); err != nil {
 		t.Fatal(err)
 	}
 	hdb.Close()
