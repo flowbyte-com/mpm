@@ -58,8 +58,9 @@ promoted release, so it tracks the newest known-good runtime.
 | bundle carrying operator data | forbidden-list refusal (`src/db`, `mpm_config.json`, …) |
 | bundle registering an empty plugin | payload presence is fail-closed, not advisory |
 | concurrent updates racing on one data root | exclusive file lock; the second updater is refused, never queued |
-| migration stranding a rollback | schema fingerprint recorded at backup time; a changed shape refuses a runtime-only rollback and names the recovery options |
+| migration stranding a rollback | schema fingerprint recorded at backup time; a changed shape refuses a runtime-only rollback and names the recovery options; a failed activation with a migrated schema verifies the old runtime against a scratch copy before falling back, otherwise stops degraded (never silently restores the database) |
 | silent database restore | runtime rollback and database restore are separate operations; the restore needs `--with-db-restore --force` |
+| uninspectable writer | fail closed on holders and on observation failure; named-but-unruled-out processes require explicit `--force` acceptance (recorded) |
 | killing agent sessions | the updater never terminates sessions; it reports them and tells the operator to restart OpenCode by hand |
 | restarting services without consent | managed services (`mpm-scheduler`, `mpm-telemetry`) are only probed by default; restarts need `--restart-services` |
 
@@ -138,13 +139,35 @@ If the update migrated the database into a shape the previous runtime
 never knew, the one-command rollback is **refused** with the exact
 recovery options (restore the pre-update backup first, or confirm the
 combined restore). A failed promotion restores the pointer
-automatically.
+automatically — unless the new runtime already migrated the live
+schema. In that case the updater first verifies the previous release
+reads the migrated shape (health check against a scratch copy, never
+the live file): if it verifies, the fallback proceeds and says so;
+if not, the update stops in a clearly identified degraded state (new
+binaries kept, because they match the migrated data) with the
+recovery point named. The database is never silently restored.
 
-A database restore additionally requires writer quiescence: any
-process holding the live database open — daemon, agent session, MCP
-server, CLI — blocks the restore, and `--force` confirms data loss
-without bypassing that check. Managed services can be stopped with
-`--restart-services`; anything else must be stopped by its owner.
+A database restore additionally requires writer quiescence. The
+updater scans `/proc` for open file descriptions on the live database
+(plus WAL/SHM sidecars), consulting the world-readable lock table
+where descriptors cannot be inspected. The verdict has four outcomes:
+
+- **holder found** — restore refused, holder named;
+- **clear** — every process inspected, none holds the database;
+- **unverifiable** — no holder found, but some process could neither
+  be inspected nor positively ruled out (foreign uid on a closed
+  database and kernel threads are ruled out; anything else is
+  named, not hidden). Refused unless `--force` explicitly accepts
+  the NAMED residual — recorded, never silent;
+- **inconclusive** — observation itself failed. Always refused,
+  even with `--force`.
+
+Authorized managed services stop FIRST (a running scheduler pins the
+database by design), and a second scan runs immediately before the
+swap to narrow the check-then-act window to the rename itself. That
+window cannot be closed by a one-time scan, so the `--force`
+confirmation and the recorded outcome remain the backstop — the scan
+is not claimed to be atomic.
 
 ## Stale processes
 

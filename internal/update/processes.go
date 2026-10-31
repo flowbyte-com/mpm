@@ -1,6 +1,7 @@
 package update
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // LiveProcess is one process whose executable resolves into a versioned
@@ -175,7 +178,41 @@ type DBHolder struct {
 	File string
 }
 
-// OpenDBHolders lists the processes holding an open file description
+// HolderScan is the outcome of one writer scan.
+//
+// A scan has four outcomes, and collapsing them is the defect this
+// type exists to prevent:
+//
+//   - occupied: at least one process holds the database;
+//   - clear: every process was inspected and none holds it;
+//   - unverifiable: no holder was found, but some processes could
+//     neither be inspected nor positively ruled out. They are NAMED,
+//     not hidden — the operator decides explicitly;
+//   - inconclusive: observation itself failed (unreadable /proc, or
+//     an unreadable lock table while uninspectable processes remain).
+//     Nothing can be said; not even --force proceeds.
+//
+// An empty holder list is evidence of safety ONLY when Inconclusive is
+// false AND Unverifiable is empty. Failing closed means: holders
+// always refuse; inconclusive always refuses; unverifiable refuses
+// unless the operator explicitly accepts the NAMED residual with
+// --force (recorded, never silent).
+type HolderScan struct {
+	Holders []DBHolder
+	// Unverifiable lists processes that could neither be inspected
+	// nor ruled out, with the reason each.
+	Unverifiable []UnverifiableProc
+	// Inconclusive is true when quiescence could not even be
+	// established.
+	Inconclusive bool
+	// Detail explains an inconclusive result for the operator.
+	Detail string
+	// Skipped counts processes that could not be fully inspected but
+	// were ruled out (a foreign uid on a group/other-closed database).
+	Skipped int
+}
+
+// ScanDBHolders lists the processes holding an open file description
 // on any of the given database files (the live database and its WAL
 // and SHM sidecars).
 //
@@ -188,24 +225,52 @@ type DBHolder struct {
 // database handle at restore time (every helper opens and closes), so
 // any holder — including, hypothetically, this process — is a real
 // writer and must block the restore.
-func OpenDBHolders(dbFiles ...string) []DBHolder {
-	want := map[string]string{}
+//
+// Fail-closed rule: a process whose file descriptors cannot be read is
+// assumed to be a holder UNLESS it can be positively ruled out — its
+// uid is neither ours nor root's, while the database file itself is
+// closed to group and other. (The data root is created 0700 and the
+// installer auto-corrects wider permissions, so the common case rules
+// foreign processes out; anything else refuses.) A vanished process
+// (the pid is gone mid-scan) is a benign race and is skipped.
+func ScanDBHolders(dbFiles ...string) HolderScan {
+	var scan HolderScan
+	want := map[string]bool{}
+	var strictPaths []string
 	for _, f := range dbFiles {
 		abs, err := filepath.Abs(f)
 		if err != nil {
 			continue
 		}
-		want[abs] = f
+		strictPaths = append(strictPaths, abs)
+		want[abs] = true
 		// SQLite may hold the main file while the sidecars come and
 		// go; match any of the three spellings.
-		want[strings.TrimSuffix(abs, "-wal")] = f
-		want[strings.TrimSuffix(abs, "-shm")] = f
+		want[strings.TrimSuffix(abs, "-wal")] = true
+		want[strings.TrimSuffix(abs, "-shm")] = true
 	}
-	var out []DBHolder
+	// Existing database files: only these can be held open. (A
+	// missing sidecar cannot be held; judging by it would fail closed
+	// on nothing.)
+	var existing []string
+	for _, p := range strictPaths {
+		if _, err := os.Stat(p); err == nil {
+			existing = append(existing, p)
+		}
+	}
 	entries, err := os.ReadDir(procFSRoot)
 	if err != nil {
-		return nil
+		scan.Inconclusive = true
+		scan.Detail = fmt.Sprintf("cannot read %s: %v", procFSRoot, err)
+		return scan
 	}
+	ownUID := os.Geteuid()
+	// Lock evidence is collected once, up front: /proc/locks is
+	// world-readable, so it covers even the processes whose file
+	// descriptors we cannot inspect. A lock on one of our inodes is
+	// hard evidence of holding, regardless of privilege.
+	lockedPIDs, locksOK := pidsLocking(wantDevs(strictPaths))
+	var firstUninspectable string
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
@@ -214,18 +279,63 @@ func OpenDBHolders(dbFiles ...string) []DBHolder {
 		fdDir := filepath.Join(procFSRoot, e.Name(), "fd")
 		fds, err := os.ReadDir(fdDir)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue // exited mid-scan: benign race
+			}
+			if isKernelThread(e.Name()) {
+				scan.Skipped++
+				continue
+			}
+			uid, groups, uidOK := procIDs(e.Name())
+			if uidOK && uid != ownUID && uid != 0 && cannotOpenAny(existing, uid, groups) {
+				// Positive exclusion: the process runs as a
+				// foreign, non-root uid and the permission
+				// check proves it cannot open any of the
+				// existing database files — so it cannot hold
+				// one open.
+				scan.Skipped++
+				continue
+			}
+			if lockedPIDs[pid] {
+				// Hard evidence despite unreadable descriptors.
+				scan.Holders = append(scan.Holders, DBHolder{PID: pid, Name: procComm(pid), File: "(lock held; descriptors unreadable)"})
+				continue
+			}
+			if !locksOK {
+				// The lock table itself is unreadable, so there is
+				// no second source to consult: quiescence cannot
+				// be established at all.
+				if firstUninspectable == "" {
+					firstUninspectable = fmt.Sprintf("cannot inspect pid %d (%v) and the lock table is unreadable", pid, err)
+				}
+				continue
+			}
+			// No lock on our files anywhere in the system.
+			// That is not a clearance -- an idle, lock-free
+			// holding cannot be disproven this way -- but it
+			// is a NAMED residual the operator can judge,
+			// instead of a silent skip or an unactionable
+			// refusal. A same-uid process with unreadable
+			// descriptors (a hardened agent, a keyring
+			// daemon) lands here too: it is the operator's
+			// own process, named, for an explicit decision.
+			scan.Unverifiable = append(scan.Unverifiable, UnverifiableProc{
+				PID:    pid,
+				Name:   procComm(pid),
+				Reason: fmt.Sprintf("descriptors unreadable (%v); no lock on the database was found", err),
+			})
 			continue
 		}
 		held := ""
 		for _, fd := range fds {
 			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
 			if err != nil {
-				continue
+				continue // fd closed mid-scan: benign race
 			}
 			// A deleted-but-held file reads as "path (deleted)".
 			// It still pins the inode, so it still counts.
 			target = strings.TrimSuffix(target, " (deleted)")
-			if _, ok := want[target]; ok {
+			if want[target] {
 				held = target
 				break
 			}
@@ -233,10 +343,213 @@ func OpenDBHolders(dbFiles ...string) []DBHolder {
 		if held == "" {
 			continue
 		}
-		out = append(out, DBHolder{PID: pid, Name: procComm(pid), File: held})
+		scan.Holders = append(scan.Holders, DBHolder{PID: pid, Name: procComm(pid), File: held})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].PID < out[j].PID })
-	return out
+	sort.Slice(scan.Holders, func(i, j int) bool { return scan.Holders[i].PID < scan.Holders[j].PID })
+	// A definite holder is actionable on its own; inconclusive
+	// observation only decides the empty case. Either way the caller
+	// refuses — but for different stated reasons.
+	if len(scan.Holders) == 0 && firstUninspectable != "" {
+		scan.Inconclusive = true
+		scan.Detail = firstUninspectable
+	}
+	return scan
+}
+
+// procIDs reports the process's uid and supplementary groups from
+// /proc/pid/status.
+func procIDs(pid string) (uid int, groups []int, ok bool) {
+	raw, err := os.ReadFile(filepath.Join(procFSRoot, pid, "status"))
+	if err != nil {
+		return 0, nil, false
+	}
+	var u int
+	var g []int
+	var haveU bool
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "Uid:") {
+			f := strings.Fields(line)
+			if len(f) < 2 {
+				return 0, nil, false
+			}
+			v, err := strconv.Atoi(f[1])
+			if err != nil {
+				return 0, nil, false
+			}
+			u, haveU = v, true
+		}
+		if strings.HasPrefix(line, "Groups:") {
+			for _, f := range strings.Fields(line)[1:] {
+				v, err := strconv.Atoi(f)
+				if err != nil {
+					return 0, nil, false
+				}
+				g = append(g, v)
+			}
+		}
+	}
+	if !haveU {
+		return 0, nil, false
+	}
+	return u, g, true
+}
+
+// cannotOpenAny reports whether the process credentials provably
+// cannot open any of the given files for reading: neither the file
+// itself (owner/group/other read bit for its class) nor directory
+// traversal (execute bit on every ancestor) permits it. This is the
+// same check the kernel performs on open(2), minus ACLs and LSM
+// policy — and it fails closed: any unreadable stat or unparseable
+// input means "cannot prove", i.e. false.
+func cannotOpenAny(paths []string, uid int, groups []int) bool {
+	if len(paths) == 0 {
+		return true // nothing exists to hold open
+	}
+	inGroups := func(gid int) bool {
+		for _, g := range groups {
+			if g == gid {
+				return true
+			}
+		}
+		return false
+	}
+	classBits := func(fUid, fGid int, mode os.FileMode, need os.FileMode) bool {
+		var bits os.FileMode
+		switch {
+		case uid == fUid:
+			bits = (mode >> 6) & 7
+		case inGroups(fGid):
+			bits = (mode >> 3) & 7
+		default:
+			bits = mode & 7
+		}
+		return bits&need == need
+	}
+	statOwner := func(path string) (int, int, os.FileMode, bool) {
+		var st unix.Stat_t
+		if err := unix.Stat(path, &st); err != nil {
+			return 0, 0, 0, false
+		}
+		return int(st.Uid), int(st.Gid), os.FileMode(st.Mode & 0777), true
+	}
+	for _, p := range paths {
+		fUid, fGid, fMode, ok := statOwner(p)
+		if !ok {
+			return false
+		}
+		if !classBits(fUid, fGid, fMode, 4) {
+			continue // this file provably unreadable; check the next
+		}
+		// Readable — but only reachable with execute on every
+		// ancestor directory.
+		dir := filepath.Dir(p)
+		reachable := true
+		for {
+			dUid, dGid, dMode, ok := statOwner(dir)
+			if !ok || !classBits(dUid, dGid, dMode, 1) {
+				reachable = false
+				break
+			}
+			if dir == "/" {
+				break
+			}
+			dir = filepath.Dir(dir)
+		}
+		if reachable {
+			return false // this file could be opened
+		}
+	}
+	return true
+}
+
+// isKernelThread reports whether the process has an empty command
+// line: only kernel threads (and zombies, which hold no files) look
+// like that. A kernel thread performs no userspace file I/O and
+// cannot be an SQLite client.
+func isKernelThread(pid string) bool {
+	raw, err := os.ReadFile(filepath.Join(procFSRoot, pid, "cmdline"))
+	if err != nil {
+		return false
+	}
+	return len(bytes.Trim(raw, "\x00 \t\n")) == 0
+}
+
+// wantDevs resolves each existing database path to its (device,
+// inode) identity for lock matching. Missing files cannot be held
+// open and are skipped.
+func wantDevs(paths []string) map[[2]uint64]bool {
+	want := map[[2]uint64]bool{}
+	for _, p := range paths {
+		var st unix.Stat_t
+		if err := unix.Stat(p, &st); err != nil {
+			continue
+		}
+		want[[2]uint64{st.Dev, st.Ino}] = true
+	}
+	return want
+}
+
+// lockDevIno parses a /proc/locks device:ino field ("MAJ:MIN:INO",
+// major/minor hex, inode decimal) into a device number and inode.
+func lockDevIno(field string) (uint64, uint64, bool) {
+	parts := strings.Split(field, ":")
+	if len(parts) != 3 {
+		return 0, 0, false
+	}
+	maj, err := strconv.ParseUint(parts[0], 16, 32)
+	if err != nil {
+		return 0, 0, false
+	}
+	min, err := strconv.ParseUint(parts[1], 16, 32)
+	if err != nil {
+		return 0, 0, false
+	}
+	ino, err := strconv.ParseUint(parts[2], 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return unix.Mkdev(uint32(maj), uint32(min)), ino, true
+}
+
+// pidsLocking reports the pids holding a lock on any of the wanted
+// (device, inode) pairs, read from the world-readable /proc/locks.
+// The second return is false when the locks table itself is
+// unreadable — in which case lock evidence is unavailable, not absent.
+func pidsLocking(want map[[2]uint64]bool) (map[int]bool, bool) {
+	out := map[int]bool{}
+	if len(want) == 0 {
+		return out, true
+	}
+	raw, err := os.ReadFile(filepath.Join(procFSRoot, "locks"))
+	if err != nil {
+		return nil, false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[4])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		dev, ino, ok := lockDevIno(fields[5])
+		if !ok {
+			continue
+		}
+		if want[[2]uint64{dev, ino}] {
+			out[pid] = true
+		}
+	}
+	return out, true
+}
+
+// UnverifiableProc is a process the scan could neither inspect nor
+// rule out, named so the operator can judge it.
+type UnverifiableProc struct {
+	PID    int
+	Name   string
+	Reason string
 }
 
 // procComm names a process for operator output: the exe basename, or

@@ -334,23 +334,49 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 	if err != nil {
 		return failAfterStop("activate", err)
 	}
-	// A failure after the pointer moved restores it (each step
-	// below does so explicitly), then restarts what was stopped.
-	// A failure before needs no rollback: nothing was changed.
-	failAfterActivate := func(postFP string, err error) (Outcome, error) {
+	// A failure after the pointer moved either falls back or stops
+	// degraded (see below). A failure before needs no rollback:
+	// nothing was changed.
+	failAfterActivate := func(postFP string, schemaChanged bool, err error) (Outcome, error) {
+		if !schemaChanged {
+			// The live schema is untouched: falling back restores a
+			// consistent state (old binaries on the old shape).
+			_ = restorePointer(dataRoot, prevTarget)
+			restoreStopped()
+			recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "failed", err.Error())
+			return out, err
+		}
+		// The new runtime changed the live schema before failing.
+		// Restoring the old pointer blindly would strand old binaries
+		// on a shape they never knew — a second outage manufactured
+		// by the recovery procedure. Verify the previous release can
+		// actually read the migrated shape (against a scratch copy,
+		// never the live file) before falling back.
+		if cerr := oldRuntimeReadsNewSchema(dataRoot, out.FromRev); cerr != nil {
+			// DEGRADED STOP. Keep the new pointer: the binaries match
+			// the migrated data. Restart what was stopped so the
+			// managed services are consistent with the KEPT pointer.
+			// Record everything, touch nothing else — in particular,
+			// never silently restore the database.
+			restoreStopped()
+			degraded := fmt.Errorf("%v\nDEGRADED: the live database's shape changed and the previous release cannot read it (%v). The active pointer stays at %s (binaries match the data). Recover with: mpm-update --rollback --with-db-restore --force (restores the pre-update backup %s, overwriting newer data), or fix %s forward", err, cerr, src.Rev, backupDir, src.Rev)
+			recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "failed", degraded.Error())
+			return out, degraded
+		}
 		_ = restorePointer(dataRoot, prevTarget)
 		restoreStopped()
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "failed", err.Error())
-		return out, err
+		verified := fmt.Errorf("%v\nNote: the live database's shape changed during this update, but the previous release verified clean against the migrated schema, so the fallback was restored", err)
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "failed", verified.Error())
+		return out, verified
 	}
 	if err := failPoint(o.failAt(), "activate"); err != nil {
-		return failAfterActivate("", err)
+		return failAfterActivate("", false, err)
 	}
 
 	smoke := SmokeScratch(filepath.Join(NewLayout(dataRoot).ReleaseDir(src.Rev), "bin", "mpm"), filepath.Join(backupDir, "mpm.db"))
 	if !smoke.OK {
 		err := fmt.Errorf("the candidate failed its smoke test (%s); the previous runtime is active again", smoke.Detail)
-		return failAfterActivate("", err)
+		return failAfterActivate("", false, err)
 	}
 
 	// The live smoke is the point of no return for the SCHEMA: the new
@@ -360,17 +386,11 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 	// untouched.
 	live, postFP, schemaChanged := smokeLiveWatched(dataRoot, preFP)
 	if !live.OK {
-		err := fmt.Errorf("the promoted runtime failed its health check (%s); the previous runtime is active again", live.Detail)
-		if schemaChanged {
-			err = fmt.Errorf("%v\nNOTE: the live database's shape changed while the new runtime ran (a migration applied on open). The old binaries are active again, but they may not read the migrated shape: restore the database from %s if they cannot, or stay on %s and investigate", err, backupDir, src.Rev)
-		}
-		return failAfterActivate(postFP, err)
+		err := fmt.Errorf("the promoted runtime failed its health check (%s)", live.Detail)
+		return failAfterActivate(postFP, schemaChanged, err)
 	}
 	if err := failPoint(o.failAt(), "smoke"); err != nil {
-		if schemaChanged {
-			err = fmt.Errorf("%v\nNOTE: the live database's shape changed during the smoke step; recovery point: %s", err, backupDir)
-		}
-		return failAfterActivate(postFP, err)
+		return failAfterActivate(postFP, schemaChanged, err)
 	}
 
 	// The promoted release passed. Only now is the stable updater
@@ -378,21 +398,26 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 	// place, so recovery never depends on a release that never proved
 	// itself.
 	if err := installStableUpdater(dataRoot, src.Rev); err != nil {
-		return failAfterActivate(postFP, err)
+		return failAfterActivate(postFP, schemaChanged, err)
 	}
 
 	// Restart what was stopped, then verify the running identities:
 	// a restarted daemon must resolve into the new release, not just
-	// report active.
+	// report active. Only units that verify cleanly count as
+	// "verified" — a warning anywhere means partial success at best,
+	// and the report must say so instead of claiming a clean restart.
 	var identityWarnings []string
+	var verifiedUnits []string
 	for _, u := range stoppedSoFar {
 		if err := sc.Start(u); err != nil {
-			identityWarnings = append(identityWarnings, fmt.Sprintf("%s: restarted but the start reported an error (%v); confirm it by hand", u, err))
+			identityWarnings = append(identityWarnings, fmt.Sprintf("%s: restart requested but the start reported an error (%v); confirm it by hand", u, err))
 			continue
 		}
 		if w := verifyServiceIdentity(dataRoot, src.Rev, sc, u); w != "" {
 			identityWarnings = append(identityWarnings, w)
+			continue
 		}
+		verifiedUnits = append(verifiedUnits, u)
 	}
 	recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "success", successDetail(schemaChanged, identityWarnings))
 
@@ -403,7 +428,14 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 		b.WriteString("note: the live database's shape changed during this update; a runtime rollback will require a database restore (see `mpm update --rollback`)\n")
 	}
 	if len(stoppedSoFar) > 0 {
-		fmt.Fprintf(&b, "restarted: %s (verified against %s)\n", strings.Join(stoppedSoFar, ", "), src.Rev)
+		if len(identityWarnings) == 0 {
+			fmt.Fprintf(&b, "restarted: %s (verified against %s)\n", strings.Join(stoppedSoFar, ", "), src.Rev)
+		} else {
+			fmt.Fprintf(&b, "restarted: %s (with verification warnings — partial success, see below)\n", strings.Join(stoppedSoFar, ", "))
+			if len(verifiedUnits) > 0 {
+				fmt.Fprintf(&b, "verified: %s\n", strings.Join(verifiedUnits, ", "))
+			}
+		}
 	} else if len(sc.ActiveUnits()) > 0 {
 		fmt.Fprintf(&b, "note: managed service(s) still running (%s) were NOT restarted (no --restart-services); they may still use the old executable until restarted\n", strings.Join(sc.ActiveUnits(), ", "))
 	}
@@ -457,6 +489,26 @@ func smokeLiveWatched(dataRoot string, preFP string) (smoke SmokeResult, postFP 
 		return smoke, "", false
 	}
 	return smoke, post, preFP != "" && post != "" && post != preFP
+}
+
+// oldRuntimeReadsNewSchema verifies the previous release can read
+// the migrated live database — against a scratch copy, never the live
+// file. A nil error means falling back to the old pointer is safe;
+// anything else means the fallback itself would strand the operator
+// and the update must stop degraded instead.
+func oldRuntimeReadsNewSchema(dataRoot, fromRev string) error {
+	if fromRev == "" {
+		return fmt.Errorf("no previous release is installed to fall back to")
+	}
+	oldMPM := filepath.Join(NewLayout(dataRoot).ReleaseDir(fromRev), "bin", "mpm")
+	if fi, err := os.Stat(oldMPM); err != nil || fi.IsDir() {
+		return fmt.Errorf("previous release %s has no mpm binary", fromRev)
+	}
+	smoke := SmokeScratch(oldMPM, NewLayout(dataRoot).LiveDB())
+	if !smoke.OK {
+		return fmt.Errorf("previous release failed its health check against the migrated schema: %s", smoke.Detail)
+	}
+	return nil
 }
 
 // verifyServiceIdentity confirms a restarted unit resolves into the

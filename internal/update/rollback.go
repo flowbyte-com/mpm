@@ -7,6 +7,25 @@ import (
 	"strings"
 )
 
+// rollbackBaselineDrift enforces the rollback safety rule against a
+// given history snapshot and live fingerprint: a runtime rollback to
+// a previous release is safe only while the live database still has
+// the shape it had before the update that left that release.
+//
+// It returns the governing history entry (possibly nil) and whether
+// the live shape drifted from the recorded pre-update shape. A nil
+// entry or an entry without a fingerprint means no recorded baseline —
+// there is nothing to compare against, so no drift. Callers decide
+// what drift means: without --with-db-restore it is a refusal, with
+// it the restore overwrites the drift explicitly.
+func rollbackBaselineDrift(hist []HistoryEntry, liveFP, fromRev string) (*HistoryEntry, bool) {
+	entry := LastSuccessfulUpdateTo(hist, fromRev)
+	if entry == nil || entry.PreFP == "" {
+		return entry, false
+	}
+	return entry, liveFP != entry.PreFP
+}
+
 // Rollback moves the active pointer back to the previous release.
 //
 // Runtime rollback and database rollback are SEPARATE operations, and
@@ -27,6 +46,7 @@ func Rollback(o Options) (Outcome, error) {
 	var out Outcome
 	out.Action = "rollback"
 	dataRoot := o.root()
+	var dbRestoreAccepted []string
 
 	prevTarget := ReadPreviousRelease(dataRoot)
 	if prevTarget == "" {
@@ -61,17 +81,11 @@ func Rollback(o Options) (Outcome, error) {
 	if ferr != nil {
 		return out, fmt.Errorf("could not fingerprint the live database: %w", ferr)
 	}
-	if entry := LastSuccessfulUpdateTo(hist, activeRev); entry != nil && entry.PreFP != "" {
-		if liveFP != entry.PreFP {
-			if !o.WithDBRestore {
-				return out, &RollbackRefused{
-					PrevRev:   prevRev,
-					BackupDir: entry.BackupDir,
-					Reason:    "the live database's shape changed since the update (a migration ran); repointing the old binaries without restoring the old data would strand them on a schema they never knew",
-				}
-			}
-			// --force was confirmed above; fall through to the
-			// restore inside the lock.
+	if entry, drifted := rollbackBaselineDrift(hist, liveFP, activeRev); drifted && !o.WithDBRestore {
+		return out, &RollbackRefused{
+			PrevRev:   prevRev,
+			BackupDir: entry.BackupDir,
+			Reason:    "the live database's shape changed since the update (a migration ran); repointing the old binaries without restoring the old data would strand them on a schema they never knew",
 		}
 	}
 
@@ -81,12 +95,27 @@ func Rollback(o Options) (Outcome, error) {
 	}
 	defer lock.Release()
 
-	// Re-verify inside the lock: the world may have moved.
-	liveFP2, ferr := SchemaFingerprint(NewLayout(dataRoot).LiveDB())
+	// Re-evaluate the safety condition against the LOCKED state. The
+	// pre-lock fingerprint above is advisory (a fast, clear refusal);
+	// this is authoritative: the world may have moved between the two
+	// reads — another update, a migration, a restore — and the
+	// discarded liveFP2 this replaces was exactly that hole. If the
+	// live shape no longer matches the recorded pre-update shape, the
+	// baseline the rollback decision rested on is gone: refuse and
+	// make the operator re-evaluate, rather than restoring against a
+	// fingerprint that no longer describes the database.
+	lockedHist, _ := ReadHistory(dataRoot)
+	lockedFP, ferr := SchemaFingerprint(NewLayout(dataRoot).LiveDB())
 	if ferr != nil {
 		return out, fmt.Errorf("could not fingerprint the live database: %w", ferr)
 	}
-	_ = liveFP2
+	if lockedEntry, lockedDrift := rollbackBaselineDrift(lockedHist, lockedFP, out.FromRev); lockedDrift && !o.WithDBRestore {
+		return out, &RollbackRefused{
+			PrevRev:   prevRev,
+			BackupDir: lockedEntry.BackupDir,
+			Reason:    "the live database changed while acquiring the update lock; re-evaluate and retry rather than rolling back against a stale safety check",
+		}
+	}
 
 	if o.WithDBRestore {
 		hist2, _ := ReadHistory(dataRoot)
@@ -94,11 +123,15 @@ func Rollback(o Options) (Outcome, error) {
 		if entry == nil || entry.BackupDir == "" {
 			return out, fmt.Errorf("no verified pre-update backup is recorded for %s; refusing a database restore with no recovery point", out.FromRev)
 		}
-		if err := restoreDatabase(dataRoot, entry.BackupDir, o.services(), o.RestartServices); err != nil {
+		accepted, err := restoreDatabase(dataRoot, entry.BackupDir, o.services(), o.RestartServices, o.Force)
+		if err != nil {
 			recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, "", "", "", "failed", err.Error())
 			return out, err
 		}
 		out.BackupDir = entry.BackupDir
+		for _, u := range accepted {
+			dbRestoreAccepted = append(dbRestoreAccepted, fmt.Sprintf("pid %d %s (%s)", u.PID, u.Name, u.Reason))
+		}
 	}
 
 	if err := restorePointer(dataRoot, prevTarget); err != nil {
@@ -121,13 +154,20 @@ func Rollback(o Options) (Outcome, error) {
 		recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, out.BackupDir, "", "", "failed", live.Detail)
 		return out, fmt.Errorf("the restored runtime failed its health check: %s", live.Detail)
 	}
-	recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{Kind: SourceGitHub}, out.BackupDir, "", "", "success", dbRestoreNote(o.WithDBRestore))
+	detail := dbRestoreNote(o.WithDBRestore)
+	for _, a := range dbRestoreAccepted {
+		detail += "; explicitly accepted unverified process: " + a
+	}
+	recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{Kind: SourceGitHub}, out.BackupDir, "", "", "success", detail)
 
 	var b strings.Builder
 	b.WriteString("")
 	fmt.Fprintf(&b, "rolled back %s -> %s\n", displayRev(out.FromRev), prevRev)
 	if o.WithDBRestore {
 		fmt.Fprintf(&b, "database restored from %s\n", out.BackupDir)
+		for _, a := range dbRestoreAccepted {
+			fmt.Fprintf(&b, "accepted explicitly-unverified process: %s\n", a)
+		}
 	} else {
 		b.WriteString("database untouched (runtime rollback only)\n")
 	}
@@ -172,15 +212,37 @@ func (e *RollbackRefused) Error() string {
 // of restoring under writers. The installation is untouched.
 type WritersActiveError struct {
 	Holders []DBHolder
+	// Unverifiable names processes the scan could neither inspect
+	// nor rule out. It is set only when the caller did NOT pass
+	// --force: with --force the operator explicitly accepts the named
+	// residual instead (recorded, never silent).
+	Unverifiable []UnverifiableProc
+	// Inconclusive means quiescence could not even be established.
+	Inconclusive bool
+	Detail       string
 }
 
 func (e *WritersActiveError) Error() string {
 	var b strings.Builder
+	if e.Inconclusive {
+		fmt.Fprintf(&b, "refusing to restore the database: writer quiescence cannot be established: %s\n", e.Detail)
+		b.WriteString("Resolve the observation failure and retry; --force does not bypass this check.")
+		return b.String()
+	}
+	if len(e.Unverifiable) > 0 {
+		fmt.Fprintf(&b, "refusing to restore the database: %d process(es) could not be verified as writers or non-writers:\n", len(e.Unverifiable))
+		for _, u := range e.Unverifiable {
+			fmt.Fprintf(&b, "  pid %d %s (%s)\n", u.PID, u.Name, u.Reason)
+		}
+		b.WriteString("Re-run with --force to explicitly accept this NAMED residual, or stop the processes and retry.\n")
+		b.WriteString("--force confirms overwriting newer data AND accepting the named unknowns; it does not bypass hard evidence.")
+		return b.String()
+	}
 	fmt.Fprintf(&b, "refusing to restore the database: %d process(es) still hold it open:\n", len(e.Holders))
 	for _, h := range e.Holders {
 		fmt.Fprintf(&b, "  pid %d %s (%s)\n", h.PID, h.Name, h.File)
 	}
-	b.WriteString("Stop the writers — agents, MCP servers, CLI processes — and retry.\n")
+	b.WriteString("Stop the writers, then retry.\n")
 	b.WriteString("--force confirms overwriting newer data; it does not bypass this check.")
 	return b.String()
 }
@@ -200,27 +262,48 @@ func (e *WritersActiveError) Error() string {
 // units that were active are stopped, and only those are started
 // back, so previously inactive services stay inactive). Anything else
 // holding the database must be stopped by its owner first.
-func restoreDatabase(dataRoot, backupDir string, sc ServiceControl, restartServices bool) error {
+// checkWriters enforces the restore's writer rule against one scan:
+// holders and inconclusive observation always refuse; named-but-
+// unverifiable processes refuse unless the operator explicitly
+// accepted them with --force.
+func checkWriters(scan HolderScan, force bool) ([]UnverifiableProc, error) {
+	if scan.Inconclusive {
+		return nil, &WritersActiveError{Inconclusive: true, Detail: scan.Detail}
+	}
+	if len(scan.Holders) > 0 {
+		return nil, &WritersActiveError{Holders: scan.Holders}
+	}
+	if len(scan.Unverifiable) > 0 && !force {
+		return nil, &WritersActiveError{Unverifiable: scan.Unverifiable}
+	}
+	return scan.Unverifiable, nil
+}
+
+func restoreDatabase(dataRoot, backupDir string, sc ServiceControl, restartServices, force bool) ([]UnverifiableProc, error) {
 	l := NewLayout(dataRoot)
 	live := l.LiveDB()
 	raw, err := os.ReadFile(filepath.Join(backupDir, "mpm.db"))
 	if err != nil {
-		return fmt.Errorf("the recovery point has no database copy: %w", err)
-	}
-	if holders := OpenDBHolders(live, live+"-wal", live+"-shm"); len(holders) > 0 {
-		return &WritersActiveError{Holders: holders}
+		return nil, fmt.Errorf("the recovery point has no database copy: %w", err)
 	}
 	active := sc.ActiveUnits()
 	if len(active) > 0 && !restartServices {
-		return fmt.Errorf("managed service(s) still running (%s); stop them first or re-run with --restart-services (restoring under writers corrupts)", strings.Join(active, ", "))
+		return nil, fmt.Errorf("managed service(s) still running (%s); stop them first or re-run with --restart-services (restoring under writers corrupts)", strings.Join(active, ", "))
 	}
+	// Authorized managed services stop FIRST: a running scheduler pins
+	// the database by design, so checking holders before stopping
+	// what we may stop would refuse a restore the operator explicitly
+	// authorized.
 	var stopped []string
+	unstop := func() {
+		for _, s := range stopped {
+			_ = sc.Start(s)
+		}
+	}
 	for _, unit := range active {
 		if err := sc.Stop(unit); err != nil {
-			for _, s := range stopped {
-				_ = sc.Start(s)
-			}
-			return err
+			unstop()
+			return nil, err
 		}
 		stopped = append(stopped, unit)
 	}
@@ -231,29 +314,48 @@ func restoreDatabase(dataRoot, backupDir string, sc ServiceControl, restartServi
 			_ = sc.Start(s)
 		}
 	}()
+	// Now that everything stoppable is stopped, the remaining holders
+	// are unstoppable-by-us: refuse. Named-but-unverifiable processes
+	// are accepted only with --force (recorded, never silent).
+	accepted, err := checkWriters(ScanDBHolders(live, live+"-wal", live+"-shm"), force)
+	if err != nil {
+		return nil, err
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(live), ".mpm.db.restore.*")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(raw); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		return err
+		return nil, err
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
-		return err
+		return nil, err
 	}
 	if err := os.Chmod(tmpName, 0600); err != nil {
 		os.Remove(tmpName)
-		return err
+		return nil, err
+	}
+	// Re-check immediately before the swap: a connection opened after
+	// the first scan must abort the restore rather than race it. This
+	// narrows the check-then-act window to the rename syscall itself.
+	// It cannot close the window — a one-time /proc scan is not an
+	// atomic all-writers guarantee — so the --with-db-restore --force
+	// confirmation and the recorded outcome remain the backstop, not
+	// the scan.
+	accepted, err = checkWriters(ScanDBHolders(live, live+"-wal", live+"-shm"), force)
+	if err != nil {
+		os.Remove(tmpName)
+		return nil, err
 	}
 	if err := os.Rename(tmpName, live); err != nil {
 		os.Remove(tmpName)
-		return fmt.Errorf("could not restore the database: %w", err)
+		return nil, fmt.Errorf("could not restore the database: %w", err)
 	}
 	os.Remove(live + "-wal")
 	os.Remove(live + "-shm")
-	return nil
+	return accepted, nil
 }

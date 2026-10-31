@@ -90,6 +90,17 @@ func (f fakeBuilder) BuildFromCheckout(srcDir, dstDir string) (string, error) {
 // config file, and (optionally) an installed active release.
 func testLayout(t *testing.T, activeRev string) string {
 	t.Helper()
+	if activeRev == "" {
+		return testLayoutWithOldBuilder(t, "", nil)
+	}
+	return testLayoutWithOldBuilder(t, activeRev, fakeBuilder{commit: activeRev})
+}
+
+// testLayoutWithOldBuilder is testLayout with an explicit builder for
+// the pre-installed release (lets a test install an old runtime whose
+// health check behaves differently from the candidate's).
+func testLayoutWithOldBuilder(t *testing.T, activeRev string, b Builder) string {
+	t.Helper()
 	root := t.TempDir()
 	l := NewLayout(root)
 	if err := os.MkdirAll(filepath.Join(root, "src", "db"), 0700); err != nil {
@@ -100,7 +111,6 @@ func testLayout(t *testing.T, activeRev string) string {
 	})
 	os.WriteFile(filepath.Join(root, "mpm_config.json"), []byte(`{"secret":"s3cret"}`), 0600)
 	if activeRev != "" {
-		b := fakeBuilder{commit: activeRev}
 		dir := t.TempDir()
 		if _, err := b.BuildFromCheckout(t.TempDir(), dir); err != nil {
 			t.Fatal(err)
@@ -129,6 +139,12 @@ func mkDB(t *testing.T, path string, tables map[string]string) {
 		}
 	}
 	if _, err := db.Exec("INSERT INTO memories (id, content) VALUES ('m1','hello')"); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	// Owner-only, like production (data root 0700, restored copies
+	// 0600): the writer scan's foreign-uid rule-outs depend on it.
+	if err := os.Chmod(path, 0600); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}

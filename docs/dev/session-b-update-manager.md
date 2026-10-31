@@ -61,16 +61,31 @@ branch before merge:
    reported as possibly running the old executable. Never touches
    agent sessions.
 2. **Restore checked managed services only.** A new `/proc` fd scan
-   finds any process holding the live DB (or WAL/SHM) and refuses the
-   restore — unbypassable, even with `--force`, which confirms data
-   loss only. Tested with a held SQLite connection and a simulated
-   agent process holding the DB file.
+   finds any process holding the live DB (or WAL/SHM), with
+   `/proc/locks` as world-readable second evidence where descriptors
+   cannot be read. Tri-state verdict: holders and observation failure
+   always refuse; named-but-uninspectable processes refuse unless
+   `--force` explicitly accepts the named residual (recorded, never
+   silent); foreign uids on a closed database and kernel threads are
+   positively ruled out. Authorized services stop first so a
+   scheduler pin does not block its own authorized restore; the re
+   check runs immediately before the swap (TOCTOU narrowed, not
+   claimed closed). Tested with a held SQLite connection, a
+   simulated agent process holding the DB file, fake-proc
+   inconclusive/ruled-out/lock-match cases, and a stop-ordering
+   test with a pinning service.
 3. **Recovery consistency on failed activation.** The stable updater is
    replaced only after the health checks pass; a live smoke runs with
    a schema-fingerprint watch, so a migration applied before a later
    failure is recorded explicitly with its recovery point instead of
-   silently restoring old binaries onto a new schema. Database writes
-   are never auto-restored.
+   silently restoring old binaries onto a new schema. On failure with
+   a migrated schema, the previous release is health-checked against
+   a scratch copy of the migrated database: verified means the
+   fallback proceeds and says so; unverified means a clearly
+   identified degraded stop (new binaries kept, recovery point
+   named). Database writes are never auto-restored. Rollback
+   re-evaluates the fingerprint baseline inside the update lock
+   instead of discarding it.
 4. **Backup verification raced concurrent writers.** Row-count
    equality compared two points in time; replaced with integrity +
    table-set parity + readability (fail-closed on truncation/emptiness).
