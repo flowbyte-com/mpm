@@ -607,6 +607,89 @@ func TestRestore_ReVerifiesTheRecordedFingerprintImmediatelyBeforeTheRename(t *t
 	}
 }
 
+// TestRollback_PostRestorePointerFailureBlackBox reproduces the reported
+// sequence WITHOUT the failure-injection hook, so the defect is pinned
+// against the real code path rather than against a test seam.
+//
+// `Rollback` repoints `current` by renaming a symlink onto
+// `<root>/.current.swap.update`. A non-empty DIRECTORY at that path
+// cannot be replaced by a symlink rename, so `restoreDatabase`
+// commits and `restorePointer` fails by itself. That is exactly the
+// reported state: the older database under the newer release.
+func TestRollback_PostRestorePointerFailureBlackBox(t *testing.T) {
+	root, _, newRev := rollbackFixture(t)
+	log := newOrderLog(t)
+	instrumentOldRuntime(t, root, oldRevOf(t, root), true)
+	log.reset(t)
+
+	// Inject the failure with the filesystem only.
+	if err := os.MkdirAll(filepath.Join(root, ".current.swap.update", "blocker"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	sc := newRecordedServices(root, log, "mpm-scheduler")
+	out, err := Rollback(Options{
+		DataRoot: root, WithDBRestore: true, Force: true,
+		RestartServices: true, Services: sc,
+	})
+	if err == nil {
+		t.Fatalf("the blocked pointer swap must fail the rollback; report:\n%s", out.Report)
+	}
+
+	// The prerequisite: the restore really did commit, so the pair
+	// really is split.
+	if got := newerRowsIn(t, root); got != 0 {
+		t.Fatalf("the scenario requires the restore to have committed; newer rows = %d", got)
+	}
+	if _, pointerRev, _ := CurrentReleaseTarget(root); pointerRev != newRev {
+		t.Fatalf("the pointer must still name %s; got %q", newRev, pointerRev)
+	}
+
+	if got := log.indexOf(t, "EVENT start"); got >= 0 {
+		t.Errorf("NO service may start while the restored database and the active release disagree; events:\n%s",
+			strings.Join(log.lines(t), "\n"))
+	}
+
+	// Reported as DEGRADED on every surface the operator can see: the
+	// error, the outcome report, and the recorded history.
+	if !strings.Contains(err.Error(), "DEGRADED") {
+		t.Errorf("the error must mark the state DEGRADED: %v", err)
+	}
+	if !strings.Contains(out.Report, "DEGRADED") {
+		t.Errorf("the outcome report must mark the state DEGRADED (it must not read as a clean recovery):\n%q", out.Report)
+	}
+	last, ok := lastHistoryEntry(t, root)
+	if !ok || last.Outcome != "failed" || !strings.Contains(last.Detail, "DEGRADED") {
+		t.Fatalf("the history must record a failed, DEGRADED outcome: %+v", last)
+	}
+}
+
+// oldRevOf returns the release the pointer named before the fixture's
+// update — the "previous" release a rollback returns to.
+func oldRevOf(t *testing.T, root string) string {
+	t.Helper()
+	target := ReadPreviousRelease(root)
+	rev := previousRevOf(target)
+	if rev == "" {
+		t.Fatalf("no previous release recorded at %s", root)
+	}
+	return rev
+}
+
+func newerRowsIn(t *testing.T, root string) int {
+	t.Helper()
+	db, err := openSQLiteRO(NewLayout(root).LiveDB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM memories WHERE content='newer'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 // --- recovery-point identity ----------------------------------------------------
 
 // fakeRecoveryPoint replaces the recorded backup's database with the

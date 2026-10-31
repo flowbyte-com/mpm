@@ -214,11 +214,14 @@ func Rollback(o Options) (Outcome, error) {
 	restartVerdict := func() (bool, string) {
 		if dbRestored && !activated {
 			return false, fmt.Sprintf(
-				"the database was restored from %s but the active release is still %s, so the two disagree and the managed service(s) were left stopped; start them only after deciding which release should own the restored database",
-				out.BackupDir, out.FromRev)
+				"DEGRADED: the database was restored from %s but the active release is still %s. "+
+					"The two halves of the transition disagree, so the managed service(s) were left stopped — "+
+					"starting one now would run the %s binary against the restored (older) database. "+
+					"Complete the pointer swap (re-run the rollback), then start the service(s) by hand",
+				out.BackupDir, out.FromRev, out.FromRev)
 		}
 		if activated && !healthy {
-			return false, "the restored runtime did not pass its health check, so the managed service(s) were left stopped; start them only once the runtime is known good"
+			return false, "DEGRADED: the restored runtime did not pass its health check, so the managed service(s) were left stopped — start them only once the runtime is known good"
 		}
 		return true, ""
 	}
