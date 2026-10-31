@@ -18,8 +18,6 @@ type Options struct {
 	CheckOnly bool
 	// DryRun plans the promotion without changing anything.
 	DryRun bool
-	// StatusOnly reports local state (no network, no changes).
-	StatusOnly bool
 	// Rollback repoints at the previous release instead of promoting.
 	Rollback bool
 	// WithDBRestore pairs with Rollback to restore the pre-update
@@ -290,12 +288,9 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
 		return out, err
 	}
-	activated := true
-	defer func() {
-		// A failure after the pointer moved restores it. A failure
-		// before needs no rollback: nothing was changed.
-		_ = activated
-	}()
+	// A failure after the pointer moved restores it (each step
+	// below does so explicitly). A failure before needs no rollback:
+	// nothing was changed.
 	if err := failPoint(o.failAt(), "activate"); err != nil {
 		_ = restorePointer(dataRoot, prevTarget)
 		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())

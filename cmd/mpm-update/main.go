@@ -175,9 +175,9 @@ func run(args []string) int {
 	}
 
 	o = update.Options{
-		DataRoot:        update.DataRoot(),
-		CheckOnly:       check,
-		StatusOnly:      status,
+		DataRoot:  update.DataRoot(),
+		CheckOnly: check,
+
 		DryRun:          dryRun,
 		Rollback:        rollback,
 		WithDBRestore:   withRestore,

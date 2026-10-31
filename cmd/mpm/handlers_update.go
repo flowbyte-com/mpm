@@ -263,7 +263,6 @@ func runUpdateInProcess(f updateFlagSet) int {
 	o := mpmupdate.Options{
 		DataRoot:        mpmupdate.DataRoot(),
 		CheckOnly:       f.check,
-		StatusOnly:      f.status,
 		DryRun:          f.dryRun,
 		Rollback:        f.rollback,
 		WithDBRestore:   f.withRestore,
