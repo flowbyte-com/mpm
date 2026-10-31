@@ -114,14 +114,20 @@ func TestConfirmPrompt_UnterminatedAnswerIsCancellation(t *testing.T) {
 //	Protocol            → Ollama (no credential prompt)
 //	Model               → left empty, so the wizard probes no endpoint
 //	Base URL            → the protocol's default
-//	Timeout seconds     → the default
 //	Embedding           → leave unchanged
 //	Specialised models  → no separate critic model
 //
 // The model is left empty on purpose: a named model makes the wizard
 // probe the endpoint's capabilities, and a regression test must not
 // depend on what answers a live daemon.
-const wizardAnswers = "1\n3\n\n\n\n1\nn\n"
+//
+// There is NO line for a request timeout. The timeout is not an
+// onboarding question (see the timeout policy in
+// internal/core/config/timeout.go), so the wizard does not ask for one.
+// This script is also the check: if the prompt came back, the answers
+// would misalign from that point on and the session would write the
+// wrong values — which the wizard's own regression tests would catch.
+const wizardAnswers = "1\n3\n\n\n1\nn\n"
 
 // runWizardInPTY drives the interactive wizard through a
 // pseudo-terminal and returns its exit code and whether the wizard
