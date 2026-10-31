@@ -49,6 +49,39 @@ verified bundles.
 6. **Signature verification deferred** (checksum + TLS + attestation +
    recorded provenance today). The checksum hook is the seam.
 
+## Follow-up corrections (PR #195 review)
+
+Direct review found six release-critical edges; all fixed on this
+branch before merge:
+
+1. **`--restart-services` was accepted and ignored.** The update now
+   stops the active managed units before activation, starts back only
+   those, and verifies each restarted process resolves into the new
+   release (PID + exe). Without authorization, active daemons are
+   reported as possibly running the old executable. Never touches
+   agent sessions.
+2. **Restore checked managed services only.** A new `/proc` fd scan
+   finds any process holding the live DB (or WAL/SHM) and refuses the
+   restore — unbypassable, even with `--force`, which confirms data
+   loss only. Tested with a held SQLite connection and a simulated
+   agent process holding the DB file.
+3. **Recovery consistency on failed activation.** The stable updater is
+   replaced only after the health checks pass; a live smoke runs with
+   a schema-fingerprint watch, so a migration applied before a later
+   failure is recorded explicitly with its recovery point instead of
+   silently restoring old binaries onto a new schema. Database writes
+   are never auto-restored.
+4. **Backup verification raced concurrent writers.** Row-count
+   equality compared two points in time; replaced with integrity +
+   table-set parity + readability (fail-closed on truncation/emptiness).
+   Tested with concurrent writers and truncated/empty backups.
+5. **Release publishing could clobber.** The workflow now ensures the
+   release exists, verifies tag/identity/checksum/asset names, carries
+   no `--clobber`, and keeps the attestation.
+6. **`--dry-run` took a persistent backup.** Dry-run is now fully
+   nonmutating (temp staging, no backup, no lock, no record), pinned
+   by a contract test.
+
 ## Failures this work found in itself
 
 1. **Unstamped dev builds refused by anti-mixture.** `GoBuilder` passed

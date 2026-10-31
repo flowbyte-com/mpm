@@ -219,14 +219,23 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 		return out, nil
 	}
 
+	// --dry-run is nonmutating: the candidate is staged in a temp
+	// directory outside the data root, no backup is taken, no lock is
+	// held and nothing is recorded. It answers "would this validate?"
+	// and keeps nothing. --check is even cheaper (resolve only).
+	if o.DryRun {
+		return dryRunUpdate(ctx, o, dataRoot, src, &out)
+	}
+
 	lock, err := AcquireUpdateLock(dataRoot)
 	if err != nil {
 		return out, err
 	}
 	defer lock.Release()
 
-	cand, err := stageCandidate(ctx, o, dataRoot, src)
+	cand, err := stageCandidate(ctx, o, NewLayout(dataRoot).Staging(), src)
 	if err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, "", "", "", "failed", err.Error())
 		return out, err
 	}
 	// The staging area is disposable: a failure anywhere below discards
@@ -241,22 +250,27 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 		}
 	}()
 	if err := failPoint(o.failAt(), "stage"); err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, "", "", "", "failed", err.Error())
 		return out, err
 	}
 
 	preFP, backupDir, err := backupAndFingerprint(dataRoot, o.now())
 	if err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, "", preFP, "", "failed", err.Error())
 		return out, err
 	}
 	out.BackupDir = backupDir
 	if err := failPoint(o.failAt(), "backup"); err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
 		return out, err
 	}
 
 	if err := preflight(candidateDir(cand), dataRoot); err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
 		return out, err
 	}
 	if err := failPoint(o.failAt(), "preflight"); err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
 		return out, err
 	}
 
@@ -266,66 +280,121 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 		return out, rep.ValidationError()
 	}
 	if err := failPoint(o.failAt(), "validate"); err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
 		return out, err
 	}
 
 	if o.DryRun {
-		out.Report = dryRunReport(out.FromRev, src, rep, backupDir)
+		out.Report = dryRunReport(out.FromRev, src, rep)
 		return out, nil
 	}
 
-	if _, err := installRelease(dataRoot, candidateDir(cand), src.Rev); err != nil {
+	// Quiescence. With --restart-services, the managed units that are
+	// active are stopped before the pointer moves, so no old-binary
+	// writer is mid-flight during activation, and started back
+	// afterwards. Only stopped units are started back: previously
+	// inactive services stay inactive.
+	sc := o.services()
+	var stoppedUnits []string
+	var stoppedSoFar []string
+	if o.RestartServices {
+		stoppedUnits = sc.ActiveUnits()
+		for _, u := range stoppedUnits {
+			if err := sc.Stop(u); err != nil {
+				for _, s := range stoppedSoFar {
+					_ = sc.Start(s)
+				}
+				recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
+				return out, err
+			}
+			stoppedSoFar = append(stoppedSoFar, u)
+		}
+	}
+	restoreStopped := func() {
+		for _, s := range stoppedSoFar {
+			_ = sc.Start(s)
+		}
+	}
+
+	failAfterStop := func(stage string, err error) (Outcome, error) {
+		restoreStopped()
 		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
 		return out, err
 	}
+
+	if _, err := installRelease(dataRoot, candidateDir(cand), src.Rev); err != nil {
+		return failAfterStop("install", err)
+	}
 	candidateKept = true
 	if err := failPoint(o.failAt(), "install"); err != nil {
-		return out, err
+		return failAfterStop("install", err)
 	}
 
 	prevTarget, err := activateRelease(dataRoot, src.Rev)
 	if err != nil {
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
-		return out, err
+		return failAfterStop("activate", err)
 	}
 	// A failure after the pointer moved restores it (each step
-	// below does so explicitly). A failure before needs no rollback:
-	// nothing was changed.
-	if err := failPoint(o.failAt(), "activate"); err != nil {
+	// below does so explicitly), then restarts what was stopped.
+	// A failure before needs no rollback: nothing was changed.
+	failAfterActivate := func(postFP string, err error) (Outcome, error) {
 		_ = restorePointer(dataRoot, prevTarget)
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
+		restoreStopped()
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "failed", err.Error())
 		return out, err
 	}
-
-	if err := installStableUpdater(dataRoot, src.Rev); err != nil {
-		_ = restorePointer(dataRoot, prevTarget)
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
-		return out, err
+	if err := failPoint(o.failAt(), "activate"); err != nil {
+		return failAfterActivate("", err)
 	}
 
 	smoke := SmokeScratch(filepath.Join(NewLayout(dataRoot).ReleaseDir(src.Rev), "bin", "mpm"), filepath.Join(backupDir, "mpm.db"))
 	if !smoke.OK {
-		_ = restorePointer(dataRoot, prevTarget)
 		err := fmt.Errorf("the candidate failed its smoke test (%s); the previous runtime is active again", smoke.Detail)
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
-		return out, err
-	}
-	live := SmokeLive(dataRoot)
-	if !live.OK {
-		_ = restorePointer(dataRoot, prevTarget)
-		err := fmt.Errorf("the promoted runtime failed its health check (%s); the previous runtime is active again", live.Detail)
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
-		return out, err
-	}
-	if err := failPoint(o.failAt(), "smoke"); err != nil {
-		_ = restorePointer(dataRoot, prevTarget)
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
-		return out, err
+		return failAfterActivate("", err)
 	}
 
-	postFP, _ := SchemaFingerprint(NewLayout(dataRoot).LiveDB())
-	schemaChanged := postFP != "" && preFP != "" && postFP != preFP
-	recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "success", schemaNote(schemaChanged))
+	// The live smoke is the point of no return for the SCHEMA: the new
+	// binary opens the live database, and a newer binary may apply
+	// pending migrations just by opening it. The fingerprint watch
+	// observes that, so a later failure cannot pretend the database is
+	// untouched.
+	live, postFP, schemaChanged := smokeLiveWatched(dataRoot, preFP)
+	if !live.OK {
+		err := fmt.Errorf("the promoted runtime failed its health check (%s); the previous runtime is active again", live.Detail)
+		if schemaChanged {
+			err = fmt.Errorf("%v\nNOTE: the live database's shape changed while the new runtime ran (a migration applied on open). The old binaries are active again, but they may not read the migrated shape: restore the database from %s if they cannot, or stay on %s and investigate", err, backupDir, src.Rev)
+		}
+		return failAfterActivate(postFP, err)
+	}
+	if err := failPoint(o.failAt(), "smoke"); err != nil {
+		if schemaChanged {
+			err = fmt.Errorf("%v\nNOTE: the live database's shape changed during the smoke step; recovery point: %s", err, backupDir)
+		}
+		return failAfterActivate(postFP, err)
+	}
+
+	// The promoted release passed. Only now is the stable updater
+	// replaced: every earlier failure leaves the known-good copy in
+	// place, so recovery never depends on a release that never proved
+	// itself.
+	if err := installStableUpdater(dataRoot, src.Rev); err != nil {
+		return failAfterActivate(postFP, err)
+	}
+
+	// Restart what was stopped, then verify the running identities:
+	// a restarted daemon must resolve into the new release, not just
+	// report active.
+	var identityWarnings []string
+	for _, u := range stoppedSoFar {
+		if err := sc.Start(u); err != nil {
+			identityWarnings = append(identityWarnings, fmt.Sprintf("%s: restarted but the start reported an error (%v); confirm it by hand", u, err))
+			continue
+		}
+		if w := verifyServiceIdentity(dataRoot, src.Rev, sc, u); w != "" {
+			identityWarnings = append(identityWarnings, w)
+		}
+	}
+	recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, postFP, "success", successDetail(schemaChanged, identityWarnings))
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "updated %s -> %s\n", displayRev(out.FromRev), src.Rev)
@@ -333,9 +402,112 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 	if schemaChanged {
 		b.WriteString("note: the live database's shape changed during this update; a runtime rollback will require a database restore (see `mpm update --rollback`)\n")
 	}
+	if len(stoppedSoFar) > 0 {
+		fmt.Fprintf(&b, "restarted: %s (verified against %s)\n", strings.Join(stoppedSoFar, ", "), src.Rev)
+	} else if len(sc.ActiveUnits()) > 0 {
+		fmt.Fprintf(&b, "note: managed service(s) still running (%s) were NOT restarted (no --restart-services); they may still use the old executable until restarted\n", strings.Join(sc.ActiveUnits(), ", "))
+	}
+	for _, w := range identityWarnings {
+		fmt.Fprintf(&b, "warning: %s\n", w)
+	}
 	b.WriteString(staleNote(dataRoot))
 	out.Report = b.String()
 	return out, nil
+}
+
+// dryRunUpdate validates a candidate without changing or keeping
+// anything.
+//
+// Nothing persistent happens here: the candidate is staged in a temp
+// directory (never the data root's staging area), no backup is taken
+// (there is nothing to recover), no lock is held (no shared state is
+// touched) and nothing is recorded. The preflight reads the live
+// database through a temp snapshot, never the live file. What costs
+// something is time and network — resolving, downloading or building
+// the candidate — which is exactly what --check avoids and --dry-run
+// spends on purpose.
+func dryRunUpdate(ctx context.Context, o Options, dataRoot string, src Source, out *Outcome) (Outcome, error) {
+	work, err := os.MkdirTemp("", "mpm-update-dryrun.")
+	if err != nil {
+		return *out, err
+	}
+	defer removeWorkDir(work)
+	cand, err := stageCandidate(ctx, o, work, src)
+	if err != nil {
+		return *out, err
+	}
+	if err := preflight(candidateDir(cand), dataRoot); err != nil {
+		return *out, err
+	}
+	rep := ValidateBundle(candidateDir(cand), src.Rev)
+	if !rep.Valid {
+		return *out, rep.ValidationError()
+	}
+	out.Report = dryRunReport(out.FromRev, src, rep)
+	return *out, nil
+}
+
+// smokeLiveWatched runs the live health check and fingerprints the
+// database before and after, so a migration applied by the new binary
+// is observed rather than assumed away.
+func smokeLiveWatched(dataRoot string, preFP string) (smoke SmokeResult, postFP string, changed bool) {
+	smoke = SmokeLive(dataRoot)
+	post, err := SchemaFingerprint(NewLayout(dataRoot).LiveDB())
+	if err != nil {
+		return smoke, "", false
+	}
+	return smoke, post, preFP != "" && post != "" && post != preFP
+}
+
+// verifyServiceIdentity confirms a restarted unit resolves into the
+// new release. It returns "" when the identity checks out, or a
+// warning the operator must see.
+func verifyServiceIdentity(dataRoot, rev string, sc ServiceControl, unit string) string {
+	pid, err := sc.MainPID(unit)
+	if err != nil || pid <= 0 {
+		return fmt.Sprintf("%s: restarted but its process could not be identified; confirm it runs %s by hand", unit, rev)
+	}
+	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil {
+		return fmt.Sprintf("%s (pid %d): executable unreadable; confirm it runs %s by hand", unit, pid, rev)
+	}
+	return verifyServiceExe(dataRoot, rev, unit, pid, exe)
+}
+
+// verifyServiceExe is the pure identity rule: the executable must
+// resolve into the new release directory. Split out so tests can pin
+// the matching without live processes.
+func verifyServiceExe(dataRoot, rev, unit string, pid int, exe string) string {
+	want := filepath.Join(dataRoot, ReleasesDirName, rev)
+	if exe == want+"/bin/"+unit || strings.HasPrefix(exe, want+"/") {
+		return ""
+	}
+	return fmt.Sprintf("%s (pid %d) runs %s, not the active release %s; restart it by hand", unit, pid, exe, rev)
+}
+
+func successDetail(schemaChanged bool, warnings []string) string {
+	if schemaChanged {
+		return "the live database's shape changed during this update"
+	}
+	if len(warnings) > 0 {
+		return "update succeeded with warnings: " + strings.Join(warnings, "; ")
+	}
+	return ""
+}
+
+func dryRunReport(from string, src Source, rep BundleReport) string {
+	var b strings.Builder
+	b.WriteString("dry run — nothing was changed and nothing was kept:\n")
+	b.WriteString("(no backup was taken, nothing was staged in the data root, nothing was recorded)\n")
+	fmt.Fprintf(&b, "would update %s -> %s (%s)\n", displayRev(from), src.Rev, string(src.Kind))
+	for _, c := range rep.Checks {
+		mark := "ok"
+		if !c.OK {
+			mark = "FAIL"
+		}
+		fmt.Fprintf(&b, "  [%s] %s: %s\n", mark, c.Name, c.Detail)
+	}
+	return b.String()
 }
 
 func candidateDir(cand Candidate) string { return cand.Dir }
@@ -372,20 +544,6 @@ func recordOutcome(dataRoot, action, from, to string, src Source, backupDir, pre
 		Outcome: outcome, Detail: detail, BackupDir: backupDir,
 		PreFP: preFP, PostFP: postFP, SchemaChanged: preFP != "" && postFP != "" && preFP != postFP,
 	})
-}
-
-func dryRunReport(from string, src Source, rep BundleReport, backupDir string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "dry run — nothing was changed\n")
-	fmt.Fprintf(&b, "would update %s -> %s (%s)\n", displayRev(from), src.Rev, string(src.Kind))
-	for _, c := range rep.Checks {
-		mark := "ok"
-		if !c.OK {
-			mark = "FAIL"
-		}
-		fmt.Fprintf(&b, "  [%s] %s: %s\n", mark, c.Name, c.Detail)
-	}
-	return b.String()
 }
 
 func staleNote(dataRoot string) string {

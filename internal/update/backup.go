@@ -114,8 +114,26 @@ func rmSiblingJournals(dst string) {
 	os.Remove(dst + "-shm")
 }
 
-// verifyBackup checks integrity_check and per-table row-count parity
-// between live and backup.
+// verifyBackup proves the backup stands alone.
+//
+// VACUUM INTO captures a transactionally consistent snapshot — but of
+// some instant DURING the backup, not of the live database as it reads
+// right now. Comparing the backup's row counts against a LATER live
+// read therefore compares two different points in time: a legitimate
+// concurrent write produces different counts and a false failure.
+//
+// So the backup is verified against ITSELF, not against a second
+// sample of a moving target:
+//
+//  1. PRAGMA integrity_check passes (fail closed: truncation and torn
+//     pages are corruption, whatever the row counts say);
+//  2. the backup carries the same TABLES as the live database (a
+//     backup missing a table is not a backup);
+//  3. every backup table is fully readable (a COUNT(*) forces the
+//     pages to be visited; an unreadable table fails closed).
+//
+// Row counts are not compared. A concurrent insert or delete between
+// the snapshot and any live read is normal operation, not corruption.
 func verifyBackup(live, backup string) error {
 	bdb, err := sql.Open("sqlite3", "file:"+backup+"?mode=ro")
 	if err != nil {
@@ -130,28 +148,40 @@ func verifyBackup(live, backup string) error {
 	if integrity != "ok" {
 		return fmt.Errorf("backup integrity_check: %s", integrity)
 	}
-	liveCounts, err := tableRowCounts(live)
+	liveTables, err := tableNames(live)
 	if err != nil {
-		return fmt.Errorf("could not count the live tables: %w", err)
+		return fmt.Errorf("could not list the live tables: %w", err)
 	}
-	backupCounts, err := tableRowCounts(backup)
+	backupTables, err := tableNames(backup)
 	if err != nil {
-		return fmt.Errorf("could not count the backup tables: %w", err)
+		return fmt.Errorf("could not list the backup tables: %w", err)
 	}
-	for t, n := range liveCounts {
-		if backupCounts[t] != n {
-			return fmt.Errorf("backup row counts differ on %s (live=%d backup=%d)", t, n, backupCounts[t])
-		}
+	if !equalStrings(liveTables, backupTables) {
+		return fmt.Errorf("backup tables %v do not match live tables %v", backupTables, liveTables)
 	}
-	for t := range backupCounts {
-		if _, ok := liveCounts[t]; !ok {
-			return fmt.Errorf("backup carries an unexpected table %s", t)
+	for _, tbl := range backupTables {
+		var n int64
+		// Table names come from sqlite_master, not operator input.
+		if err := bdb.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, tbl)).Scan(&n); err != nil {
+			return fmt.Errorf("backup table %s is not readable: %w", tbl, err)
 		}
 	}
 	return nil
 }
 
-func tableRowCounts(path string) (map[string]int64, error) {
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func tableNames(path string) ([]string, error) {
 	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
 	if err != nil {
 		return nil, err
@@ -162,31 +192,16 @@ func tableRowCounts(path string) (map[string]int64, error) {
 	if err != nil {
 		return nil, err
 	}
-	var tables []string
+	defer rows.Close()
+	var out []string
 	for rows.Next() {
 		var n string
 		if err := rows.Scan(&n); err != nil {
-			rows.Close()
 			return nil, err
 		}
-		tables = append(tables, n)
+		out = append(out, n)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make(map[string]int64, len(tables))
-	for _, t := range tables {
-		var n int64
-		// Table names come from sqlite_master, not operator input.
-		// An unreadable table fails verification: a backup whose
-		// contents cannot be fully compared is not a verified backup.
-		if err := db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, t)).Scan(&n); err != nil {
-			return nil, fmt.Errorf("could not count table %s: %w", t, err)
-		}
-		out[t] = n
-	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // copyOperatorFiles copies operator-owned state alongside the database

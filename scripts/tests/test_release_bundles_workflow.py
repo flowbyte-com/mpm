@@ -56,6 +56,28 @@ class ReleaseBundlesWorkflowTest(unittest.TestCase):
         self.assertNotIn("darwin", text)
         self.assertNotIn("windows", text)
 
+    def test_published_artifacts_are_never_replaced(self):
+        text = WORKFLOW.read_text()
+        # The upload COMMAND must not clobber: already-published
+        # artifacts are never replaced. Comments may discuss the flag;
+        # strip them before asserting.
+        publish = text.split("Publish to the GitHub release")[1]
+        self.assertIn("gh release upload", publish)
+        code = "\n".join(
+            line.split("#")[0] for line in publish.splitlines()
+        )
+        self.assertNotIn("--clobber", code)
+
+    def test_release_is_created_deterministically(self):
+        text = WORKFLOW.read_text()
+        self.assertIn("gh release view", text)
+        self.assertIn("gh release create", text)
+
+    def test_artifacts_are_verified_before_publish(self):
+        text = WORKFLOW.read_text()
+        self.assertIn("RELEASE.json", text)
+        self.assertIn("SHA256SUMS", text)
+
 
 class AssemblerTest(unittest.TestCase):
     def test_names_match_the_updater(self):

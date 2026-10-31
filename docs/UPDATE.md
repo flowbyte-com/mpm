@@ -95,21 +95,37 @@ router reserves it for build-identity reporting, so the update flag is
 2. Acquire the update lock; reject concurrent updates.
 3. Resolve and (for releases) download + verify the candidate.
 4. Stage the candidate outside the active release.
-5. Take and verify a SQLite online backup (`VACUUM INTO` + integrity +
-   row counts). Operator files are copied alongside; credentials are
-   never printed.
+5. Take and verify a SQLite online backup (`VACUUM INTO` + integrity
+   check + table-set parity against a snapshot + full readability).
+   Row counts are deliberately NOT compared: the backup is a snapshot
+   of one instant and the live database is read at another, so a
+   legitimate concurrent write would produce a false failure. Operator
+   files are copied alongside; credentials are never printed.
 6. Check schema compatibility against a snapshot (collision = refusal).
 7. Validate binaries, plugin payload, manifests and metadata.
 8. Atomically activate the candidate; record the previous pointer.
+   With `--restart-services`, the managed units that were active are
+   stopped first (previously inactive services stay untouched) and
+   started back afterwards; without it they are left running and the
+   report says they may still use the old executable.
 9. Verify the new identity, smoke-test against a scratch copy, then
-   health-check the live runtime. Any failure restores the pointer.
-10. Refresh the stable `mpm-update` copy and record the outcome.
-11. Preserve rollback material (the previous release dir, the backup).
+   health-check the live runtime while watching for schema migration.
+   Any failure restores the pointer (and restarts what was stopped).
+   The stable `mpm-update` copy is replaced only after the health
+   checks pass, so a failed activation never leaves an unproven
+   recovery binary behind. If the new binary migrated the database
+   before a later failure, the record says so explicitly and names the
+   recovery point — the old binaries are restored, but the migrated
+   data is never silently overwritten.
+10. Record the outcome and preserve rollback material (the previous
+    release dir, the backup).
 
-`--dry-run` stops after validation. `--check` resolves and reports.
-`--status` is local-only (no network). Re-runs are idempotent: an
-already-current target reports "already up to date" and changes
-nothing.
+`--dry-run` is nonmutating: the candidate is staged in a temp
+directory, no backup is taken, no lock is held and nothing is
+recorded. It answers "would this validate?" and keeps nothing.
+`--check` is even cheaper (resolve only). `--status` is local-only
+(no network). Re-runs are idempotent: an already-current target
+reports "already up to date" and changes nothing.
 
 ## Rollback
 
@@ -123,6 +139,12 @@ never knew, the one-command rollback is **refused** with the exact
 recovery options (restore the pre-update backup first, or confirm the
 combined restore). A failed promotion restores the pointer
 automatically.
+
+A database restore additionally requires writer quiescence: any
+process holding the live database open — daemon, agent session, MCP
+server, CLI — blocks the restore, and `--force` confirms data loss
+without bypassing that check. Managed services can be stopped with
+`--restart-services`; anything else must be stopped by its owner.
 
 ## Stale processes
 

@@ -3,6 +3,7 @@ package update
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -161,6 +162,96 @@ func isMPMBinary(name string) bool {
 		return true
 	}
 	return false
+}
+
+// procFSRoot is /proc on Linux. Tests override it with a fake tree.
+var procFSRoot = "/proc"
+
+// DBHolder is one process holding an open file description on a
+// database file.
+type DBHolder struct {
+	PID  int
+	Name string
+	File string
+}
+
+// OpenDBHolders lists the processes holding an open file description
+// on any of the given database files (the live database and its WAL
+// and SHM sidecars).
+//
+// This is hard evidence, not heuristics: an SQLite connection is an
+// open file description. A process on this list is a WRITER for
+// restore purposes whether it looks like a daemon, an agent session,
+// a CLI or anything else.
+//
+// The updater itself is never excluded: by construction it holds no
+// database handle at restore time (every helper opens and closes), so
+// any holder — including, hypothetically, this process — is a real
+// writer and must block the restore.
+func OpenDBHolders(dbFiles ...string) []DBHolder {
+	want := map[string]string{}
+	for _, f := range dbFiles {
+		abs, err := filepath.Abs(f)
+		if err != nil {
+			continue
+		}
+		want[abs] = f
+		// SQLite may hold the main file while the sidecars come and
+		// go; match any of the three spellings.
+		want[strings.TrimSuffix(abs, "-wal")] = f
+		want[strings.TrimSuffix(abs, "-shm")] = f
+	}
+	var out []DBHolder
+	entries, err := os.ReadDir(procFSRoot)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		fdDir := filepath.Join(procFSRoot, e.Name(), "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		held := ""
+		for _, fd := range fds {
+			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+			if err != nil {
+				continue
+			}
+			// A deleted-but-held file reads as "path (deleted)".
+			// It still pins the inode, so it still counts.
+			target = strings.TrimSuffix(target, " (deleted)")
+			if _, ok := want[target]; ok {
+				held = target
+				break
+			}
+		}
+		if held == "" {
+			continue
+		}
+		out = append(out, DBHolder{PID: pid, Name: procComm(pid), File: held})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PID < out[j].PID })
+	return out
+}
+
+// procComm names a process for operator output: the exe basename, or
+// the comm value when the exe is unreadable.
+func procComm(pid int) string {
+	if exe, err := os.Readlink(filepath.Join(procFSRoot, strconv.Itoa(pid), "exe")); err == nil {
+		if i := strings.LastIndex(exe, "/"); i >= 0 {
+			return exe[i+1:]
+		}
+		return exe
+	}
+	if raw, err := os.ReadFile(filepath.Join(procFSRoot, strconv.Itoa(pid), "comm")); err == nil {
+		return strings.TrimSpace(string(raw))
+	}
+	return fmt.Sprintf("pid %d", pid)
 }
 
 // FormatStaleReport renders the inventory for the operator. It never

@@ -167,27 +167,70 @@ func (e *RollbackRefused) Error() string {
 	return b.String()
 }
 
+// WritersActiveError refuses a database restore while writers remain.
+// It is unbypassable: --force confirms DATA LOSS, never the integrity
+// of restoring under writers. The installation is untouched.
+type WritersActiveError struct {
+	Holders []DBHolder
+}
+
+func (e *WritersActiveError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "refusing to restore the database: %d process(es) still hold it open:\n", len(e.Holders))
+	for _, h := range e.Holders {
+		fmt.Fprintf(&b, "  pid %d %s (%s)\n", h.PID, h.Name, h.File)
+	}
+	b.WriteString("Stop the writers — agents, MCP servers, CLI processes — and retry.\n")
+	b.WriteString("--force confirms overwriting newer data; it does not bypass this check.")
+	return b.String()
+}
+
 // restoreDatabase copies the verified backup over the live database.
-// Writers must be stopped first: with --restart-services the managed
-// services are stopped here and restarted after; otherwise an active
-// scheduler is a refusal, because restoring under writers corrupts.
+//
+// WRITER QUIESCENCE. Restoring under writers corrupts: an SQLite
+// connection holding the live file (or its WAL) will keep writing to
+// the replaced inode or replay the old WAL over the restored copy.
+// So the restore is refused while any process holds an open file
+// description on the live database or its sidecars — daemons, agent
+// sessions, MCP servers, CLIs alike. That check cannot be overridden:
+// --force confirms DATA LOSS (overwriting newer user data), not the
+// integrity of restoring under writers.
+//
+// Managed services are stoppable with --restart-services (only the
+// units that were active are stopped, and only those are started
+// back, so previously inactive services stay inactive). Anything else
+// holding the database must be stopped by its owner first.
 func restoreDatabase(dataRoot, backupDir string, sc ServiceControl, restartServices bool) error {
 	l := NewLayout(dataRoot)
+	live := l.LiveDB()
 	raw, err := os.ReadFile(filepath.Join(backupDir, "mpm.db"))
 	if err != nil {
 		return fmt.Errorf("the recovery point has no database copy: %w", err)
 	}
-	active := sc.Active()
-	if active && !restartServices {
-		return fmt.Errorf("a managed service is still running; stop it first or re-run with --restart-services (restoring under writers corrupts)")
+	if holders := OpenDBHolders(live, live+"-wal", live+"-shm"); len(holders) > 0 {
+		return &WritersActiveError{Holders: holders}
 	}
-	if active {
-		if err := sc.Stop(); err != nil {
+	active := sc.ActiveUnits()
+	if len(active) > 0 && !restartServices {
+		return fmt.Errorf("managed service(s) still running (%s); stop them first or re-run with --restart-services (restoring under writers corrupts)", strings.Join(active, ", "))
+	}
+	var stopped []string
+	for _, unit := range active {
+		if err := sc.Stop(unit); err != nil {
+			for _, s := range stopped {
+				_ = sc.Start(s)
+			}
 			return err
 		}
-		defer sc.Start() //nolint:errcheck
+		stopped = append(stopped, unit)
 	}
-	live := l.LiveDB()
+	// Only the units this restore stopped are started back. A unit
+	// that was inactive before stays inactive.
+	defer func() {
+		for _, s := range stopped {
+			_ = sc.Start(s)
+		}
+	}()
 	tmp, err := os.CreateTemp(filepath.Dir(live), ".mpm.db.restore.*")
 	if err != nil {
 		return err

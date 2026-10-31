@@ -16,35 +16,68 @@ var ManagedServices = []string{"mpm-scheduler", "mpm-telemetry"}
 // ServiceControl probes and restarts managed services. The production
 // implementation shells out to systemctl; tests inject a fake so no
 // test ever touches the operator's live services.
+//
+// The interface is per-unit, because the updater must preserve
+// previously inactive services as inactive: it stops only the units
+// that were active, and starts only those back.
 type ServiceControl interface {
-	Active() bool
-	Stop() error
-	Start() error
+	// ActiveUnits returns the managed units currently active.
+	ActiveUnits() []string
+	// Stop stops one unit.
+	Stop(unit string) error
+	// Start starts one unit.
+	Start(unit string) error
+	// MainPID returns the unit's main PID, or 0 when unknown.
+	MainPID(unit string) (int, error)
 }
 
 // SystemdServices is the production ServiceControl.
 type SystemdServices struct{}
 
-func (SystemdServices) Active() bool {
+func (SystemdServices) ActiveUnits() []string {
+	var out []string
 	for _, s := range ManagedServices {
 		if systemctlActive(s) {
-			return true
+			out = append(out, s)
 		}
 	}
-	return false
+	return out
 }
 
-func (SystemdServices) Stop() error { return StopServices() }
+func (SystemdServices) Stop(unit string) error {
+	if out, err := exec.Command("systemctl", "--user", "stop", unit).CombinedOutput(); err != nil { //nolint:gosec
+		return fmt.Errorf("could not stop %s: %v\n%s", unit, err, out)
+	}
+	return nil
+}
 
-func (SystemdServices) Start() error { return StartServices() }
+func (SystemdServices) Start(unit string) error {
+	if out, err := exec.Command("systemctl", "--user", "start", unit).CombinedOutput(); err != nil { //nolint:gosec
+		return fmt.Errorf("could not start %s: %v\n%s", unit, err, out)
+	}
+	return nil
+}
 
-// QuietServices reports no running services and refuses restarts. Tests
-// use it to prove the restore path without touching live services.
+func (SystemdServices) MainPID(unit string) (int, error) {
+	out, err := exec.Command("systemctl", "--user", "show", "-p", "MainPID", "--value", unit).CombinedOutput() //nolint:gosec
+	if err != nil {
+		return 0, fmt.Errorf("could not query %s: %v", unit, err)
+	}
+	var pid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &pid); err != nil {
+		return 0, fmt.Errorf("could not parse MainPID for %s: %v", unit, err)
+	}
+	return pid, nil
+}
+
+// QuietServices reports no running services. Tests use it to prove
+// paths without touching live services.
 type QuietServices struct{}
 
-func (QuietServices) Active() bool { return false }
-func (QuietServices) Stop() error  { return nil }
-func (QuietServices) Start() error { return nil }
+func (QuietServices) ActiveUnits() []string            { return nil }
+func (QuietServices) Stop(unit string) error           { return nil }
+func (QuietServices) Start(unit string) error          { return nil }
+func (QuietServices) MainPID(unit string) (int, error) { return 0, nil }
 
 // ServiceHealth is the read-only state of one managed service.
 type ServiceHealth struct {

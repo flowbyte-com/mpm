@@ -117,8 +117,12 @@ func resolveBranchHead(branch string) (string, error) {
 //   - git: fetch the revision into an isolated temp clone, then build;
 //   - local: build from the checkout in place (read-only — the build
 //     writes only to the destination bundle directory).
-func stageCandidate(ctx context.Context, o Options, dataRoot string, src Source) (Candidate, error) {
-	staging := NewLayout(dataRoot).Staging()
+//
+// stageCandidate assembles the candidate bundle under stagingParent
+// (the data root's staging directory for a real update; a temp
+// directory for a dry run, so a dry run keeps nothing).
+func stageCandidate(ctx context.Context, o Options, stagingParent string, src Source) (Candidate, error) {
+	staging := stagingParent
 	if err := os.MkdirAll(staging, 0755); err != nil {
 		return Candidate{}, err
 	}

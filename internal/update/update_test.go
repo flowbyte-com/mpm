@@ -122,15 +122,21 @@ func mkDB(t *testing.T, path string, tables map[string]string) {
 	os.MkdirAll(filepath.Dir(path), 0700)
 	os.Remove(path)
 	db := openTestDB(t, path)
-	defer db.Close()
 	for _, ddl := range tables {
 		if _, err := db.Exec(ddl); err != nil {
+			db.Close()
 			t.Fatal(err)
 		}
 	}
 	if _, err := db.Exec("INSERT INTO memories (id, content) VALUES ('m1','hello')"); err != nil {
+		db.Close()
 		t.Fatal(err)
 	}
+	// Closed immediately, not at test cleanup: database/sql pools keep
+	// the file descriptor open, and an idle pooled handle is still an
+	// open file description — which is exactly what the writer scan
+	// detects. (The deferred Cleanup close stays as a safety net.)
+	db.Close()
 }
 
 // --- already up to date -------------------------------------------------
