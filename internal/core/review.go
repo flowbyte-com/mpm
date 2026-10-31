@@ -97,6 +97,19 @@ const (
 	ReviewDecisionWeaken = "weaken"
 )
 
+// memExecer is the write surface the review and the weight primitives
+// need.
+//
+// Both *sql.DB and *sql.Tx satisfy it, and that is the whole point: the
+// EXACT same weight semantics, validation and read-back assertion can
+// run inside a transaction and outside one. The atomic review path and
+// the standalone weakening path are therefore the same code, and they
+// cannot drift apart.
+type memExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // ReviewCandidate is one memory whose spaced review is due.
 //
 // It carries the review-relevant facts explicitly rather than as a bag of
@@ -280,6 +293,19 @@ func (s *MemoryStore) RecordMemoryReview(memoryID string, decision string, note 
 			return err
 		}
 	}
+	return s.recordMemoryReviewOn(s.DB, memoryID, decision, note)
+}
+
+// recordMemoryReviewOn records the review through the given executor.
+//
+// It is the whole of RecordMemoryReview, split so that the SAME
+// validation and the SAME write can run inside a transaction: the
+// review decision and the weight change it asks for are one operator
+// act, and a decision recorded without its weight change is a review
+// the operator asked for and did not get.
+//
+// See DatabaseManager.RecordMemoryReviewsAndApply for the atomic path.
+func (s *MemoryStore) recordMemoryReviewOn(ex memExecer, memoryID string, decision string, note string) error {
 	if memoryID == "" {
 		return fmt.Errorf("record memory review: the memory id is empty")
 	}
@@ -294,7 +320,7 @@ func (s *MemoryStore) RecordMemoryReview(memoryID string, decision string, note 
 	// memory that is not there is a mistake worth reporting, not a
 	// silent no-op.
 	var alive int
-	err := s.DB.QueryRow(
+	err := ex.QueryRow(
 		`SELECT COUNT(*) FROM memories WHERE id = ? AND deleted_at IS NULL`,
 		memoryID).Scan(&alive)
 	if err != nil {
@@ -309,7 +335,7 @@ func (s *MemoryStore) RecordMemoryReview(memoryID string, decision string, note 
 		noteValue = note
 	}
 
-	_, err = s.DB.Exec(`
+	_, err = ex.Exec(`
 		INSERT INTO memory_reviews (memory_id, reviewed_at, decision, note)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(memory_id) DO UPDATE SET

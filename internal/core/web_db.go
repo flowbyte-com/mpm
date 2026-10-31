@@ -699,12 +699,29 @@ func (dm *DatabaseManager) ChallengeAndReinforce(id string, delta int) error {
 // state landed and surfaces the silent-promotion class of failures
 // (trigger swallowing the UPDATE, view with INSTEAD OF, etc.).
 func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
+	return weakenMemoryOn(dm.db, id, delta)
+}
+
+// weakenMemoryOn is the weakening primitive, over an executor.
+//
+// It is the whole of WeakenMemory, split so that the EXACT same
+// semantics — the floor, the validation, the busy-error mapping and the
+// read-back assertion — can run inside a transaction. The atomic
+// review path and the standalone weakening path are therefore one
+// implementation, and a second, divergent weakening algorithm cannot be
+// written by accident.
+//
+// The executor is a *sql.DB on the standalone path and a *sql.Tx on the
+// atomic one. On the transactional path the read-back reads the
+// transaction's own uncommitted state, which is exactly what the
+// assertion is for: it proves the row changed as the SQL said it would.
+func weakenMemoryOn(ex memExecer, id string, delta int) error {
 	if delta <= 0 {
 		delta = 1
 	}
 	weightLoss := (delta + 1) / 2
 
-	res, err := dm.db.Exec(`
+	res, err := ex.Exec(`
 		UPDATE memories
 		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
 		    weight = MAX(weight - ?, 1),
@@ -730,7 +747,7 @@ func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
 	// is misconfigured or an INSTEAD OF trigger swallowed the UPDATE.
 	var postWeight float64
 	var postReinf int
-	if err := dm.db.QueryRow(
+	if err := ex.QueryRow(
 		`SELECT weight, reinforcement_count FROM memories WHERE id = ?`, id,
 	).Scan(&postWeight, &postReinf); err != nil {
 		return fmt.Errorf("weaken memory: post-update read-back: %w", err)
@@ -1959,6 +1976,80 @@ func (dm *DatabaseManager) RecordMemoryReview(memoryID string, decision string, 
 		return err
 	}
 	return store.RecordMemoryReview(memoryID, decision, note)
+}
+
+// RecordMemoryReviewsAndApply records the operator's review of a batch
+// of memories AND, for a "weaken" decision, applies the weight change —
+// in ONE transaction.
+//
+// WHY ONE TRANSACTION.
+//
+// The review decision and the weight mutation are ONE operator act. The
+// command used to make them two writes: the review first, then the
+// weakening. If the weakening failed, the review was already recorded —
+// so the memory had LEFT the doctor's backlog, and the weight the
+// operator asked to reduce was untouched. The operator's decision was
+// half applied and reported as an error that named the half that
+// worked.
+//
+// The reverse order has the mirror defect: the weight reduced and the
+// memory still in the backlog, so the next review would ask again.
+//
+// The batch is atomic as a UNIT. `--ack-all` either applies every
+// review and every weakening, or applies NONE of them. A partial batch
+// is never reported as complete success, and it is never left behind
+// as a half-applied state.
+//
+// The weight change goes through the EXISTING WeakenMemory path — the
+// same floor, the same validation, the same read-back assertion — so
+// there is no second, divergent weakening algorithm. See
+// weakenMemoryOn.
+func (dm *DatabaseManager) RecordMemoryReviewsAndApply(memoryIDs []string, decision string, note string) error {
+	if len(memoryIDs) == 0 {
+		return nil
+	}
+	// The decision is validated ONCE, before any write, so an unknown
+	// decision cannot half-apply a batch.
+	switch decision {
+	case ReviewDecisionKeep, ReviewDecisionWeaken:
+	default:
+		return fmt.Errorf("record memory review: unknown decision %q (expected %q or %q)",
+			decision, ReviewDecisionKeep, ReviewDecisionWeaken)
+	}
+
+	tx, err := dm.db.Begin()
+	if err != nil {
+		if isBusyError(err) {
+			return fmt.Errorf("review: the database is contended: %w", err)
+		}
+		return fmt.Errorf("review: could not begin the review transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	store, err := dm.getSharedStore()
+	if err != nil {
+		return fmt.Errorf("review: %w", err)
+	}
+	for _, id := range memoryIDs {
+		if err := store.recordMemoryReviewOn(tx, id, decision, note); err != nil {
+			return err
+		}
+		if decision == ReviewDecisionWeaken {
+			if err := weakenMemoryOn(tx, id, 1); err != nil {
+				return fmt.Errorf("review: could not weaken %s: %w (the whole batch was rolled back, so no review was recorded)", id, err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("review: could not commit the review transaction: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // MemoryReview returns the recorded review for a memory, or nil.

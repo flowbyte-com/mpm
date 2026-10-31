@@ -459,19 +459,28 @@ func handleReviewAcknowledge(o *reviewOpts) int {
 		targets = []string{o.ack}
 	}
 
+	// ONE transaction for the whole batch.
+	//
+	// The review decision and the weight change a "weaken" decision
+	// asks for are ONE operator act. They used to be two writes, and
+	// a failure between them left the memory out of the doctor's
+	// backlog with the weight the operator asked to reduce untouched —
+	// half applied, and reported as an error naming only the half that
+	// worked.
+	//
+	// The batch is atomic as a unit: `--ack-all` either applies every
+	// review and every weakening, or applies none of them. A partially
+	// applied batch is never reported as complete success.
+	//
+	// The weight change goes through the EXISTING WeakenMemory path —
+	// the same floor, validation and read-back assertion that `mpm
+	// weaken` performs — so there is no second weakening algorithm
+	// here to drift from it.
+	if err := dm.RecordMemoryReviewsAndApply(targets, o.decision, o.note); err != nil {
+		return usererror.Error("review: %v", err)
+	}
 	reviewed := make([]map[string]interface{}, 0, len(targets))
 	for _, id := range targets {
-		if err := dm.RecordMemoryReview(id, o.decision, o.note); err != nil {
-			return usererror.Error("review: %v", err)
-		}
-		// A "weaken" decision is an explicit instruction. It goes
-		// through the existing WeakenMemory path, so the weight change
-		// is the same audited operation `mpm weaken` performs.
-		if o.decision == "weaken" {
-			if err := dm.WeakenMemory(id, 1); err != nil {
-				return usererror.Error("review: recorded the review of %s but could not weaken it: %v", id, err)
-			}
-		}
 		reviewed = append(reviewed, map[string]interface{}{
 			"id":       id,
 			"decision": o.decision,

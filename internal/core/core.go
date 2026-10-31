@@ -145,6 +145,12 @@ type CoreDB interface {
 	MemoriesDueForReview(days int, limit int) ([]ReviewCandidate, error)
 	CountMemoriesDueForReview(days int) (int, error)
 	RecordMemoryReview(memoryID string, decision string, note string) error
+	// RecordMemoryReviewsAndApply records the review of a BATCH and
+	// applies the weight change a "weaken" decision asks for, in ONE
+	// transaction. The decision and the mutation are one operator act:
+	// recording one without the other leaves the operator's intent
+	// half applied. The batch is atomic as a unit.
+	RecordMemoryReviewsAndApply(memoryIDs []string, decision string, note string) error
 	MemoryReview(memoryID string) (*MemoryReviewRecord, error)
 
 	// ─── Memory Mutations ────────────────────────────────────────────
