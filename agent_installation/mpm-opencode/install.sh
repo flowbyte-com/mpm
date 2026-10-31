@@ -145,6 +145,16 @@ MPM_HOME_DIR="${MPM_WORKSPACE:-${HOME_DIR}/.mpm}"
 PLUGIN_INSTALL_DIR="${MPM_HOME_DIR}/agent_installation"
 
 # Canonical adapter install locations (new and legacy).
+#
+# These stay LOGICAL — the path as the operator's layout names it. Under
+# the versioned-bundle layout `agent_installation` is a symlink into the
+# active release, so the physical path of the same directory changes with
+# every release. The registration must name the LOGICAL path: it is the
+# one that rolls with the release, and it is the one every other
+# registration that names the workspace keeps naming. Resolving it
+# physically would register a path pinned to one revision, and — because
+# it is a different string for the same directory as the stable entry —
+# would add a SECOND registration of the same plugin.
 CANONICAL_ADAPTER_DIR="${PLUGIN_INSTALL_DIR}/mpm-opencode"
 LEGACY_ADAPTER_DIR="${PLUGIN_INSTALL_DIR}/opencode-mpm"
 # The registration is the plugin PACKAGE DIRECTORY. OpenCode 2 resolves a
@@ -532,8 +542,38 @@ stage_opencode_runtime_package() {
         err "runtime package provisioning failed for mpm-opencode; refusing to register an unvalidated payload"
         exit 3
     fi
-    CANONICAL_ADAPTER_DIR="$(cd "$staged" && pwd -P)"
-    CANONICAL_PLUGIN_ENTRY="file://${CANONICAL_ADAPTER_DIR}"
+    # The registration is the STABLE path — the one that rolls with the
+    # release.
+    #
+    # `stage_runtime_package` publishes into
+    # "$MPM_HOME_DIR/agent_installation/mpm-opencode", which is exactly
+    # CANONICAL_ADAPTER_DIR. Under the versioned-bundle layout that
+    # directory is a SYMLINK into the active release, so resolving it
+    # physically ("cd "$staged" && pwd -P") yields the REVISION-PINNED
+    # path
+    #
+    #     <home>/.mpm/releases/<rev>/agent_installation/mpm-opencode
+    #
+    # Registering that would break the installation twice over. It pins
+    # the registration to one revision, so the plugin stops resolving at
+    # the next upgrade. And it is a DIFFERENT STRING for the SAME
+    # DIRECTORY as the stable entry the config already carries, so the
+    # config's dedupe — which compares strings — does not collapse them:
+    # the same plugin is registered, and loaded, twice.
+    #
+    # So the canonical stays LOGICAL, and the staged package must still
+    # resolve to it. If it does not, the installer fails closed rather
+    # than registering a path it cannot vouch for.
+    local staged_real canonical_real
+    staged_real="$(cd "$staged" 2>/dev/null && pwd -P)"
+    canonical_real="$(cd "$CANONICAL_ADAPTER_DIR" 2>/dev/null && pwd -P)"
+    if [ -z "$staged_real" ] || [ "$staged_real" != "$canonical_real" ]; then
+        err "the staged runtime package is not at the canonical adapter directory"
+        err "  staged:     $staged"
+        err "  canonical:  $CANONICAL_ADAPTER_DIR"
+        err "  MPM will NOT register a path it cannot vouch for."
+        exit 3
+    fi
     log "runtime package staged and validated: $CANONICAL_ADAPTER_DIR"
 }
 
@@ -559,7 +599,14 @@ migrate_opencode_config() {
         # No config yet — create one with just the plugin entry. The "plugins"
         # key is the OpenCode 2 canonical name ("plugin" is the V1 key the
         # v2 loader still tolerates for compatibility).
-        cat > "$OPENCODE_CONFIG" <<EOF
+        #
+        # The file is created PRIVATE (0600), not at whatever the ambient
+        # umask happens to be. The config can name provider credentials and
+        # host tokens, and a file the operator never chose to widen should
+        # not start life group- or world-readable. The umask is set for the
+        # creation itself, so the file is never briefly visible at the
+        # ambient mode either.
+        ( umask 077 && cat > "$OPENCODE_CONFIG" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
   "plugins": [
@@ -567,7 +614,13 @@ migrate_opencode_config() {
   ]
 }
 EOF
-        log "created ${OPENCODE_CONFIG} with canonical plugin entry"
+        ) || {
+            err "could not create ${OPENCODE_CONFIG}"
+            return 1
+        }
+        # Belt and braces: the mode is stated, not merely inherited.
+        chmod 600 "$OPENCODE_CONFIG" 2>/dev/null || true
+        log "created ${OPENCODE_CONFIG} with canonical plugin entry (mode 0600)"
         return 0
     fi
 

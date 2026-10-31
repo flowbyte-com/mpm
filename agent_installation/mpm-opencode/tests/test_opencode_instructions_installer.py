@@ -192,6 +192,56 @@ class InstallerRoundTrip(unittest.TestCase):
         # the banner — but the managed section structure is preserved.
         self.assertLessEqual(len(after), len(before) + 200)
 
+    def test_the_install_preserves_the_targets_mode(self):
+        """The installer must not change the target file's permissions.
+
+        This is the AGENTS.md half of the question "does the installer
+        widen operator-owned files?". It does not: the installer
+        rewrites the target with `Path.write_text()` on the EXISTING
+        inode, which keeps the file's mode. (The jsonc_config.py
+        writer is the other half, and it needed an explicit fix —
+        `os.replace()` installs a NEW inode.)
+
+        The mode is asserted across a rewrite of the managed block, so
+        the claim is measured rather than assumed. A live host carried
+        `AGENTS.md` at 0664 before and after an install, with the four
+        installer-written `.bak` siblings at 0664 as corroboration.
+        """
+        for mode in (0o644, 0o664, 0o600):
+            with self.subTest(mode=oct(mode)):
+                if self.target.exists():
+                    self.target.unlink()
+                self.target.write_text("# operator content\n")
+                os.chmod(self.target, mode)
+                self.assertEqual(
+                    os.stat(self.target).st_mode & 0o777, mode,
+                    "the precondition: the target starts at the mode under test")
+
+                result = self._install()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    os.stat(self.target).st_mode & 0o777, mode,
+                    "the installer must leave the target's mode alone")
+
+    def test_the_backup_carries_the_targets_mode(self):
+        """The `.bak` the installer writes carries the target's mode.
+
+        `shutil.copy2` preserves the mode, which is why every
+        installer-written backup on a live host matched the file it was
+        copied from — and why those backups are evidence of what the
+        target's mode was BEFORE an install.
+        """
+        self.target.write_text("# operator content\n")
+        os.chmod(self.target, 0o664)
+        result = self._install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        backups = sorted(self.tmpdir.glob("AGENTS.md.bak*"))
+        self.assertTrue(backups, "the installer must write a backup")
+        for backup in backups:
+            self.assertEqual(
+                os.stat(backup).st_mode & 0o777, 0o664,
+                f"the backup must carry the mode it was copied from: {backup}")
+
     def test_preserves_user_content_above_markers(self):
         user_header = "# My OpenCode Config\n\nDo not touch.\n"
         self.target.write_text(user_header)
