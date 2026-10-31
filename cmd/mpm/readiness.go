@@ -236,31 +236,30 @@ func checkWakeBacklogReady(dm *mpminternal.DatabaseManager) ReadinessItem {
 }
 
 // checkReviewBacklogReady mirrors service_doctor.go's
-// checkReviewBacklog data source (GetSpacedReinforcementReview)
-// for use in the dashboard readiness stream. Same query, same
-// severity (WARN when > 0 memories due).
+// checkReviewBacklog data source for use in the dashboard readiness
+// stream. Same query, same severity (WARN when > 0 memories due).
+//
+// It uses the substrate's canonical review rule and window — the same
+// ones the doctor and `mpm ops review` use — so the dashboard and the
+// doctor cannot disagree about the size of the backlog. It used to
+// report the length of a 100-candidate SAMPLE as the backlog size.
 func checkReviewBacklogReady(dm *mpminternal.DatabaseManager) ReadinessItem {
 	if dm == nil {
 		return ReadinessItem{Name: "Review backlog", OK: true, Detail: "(no db)"}
 	}
-	items, err := dm.GetSpacedReinforcementReview(14, 100)
+	n, err := dm.CountMemoriesDueForReview(mpminternal.ReviewDueAfterDays)
 	if err != nil {
 		return ReadinessItem{Name: "Review backlog", OK: false, Detail: "could not query review candidates"}
 	}
-	n := len(items)
 	if n == 0 {
 		return ReadinessItem{Name: "Review backlog", OK: true, Detail: "no memories due for review"}
-	}
-	hint := "Run `mpm ops review` to clear the backlog."
-	if n > 5 {
-		hint = "Run `mpm ops review --stale` to clear the backlog."
 	}
 	return ReadinessItem{
 		Name:   "Review backlog",
 		OK:     false,
 		Level:  readinessLevelWarn,
 		Detail: fmt.Sprintf("%d memories due for spaced review", n),
-		Hint:   hint,
+		Hint:   "run `mpm ops review --stale` to list them, then `mpm ops review --ack <id>` to clear them",
 	}
 }
 

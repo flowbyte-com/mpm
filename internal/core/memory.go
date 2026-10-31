@@ -2258,10 +2258,37 @@ func (s *MemoryStore) RunSelfMaintenance() (*MaintenanceStats, error) {
 		stats.Consolidated = consolidated
 	}
 
-	// 4. Get counts for review queue
-	forReview, err := s.SpacedReinforcementReview(14, 100)
+	// 4. The review backlog — the CANONICAL rule and the TOTAL.
+	//
+	//    This used to call SpacedReinforcementReview(14, 100) and
+	//    report len(candidates). That was wrong in three ways at once,
+	//    and each of them could make the number a lie:
+	//
+	//      * the OLD eligibility rule. SpacedReinforcementReview
+	//        treats a never-accessed memory as due IMMEDIATELY, and
+	//        it ignores `memory_reviews` entirely, so a memory the
+	//        operator had already reviewed was still counted. The
+	//        canonical rule (review.go) falls back to created_at for a
+	//        never-accessed memory and takes an operator's recorded
+	//        review as the strongest signal. So the old rule counted
+	//        memories the doctor, the dashboard and `mpm ops review`
+	//        do not consider due.
+	//      * the CAP of 100. With more than 100 memories due, the
+	//        number reported was the length of a SAMPLE, not the
+	//        backlog. That is the same defect the doctor's "60
+	//        memories due" was.
+	//      * the hard-coded 14 — a second copy of the window the
+	//        canonical constant already holds.
+	//
+	//    Every operator-facing surface already uses the canonical
+	//    query and the canonical count. This path now uses them too,
+	//    so there is ONE definition of review eligibility in the
+	//    substrate.
+	forReview, err := s.CountMemoriesDueForReview(ReviewDueAfterDays)
 	if err == nil {
-		stats.ForReview = len(forReview)
+		stats.ForReview = forReview
+	} else if s.DM != nil {
+		s.DM.LogAudit(AuditWarn, "memory", fmt.Sprintf("RunSelfMaintenance: review backlog count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
 
 	// Get never-accessed count

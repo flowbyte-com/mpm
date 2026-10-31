@@ -23,11 +23,38 @@
 package main
 
 import (
+	"database/sql"
 	stdlibexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	_ "github.com/mattn/go-sqlite3"
 )
+
+// backdateAttentionMemories rewrites the created_at of the seeded
+// review-probe memories so they are genuinely overdue.
+//
+// The review rule's clock is COALESCE(reviewed_at, last_accessed_at,
+// created_at). A memory added a moment ago has a created_at of now, so
+// it is not due — which is correct, and is the behaviour the
+// "never-accessed is instantly stale" defect got wrong. A fixture that
+// wants an overdue memory has to age it.
+func backdateAttentionMemories(t *testing.T, ws string, ageDays int) {
+	t.Helper()
+	dbPath := filepath.Join(ws, "src", "db", "mpm.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("open the fixture database: %v", err)
+	}
+	defer db.Close()
+	_, err = db.Exec(
+		`UPDATE memories SET created_at = CAST(strftime('%s','now','-'||?||' days') AS INTEGER) WHERE tags LIKE '%ops-review%'`,
+		ageDays)
+	if err != nil {
+		t.Fatalf("backdate the seeded review memories: %v", err)
+	}
+}
 
 // TestDashboard_AttentionVisibleWithBacklog is the headline
 // regression. With actionable Doctor warnings present, the
@@ -38,14 +65,18 @@ import (
 // and the Attention line was absent, so the operator's view
 // silently diverged from Doctor's.
 //
-// Seed strategy: the review backlog path (GetSpacedReinforcementReview)
-// matches memories where (is_long_term=1 OR weight>=5) AND
-// (last_accessed_at IS NULL OR < now-14d). Newly added memories
-// default to last_accessed_at=NULL and weight=10 (via --weight
-// 10) make them eligible. The review backlog count in the
-// fixture is dynamic (depends on the install baseline + the
-// seeded rows); the regression asserts the dashboard surfaces
-// the SAME warning state Doctor surfaces, not a literal number.
+// Seed strategy: the review backlog path (MemoriesDueForReview)
+// matches memories where (is_long_term=1 OR weight>=5) AND the
+// REVIEW CLOCK — COALESCE(reviewed_at, last_accessed_at, created_at) —
+// is older than 14 days. A newly added memory defaults to
+// last_accessed_at=NULL and weight=10 (via --weight 10), and its
+// created_at is NOW, so it is NOT due: it is brand new.
+//
+// The fixture therefore backdates the seeded rows. A memory has to be
+// OLD to be due for review. The review backlog count in the fixture is
+// dynamic (depends on the install baseline + the seeded rows); the
+// regression asserts the dashboard surfaces the SAME warning state
+// Doctor surfaces, not a literal number.
 func TestDashboard_AttentionVisibleWithBacklog(t *testing.T) {
 	bin := buildAttentionBin(t)
 	ws := t.TempDir()
@@ -62,6 +93,14 @@ func TestDashboard_AttentionVisibleWithBacklog(t *testing.T) {
 			t.Fatalf("seed review memory %d: %v\n%s", i, err, out)
 		}
 	}
+
+	// Backdate the seeded memories so they are genuinely DUE.
+	//
+	// A memory created now is not due for review: the review clock
+	// falls back to created_at, and "created a moment ago" is not
+	// "overdue by 14 days". The fixture wants an overdue memory, so it
+	// makes one.
+	backdateAttentionMemories(t, ws, 90)
 
 	// Sanity: doctor must report the review backlog.
 	doctorOut := mustRunAttention(t, bin, ws, "doctor")

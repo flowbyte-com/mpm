@@ -544,11 +544,21 @@ func TestCallHelpers_ReviewMemories_RequiresSetup(t *testing.T) {
 	assert.Empty(t, items)
 }
 
+// TestCallHelpers_ReviewMemories_DefaultsApplied pins the defaults.
+//
+// The window is the substrate's ONE review window (ReviewDueAfterDays,
+// 14 days) — the same one the doctor's backlog check and `mpm ops
+// review` use.
+//
+// It used to be 30 here while the doctor counted 14, so the agent was
+// shown a different set than the operator was being warned about. One
+// constant, one backlog.
 func TestCallHelpers_ReviewMemories_DefaultsApplied(t *testing.T) {
 	dm := newTestDM(t)
 	out, err := dm.ReviewMemories(0, 0) // both invalid → defaults
 	require.NoError(t, err)
-	assert.Equal(t, 30, out["days"], "days<=0 must default to 30")
+	assert.Equal(t, ReviewDueAfterDays, out["days"],
+		"days<=0 must default to the substrate's canonical review window")
 	assert.Equal(t, 20, out["limit"], "limit<=0 must default to 20")
 }
 

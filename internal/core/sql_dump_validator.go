@@ -168,6 +168,11 @@ var CanonicalMPMSchema = []string{
 	"lifecycle_events",
 	"memories",
 	"memory_revisions",
+	// memory_reviews: the operator's review ledger (2026-10-30). A
+	// memory that has been reviewed must not come back as due, and the
+	// ledger has to survive a restore — a dump declaring it is
+	// legitimate.
+	"memory_reviews",
 	"memory_settling_baselines",
 	"raw_memories",
 	"reference_chunks",

@@ -17,6 +17,17 @@ type Command struct {
 	Aliases     []string
 	MinArgs     int
 	MaxArgs     int
+	// Help, when set, renders THIS command's own help page.
+	//
+	// It is the single extension point for a command that has a real
+	// option set. `mpm <cmd> --help`, `mpm <cmd> -h` and `mpm help
+	// <cmd>` all reach it, so the three cannot disagree about what the
+	// command accepts — which is the whole point: a help page that
+	// lists an option the parser rejects is worse than no help page.
+	//
+	// When it is nil, the command falls back to the generic page
+	// (its Description), which is what most commands still use.
+	Help func() int
 }
 
 // CommandRouter routes commands to handlers
@@ -48,7 +59,7 @@ func NewRouter() *CommandRouter {
 		// Info / diagnostics
 		"version": {Name: "version", Description: "Show version + build identity", MinArgs: 0, MaxArgs: 0},
 		"help":    {Name: "help", Description: "Show CLI catalogue", MinArgs: 0, MaxArgs: 0},
-		"doctor":  {Name: "doctor", Description: "Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)", MinArgs: 0},
+		"doctor":  {Name: "doctor", Description: "Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)", MinArgs: 0, Help: printDoctorHelp},
 
 		// Memory verbs — capability-named
 		"recall":       {Name: "recall", Description: "Recall relevant context", MinArgs: 1, Aliases: []string{"s"}},
@@ -71,7 +82,7 @@ func NewRouter() *CommandRouter {
 		"maintain":     {Name: "maintain", Description: "Run self-maintenance sweep", MinArgs: 0},
 
 		// Review
-		"review": {Name: "review", Description: "Start spaced-repetition review", MinArgs: 0},
+		"review": {Name: "review", Description: "Start spaced-repetition review", MinArgs: 0, Help: printReviewHelp},
 
 		// Feature namespaces
 		"switch":    {Name: "switch", Description: "Switch persona/mode interactively", MinArgs: 0},
@@ -231,6 +242,26 @@ func (r *CommandRouter) Execute(args []string) int {
 	if cmd == nil {
 		r.unknownCommand(cmdName)
 		return 1
+	}
+
+	// An option the command does not accept is a MISTAKE, and a
+	// mistake must never be treated as data.
+	//
+	// Go's flag package rejects an unknown flag for every command
+	// that uses a FlagSet. The gap was the commands that read their
+	// arguments positionally: `mpm decide --anything` recorded a
+	// decision whose choice was "--anything", `mpm gc --anything` ran
+	// the decay sweep, `mpm backup --anything` wrote a dump to a file
+	// named "--anything".
+	//
+	// The router is the last place that sees the raw argv, so the
+	// rejection happens here — before any handler can mistake an
+	// option for data. The vocabulary is in cli_options_registry.go,
+	// and it is deliberately generous: a token the codebase knows
+	// about is passed on, and the leaf that does not support it
+	// rejects it itself.
+	if rc := rejectUnknownCommandOption(cmdName, args[1:]); rc != 0 {
+		return rc
 	}
 
 	// Centralized help interception (D5 fix, 2026-08-25).
@@ -701,7 +732,16 @@ func (r *CommandRouter) handleHelp(args []string) int {
 		if handled := printToolHelp(helpCmd); handled {
 			return 0
 		}
-		// 5. Unknown: stay explicit rather than dumping the cognitive
+		// 5. A KNOWN COMMAND with no dedicated page still has a page:
+		// the generic one that `mpm <cmd> --help` renders. Saying "no
+		// help available" for a command that DOES have a help page is
+		// an inconsistency an operator notices immediately — and it is
+		// how `mpm help doctor` came to answer a different question
+		// than `mpm doctor --help`.
+		if cmd := r.resolveCommand(helpCmd); cmd != nil {
+			return r.handleCommandHelp(helpCmd, cmd)
+		}
+		// 6. Unknown: stay explicit rather than dumping the cognitive
 		// default. Operator asked for a specific help page; tell them
 		// if we don't have one. They can then run `mpm help` for the
 		// cognitive default.
@@ -726,6 +766,17 @@ func (r *CommandRouter) handleSwitch() int {
 // (usage line + description) otherwise. Always exits 0: asking for help is
 // never an error, and never a mutation.
 func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
+	// 0. A command that declares its OWN help page gets it, always.
+	//
+	// This is checked first so that `mpm <cmd> --help`, `mpm <cmd> -h`
+	// and `mpm help <cmd>` all render the SAME page. Before this hook
+	// existed, `mpm doctor --help` printed the command's one-line
+	// description while `mpm help doctor` said "no help available for
+	// 'doctor'" — three different answers to one question.
+	if cmd != nil && cmd.Help != nil {
+		return cmd.Help()
+	}
+
 	// 1. Dedicated per-command help pages (same dispatch as handleHelp).
 	// Checked FIRST so `mpm <cmd> --help` routes to the command's own
 	// help function rather than to section help. Previously `mpm work
@@ -956,6 +1007,14 @@ var subcommandHelpOwners = map[string]bool{
 	"config capability": true, "config detect-embedding": true,
 
 	// ops — only these leaves print a usage line instead of running.
+	//
+	// "ops review" prints the review command's OWN page: it has a real
+	// option set (--stale, --days, --limit, --ack, --ack-all,
+	// --decision), and the family page does not mention any of them.
+	// Without this entry `mpm ops review --help` printed the generic
+	// `mpm ops` page — the wrong command's help, for the command the
+	// doctor tells the operator to run.
+	//
 	// Deliberately absent, because each of these EXECUTES on --help:
 	//   ops synthesize / gc / backfill-embeddings / backfill-snapshots /
 	//   migrate-embeddings / self-heal / backup / restore-db / directives /
@@ -984,6 +1043,7 @@ var subcommandHelpOwners = map[string]bool{
 	"ops milestones": true, "ops broadcast": true,
 	"ops active-sessions": true, "ops confidence": true,
 	"ops resolve-contradictions": true,
+	"ops review": true,
 }
 
 // jsonSubcommandHelpOwners lists the paths whose owner handler must also
@@ -1279,8 +1339,19 @@ func handleOps(args []string) int {
 		return 0
 
 	default:
+		// An unrecognised SUBCOMMAND is an error, not a help page.
+		//
+		// This branch used to print the ops help and return 0, so
+		// `mpm ops --anything` and `mpm ops not-a-subcommand` both
+		// SUCCEEDED. An operator who mistyped a subcommand was told
+		// nothing was wrong, and a script that invoked a typo'd
+		// subcommand exited 0.
+		//
+		// The switch above is the authority on what ops accepts, so
+		// there is no second list here to drift from it.
+		usererror.Error("ops: unknown subcommand %q", subCmd)
 		printOpsHelp()
-		return 0
+		return 1
 	}
 }
 
