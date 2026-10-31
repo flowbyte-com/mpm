@@ -2633,7 +2633,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`restore-db`** — Restore database from SQL dump
 - **`review`** — Start spaced-repetition review
 - **`rm`** — Delete memory
-- **`route`** — Route a prompt to a mode/persona; returns the directive to inject
+- **`route`** — Route prompt to mode/persona (Claude Code hook input)
 - **`save-skill`** — Save skill from markdown file (--file, --name, --version, --force)
 - **`session`** — Manage sessions
 - **`set-weight`** — Set stored weight 0–100 (decay/LTM/provenance; does not affect current retrieval ranking — see §6.3)
@@ -2651,6 +2651,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`theory`** — Theory CRUD
 - **`topic`** — Manage topics
 - **`tour`** — Walk through cognitive verbs (--demo auto-runs each step; --step N jumps)
+- **`update`** — Update the runtime to a newer release (check, apply, rollback)
 - **`version`** — Show version + build identity
 - **`wake`** — Show wake context (--json, --strict)
 - **`weaken`** — Record weakening (provenance/display; does not affect current retrieval ranking — see §6.3)

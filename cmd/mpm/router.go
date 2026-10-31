@@ -134,6 +134,7 @@ func NewRouter() *CommandRouter {
 		"directives": {Name: "directives", Description: "Show behavioral directives"},
 		"lifecycle":  {Name: "lifecycle", Description: "Lifecycle asymmetry notes for artifact families", MinArgs: 0, MaxArgs: 1},
 		"status":     {Name: "status", Description: "Show system status", MinArgs: 0},
+		"update":     {Name: "update", Description: "Update the runtime to a newer release (check, apply, rollback)", MinArgs: 0},
 		"persona":    {Name: "persona", Description: "Manage personas"},
 		"ops":        {Name: "ops", Description: "Engine-room operations (maintenance, diagnostics)"},
 		"onboard":    {Name: "onboard", Description: "Guided setup and verification of an MPM installation", MinArgs: 0, MaxArgs: -1},
@@ -405,6 +406,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleLifecycleHelp(args[1:])
 	case "status":
 		return handleStatus(args[1:])
+	case "update":
+		return handleUpdate(args[1:])
 	case "memory":
 		return handleMemory(args[1:])
 	case "mode":
@@ -656,6 +659,8 @@ func (r *CommandRouter) handleHelp(args []string) int {
 	case "ops":
 		printOpsHelp()
 		return 0
+	case "update":
+		return printUpdateHelp()
 	case "onboard":
 		printOnboardHelp()
 		return 0
@@ -780,6 +785,8 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 	case "ops":
 		printOpsHelp()
 		return 0
+	case "update":
+		return printUpdateHelp()
 	case "onboard":
 		printOnboardHelp()
 		return 0

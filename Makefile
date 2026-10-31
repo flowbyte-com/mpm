@@ -45,6 +45,7 @@ MCP_BINARY  := mpm-mcp
 SCHED_BINARY := mpm-scheduler
 CRITIC_BINARY := mpm-critic
 TELEMETRY_BINARY := mpm-telemetry
+UPDATE_BINARY := mpm-update
 # Developer build output. RELATIVE on purpose: it must follow the checkout
 # into whatever worktree or scratch clone is being built, so two checkouts
 # never share artifacts and a build here can never land in someone else's
@@ -328,7 +329,8 @@ build: assert-build-dir-safe
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(SCHED_BINARY) ./cmd/mpm-scheduler
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(CRITIC_BINARY) ./cmd/mpm-critic
 	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(TELEMETRY_BINARY) ./cmd/mpm-telemetry
-	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), $(BUILD_DIR)/$(CRITIC_BINARY), and $(BUILD_DIR)/$(TELEMETRY_BINARY) (mpm-alpha)"
+	CGO_CFLAGS=$(CGO_CFLAGS) CGO_LDFLAGS=$(CGO_LDFLAGS) $(GO) build -tags fts5 $(BUILD_LDFLAGS) -o $(BUILD_DIR)/$(UPDATE_BINARY) ./cmd/mpm-update
+	@echo "🤖 Built $(BUILD_DIR)/$(BINARY_NAME), $(BUILD_DIR)/$(MCP_BINARY), $(BUILD_DIR)/$(SCHED_BINARY), $(BUILD_DIR)/$(CRITIC_BINARY), $(BUILD_DIR)/$(TELEMETRY_BINARY), and $(BUILD_DIR)/$(UPDATE_BINARY) (mpm-alpha)"
 
 # Print the ABSOLUTE resolved build output directory, one line, nothing else.
 #
