@@ -607,6 +607,54 @@ adapter directories (`mpm-claude-code`, `mpm-hermes`, `mpm-memory-openclaw`,
 A clean CI checkout never saw them, so this was never a CI failure; the
 leftovers are gone.
 
+### The PR reconciliation — 2026-10-30 (Session B)
+
+> §6.1: the ledger is the channel of record. Session B reconciled
+> #187–#190 against Session A's integration candidate and prepared two
+> further PRs. **Nothing was merged** — A remains the merge and
+> deployment authority.
+
+**A's final candidate revision** is
+`3d63244e1e64955db2db243e70e279d370ebf1d6` (`docs(agent): the
+managed-instruction contract moves to 5.0.0`), **not** the `ba13a2d5`
+the brief named as previously verified. A has **completed the live
+cutover**: the installation is now the versioned layout, with
+`current -> releases/3d63244e…` and the five binaries inside the
+release bundle.
+
+**Two corrections exist only on the integration branch**, and both are
+already in the deployed runtime. Merging the individual PRs would have
+lost both:
+
+| Correction | What it is | Affects |
+|---|---|---|
+| `70b00a1d` | the OpenCode plugin's `mpm_system` description states the proposal contract, not the trusted-lesson contract | **the plugin payload** |
+| `3d63244e` | the managed-instruction protocol marker moves to **5.0.0** — #189's action rename is a MAJOR bump by the repository's own policy | **the managed instructions' provenance stamp** |
+
+**One defect exists in the COMBINATION**, in no PR and on no branch:
+#189's rename of `mpm_lessons action=save` silently broke the
+rehearsal's lesson seeding, so **the migration's preservation of the
+lesson surface was not being exercised at all** on the deployed
+candidate — and the rehearsal's one failing assertion named a symptom
+rather than a cause.
+
+| Branch | PR | Base | Status |
+|---|---|---|---|
+| `fix/integration-follow-up-a-corrections` | [#193](https://github.com/flowbyte-com/mpm/pull/193) | `fix/lesson-trust-boundary` | 🟡 open — **A's two commits, cherry-picked verbatim**; must merge **after #189** |
+| `fix/rehearsal-lesson-seeding-after-trust-boundary` | [#192](https://github.com/flowbyte-com/mpm/pull/192) | `main` | 🟡 open — the combination-only defect |
+
+**No deployment drift.** Merging all six heads onto `main` produces a
+tree that differs from the deployed candidate in **eight files, all of
+them the rehearsal harness, its tests, and documentation** — zero
+differences in `cmd/`, `internal/`, the schema, `agent_installation/`,
+the installer, the `Makefile` or `docs/SPEC.md`, and the **compiled
+plugin payload is byte-identical** to the deployed one.
+
+**Recommended order:** #188 → #187 → #189 → **#193** → #190 → #192.
+The only ordering constraint is **#189 before #193**.
+
+Full record: [`session-b-pr-reconciliation-2026-10-30.md`](session-b-pr-reconciliation-2026-10-30.md).
+
 ### Session B's remaining PRs, merged — 2026-10-27 (Session A)
 
 Four of B's PRs were reviewed and merged on top of #143. Each was verified
