@@ -244,8 +244,9 @@ func handleSelfHeal(args []string) int {
 				"Drift signature: %s. Source: self-heal.",
 			now.Format(time.RFC3339), fixedCount, dbPath, sig,
 		)
-		if _, err := dm.SQLDB().Exec(
+		if _, err := dm.ExecTracked(
 			"INSERT INTO lessons (id, type, content, tags, created) VALUES (?, 'insight', ?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', 'NOW'))",
+			5,
 			fmt.Sprintf("selfheal-%d", now.UnixNano()),
 			lesson,
 			`["mpm","self-heal","auto-fix","audit"]`,

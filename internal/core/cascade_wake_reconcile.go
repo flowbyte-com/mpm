@@ -153,8 +153,8 @@ func deleteOrphanWake(dm *DatabaseManager, wakeResult map[string]interface{}) {
 	if !ok || wakeID == "" {
 		return
 	}
-	if _, err := dm.db.Exec(
-		`DELETE FROM scheduled_wakes WHERE id = ?`, wakeID,
+	if _, err := dm.ExecTracked(
+		`DELETE FROM scheduled_wakes WHERE id = ?`, 5, wakeID,
 	); err != nil {
 		dm.LogAudit(AuditWarn, "cascade-reconciler",
 			fmt.Sprintf("failed to delete orphan wake id=%s: %v", wakeID, err), "", nil)

@@ -3211,10 +3211,10 @@ func (s *MemoryStore) LoadSessionsFromDir(dir string) (int, error) {
 			"model":         summary.Model,
 			"message_count": summary.MessageCount,
 		})
-		_, err = s.DB.Exec(`
+		_, err = s.execTracked(`
 			INSERT OR IGNORE INTO sessions (id, session_id, content, content_hash, source_path, metadata, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, summary.ID, summary.ID, summary.Content, "", summary.SourcePath, metaJSON, summary.StartedAt)
+		`, 5, summary.ID, summary.ID, summary.Content, "", summary.SourcePath, metaJSON, summary.StartedAt)
 		if err == nil {
 			loaded++
 		}
