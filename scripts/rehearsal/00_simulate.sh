@@ -138,7 +138,52 @@ save '{"action":"save","params":{"fact":"REHEARSAL FACT TWO: promotion is an ato
 save '{"action":"save","params":{"fact":"REHEARSAL FACT THREE: the backup must be an online SQLite backup, because a raw copy of a WAL database omits everything still in the log.","collection":"memories","tags":["rehearsal","backup"]}}'
 save '{"action":"save","params":{"fact":"REHEARSAL EVIDENCE: the rehearsal recorded a synthetic corpus so the live database was never read into a fixture.","collection":"evidence","tags":["rehearsal"]}}'
 
-"$SIM_WS/bin/mpm" call mpm_lessons --payload '{"action":"save","params":{"fact":"REHEARSAL LESSON: a migration that cannot be rolled back must be preceded by a backup that has been verified by restoring it.","type":"warning","tags":["rehearsal"]}}' >/dev/null 2>&1
+# THE TRUSTED LESSON — the operator path, deliberately.
+#
+# This used to be:
+#
+#   "$SIM_WS/bin/mpm" call mpm_lessons --payload '{"action":"save",...}'
+#
+# and it SILENTLY stopped working. The lesson trust boundary (PR #189)
+# made `mpm_lessons action=save` OPERATOR-ONLY: a lesson is trusted on
+# arrival, the lesson surface has no pending state, so the agent-reachable
+# write is refused at the execution point. The refusal is invisible here,
+# because every seeding call redirects its output to /dev/null — and the
+# rehearsal only noticed one suite later, as:
+#
+#   FAIL the synthetic lesson survived (0 rows)
+#
+# which says nothing about the cause. The migration proof was silently
+# not being exercised at all.
+#
+# The OPERATOR path is what this seeding needs: a TRUSTED lesson, so that
+# the migration's preservation of the lesson surface is actually proved.
+# `mpm_lessons action=propose` would create a PENDING PROPOSAL in a
+# different table, and the proof would then be about the proposal table
+# rather than about the lesson surface.
+#
+# And it is LOUD now: a seeding call that is refused must stop the
+# rehearsal, not leave it to fail later with an unrelated symptom.
+seed_lesson() {
+  local out
+  if ! out="$("$SIM_WS/bin/mpm" lesson add "$1" --type warning --tags rehearsal 2>&1)"; then
+    printf '  [sim] FATAL: the synthetic lesson could not be seeded:\n%s\n' "$out" >&2
+    printf '  [sim] the trusted-lesson write is operator-only; use `mpm lesson add`.\n' >&2
+    exit 1
+  fi
+  printf '  [sim] seeded the synthetic trusted lesson: %s\n' "$(printf '%s' "$out" | tail -1)"
+}
+seed_lesson "REHEARSAL LESSON: a migration that cannot be rolled back must be preceded by a backup that has been verified by restoring it."
+#
+# (PR #191 reached the same conclusion independently, and its rationale is
+# folded in here: the rehearsal copies the LIVE binaries into the
+# simulated workspace, so it exercises whatever runtime is installed.
+# From the runtime that introduced the lesson trust gate, `mpm_lessons
+# action=save` is refused at the execution point on the agent surface —
+# nothing is written — so a rehearsal that seeded its lesson through
+# `mpm call` produced an empty `lessons` table and the "the synthetic
+# lesson survived" assertion failed.)
+
 
 "$SIM_WS/bin/mpm" call mpm_decisions --payload '{"action":"record","params":{"choice":"REHEARSAL DECISION: keep the data root at ~/.mpm so no host configuration changes.","context":"Runtime layout migration","rationale":"The database path, the systemd unit, the PATH symlink and the MCP client wiring all name that path already.","outcome":"accepted for the rehearsal","tags":["rehearsal"]}}' >/dev/null 2>&1
 

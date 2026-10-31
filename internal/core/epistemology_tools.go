@@ -840,16 +840,52 @@ func (dm *DatabaseManager) recordCitationsNode(node DBNode, citations []Citation
 // read-only counterpart to handleReview's CLI flag parsing — the JSON
 // result is suitable for both the agent's next-action selection and
 // the web UI's review panel.
+//
+// It uses the substrate's canonical review rule (review.go) and its
+// canonical window, so the agent, the operator and the doctor are
+// looking at ONE backlog. It used to call GetSpacedReinforcementReview
+// with a 30-day default while the doctor counted 14-day-old memories —
+// so the agent was shown a different set than the operator was being
+// warned about.
+//
+// The envelope keeps its shape ("success", "items", "count", "days",
+// "limit"); the per-item records keep their key names, and gain the
+// honest fields: last_accessed_at is NULL for a memory that was never
+// accessed, rather than a fabricated age.
 func (dm *DatabaseManager) ReviewMemories(daysSinceAccess, limit int) (map[string]interface{}, error) {
 	if daysSinceAccess <= 0 {
-		daysSinceAccess = 30
+		daysSinceAccess = ReviewDueAfterDays
 	}
 	if limit <= 0 {
 		limit = 20
 	}
-	items, err := dm.GetSpacedReinforcementReview(daysSinceAccess, limit)
+	candidates, err := dm.MemoriesDueForReview(daysSinceAccess, limit)
 	if err != nil {
 		return nil, fmt.Errorf("review: %w", err)
+	}
+	items := make([]map[string]interface{}, 0, len(candidates))
+	for _, c := range candidates {
+		item := map[string]interface{}{
+			"id":                  c.ID,
+			"collection":          c.Collection,
+			"content":             c.Content,
+			"weight":              c.Weight,
+			"reinforcement_count": c.ReinforcementCount,
+			"created_at":          c.CreatedAt,
+			"review_clock":        c.ReviewClock,
+			"days_overdue":        c.DaysOverdue,
+		}
+		if c.LastAccessedAt == nil {
+			item["last_accessed_at"] = nil
+		} else {
+			item["last_accessed_at"] = *c.LastAccessedAt
+		}
+		if c.ReviewedAt == nil {
+			item["reviewed_at"] = nil
+		} else {
+			item["reviewed_at"] = *c.ReviewedAt
+		}
+		items = append(items, item)
 	}
 	return map[string]interface{}{
 		"success": true,

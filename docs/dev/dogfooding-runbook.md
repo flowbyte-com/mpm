@@ -764,3 +764,50 @@ item in [`session-a-adjudication.md`](session-a-adjudication.md) §7.
 | The scheduler situation is documented honestly | ✅ — **no scheduler** for the dogfooding workspace; the `mpm info` line is not evidence | §8.5 |
 | The live systemd service was not modified | ✅ | §8.5 |
 | Automated tests are strictly isolated from the live database | ✅ — enforced in-repo by an AST guard, not by convention | §8.9 |
+
+---
+
+## 9. The lesson review queue — the operator's step
+
+### 9.1 What changed
+
+The substrate's **compaction reflex** — the nightly `epistemic-compaction`
+scheduled task, which wakes the agent to drain raw memories into durable
+knowledge — no longer writes **trusted lessons**. It writes **pending
+proposals**.
+
+The reason is a trust boundary, not a redesign: the raw memories the drain
+reads are the agent's own writing (`collection='memories'`, exactly what
+`mpm_memory action=save` writes), and the drain is invoked only through the
+agent's tool surface (`mpm_system action=compact` — there is no operator CLI
+for it). A synthesis of the agent's own text is the agent's derivation, so
+it goes into the review queue like any other proposal.
+
+The raw memories are still marked as folded in the same transaction, so the
+pressure gauge behaves as before and the drain does not re-offer the same
+rows.
+
+### 9.2 What the operator does
+
+```bash
+mpm lesson proposals --status pending   # the review queue
+mpm lesson promote <id>                 # accept → a trusted lesson
+mpm lesson reject <id>                  # decline → the proposal is kept, not promoted
+```
+
+The drain's envelope reports `proposals_created` and `proposal_ids`.
+`lessons_created` is now always `0` — that is the intended state, not a
+fault.
+
+### 9.3 Two things to know before promoting
+
+* **A rejected compaction proposal leaves its source memories folded.**
+  They are not re-offered to the drain — re-running would produce the same
+  synthesis. The proposal row keeps the synthesis, and the memories
+  themselves stay in the substrate and remain retrievable.
+* **The boundary is an API boundary.** The promotion command is not
+  reachable through MPM's tool surface, but an agent with shell access
+  running as the same UID can invoke it. For the dogfooding workspace this
+  is contained: the workspace has its own database (§8.1), so a same-UID
+  write stays inside it. The detection query for unattributed writes is in
+  the release-candidate report §8.3.

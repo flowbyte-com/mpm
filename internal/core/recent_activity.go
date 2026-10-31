@@ -523,7 +523,13 @@ func activitySummary(tool, action, actor string) string {
 		return "challenged memory"
 	case tool == "mpm_memory" && action == "commit_milestone":
 		return "committed milestone"
+	case tool == "mpm_lessons" && action == "propose":
+		return "proposed lesson for review"
 	case tool == "mpm_lessons" && action == "save":
+		// The agent-reachable lesson write is refused (a lesson is
+		// trusted on arrival). The summary is retained so an
+		// invocation row written by an older binary still reads
+		// sensibly in the activity feed.
 		return "saved lesson"
 	case tool == "mpm_lessons" && action == "shred":
 		return "shredded lesson"

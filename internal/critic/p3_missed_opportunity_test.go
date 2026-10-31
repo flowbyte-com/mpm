@@ -685,7 +685,7 @@ func TestP3RecordingActionVocabulary_IsDeclaredAndComplete(t *testing.T) {
 		"mpm_memory":     {"save"},
 		"mpm_theories":   {"propose"},
 		"mpm_decisions":  {"record"},
-		"mpm_lessons":    {"save"},
+		"mpm_lessons":    {"propose"},
 		"mpm_work":       {"create", "note"},
 		"mpm_skills":     {"save"},
 		"mpm_handoff":    {"write"},

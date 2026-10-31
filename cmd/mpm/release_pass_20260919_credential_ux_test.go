@@ -501,7 +501,7 @@ func TestCred_J_SecretHelpersNonTTY(t *testing.T) {
 	}
 
 	// resolveSecretFieldValue rejects any positional secret argument.
-	_, code := resolveSecretFieldValue([]string{sentinelSecret})
+	_, code := resolveSecretFieldValue([]string{sentinelSecret}, "")
 	if code != 1 {
 		t.Errorf("resolveSecretFieldValue exit code = %d, want 1", code)
 	}

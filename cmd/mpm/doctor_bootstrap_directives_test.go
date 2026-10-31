@@ -29,6 +29,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -43,12 +44,29 @@ import (
 // claim provider coverage for a row that holds no vector.
 func insertBootstrapRow(t *testing.T, dm *mpminternal.DatabaseManager, id, collection string, primeDirective int, weight int) {
 	t.Helper()
+	insertBootstrapRowAged(t, dm, id, collection, primeDirective, weight, 0)
+}
+
+// insertBootstrapRowAged inserts a bootstrap row with an explicit
+// creation time.
+//
+// ageDays > 0 backdates the row's created_at by that many days. It
+// exists because the review rule changed (2026-10-30): a memory's
+// review clock is COALESCE(reviewed_at, last_accessed_at, created_at),
+// so a memory created NOW and never accessed is NOT due for review —
+// it is brand new. Under the previous rule every never-accessed memory
+// was due immediately, which is how a just-created memory could be
+// "30 days stale".
+//
+// A fixture that wants a memory to be DUE has to make it old.
+func insertBootstrapRowAged(t *testing.T, dm *mpminternal.DatabaseManager, id, collection string, primeDirective int, weight int, ageDays int) {
+	t.Helper()
+	createdAt := fmt.Sprintf("CAST(strftime('%%s','now','-%d days') AS INTEGER)", ageDays)
 	_, err := dm.SQLDB().Exec(
 		`INSERT INTO memories
 			(id, collection, content, embedding, embedding_source, weight,
 			 is_long_term, is_prime_directive, reinforcement_count, created_at, updated_at)
-		 VALUES (?, ?, ?, NULL, 'provider', ?, 0, ?, 0,
-		         CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER))`,
+		 VALUES (?, ?, ?, NULL, 'provider', ?, 0, ?, 0, `+createdAt+`, `+createdAt+`)`,
 		id, collection, "bootstrap row "+id, weight, primeDirective)
 	if err != nil {
 		t.Fatalf("insert %q: %v", id, err)
@@ -200,20 +218,22 @@ func TestDoctorReviewBacklog_ExcludesDirectivesKeepsRealCandidates(t *testing.T)
 	dm := newTestDMForCmd(t)
 	svc := NewDoctorService(dm)
 
-	insertBootstrapRow(t, dm, "directive-1", "directives", 1, 10)
-	insertBootstrapRow(t, dm, "memory-1", "memories", 0, 10)
+	// Both rows are backdated: the directive is excluded from the
+	// review queue, and the ordinary memory is old enough to be due.
+	// A memory created NOW is NOT due — see insertBootstrapRowAged.
+	insertBootstrapRowAged(t, dm, "directive-1", "directives", 1, 10, 90)
+	insertBootstrapRowAged(t, dm, "memory-1", "memories", 0, 10, 90)
 
-	items, err := dm.GetSpacedReinforcementReview(14, 100)
+	items, err := dm.MemoriesDueForReview(14, 100)
 	if err != nil {
-		t.Fatalf("GetSpacedReinforcementReview: %v", err)
+		t.Fatalf("MemoriesDueForReview: %v", err)
 	}
 	if len(items) != 1 {
 		t.Fatalf("the review queue holds %d candidates, want 1 (the ordinary memory only); candidates: %v",
 			len(items), items)
 	}
-	id, _ := items[0]["id"].(string)
-	if id != "memory-1" {
-		t.Errorf("the review candidate is %q, want the ordinary memory \"memory-1\"", id)
+	if items[0].ID != "memory-1" {
+		t.Errorf("the review candidate is %q, want the ordinary memory \"memory-1\"", items[0].ID)
 	}
 
 	check := svc.checkReviewBacklog()

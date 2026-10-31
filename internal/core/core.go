@@ -134,6 +134,25 @@ type CoreDB interface {
 	VectorSearch(tier string, queryEmbedding []float32, limit int) ([]map[string]interface{}, error)
 	GetSpacedReinforcementReview(daysSinceAccess, limit int) ([]map[string]interface{}, error)
 
+	// ─── Review (spaced repetition) ───────────────────────────────────
+	//
+	// MemoriesDueForReview is THE review-eligibility query. The
+	// operator-facing surfaces (doctor's backlog check, the dashboard's
+	// readiness row, `mpm ops review`) all use it, so they cannot
+	// disagree about what "due" means. CountMemoriesDueForReview is the
+	// TOTAL, not a sample. RecordMemoryReview is the only way a review
+	// is created — never a read, a display or a sweep.
+	MemoriesDueForReview(days int, limit int) ([]ReviewCandidate, error)
+	CountMemoriesDueForReview(days int) (int, error)
+	RecordMemoryReview(memoryID string, decision string, note string) error
+	// RecordMemoryReviewsAndApply records the review of a BATCH and
+	// applies the weight change a "weaken" decision asks for, in ONE
+	// transaction. The decision and the mutation are one operator act:
+	// recording one without the other leaves the operator's intent
+	// half applied. The batch is atomic as a unit.
+	RecordMemoryReviewsAndApply(memoryIDs []string, decision string, note string) error
+	MemoryReview(memoryID string) (*MemoryReviewRecord, error)
+
 	// ─── Memory Mutations ────────────────────────────────────────────
 	ReinforceMemory(id string, delta int) error
 	ReinforceMemoryTool(memoryID string, delta int) (map[string]interface{}, error)
@@ -151,8 +170,8 @@ type CoreDB interface {
 	PromoteMemory(memoryID string) (map[string]interface{}, error)
 	PatchMemoryMetadata(memoryID string, patchJSON string) (map[string]interface{}, error)
 	SynthesizeMemoryFor(ctx context.Context, memoryID string) (map[string]interface{}, error)
-	CompactEpistemology(ctx context.Context, force bool) (*CompactEpistemologyResult, error)
-	CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int) (*CompactEpistemologyDrainResult, error)
+	CompactEpistemology(ctx context.Context, force bool, ac ...ActiveContext) (*CompactEpistemologyResult, error)
+	CompactEpistemologyDrain(ctx context.Context, force bool, maxBatches int, ac ...ActiveContext) (*CompactEpistemologyDrainResult, error)
 
 	// RequeueDeferred and ListDeferred are the operator half of the
 	// deferral lifecycle (compact-refusal design §3.3 R1–R5). They
@@ -203,6 +222,23 @@ type CoreDB interface {
 	SaveLesson(fact, lessonType string, tags []string, ac ...ActiveContext) (map[string]interface{}, *Lesson, error)
 	SearchLessonsLimited(query string) ([]map[string]interface{}, error)
 	ListLessonsFiltered(lessonType string) ([]map[string]interface{}, error)
+
+	// ─── Lesson proposals ───────────────────────────────────────────
+	// The PENDING surface for a lesson an agent has proposed and an
+	// operator has not yet accepted. A proposal is NOT a lesson: it
+	// lives in its own table, so it is outside every trusted retrieval
+	// path until an operator promotes it. See lesson_proposals.go.
+	//
+	// AddLessonProposal creates a pending proposal; PromoteLessonProposal
+	// and RejectLessonProposal are the OPERATOR transitions. They are
+	// not reachable from the agent tool surface.
+	AddLessonProposal(content string, lessonType string, tags []string, sourceIDs []string, ac ...ActiveContext) (*LessonProposal, error)
+	GetLessonProposal(id string) (*LessonProposal, error)
+	ListLessonProposals(status string, limit int) ([]*LessonProposal, error)
+	// PromoteLessonProposal returns the lesson, the updated proposal and
+	// the number of cited source nodes that were credited.
+	PromoteLessonProposal(id string, ac ...ActiveContext) (*Lesson, *LessonProposal, int, error)
+	RejectLessonProposal(id string) (*LessonProposal, error)
 
 	// ─── Sessions ────────────────────────────────────────────────────
 	GetLastSession() (map[string]interface{}, error)

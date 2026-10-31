@@ -114,6 +114,49 @@ var BaseTables = []string{
 		content_hash TEXT
 	);`,
 
+	// Lesson proposals (2026-10-30) — the PENDING surface for a lesson an
+	// agent has proposed and an operator has not yet accepted.
+	//
+	// WHY A SEPARATE TABLE, AND NOT A STATUS COLUMN ON `lessons`
+	// -------------------------------------------------------
+	// A lesson row is TRUSTED ON ARRIVAL. `lessons_base` has no status
+	// column, so a row there is already inside the trusted retrieval
+	// set: lessons_fts, `mpm lesson search`, `mpm lesson list`, and the
+	// wake context's recent_lessons all read it. Giving that table a
+	// "pending" status would mean every one of those read paths must
+	// filter on it — and a read path that forgets is a pending lesson
+	// silently promoted into trusted knowledge.
+	//
+	// A separate table makes the isolation STRUCTURAL: no trusted read
+	// path queries this table, so there is no filter to forget and no
+	// index to keep in sync. A proposal is invisible to the substrate's
+	// retrieval machinery — FTS, vectors, synthesis, the wake context —
+	// until an operator promotes it.
+	//
+	// THE TABLE IS ADDITIVE.
+	//   - No existing row is read, rewritten or moved.
+	//   - No existing table is altered.
+	//   - An older binary ignores the table entirely.
+	//   - A rollback leaves the table orphaned with its content intact,
+	//     and every lesson already promoted out of it survives in
+	//     `lessons_base`.
+	`CREATE TABLE IF NOT EXISTS lesson_proposals (
+		id TEXT PRIMARY KEY,
+		type TEXT NOT NULL DEFAULT 'insight',
+		content TEXT NOT NULL,
+		tags JSON,
+		created TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','promoted','rejected')),
+		source_session_id TEXT,
+		framework_name TEXT,
+		model_name TEXT,
+		source_ids TEXT,
+		promoted_lesson_id TEXT,
+		reviewed_at INTEGER
+	);`,
+
+	`CREATE INDEX IF NOT EXISTS idx_lesson_proposals_status ON lesson_proposals(status, created);`,
+
 	// Retrieval metadata — Observability Layer for "Adaptive Retrieval"
 	// (2026-07-26). 1:1 mapping with any cognitive node (Memory,
 	// Lesson, Decision, Theory, Skill). Tracks how often each node is
@@ -262,6 +305,48 @@ var BaseTables = []string{
 		captured_at INTEGER NOT NULL,
 		FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
 	);`,
+
+	// Memory reviews — the operator's spaced-repetition ledger.
+	//
+	// WHY A RELATION AND NOT A COLUMN ON memories: the same reason
+	// memory_settling_baselines is a relation — a review is written by
+	// the OPERATOR on demand, never by the memory creation path, so a
+	// column would widen the 19-site memory INSERT fan-out (memory.go,
+	// db.go, watchdog_v2.go, hitl_log.go, fts_recovery.go,
+	// handlers_challenge.go, self_heal.go) for a value that is NULL on
+	// almost every row.
+	//
+	// WHAT IT RECORDS: that a human looked at this memory and decided.
+	// The row is the review; the decision is what the operator chose to
+	// do about the memory ("keep" / "weaken").
+	//
+	// WHY IT IS NOT `last_accessed_at`: the retrieval clock and the
+	// review clock are different facts. An agent retrieving a memory
+	// 200 times says nothing about whether a human has looked at it, and
+	// a review backlog that an agent's retrieval can silently clear is
+	// not an operator backlog. The review clock is read as
+	// COALESCE(reviewed_at, last_accessed_at, created_at) — the explicit
+	// review if there is one, else the last access, else the creation —
+	// so a brand-new, never-accessed memory is NOT instantly due, and a
+	// genuinely old, never-accessed one still is.
+	//
+	// ONE ROW PER MEMORY: the table holds the LATEST review, so
+	// re-reviewing replaces the row (UPSERT) rather than appending. The
+	// history of reviews is not the product here; the current review
+	// state is.
+	//
+	// ON DELETE CASCADE mirrors memory_revisions: a hard-deleted memory
+	// takes its review with it. A soft delete (deleted_at) does NOT fire
+	// the cascade, so a review survives a soft-delete round trip.
+	`CREATE TABLE IF NOT EXISTS memory_reviews (
+		memory_id   TEXT PRIMARY KEY,
+		reviewed_at INTEGER NOT NULL,
+		decision    TEXT NOT NULL CHECK (decision IN ('keep','weaken')),
+		note        TEXT,
+		FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+	);`,
+
+	`CREATE INDEX IF NOT EXISTS idx_memory_reviews_reviewed_at ON memory_reviews(reviewed_at);`,
 
 	// Evidence table — typed, source-grouped evidence for confidence calculation.
 	`CREATE TABLE IF NOT EXISTS evidence (
