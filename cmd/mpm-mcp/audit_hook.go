@@ -96,7 +96,7 @@ func recordToolInvocation(
 	// from session_id; framework_session_id is host-owned and
 	// never synthesized from mpm_session_id) is preserved — both
 	// columns are NULL when the caller did not supply a value.
-	_, auditErr := dm.SQLDB().Exec(`
+	_, auditErr := dm.ExecTracked(`
 		INSERT INTO tool_invocations
 		    (id, session_id, tool_name, action, invocation_id,
 		     actor_kind, framework_name, payload_hash, result_status,
@@ -104,6 +104,7 @@ func recordToolInvocation(
 		     mpm_session_id, framework_session_id,
 		     outcome_class, outcome_code)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		5,
 		id, sessionID, toolName, action, invocationID,
 		actorKind, frameworkName, sha256OfPayload(payload), resultStatus,
 		startedAt.Unix(), completedAt.Unix(), completedAt.Sub(startedAt).Milliseconds(),
