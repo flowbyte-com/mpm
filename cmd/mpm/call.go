@@ -88,9 +88,9 @@ read_handoff, which the registered mpm_context action enum does not
 contain.
 
 Friendly CLI commands follow the Unix convention directly: validation
-failures print a human message on stderr and exit non-zero. Bare
-unknown tokens are the one exception — they fall through to
-smart-recall search (exit 0 on empty results) by design.
+failures print a human message on stderr and exit non-zero. Unknown
+commands are rejected the same way — they never fall through to a
+search and never execute a neighbouring command.
 `)
 		return 1
 	}

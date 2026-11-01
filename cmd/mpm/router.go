@@ -59,10 +59,10 @@ func NewRouter() *CommandRouter {
 		// Info / diagnostics
 		"version": {Name: "version", Description: "Show version + build identity", MinArgs: 0, MaxArgs: 0},
 		"help":    {Name: "help", Description: "Show CLI catalogue", MinArgs: 0, MaxArgs: 0},
-		"doctor":  {Name: "doctor", Description: "Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)", MinArgs: 0, Help: printDoctorHelp},
+		"doctor":  {Name: "doctor", Description: "Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)", MinArgs: 0, Help: printDoctorHelp, Aliases: []string{"doc"}},
 
 		// Memory verbs — capability-named
-		"recall":       {Name: "recall", Description: "Recall relevant context", MinArgs: 1, Aliases: []string{"s"}},
+		"recall":       {Name: "recall", Description: "Recall relevant context", MinArgs: 1, Aliases: []string{"r"}},
 		"add":          {Name: "add", Description: "Persist knowledge (prefix content with `-- ` if it starts with `-`)", MinArgs: 1},
 		"ls":           {Name: "ls", Description: "List memories", MinArgs: 0},
 		"show":         {Name: "show", Description: "Show memory details", MinArgs: 1},
@@ -269,7 +269,13 @@ func (r *CommandRouter) Execute(args []string) int {
 	// and it is deliberately generous: a token the codebase knows
 	// about is passed on, and the leaf that does not support it
 	// rejects it itself.
-	if rc := rejectUnknownCommandOption(cmdName, args[1:]); rc != 0 {
+	//
+	// The guard runs under the CANONICAL command name: `cmd` is
+	// already resolved through aliases above, and the registry and
+	// the deferred-owner table are keyed by canonical names. An
+	// alias spelling (`mpm r --json`) must accept exactly what the
+	// canonical spelling (`mpm recall --json`) accepts.
+	if rc := rejectUnknownCommandOption(cmd.Name, args[1:]); rc != 0 {
 		return rc
 	}
 
@@ -1773,6 +1779,12 @@ func PrintHelp() {
 
 func (r *CommandRouter) unknownCommand(name string) {
 	r.errorf("[!] Error: unknown command '%s'\n", name)
+	// Suggest the closest registered command without executing
+	// anything: a mistyped command must fail visibly, never run a
+	// search or a neighbouring command on the operator's behalf.
+	if suggestion := suggestCommandName(name, r); suggestion != "" {
+		fmt.Printf("    Did you mean %q? Try `mpm %s --help`.\n", suggestion, suggestion)
+	}
 	fmt.Printf("    Run 'mpm help' for available commands.\n")
 }
 
