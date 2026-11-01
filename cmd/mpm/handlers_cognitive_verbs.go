@@ -363,7 +363,7 @@ func handleDecisionSupersede(args []string) int {
 			"supersedes": id,
 			"action":     "supersede",
 		})
-		return respond("", string(out)+"\n", 0)
+		return respond(string(out)+"\n", "", 0)
 	}
 	return respond("", fmt.Sprintf("Superseded %s with %s\n", id, newID), 0)
 }
@@ -409,7 +409,7 @@ func handleDecisionInvalidate(args []string) int {
 	}
 	if jsonOutput {
 		out, _ := json.Marshal(map[string]interface{}{"success": true, "id": id, "action": "invalidate"})
-		return respond("", string(out)+"\n", 0)
+		return respond(string(out)+"\n", "", 0)
 	}
 	return respond("", fmt.Sprintf("Invalidated decision %s\n", id), 0)
 }
