@@ -70,6 +70,15 @@ provisions the executable itself:
   previous recovery executable untouched, and a failure at this step
   rolls the promotion back rather than leaving a runtime that cannot be
   repaired;
+- it is replaced **atomically**: the previous executable is copied aside
+  (never moved), and the validated new one is renamed straight over it.
+  There is no interval in which `mpm-update` does not exist — a recovery
+  tool that disappears exactly when the runtime breaks is not one;
+- a promotion that **rolls back** restores the previous executable with
+  it, so the recovery tool always belongs to the runtime that is actually
+  active. On a first installation the restored state is "no updater", and
+  the file the abandoned promotion created is removed rather than left
+  behind;
 - a build without `mpm-update` is refused before anything is activated,
   instead of producing a bundle with no recovery tool.
 

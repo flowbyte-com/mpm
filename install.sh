@@ -1039,6 +1039,16 @@ Remove $final if you want to retry from scratch." 3
         if ! rb_revert_layout "$DATA_ROOT" "$PREFIX"; then
             err "  the layout conversion could not be fully undone — see $DATA_ROOT/.legacy-layout-paths"
         fi
+        # The recovery executable travels with the runtime it belongs to.
+        # A rollback that restored the pointer but left the NEW release's
+        # updater in place would give the operator a recovery tool for a
+        # release that is no longer active — and on a first installation
+        # it would leave a tool where there was deliberately none.
+        if ! rb_restore_stable_updater "$DATA_ROOT"; then
+            err "  the previous recovery executable could NOT be restored (see above)."
+            err "  The installation still has SOME updater only if that message did not"
+            err "  name it missing; verify with: ls -l $DATA_ROOT/mpm-update"
+        fi
     }
 
     # ---- 5. activate ----
@@ -1102,9 +1112,14 @@ Fix the cause above. The previous executable, if any, is still in place." 3
     fi
     _bundle_fail_at updater || {
         rollback_promotion "the promotion was abandoned after provisioning the recovery executable"
-        die "the promotion was rolled back. The previous runtime is active again
-(the standalone recovery executable was refreshed and remains usable)." 3
+        die "the promotion was rolled back. The previous runtime is active again, and the
+previous recovery executable was restored with it." 3
     }
+
+    # The promotion is complete. The preserved executable and its journal
+    # are the material a rollback would have needed; drop them now, so the
+    # data root holds no rollback residue from a promotion that succeeded.
+    rb_commit_stable_updater "$DATA_ROOT"
 
     log "  active runtime: releases/$rev"
     log "  stable paths:   $PREFIX/bin -> current/bin, $PREFIX/agent_installation -> current/agent_installation"

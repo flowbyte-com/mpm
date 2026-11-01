@@ -84,6 +84,16 @@ rb_err() {
 # what the operator runs directly when `current` is broken.
 RB_UPDATER_BINARY="mpm-update"
 
+# Rollback state for the standalone updater.
+#
+# The previous executable is COPIED aside (never moved out of the way)
+# and a journal records whether there was one at all. Both are created
+# before the replacement and removed only when the promotion commits, so
+# a promotion that rolls back can put the previous recovery tool back
+# exactly as it was — including the case where there was none.
+RB_UPDATER_BACKUP_NAME=".$RB_UPDATER_BINARY.previous"
+RB_UPDATER_JOURNAL_NAME=".$RB_UPDATER_BINARY.rollback"
+
 # The runtime binaries the substrate itself needs, in the canonical
 # promotion order. This is the list the Go verifier
 # (internal/update/verify.go runtimeBinaries) enforces, and the list the
@@ -527,14 +537,13 @@ rb_install_release() {
 # second, stable copy is provisioned here, at the top of the data root,
 # where a version switch cannot reach it.
 #
-# ATOMICITY. The copy is staged beside the destination (same filesystem,
-# so the swap is rename(2)) and only replaces the existing executable
-# after it has been proven to be a regular, executable, byte-identical
-# copy of the validated release's updater. Any failure removes the
-# staged file and restores the previous executable, so the data root is
-# never left with a partial or truncated recovery tool. That is the
-# difference between "the installer failed" and "the installer failed
-# and now you cannot recover either".
+# ATOMICITY. The previous executable is COPIED aside and the validated
+# staged copy is renamed straight over the destination. There is no
+# interval in which <data root>/mpm-update does not exist — the recovery
+# tool must not be missing at the moment it becomes necessary. Any failure
+# removes the staged file and leaves the existing executable exactly as it
+# was. That is the difference between "the installer failed" and "the
+# installer failed and now you cannot recover either".
 #
 # Returns 0 when the data root holds a good standalone updater; non-zero
 # when it does not, having left whatever was there before untouched.
@@ -543,7 +552,8 @@ rb_provision_stable_updater() {
     local src="$release_dir/bin/$RB_UPDATER_BINARY"
     local dst="$data_root/$RB_UPDATER_BINARY"
     local stage="$data_root/.$RB_UPDATER_BINARY.stage.$$"
-    local previous="$data_root/.$RB_UPDATER_BINARY.previous.$$"
+    local previous="$data_root/$RB_UPDATER_BACKUP_NAME"
+    local journal="$data_root/$RB_UPDATER_JOURNAL_NAME"
 
     # 1. The SOURCE must be the validated, executable release copy. A
     #    bundle that reached here without it is refused rather than
@@ -593,27 +603,54 @@ rb_provision_stable_updater() {
         return 1
     fi
 
-    # 4. Swap. The previous executable (if any) is preserved until the
-    #    new one is in place, so a failed swap restores exactly what was
-    #    there. rename(2) over the destination means a reader sees either
-    #    the old updater or the new one, never a half-written file.
+    # 4. PRESERVE, THEN REPLACE IN ONE RENAME.
+    #
+    #    The previous executable is COPIED aside, never moved: moving it
+    #    would leave <data root>/mpm-update absent for the interval
+    #    between the two renames, and that interval is exactly when an
+    #    operator whose runtime just failed might run it. There must be no
+    #    instant at which the recovery executable does not exist.
+    #
+    #    So: copy the old one aside (a rollback copy, not a displacement),
+    #    then rename(2) the validated staged file straight over the
+    #    destination. rename(2) is atomic, so a reader sees either the old
+    #    executable or the new one — never neither, never a truncated file.
+    local previous_state="none"
     if [ -e "$dst" ] || [ -L "$dst" ]; then
-        if ! mv "$dst" "$previous"; then
-            rb_err "could not move the existing updater aside to $previous"
+        if [ ! -f "$dst" ] && [ ! -L "$dst" ]; then
+            rb_err "the existing updater at $dst is neither a regular file nor a symlink"
             rm -f "$stage" 2>/dev/null || true
             return 1
         fi
-    fi
-    if ! mv "$stage" "$dst"; then
-        rb_err "could not install the standalone updater at $dst"
-        rm -f "$stage" 2>/dev/null || true
-        if [ -e "$previous" ] || [ -L "$previous" ]; then
-            mv "$previous" "$dst" 2>/dev/null || \
-                rb_err "  the previous updater is preserved at $previous — restore it by hand"
+        rm -f "$previous" 2>/dev/null || true
+        # -a preserves mode and symlinks as symlinks, so an odd prior
+        # state is restored faithfully rather than being normalised away.
+        if ! cp -a "$dst" "$previous"; then
+            rb_err "could not preserve the existing updater at $previous"
+            rm -f "$stage" "$previous" 2>/dev/null || true
+            return 1
         fi
+        previous_state="previous"
+    fi
+
+    # The journal is written BEFORE the swap. A crash between the swap and
+    # the journal would otherwise leave a new executable with no record of
+    # what to put back, and the promotion's rollback would silently keep
+    # the wrong one.
+    rm -f "$journal" 2>/dev/null || true
+    if ! printf '%s\n' "$previous_state" > "$journal"; then
+        rb_err "could not record the updater rollback state at $journal"
+        rm -f "$stage" "$previous" 2>/dev/null || true
         return 1
     fi
-    rm -f "$previous" 2>/dev/null || true
+
+    if ! mv -f "$stage" "$dst"; then
+        # rename(2) failed, so the destination is UNTOUCHED — the old
+        # executable is still in place. Nothing to restore.
+        rb_err "could not install the standalone updater at $dst"
+        rm -f "$stage" "$previous" "$journal" 2>/dev/null || true
+        return 1
+    fi
 
     # 5. Read back. The provisioning step reports success only for a real
     #    file: a symlink here would resolve into a release, which is the
@@ -624,6 +661,69 @@ rb_provision_stable_updater() {
     fi
 
     rb_log "  standalone updater: $dst (real file, independent of releases/${rev:-?})"
+    return 0
+}
+
+# rb_restore_stable_updater <data_root>
+#
+# Put back whatever the last rb_provision_stable_updater replaced, using
+# the journal it wrote. Called when a promotion ROLLS BACK: the pointer
+# is being returned to the previous runtime, so the recovery executable
+# must be returned with it — otherwise the installation is left with a
+# recovery tool from a release that is no longer active.
+#
+# A first installation is the interesting case: the journal says "none",
+# and the restored state is "no standalone updater". Removing it is
+# correct, not destructive — there was nothing there before.
+#
+# Returns 0 when the data root matches its pre-provisioning state (or when
+# provisioning never ran), non-zero when it does not.
+rb_restore_stable_updater() {
+    local data_root="$1"
+    local dst="$data_root/$RB_UPDATER_BINARY"
+    local previous="$data_root/$RB_UPDATER_BACKUP_NAME"
+    local journal="$data_root/$RB_UPDATER_JOURNAL_NAME"
+
+    # No journal: provisioning never reached the swap, so the destination
+    # is whatever it was. Nothing to undo.
+    [ -e "$journal" ] || return 0
+
+    local state
+    state="$(cat "$journal" 2>/dev/null || true)"
+    case "$state" in
+        previous)
+            if [ ! -e "$previous" ] && [ ! -L "$previous" ]; then
+                rb_err "the journal says a previous updater existed but $previous is gone"
+                return 1
+            fi
+            if ! mv -f "$previous" "$dst"; then
+                rb_err "could not restore the previous updater from $previous"
+                return 1
+            fi
+            rb_log "  recovery executable restored to its previous version"
+            ;;
+        none)
+            rm -f "$dst" 2>/dev/null || true
+            rb_log "  recovery executable removed (there was none before this promotion)"
+            ;;
+        *)
+            rb_err "unreadable updater rollback journal at $journal (content: ${state:-<empty>})"
+            return 1
+            ;;
+    esac
+    rm -f "$journal" 2>/dev/null || true
+    return 0
+}
+
+# rb_commit_stable_updater <data_root>
+#
+# Drop the rollback state once a promotion has fully committed. Until this
+# runs, the previous executable and its journal are the material a
+# rollback needs.
+rb_commit_stable_updater() {
+    local data_root="$1"
+    rm -f "$data_root/$RB_UPDATER_BACKUP_NAME" 2>/dev/null || true
+    rm -f "$data_root/$RB_UPDATER_JOURNAL_NAME" 2>/dev/null || true
     return 0
 }
 

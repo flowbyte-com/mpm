@@ -223,7 +223,8 @@ class BootstrapFixture(unittest.TestCase):
     # driver
     # ------------------------------------------------------------------
     def drive(self, phases: str = "phase_bundle", rev: str | None = None,
-              env_extra: dict | None = None) -> subprocess.CompletedProcess:
+              env_extra: dict | None = None,
+              use_strace: bool = False) -> subprocess.CompletedProcess:
         driver = self.project / "_drive.sh"
         rev_line = f'BUNDLE_REV="{rev}"' if rev else ""
         driver.write_text(
@@ -249,9 +250,20 @@ class BootstrapFixture(unittest.TestCase):
         env.pop("MPM_DB_PATH", None)
         if env_extra:
             env.update({k: str(v) for k, v in env_extra.items()})
+        cmd = ["bash", str(driver)]
+        if use_strace:
+            cmd = [
+                "strace", "-f", "-qq",
+                "-e", "trace=rename,renameat,renameat2,unlink,unlinkat",
+                "-o", str(self._tmp / "syscalls.log"),
+            ] + cmd
         return subprocess.run(
-            ["bash", str(driver)], capture_output=True, text=True, timeout=300, env=env
+            cmd, capture_output=True, text=True, timeout=300, env=env
         )
+
+    def syscall_log(self) -> str:
+        p = self._tmp / "syscalls.log"
+        return p.read_text(errors="replace") if p.is_file() else ""
 
     # ------------------------------------------------------------------
     # assertions helpers
@@ -429,9 +441,66 @@ class TestFailureLeavesTheRecoveryExecutableIntact(BootstrapFixture):
         # The pointer names the runtime that was running before.
         self.assertEqual(self.current_target(), "releases/rev-one",
                          "a failure at the provisioning step must roll the pointer back")
-        # And a usable recovery executable is still there.
+
+    def test_a_failure_at_the_provisioning_step_restores_the_PREVIOUS_executable(self):
+        """A rolled-back promotion must put the OLD recovery tool back.
+
+        Asserting "an executable exists" is not enough: the whole point of
+        the rollback is that the executable belongs to the runtime that is
+        active again. A new-release updater left behind after the pointer
+        moved back is a recovery tool for a runtime that is no longer
+        running.
+        """
+        # The first install establishes a distinctive previous updater.
+        self.build_dir.joinpath(UPDATER).write_text(
+            "#!/usr/bin/env bash\necho 'mpm-update rev-one'\n"
+        )
+        self.build_dir.joinpath(UPDATER).chmod(0o755)
+        first = self.drive(rev="rev-one")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        previous_bytes = self.standalone_path().read_bytes()
+        self.assertIn(b"rev-one", previous_bytes)
+
+        # A second release carries a DIFFERENT updater, then the promotion
+        # is abandoned after provisioning.
+        self.build_dir.joinpath(UPDATER).write_text(
+            "#!/usr/bin/env bash\necho 'mpm-update rev-two'\n"
+        )
+        self.build_dir.joinpath(UPDATER).chmod(0o755)
+        r = self.drive(rev="rev-two", env_extra={"MPM_INSTALL_TEST_FAIL_AT": "updater"})
+        self.assertNotEqual(r.returncode, 0)
+
+        self.assertEqual(self.current_target(), "releases/rev-one")
+        self.assertEqual(
+            self.standalone_path().read_bytes(), previous_bytes,
+            "the rolled-back promotion left the NEW release's recovery executable in place",
+        )
         self.assert_provisioned_real_file(self.standalone_path(),
-                                          "after a rolled-back provisioning")
+                                          "after restoring the previous executable")
+        self.assertFalse(
+            (self.data / f".{UPDATER}.previous").exists(),
+            "the rollback left its preserved copy behind",
+        )
+        self.assertFalse(
+            (self.data / f".{UPDATER}.rollback").exists(),
+            "the rollback left its journal behind",
+        )
+
+    def test_a_first_install_that_rolls_back_removes_the_new_executable(self):
+        """On a first install the "previous" state is "no updater at all".
+
+        Restoring it must REMOVE the executable, not keep the one the
+        abandoned promotion created. Creating a recovery tool that no
+        active runtime owns is not a neutral leftover: it is a tool whose
+        provenance no longer exists.
+        """
+        r = self.drive(env_extra={"MPM_INSTALL_TEST_FAIL_AT": "updater"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(
+            self.standalone_path().exists(),
+            "a rolled-back FIRST install left a recovery executable behind",
+        )
+        self.assertIsNone(self.current_target())
 
 
 # ===========================================================================
@@ -524,6 +593,107 @@ class TestProvisioningPrimitive(BootstrapFixture):
         self.assertIn("rc=1", r.stdout, r.stdout + r.stderr)
         self.assertIn("not executable", r.stderr)
         self.assertFalse(self.standalone_path().exists())
+
+    # -- atomicity ---------------------------------------------------
+    #
+    # The recovery executable must never be absent. Moving the live file
+    # aside before moving the new one in — which is what this used to do —
+    # leaves a window in which the operator whose runtime just failed runs
+    # a path that does not exist. The window is microseconds, so a polling
+    # test would be a coin flip; the syscall trace is exact.
+
+    def _displacements(self, dest: str) -> list[str]:
+        """Syscalls that take the LIVE executable away.
+
+        A rename FROM the destination, or an unlink OF it, is a
+        displacement: the path stops existing for some interval. A rename
+        TO the destination is the correct atomic replacement and is not
+        reported.
+        """
+        bad = []
+        for line in self.syscall_log().splitlines():
+            m = re.search(r"\b(rename|renameat2?|unlink|unlinkat)\((.*)\)\s*=", line)
+            if not m:
+                continue
+            syscall = m.group(1)
+            strings = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(2))
+            if not strings:
+                continue
+            # unlink/unlinkat: the path is the first string.
+            # rename/renameat*: the SOURCE is the first string.
+            if strings[0] == dest:
+                bad.append(f"{syscall}: {line.strip()}")
+        return bad
+
+    @unittest.skipUnless(shutil.which("strace"), "strace is not available")
+    def test_the_live_executable_is_never_displaced(self):
+        # An existing executable, so the replacement has something to
+        # preserve.
+        first = self.drive(rev="rev-one")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+
+        release = self.data / "releases" / "rev-two" / "bin"
+        release.mkdir(parents=True)
+        src = release / UPDATER
+        src.write_text("#!/usr/bin/env bash\necho 'rev-two'\n")
+        src.chmod(0o755)
+
+        r = self.drive(
+            "set +e\n"
+            "load_bundle_lib || exit 9\n"
+            f'rb_provision_stable_updater "{self.data}" "{release.parent}" "rev-two"; echo "rc=$?"',
+            use_strace=True,
+        )
+        self.assertIn("rc=0", r.stdout, r.stdout + r.stderr)
+
+        dest = str(self.standalone_path())
+        displaced = self._displacements(dest)
+        self.assertEqual(
+            displaced, [],
+            "the live recovery executable was moved or unlinked rather than replaced "
+            "atomically; there was an interval in which it did not exist:\n  "
+            + "\n  ".join(displaced),
+        )
+
+    def test_the_previous_executable_is_preserved_before_the_swap(self):
+        """Both files exist after provisioning: the replacement is a swap,
+        not a displacement, and the rollback material is present."""
+        first = self.drive(rev="rev-one")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        old_bytes = self.standalone_path().read_bytes()
+
+        release = self.data / "releases" / "rev-two" / "bin"
+        release.mkdir(parents=True)
+        src = release / UPDATER
+        src.write_text("#!/usr/bin/env bash\necho 'rev-two'\n")
+        src.chmod(0o755)
+
+        r = self.drive(
+            "set +e\n"
+            "load_bundle_lib || exit 9\n"
+            f'rb_provision_stable_updater "{self.data}" "{release.parent}" "rev-two"; echo "rc=$?"'
+        )
+        self.assertIn("rc=0", r.stdout, r.stdout + r.stderr)
+
+        # The live file is the new one...
+        self.assert_provisioned_real_file(self.standalone_path(), "after provisioning")
+        self.assertIn(b"rev-two", self.standalone_path().read_bytes())
+        # ...and the old one is still here, un-moved, as rollback material.
+        backup = self.data / f".{UPDATER}.previous"
+        self.assertTrue(backup.exists(), "the previous executable was not preserved")
+        self.assertFalse(backup.is_symlink())
+        self.assertEqual(backup.read_bytes(), old_bytes,
+                         "the preserved copy is not the previous executable")
+        journal = self.data / f".{UPDATER}.rollback"
+        self.assertTrue(journal.is_file(), "no rollback journal was written")
+        self.assertEqual(journal.read_text().strip(), "previous")
+
+    def test_commit_clears_the_rollback_material(self):
+        r = self.drive()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for name in (f".{UPDATER}.previous", f".{UPDATER}.rollback"):
+            self.assertFalse((self.data / name).exists(),
+                             f"a successful install left {name} behind")
 
     def test_it_leaves_no_staging_residue_on_success(self):
         r = self.drive()
