@@ -81,6 +81,11 @@ class BundleUninstallTest(unittest.TestCase):
         (self.mpm / "staging" / "stale").mkdir(parents=True)
         (self.mpm / "staging" / "stale" / "leftover").write_text("x\n")
 
+        # The standalone recovery executable: a REAL file at the data
+        # root, not inside a release, so no other step covers it.
+        (self.mpm / "mpm-update").write_text("#!/bin/sh\necho fake-updater\n")
+        (self.mpm / "mpm-update").chmod(0o755)
+
         # The STATE — everything that must survive.
         (self.mpm / "src" / "db").mkdir(parents=True)
         (self.mpm / "src" / "db" / "mpm.db").write_text("the database\n")
@@ -127,6 +132,14 @@ class BundleUninstallTest(unittest.TestCase):
         self.assertFalse(
             (self.mpm / "agent_installation").is_symlink(),
             "the agent_installation symlink must go",
+        )
+        # The recovery executable is release-scoped runtime, not state: it
+        # is a copy of some release's mpm-update, so a runtime-only
+        # uninstall removes it. Leaving it behind would be a stray
+        # executable whose provenance no longer exists.
+        self.assertFalse(
+            (self.mpm / "mpm-update").exists(),
+            "the standalone recovery executable must go with the runtime",
         )
 
     def test_the_runtime_only_uninstall_preserves_the_persistent_state(self):
