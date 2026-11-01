@@ -71,10 +71,38 @@ rb_err() {
     if declare -F err >/dev/null 2>&1; then err "$@"; else printf 'ERROR: %s\n' "$*" >&2; fi
 }
 
-# The five binaries, in the canonical promotion order. Defined once here
-# so the bundle validator, the installer and the tests cannot disagree
-# about what a complete runtime is.
-RB_BINARIES="mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry"
+# The standalone updater. It is RELEASE-SCOPED in the bundle
+# (bin/mpm-update, so it rolls back with the release and is validated
+# with everything else) AND provisioned a second time as a REAL file at
+# the top of the data root, where a version switch cannot reach it.
+#
+# WHY BOTH. The updater is the tool that repairs a broken runtime, so it
+# cannot live only inside the runtime it repairs: in the versioned layout
+# bin/ is a symlink into the active release, so a binary placed there
+# dies with that release — exactly what must not happen to the recovery
+# tool. The data-root copy is state, survives version switches, and is
+# what the operator runs directly when `current` is broken.
+RB_UPDATER_BINARY="mpm-update"
+
+# The runtime binaries the substrate itself needs, in the canonical
+# promotion order. This is the list the Go verifier
+# (internal/update/verify.go runtimeBinaries) enforces, and the list the
+# non-bundle install path promotes. Kept separate so the difference is
+# explicit: a release built before the updater existed has these five
+# and no updater, and the updater must still be able to verify it.
+RB_CORE_BINARIES="mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry"
+
+# The binaries a complete runtime contains: the five above plus the
+# standalone updater. Defined once here so the bundle validator, the
+# installer, the release assembler and the tests cannot disagree about
+# what a complete runtime is.
+#
+# The updater is in this list because a bundle that omitted it could
+# never provision the standalone copy: the installer would report a
+# successful install over an installation with no recovery executable,
+# and no later update could repair it (an already-current update returns
+# before the provisioning step). See rb_provision_stable_updater below.
+RB_BINARIES="$RB_CORE_BINARIES $RB_UPDATER_BINARY"
 
 # The OpenCode runtime payload manifest.
 #
@@ -357,11 +385,20 @@ rb_validate_bundle() {
 
     [ -d "$bundle" ] || { rb_err "bundle directory does not exist: $bundle"; return 1; }
 
-    # 1. The five binaries.
+    # 1. The runtime binaries (the five substrate binaries plus the
+    #    standalone updater — see RB_BINARIES). A release carrying no
+    #    updater would be one whose recovery executable can never be
+    #    provisioned, so its absence is a validation failure, not a
+    #    warning.
     for bin in $RB_BINARIES; do
         local p="$bundle/bin/$bin"
         if [ ! -e "$p" ]; then
             rb_err "bundle is missing bin/$bin"
+            if [ "$bin" = "$RB_UPDATER_BINARY" ]; then
+                rb_err "the updater is the recovery executable: without it a broken runtime has no"
+                rb_err "repair path, and no later update can create one (an already-current update"
+                rb_err "returns before the provisioning step)."
+            fi
             return 1
         fi
         if [ ! -f "$p" ]; then
@@ -471,6 +508,122 @@ rb_install_release() {
         return 1
     }
     rb_log "  release installed at releases/$rev"
+    return 0
+}
+
+# ---------- the standalone recovery executable ----------
+
+# rb_provision_stable_updater <data_root> <release_dir> [rev]
+#
+# Install the release's updater as a REAL file at <data_root>/mpm-update,
+# beside the state rather than inside a release.
+#
+# WHY THIS EXISTS. The release bundle carries bin/mpm-update so that it
+# is versioned, validates with the rest of the runtime and rolls back
+# with it. That copy is NOT reachable as a recovery path: in the
+# versioned layout <data root>/bin is a symlink into the active release,
+# so a binary there dies with the release it is meant to repair. The
+# recovery executable must be independent of the thing it recovers, so a
+# second, stable copy is provisioned here, at the top of the data root,
+# where a version switch cannot reach it.
+#
+# ATOMICITY. The copy is staged beside the destination (same filesystem,
+# so the swap is rename(2)) and only replaces the existing executable
+# after it has been proven to be a regular, executable, byte-identical
+# copy of the validated release's updater. Any failure removes the
+# staged file and restores the previous executable, so the data root is
+# never left with a partial or truncated recovery tool. That is the
+# difference between "the installer failed" and "the installer failed
+# and now you cannot recover either".
+#
+# Returns 0 when the data root holds a good standalone updater; non-zero
+# when it does not, having left whatever was there before untouched.
+rb_provision_stable_updater() {
+    local data_root="$1" release_dir="$2" rev="${3:-}"
+    local src="$release_dir/bin/$RB_UPDATER_BINARY"
+    local dst="$data_root/$RB_UPDATER_BINARY"
+    local stage="$data_root/.$RB_UPDATER_BINARY.stage.$$"
+    local previous="$data_root/.$RB_UPDATER_BINARY.previous.$$"
+
+    # 1. The SOURCE must be the validated, executable release copy. A
+    #    bundle that reached here without it is refused rather than
+    #    silently reported as provisioned (the defect this closes: a
+    #    success banner over an installation with no recovery tool).
+    if [ ! -f "$src" ]; then
+        rb_err "the release carries no bin/$RB_UPDATER_BINARY (expected $src)"
+        rb_err "refusing to activate a runtime whose recovery executable cannot be provisioned"
+        return 1
+    fi
+    if [ ! -x "$src" ]; then
+        rb_err "the release's bin/$RB_UPDATER_BINARY is not executable"
+        return 1
+    fi
+
+    # 2. Stage beside the destination. Nothing visible has changed yet.
+    rm -f "$stage" 2>/dev/null || true
+    if ! cp "$src" "$stage"; then
+        rb_err "could not stage the standalone updater at $stage"
+        rm -f "$stage" 2>/dev/null || true
+        return 1
+    fi
+    if ! chmod 0755 "$stage"; then
+        rb_err "could not make the staged updater executable"
+        rm -f "$stage" 2>/dev/null || true
+        return 1
+    fi
+
+    # 3. VALIDATE BEFORE PROMOTION. The staged copy must be a regular,
+    #    executable, byte-identical copy of the release's updater. A
+    #    truncated or substituted copy must never reach the data root,
+    #    because this is the file an operator runs when nothing else
+    #    works.
+    local reason=""
+    if [ -L "$stage" ]; then
+        reason="the staged updater is a symlink"
+    elif [ ! -f "$stage" ]; then
+        reason="the staged updater is not a regular file"
+    elif [ ! -x "$stage" ]; then
+        reason="the staged updater is not executable"
+    elif ! cmp -s "$src" "$stage"; then
+        reason="the staged updater is not byte-identical to the release's copy"
+    fi
+    if [ -n "$reason" ]; then
+        rb_err "$reason — refusing to provision a recovery executable that could be wrong"
+        rm -f "$stage" 2>/dev/null || true
+        return 1
+    fi
+
+    # 4. Swap. The previous executable (if any) is preserved until the
+    #    new one is in place, so a failed swap restores exactly what was
+    #    there. rename(2) over the destination means a reader sees either
+    #    the old updater or the new one, never a half-written file.
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
+        if ! mv "$dst" "$previous"; then
+            rb_err "could not move the existing updater aside to $previous"
+            rm -f "$stage" 2>/dev/null || true
+            return 1
+        fi
+    fi
+    if ! mv "$stage" "$dst"; then
+        rb_err "could not install the standalone updater at $dst"
+        rm -f "$stage" 2>/dev/null || true
+        if [ -e "$previous" ] || [ -L "$previous" ]; then
+            mv "$previous" "$dst" 2>/dev/null || \
+                rb_err "  the previous updater is preserved at $previous — restore it by hand"
+        fi
+        return 1
+    fi
+    rm -f "$previous" 2>/dev/null || true
+
+    # 5. Read back. The provisioning step reports success only for a real
+    #    file: a symlink here would resolve into a release, which is the
+    #    failure mode this function exists to prevent.
+    if [ -L "$dst" ] || [ ! -f "$dst" ] || [ ! -x "$dst" ]; then
+        rb_err "the standalone updater at $dst is not a real executable after provisioning"
+        return 1
+    fi
+
+    rb_log "  standalone updater: $dst (real file, independent of releases/${rev:-?})"
     return 0
 }
 

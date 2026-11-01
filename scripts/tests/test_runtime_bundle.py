@@ -35,7 +35,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LIB = REPO_ROOT / "scripts" / "lib" / "runtime_bundle.sh"
 
-BINARIES = ("mpm", "mpm-scheduler", "mpm-critic", "mpm-mcp", "mpm-telemetry")
+BINARIES = (
+    "mpm",
+    "mpm-scheduler",
+    "mpm-critic",
+    "mpm-mcp",
+    "mpm-telemetry",
+    # A complete runtime bundle also carries the standalone updater. It
+    # is in bin/ so it validates, versions and rolls back with the
+    # release; the installer then provisions a stable copy of it at the
+    # data-root top level (rb_provision_stable_updater) as the recovery
+    # executable.
+    "mpm-update",
+)
 OPENCODE_MANIFEST = (
     "server.js",
     "dist/index.v2.js",

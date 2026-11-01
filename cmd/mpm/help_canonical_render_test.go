@@ -130,3 +130,25 @@ func TestHelp_BareIsDashboard(t *testing.T) {
 		t.Fatalf("bare `mpm` must not present the help panel (regression to legacy PrintHelp).\nGot:\n%s", out)
 	}
 }
+
+// TestHelp_FrontPageDiscoversUpdate pins the discoverability of the
+// update surface on the DEFAULT help page.
+//
+// `mpm update` is the operator's route to a newer runtime, and it is
+// the surface the release notes point at. A command registered in the
+// router but absent from `mpm help` is only discoverable by someone who
+// already knows it exists — which is the opposite of what an update
+// path needs. The front page is the one screen an operator reads after
+// an install, so the command must appear there.
+func TestHelp_FrontPageDiscoversUpdate(t *testing.T) {
+	out := renderCognitiveHelp()
+	if !strings.Contains(out, "update") {
+		t.Fatalf("`mpm help` must mention the update surface.\nGot:\n%s", out)
+	}
+	// The section that carries it must be an operator-facing one, not a
+	// dangling line: assert the entry appears under Maintenance, beside
+	// the other runtime-lifecycle commands.
+	if !strings.Contains(out, "Maintenance") {
+		t.Fatalf("`mpm help` must still render the Maintenance section.\nGot:\n%s", out)
+	}
+}

@@ -170,6 +170,43 @@ func TestUpdateAlreadyUpToDate(t *testing.T) {
 	}
 }
 
+// TestAlreadyCurrentDoesNotRepairMissingUpdater pins the boundary the
+// first-installation bootstrap relies on.
+//
+// An already-current update returns from Update BEFORE the provisioning
+// step, so it is NOT a repair path for a missing recovery executable. A
+// missing <data root>/mpm-update therefore has to be created by the
+// installer, which is why install.sh's bundle phase provisions it
+// (rb_provision_stable_updater) instead of leaving it to a later update.
+//
+// If someone ever "fixes" the early return to provision the updater,
+// this test will fail — and that is the point: the behaviour is a
+// contract, not an accident, and the runbook tells the operator to
+// bootstrap with the installer rather than with an idempotent update.
+func TestAlreadyCurrentDoesNotRepairMissingUpdater(t *testing.T) {
+	rev := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	root := testLayout(t, rev)
+
+	// The fixture is a runtime installed WITHOUT the standalone updater:
+	// exactly the state a pre-bootstrap installation is left in.
+	stable := filepath.Join(root, StableUpdaterName)
+	if _, err := os.Stat(stable); !os.IsNotExist(err) {
+		t.Fatalf("fixture precondition: the stable updater must be absent, stat err = %v", err)
+	}
+
+	out, err := Update(context.Background(), Options{DataRoot: root, Fetcher: stubFetcher{rev: rev}})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !out.AlreadyCurrent {
+		t.Fatalf("expected AlreadyCurrent, got %+v", out)
+	}
+	if _, err := os.Stat(stable); !os.IsNotExist(err) {
+		t.Fatalf("an already-current update provisioned %s: recovery provisioning must not be "+
+			"assumed to happen on a no-op update (stat err = %v)", stable, err)
+	}
+}
+
 type stubFetcher struct{ rev string }
 
 func (s stubFetcher) LatestStable(tag string) (ReleaseInfo, error) {

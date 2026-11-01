@@ -35,8 +35,11 @@ the updater **reuses** them: the Go bundle validator applies the same
 five checks in the same order (pinned by a parity test), the pointer
 swap is the same `rename(2)`, backups use the online path (never a raw
 copy), and the preflight compares against a snapshot, never the live
-file. `install.sh` and the shared shell libraries are untouched by this
-change.
+file.
+
+The updater itself does not change `install.sh` or the shared shell
+libraries. The **bootstrap** does, because a first installation is the
+one surface that can guarantee a recovery executable — see below.
 
 ### The standalone updater
 
@@ -47,6 +50,30 @@ delegates to it; when the active runtime is broken, the operator runs
 `internal/buildinfo` — never the substrate — so recovering MPM never
 requires starting the broken runtime. It is refreshed from every
 promoted release, so it tracks the newest known-good runtime.
+
+#### First installation (the bootstrap)
+
+An installation with no `mpm-update` has no repair path, and **nothing
+repairs that later**: the updater provisions its stable copy only after
+a release has passed its health check, and an *already-current* update
+returns before that step. So the first bundle-mode installation
+provisions the executable itself:
+
+- `mpm-update` is part of the release bundle (`bin/mpm-update`), so it
+  is validated with the rest of the runtime and rolls back with it;
+- `install.sh --bundle` then copies it to `<data root>/mpm-update` as a
+  **real file** — staged beside the destination, verified
+  byte-identical, then swapped by `rename(2)`;
+- the copy is made **last**, after the release is active and its layout
+  is in place. A promotion that fails at any earlier step leaves the
+  previous recovery executable untouched, and a failure at this step
+  rolls the promotion back rather than leaving a runtime that cannot be
+  repaired;
+- a build without `mpm-update` is refused before anything is activated,
+  instead of producing a bundle with no recovery tool.
+
+`mpm update --status` reports it (`stable_updater` in `--json`), and
+`install.sh --validate` fails if it is missing or is a symlink.
 
 ## Threat model
 
