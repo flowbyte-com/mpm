@@ -160,6 +160,11 @@ type MaterializationReport struct {
 	Skipped int
 	// Suppressed is the count of intents suppressed due to depth > MaxCascadeDepth.
 	Suppressed int
+	// RevertFailed is the count of intents the materializer could not
+	// move back to `pending` while stopping mid-batch. A non-zero count
+	// means intents are stranded in `processing` with no reconciler
+	// looking for them — the operator must requeue or fail them by hand.
+	RevertFailed int
 }
 
 // MaterializeBatch claims up to `limit` pending intents, materializes each
@@ -184,7 +189,11 @@ func (cm *CascadeMaterializer) MaterializeBatch(ctx context.Context, limit int) 
 	for _, intent := range intents {
 		select {
 		case <-ctx.Done():
-			cm.revertToPending(intent.ID)
+			if rerr := cm.revertToPending(intent.ID); rerr != nil {
+				report.RevertFailed++
+				cm.dm.LogAudit(AuditWarn, "cascade",
+					"revertToPending failed (intent stranded in processing): "+rerr.Error(), "", nil)
+			}
 			continue
 		default:
 		}
@@ -780,14 +789,20 @@ func (cm *CascadeMaterializer) requeueIntent(intentID string, attemptCount int, 
 }
 
 // revertToPending resets a single intent back to 'pending' (used when
-// the materializer is stopping mid-batch).
-func (cm *CascadeMaterializer) revertToPending(intentID string) {
+// the materializer is stopping mid-batch). The error is RETURNED: a
+// revert that does not land strands the intent in `processing` forever
+// — no reconciler looks for it — so the caller must know.
+func (cm *CascadeMaterializer) revertToPending(intentID string) error {
 	now := time.Now().Unix()
-	cm.dm.db.Exec(`
+	_, err := cm.dm.ExecTracked(`
 		UPDATE epistemic_cascade_outbox
 		SET status = 'pending', updated_at = ?
 		WHERE id = ? AND status = 'processing'
-	`, now, intentID)
+	`, 5, now, intentID)
+	if err != nil {
+		return fmt.Errorf("revertToPending %s: %w", intentID, err)
+	}
+	return nil
 }
 
 // scheduleCascadeWake schedules a cascade wake for the generated theory
@@ -847,11 +862,11 @@ func (cm *CascadeMaterializer) scheduleCascadeWake(intentID, theoryID, invalidat
 // for materialized rows with wake_scheduled=0 to recover lost wakes.
 func (cm *CascadeMaterializer) markWakeScheduled(intentID string) error {
 	now := time.Now().Unix()
-	res, err := cm.dm.db.Exec(`
+	res, err := cm.dm.ExecTracked(`
 		UPDATE epistemic_cascade_outbox
 		SET wake_scheduled = 1, updated_at = ?
 		WHERE id = ?
-	`, now, intentID)
+	`, 5, now, intentID)
 	if err != nil {
 		return fmt.Errorf("markWakeScheduled exec: %w", err)
 	}
