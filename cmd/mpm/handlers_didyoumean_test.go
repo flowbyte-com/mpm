@@ -58,20 +58,20 @@ func filterDYMOutput(s string) string {
 	return b.String()
 }
 
-// TestDidYouMean_CloseTypoSuggests verifies the core happy path:
-// a single-token typo that is close (in Levenshtein distance) to a
-// known command triggers a "did you mean?" hint after recall returns
-// zero results.
+// TestDidYouMean_CloseTypoSuggests verifies the core contract: an
+// unknown single-token command that is close (in Levenshtein distance)
+// to a known command fails visibly (nonzero exit), suggests the match
+// WITHOUT executing it, and never runs a memory search.
 func TestDidYouMean_CloseTypoSuggests(t *testing.T) {
 	bin := buildMpmForDYMTest(t)
 	workspace := t.TempDir()
 
 	out, exit := runMpmDYM(t, bin, workspace, "lss")
-	if exit != 0 {
-		t.Fatalf("mpm lss should exit 0 on empty results, got %d\n%s", exit, out)
+	if exit == 0 {
+		t.Fatalf("mpm lss should exit nonzero for an unknown command, got %d\n%s", exit, out)
 	}
-	if !strings.Contains(out, "No memories found for: lss") {
-		t.Errorf("expected recall message, got: %s", out)
+	if strings.Contains(out, "No memories found for: lss") {
+		t.Errorf("unknown command must never invoke recall, got: %s", out)
 	}
 	if !strings.Contains(out, `Did you mean "ls"`) {
 		t.Errorf("expected did-you-mean hint for ls, got: %s", out)
@@ -83,29 +83,29 @@ func TestDidYouMean_CloseTypoSuggests(t *testing.T) {
 
 // TestDidYouMean_UnrelatedTokenNoHint verifies the threshold boundary:
 // a token that is NOT close to any known command name produces no
-// "did you mean?" suggestion, but still gets a clear "Unknown command"
-// line so the user knows the token didn't dispatch.
+// suggestion, but still gets a clear "Unknown command" error with a
+// nonzero exit — and never a memory search.
 func TestDidYouMean_UnrelatedTokenNoHint(t *testing.T) {
 	bin := buildMpmForDYMTest(t)
 	workspace := t.TempDir()
 
 	out, exit := runMpmDYM(t, bin, workspace, "pinoeques")
-	if exit != 0 {
-		t.Fatalf("mpm pinoeques should exit 0 on empty results, got %d\n%s", exit, out)
+	if exit == 0 {
+		t.Fatalf("mpm pinoeques should exit nonzero for an unknown command, got %d\n%s", exit, out)
 	}
-	if !strings.Contains(out, "No memories found for: pinoeques") {
-		t.Errorf("expected recall message, got: %s", out)
+	if strings.Contains(out, "No memories found for: pinoeques") {
+		t.Errorf("unknown command must never invoke recall, got: %s", out)
 	}
 	if strings.Contains(out, "Did you mean") {
 		t.Errorf("did NOT expect hint for unrelated token, got: %s", out)
 	}
-	if !strings.Contains(out, `Unknown command "pinoeques"`) {
-		t.Errorf("expected 'Unknown command' framing for unrelated token, got: %s", out)
+	if !strings.Contains(out, `unknown command 'pinoeques'`) {
+		t.Errorf("expected 'unknown command' framing for unrelated token, got: %s", out)
 	}
 }
 
 // TestDidYouMean_KnownCommandUnchanged pins the regression that known
-// commands dispatch normally and never trigger the smart-recall / hint
+// commands dispatch normally and never trigger the unknown-command
 // path. `mpm version` should print the version banner, period.
 func TestDidYouMean_KnownCommandUnchanged(t *testing.T) {
 	bin := buildMpmForDYMTest(t)
@@ -121,16 +121,16 @@ func TestDidYouMean_KnownCommandUnchanged(t *testing.T) {
 	if strings.Contains(out, "Did you mean") {
 		t.Errorf("known command should never emit hint, got: %s", out)
 	}
-	if strings.Contains(out, "No memories found") {
-		t.Errorf("known command should never invoke recall, got: %s", out)
+	if strings.Contains(out, "Unknown command") {
+		t.Errorf("known command should never report unknown command, got: %s", out)
 	}
 }
 
 // TestDidYouMean_ExplicitRecallNoHint pins the second half of the
 // invariant: when the user explicitly types `mpm recall <query>`, the
-// hint path must NOT fire even if results are zero. The hint is a
-// fallback affordance for ambiguous single-token input, not an add-on
-// to the explicit recall surface.
+// hint path must NOT fire even if results are zero. The suggestion is
+// an unknown-command affordance, not an add-on to the explicit recall
+// surface.
 func TestDidYouMean_ExplicitRecallNoHint(t *testing.T) {
 	bin := buildMpmForDYMTest(t)
 	workspace := t.TempDir()
@@ -150,39 +150,42 @@ func TestDidYouMean_ExplicitRecallNoHint(t *testing.T) {
 	}
 }
 
-// TestDidYouMean_TypoForRecallFiltered verifies the built-in-command
-// filter: a token that is closest to "recall" (e.g., "recoll") should
-// NOT suggest "recall" because recall is the path the smart-recall
-// fallback has already routed through.
-func TestDidYouMean_TypoForRecallFiltered(t *testing.T) {
+// TestDidYouMean_TypoForRecallSuggestsRecall verifies that a token
+// close to "recall" (e.g., "recoll") suggests the recall command —
+// without executing it. There is no implicit fallback anymore, so
+// recall is suggested exactly like any other close command name.
+func TestDidYouMean_TypoForRecallSuggestsRecall(t *testing.T) {
 	bin := buildMpmForDYMTest(t)
 	workspace := t.TempDir()
 
 	out, exit := runMpmDYM(t, bin, workspace, "recoll")
-	if exit != 0 {
-		t.Fatalf("mpm recoll should exit 0, got %d\n%s", exit, out)
+	if exit == 0 {
+		t.Fatalf("mpm recoll should exit nonzero for an unknown command, got %d\n%s", exit, out)
 	}
-	if !strings.Contains(out, "No memories found for: recoll") {
-		t.Errorf("expected recall empty-results message, got: %s", out)
+	if strings.Contains(out, "No memories found for: recoll") {
+		t.Errorf("unknown command must never invoke recall, got: %s", out)
 	}
-	if strings.Contains(out, `Did you mean "recall"`) {
-		t.Errorf("should NOT suggest 'recall' (smart-recall target), got: %s", out)
+	if !strings.Contains(out, `Did you mean "recall"`) {
+		t.Errorf("should suggest 'recall' for a close typo, got: %s", out)
 	}
 }
 
-// TestDidYouMean_MultiTokenBypassesHint verifies that multi-token input
-// does NOT trigger the smart-recall / hint path. `mpm lss foo` should
-// behave like an unknown command rather than a recall query.
-func TestDidYouMean_MultiTokenBypassesHint(t *testing.T) {
+// TestDidYouMean_MultiTokenUnknownCommand verifies that multi-token
+// input is an unknown command like any other: nonzero exit, no recall,
+// and the same suggestion the single-token form would get.
+func TestDidYouMean_MultiTokenUnknownCommand(t *testing.T) {
 	bin := buildMpmForDYMTest(t)
 	workspace := t.TempDir()
 
-	out, _ := runMpmDYM(t, bin, workspace, "lss", "foo")
-	if strings.Contains(out, "Did you mean") {
-		t.Errorf("multi-token input should not trigger hint, got: %s", out)
+	out, exit := runMpmDYM(t, bin, workspace, "lss", "foo")
+	if exit == 0 {
+		t.Fatalf("mpm lss foo should exit nonzero for an unknown command, got %d\n%s", exit, out)
 	}
 	if strings.Contains(out, "No memories found") {
-		t.Errorf("multi-token input should not invoke recall, got: %s", out)
+		t.Errorf("multi-token input must not invoke recall, got: %s", out)
+	}
+	if !strings.Contains(out, `Did you mean "ls"`) {
+		t.Errorf("multi-token input should get the same suggestion, got: %s", out)
 	}
 }
 
@@ -200,9 +203,9 @@ func TestDidYouMean_SuggestPureFunction(t *testing.T) {
 		{"statts", "stats"},
 		{"addd", "add"},
 		{"remembr", "remember"},
-		{"pinoeques", ""}, // unrelated, no match
-		{"recoll", ""},    // filtered (recall is the smart-recall target)
-		{"", ""},          // empty token
+		{"pinoeques", ""},    // unrelated, no match
+		{"recoll", "recall"}, // close to recall: suggested, never executed
+		{"", ""},             // empty token
 	}
 	for _, tc := range cases {
 		t.Run(tc.token, func(t *testing.T) {
@@ -252,8 +255,8 @@ func TestDidYouMeanThreshold(t *testing.T) {
 		{0, 0},
 		{1, 2}, // short token, minimum is 2
 		{3, 2},
-		{6, 2}, // 6/3 = 2
-		{9, 3}, // 9/3 = 3
+		{6, 2},  // 6/3 = 2
+		{9, 3},  // 9/3 = 3
 		{15, 4}, // capped at 4
 	}
 	for _, tc := range cases {

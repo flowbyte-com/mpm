@@ -1874,7 +1874,7 @@ Three surfaces share one substrate (`internal/core/tools` registry):
 
 ```bash
 mpm                # Readiness dashboard — verifies substrate is ready, auto-starts scheduler
-mpm <query>        # FTS5 search (default when called with a bare string)
+mpm <unknown>      # Unknown command: exits nonzero with a suggestion — never an implicit search (use `mpm recall <query>`)
 mpm add <text>     # Add a new memory
 mpm add -i         # Interactive add — opens $EDITOR
 mpm snooze <id>    # Bump a memory's relevance (no LTM promotion)
@@ -2681,7 +2681,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`decision`** — Decision CRUD
 - **`decisions`** — List decisions
 - **`directives`** — Show behavioral directives
-- **`doctor`** — Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)
+- **`doctor`** _(aliases: doc)_ — Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)
 - **`drills`** — Behavioural drill execution + compatibility matrix (list|show|run|report)
 - **`evidence`** — Manage evidence (add|list) — confidence foundation
 - **`export`** — Export memories to JSON
@@ -2712,7 +2712,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`provenance`** — Show artifact provenance (mpm provenance help for subcommands)
 - **`prune`** — Prune expired memories
 - **`read-skill`** — Read skill by name (or id) and optional version
-- **`recall`** _(aliases: s)_ — Recall relevant context
+- **`recall`** _(aliases: r)_ — Recall relevant context
 - **`record_decision`** — Record decision (full substrate form: context, choice, rationale)
 - **`reference`** — Manage reference documents
 - **`reinforce`** — Record reinforcement (provenance/display; does not affect current retrieval ranking — see §6.3)
