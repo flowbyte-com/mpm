@@ -152,23 +152,17 @@ func Rollback(o Options) (Outcome, error) {
 		if backupEntry == nil {
 			return out, fmt.Errorf("no verified pre-update backup is recorded for %s; refusing a database restore with no recovery point", out.FromRev)
 		}
-		if backupEntry.PreFP != "" {
-			// Bind the recovery point to its recorded
-			// identity BEFORE anything stops or moves: a
-			// backup that no longer matches the fingerprint
-			// taken at backup time has been replaced or
-			// damaged since, and must not become the live
-			// database.
-			if fp, ferr := SchemaFingerprint(filepath.Join(backupEntry.BackupDir, "mpm.db")); ferr != nil || fp != backupEntry.PreFP {
-				detail := "could not fingerprint the recorded backup"
-				if ferr == nil {
-					detail = "the recorded backup's shape no longer matches its recorded fingerprint"
-				} else {
-					detail += ": " + ferr.Error()
-				}
-				recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, "", "", "", "failed", detail)
-				return out, fmt.Errorf("refusing a database restore: %s (backup: %s)", detail, backupEntry.BackupDir)
-			}
+		// Bind the recovery point to its recorded identity BEFORE
+		// anything stops or moves. A recovery point must be
+		// recognizable as MPM's and carry the pre-update schema
+		// fingerprint recorded with it at backup time; a file that
+		// fails either test has been replaced or damaged since, and
+		// must never become the live database. An EMPTY fingerprint
+		// is a refusal, not a skip — see verifyRecoveryPoint.
+		if err := verifyRecoveryPoint(filepath.Join(backupEntry.BackupDir, "mpm.db"), backupEntry.PreFP); err != nil {
+			detail := "refusing a database restore: " + err.Error()
+			recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, "", "", "", "failed", detail)
+			return out, fmt.Errorf("%s (backup: %s)", detail, backupEntry.BackupDir)
 		}
 		out.BackupDir = backupEntry.BackupDir
 	}
@@ -205,26 +199,65 @@ func Rollback(o Options) (Outcome, error) {
 			_ = sc.Start(s)
 		}
 	}
+
+	// THE PAIR MUST BE ALIGNED BEFORE ANY SERVICE STARTS.
+	//
+	// Database restoration and runtime activation are two halves of
+	// one state transition. A failure between them leaves the older
+	// database under the newer active release — and starting a daemon
+	// there runs the newer binary against the older schema, a second
+	// outage manufactured by the recovery procedure. So the restart is
+	// gated on BOTH halves having moved (or neither), and on the
+	// required health check having passed. When it is not safe, the
+	// services stay stopped, visibly, and the error says so.
+	var dbRestored, activated, healthy bool
+	restartVerdict := func() (bool, string) {
+		if dbRestored && !activated {
+			return false, fmt.Sprintf(
+				"DEGRADED: the database was restored from %s but the active release is still %s. "+
+					"The two halves of the transition disagree, so the managed service(s) were left stopped — "+
+					"starting one now would run the %s binary against the restored (older) database. "+
+					"Complete the pointer swap (re-run the rollback), then start the service(s) by hand",
+				out.BackupDir, out.FromRev, out.FromRev)
+		}
+		if activated && !healthy {
+			return false, "DEGRADED: the restored runtime did not pass its health check, so the managed service(s) were left stopped — start them only once the runtime is known good"
+		}
+		return true, ""
+	}
 	fail := func(stage string, err error) (Outcome, error) {
-		startStopped()
-		recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, out.BackupDir, "", "", "failed", stage+": "+err.Error())
+		detail := stage + ": " + err.Error()
+		if ok, why := restartVerdict(); ok {
+			startStopped()
+		} else {
+			detail += "; " + why
+			err = fmt.Errorf("%w; %s", err, why)
+		}
+		out.Report = detail
+		recordOutcome(dataRoot, "rollback", out.FromRev, prevRev, Source{}, out.BackupDir, "", "", "failed", detail)
 		return out, err
 	}
 
 	var dbRestoreAccepted []string
 	if o.WithDBRestore {
-		accepted, err := restoreDatabase(dataRoot, backupEntry.BackupDir, o.Force)
+		accepted, err := restoreDatabase(dataRoot, backupEntry.BackupDir, backupEntry.PreFP, o.Force)
 		if err != nil {
 			return fail("restore", err)
 		}
+		dbRestored = true
 		for _, u := range accepted {
 			dbRestoreAccepted = append(dbRestoreAccepted, fmt.Sprintf("pid %d %s (%s)", u.PID, u.Name, u.Reason))
 		}
 	}
 
+	if err := failPoint(o.failAt(), "restore"); err != nil {
+		return fail("restore", err)
+	}
+
 	if err := restorePointer(dataRoot, prevTarget); err != nil {
 		return fail("repoint", fmt.Errorf("could not restore the active pointer: %w", err))
 	}
+	activated = true
 	// The undone release becomes the new "previous": a second rollback
 	// returns to it, and the record always names the target the
 	// pointer held before the last activation — whichever direction
@@ -239,6 +272,7 @@ func Rollback(o Options) (Outcome, error) {
 	if !live.OK {
 		return fail("health-check", fmt.Errorf("the restored runtime failed its health check: %s", live.Detail))
 	}
+	healthy = true
 
 	// The intended runtime and database are aligned: restart what was
 	// stopped and verify the running identities, the same partial-
@@ -401,7 +435,7 @@ func checkWriters(scan HolderScan, force bool) ([]UnverifiableProc, error) {
 	return scan.Unverifiable, nil
 }
 
-func restoreDatabase(dataRoot, backupDir string, force bool) ([]UnverifiableProc, error) {
+func restoreDatabase(dataRoot, backupDir, expectFP string, force bool) ([]UnverifiableProc, error) {
 	l := NewLayout(dataRoot)
 	live := l.LiveDB()
 	raw, err := os.ReadFile(filepath.Join(backupDir, "mpm.db"))
@@ -442,8 +476,10 @@ func restoreDatabase(dataRoot, backupDir string, force bool) ([]UnverifiableProc
 	// error). A damaged recovery point must never replace the live
 	// database. This deliberately does NOT compare against the live
 	// shape — after a migration they are supposed to differ, and that
-	// difference is the reason for the restore.
-	if err := verifyBackupStandalone(tmpName); err != nil {
+	// difference is the reason for the restore. It DOES re-check the
+	// recorded pre-update schema fingerprint, so the copy that is
+	// renamed into place is provably the one that was backed up.
+	if err := verifyRecoveryPoint(tmpName, expectFP); err != nil {
 		os.Remove(tmpName)
 		return nil, fmt.Errorf("the recovery point failed pre-restore verification: %w", err)
 	}

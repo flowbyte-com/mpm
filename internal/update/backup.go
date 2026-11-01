@@ -1,6 +1,7 @@
 package update
 
 import (
+	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -190,22 +191,103 @@ func verifyBackupStandalone(path string) error {
 	if err != nil {
 		return fmt.Errorf("could not list the staged copy tables: %w", err)
 	}
-	found := false
 	for _, tbl := range tables {
-		if tbl == "memories" {
-			found = true
-		}
 		var n int64
 		// Table names come from sqlite_master, not operator input.
 		if err := bdb.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, tbl)).Scan(&n); err != nil {
 			return fmt.Errorf("staged copy table %s is not readable: %w", tbl, err)
 		}
 	}
-	if !found {
+	// RECOGNIZABLE AS MPM'S. `integrity_check` proves the file is
+	// internally consistent; it proves nothing about WHOSE database it
+	// is, and an unrelated empty schema reports `ok`. The `memories`
+	// table is the one table every MPM schema has carried, and it has
+	// always carried these columns — so a file whose table merely
+	// shares the name is not mistaken for a recovery point.
+	//
+	// This is the FLOOR, not the identity check: `verifyRecoveryPoint`
+	// is what proves the file is the database that was backed up.
+	return requireMPMShape(bdb, tables)
+}
+
+// mpmCoreColumns are the `memories` columns every MPM schema has
+// carried. They are a recognizability marker, never a compatibility
+// check: a schema that gains a column is still MPM's.
+var mpmCoreColumns = []string{"id", "content"}
+
+// requireMPMShape refuses a database whose `memories` table is not
+// MPM's, however tidy its schema is.
+func requireMPMShape(db *sql.DB, tables []string) error {
+	hasMemories := false
+	for _, tbl := range tables {
+		if tbl == "memories" {
+			hasMemories = true
+		}
+	}
+	if !hasMemories {
 		return fmt.Errorf("the staged copy has no memories table: not a recognizable MPM database")
+	}
+	cols := map[string]bool{}
+	rows, err := db.Query(`PRAGMA table_info("memories")`)
+	if err != nil {
+		return fmt.Errorf("could not inspect the staged copy's memories table: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("could not inspect the staged copy's memories table: %w", err)
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("could not inspect the staged copy's memories table: %w", err)
+	}
+	for _, want := range mpmCoreColumns {
+		if !cols[want] {
+			return fmt.Errorf("the staged copy's memories table has no %q column: not a recognizable MPM database", want)
+		}
 	}
 	return nil
 }
+
+// verifyRecoveryPoint proves a file is a usable recovery point for THIS
+// installation.
+//
+// The standalone checks answer "is this a tidy SQLite file that looks
+// like MPM's?". They cannot answer "is this the database we backed
+// up?" — an empty schema reports integrity_check=ok, and any file can
+// carry a table called `memories`. The authoritative identity is the
+// schema fingerprint recorded WITH the backup when it was taken
+// (BackupResult.Fingerprint): the PRE-UPDATE shape, which is exactly
+// the shape the restored runtime is expected to read. It is
+// deliberately not compared against the live database, whose schema
+// may legitimately have moved on — that difference is why the restore
+// is happening.
+//
+// An EMPTY expectFP is a REFUSAL, not a skip. Without a recorded
+// fingerprint there is no way to tell MPM's pre-update database from
+// any other tidy one, and the consequence of being wrong is that an
+// unrelated file replaces the live database.
+func verifyRecoveryPoint(path, expectFP string) error {
+	if err := verifyBackupStandalone(path); err != nil {
+		return err
+	}
+	if expectFP == "" {
+		return fmt.Errorf("no recorded fingerprint was stored with this recovery point, so MPM cannot tell it apart from any other database")
+	}
+	fp, err := SchemaFingerprint(path)
+	if err != nil {
+		return fmt.Errorf("could not fingerprint the recovery point: %w", err)
+	}
+	if fp != expectFP {
+		return fmt.Errorf("the recovery point does not match its recorded fingerprint: its schema is %s, the recorded fingerprint is %s", fp, expectFP)
+	}
+	return nil
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
