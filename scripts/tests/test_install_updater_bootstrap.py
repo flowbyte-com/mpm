@@ -536,5 +536,60 @@ class TestProvisioningPrimitive(BootstrapFixture):
                          f"provisioning left staging residue in the data root: {residue}")
 
 
+
+# ===========================================================================
+# 6 — the post-install validation predicate
+# ===========================================================================
+
+
+class TestValidationPredicate(BootstrapFixture):
+    """`install.sh --validate` must reject every unusable recovery tool.
+
+    The predicate is exercised directly rather than through the full
+    validation phase: that phase also probes systemd and the live
+    database, which would make this a test of the host rather than of
+    the rule.
+    """
+
+    def check(self, path: Path) -> tuple[str, str]:
+        r = self.drive(
+            "set +e\n"
+            f'recovery_executable_problem "{path}"; echo "<<END>>"'
+        )
+        out = r.stdout
+        self.assertIn("<<END>>", out, out + r.stderr)
+        return out.split("<<END>>")[0].strip(), r.stderr
+
+    def test_a_real_executable_is_accepted(self):
+        good = self.data / "good-updater"
+        good.write_text("#!/bin/sh\nexit 0\n")
+        good.chmod(0o755)
+        problem, _ = self.check(good)
+        self.assertEqual(problem, "", f"a real executable must pass, got {problem!r}")
+
+    def test_a_symlink_is_rejected_even_when_it_resolves(self):
+        target = self.data / "releases" / "r1" / "bin" / UPDATER
+        target.parent.mkdir(parents=True)
+        target.write_text("#!/bin/sh\nexit 0\n")
+        target.chmod(0o755)
+        link = self.data / "linked-updater"
+        link.symlink_to(target)
+        self.assertTrue(os.access(link, os.X_OK), "fixture: the link must resolve")
+
+        problem, _ = self.check(link)
+        self.assertIn("SYMLINK", problem)
+
+    def test_a_missing_file_is_rejected(self):
+        problem, _ = self.check(self.data / "no-such-updater")
+        self.assertIn("missing", problem)
+
+    def test_a_non_executable_file_is_rejected(self):
+        p = self.data / "inert-updater"
+        p.write_text("#!/bin/sh\nexit 0\n")
+        p.chmod(0o644)
+        problem, _ = self.check(p)
+        self.assertIn("not executable", problem)
+
+
 if __name__ == "__main__":
     unittest.main()

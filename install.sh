@@ -1641,6 +1641,34 @@ phase_runtime_assets() {
 }
 
 
+# recovery_executable_problem <path>
+#
+# The three ways the standalone recovery executable can be unusable, as
+# a message, or the empty string when it is fine.
+#
+# This is deliberately stricter than `[ -x ]`: a SYMLINK is a failure
+# even when it resolves to an executable. In the versioned layout the
+# stable bin/ path is a link into the active release, so a recovery
+# tool that is itself a link dies with the runtime it exists to repair.
+# Accepting it here would report a green validation over an installation
+# with no independent recovery path.
+recovery_executable_problem() {
+    local p="$1"
+    if [ -L "$p" ]; then
+        printf 'is a SYMLINK at %s (must be a real file, independent of the active release)' "$p"
+        return 0
+    fi
+    if [ ! -f "$p" ]; then
+        printf 'missing at %s' "$p"
+        return 0
+    fi
+    if [ ! -x "$p" ]; then
+        printf 'is not executable at %s' "$p"
+        return 0
+    fi
+    return 0
+}
+
 phase_validate() {
     note "VALIDATION"
     local errors=0
@@ -1670,17 +1698,18 @@ phase_validate() {
     #      the release it is meant to repair, which is precisely the
     #      property that makes it useless as a recovery path — so a
     #      symlink is a failure, not a pass.
+    #
+    #      The predicate is a function so the three rejection reasons are
+    #      testable on their own (scripts/tests/test_install_updater_bootstrap.py)
+    #      instead of only being reachable through a full install.
     if [ "$USE_BUNDLE" = "1" ]; then
         local recovery="$DATA_ROOT/mpm-update"
-        if [ -L "$recovery" ]; then
-            err "  ✗ recovery executable at $recovery is a SYMLINK (must be a real file, independent of the active release)"
-            errors=$((errors + 1))
-        elif [ ! -f "$recovery" ]; then
-            err "  ✗ recovery executable missing at $recovery"
-            err "    without it a broken runtime has no repair path"
-            errors=$((errors + 1))
-        elif [ ! -x "$recovery" ]; then
-            err "  ✗ recovery executable at $recovery is not executable"
+        local problem
+        problem="$(recovery_executable_problem "$recovery")"
+        if [ -n "$problem" ]; then
+            err "  ✗ recovery executable: $problem"
+            [ -L "$recovery" ] || [ -f "$recovery" ] || \
+                err "    without it a broken runtime has no repair path"
             errors=$((errors + 1))
         else
             log "  ✓ recovery executable present ($recovery, real file)"
