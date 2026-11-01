@@ -155,7 +155,14 @@ func handleMemory(args []string) int {
 	case "patch-memory":
 		return handlePatchMemory(args)
 	default:
-		return handleMemoryHelp()
+		// An unrecognised subcommand is an error, not a help page.
+		// The router skips the first token for subcommand families
+		// so the dispatcher reports it (see cli_options_registry.go);
+		// printing help with exit 0 here swallowed the mistake, so
+		// `mpm memory --bogus` SUCCEEDED. Mirrors handleOps.
+		usererror.Error("mpm memory: unknown subcommand %q", subCmd)
+		handleMemoryHelp()
+		return 1
 	}
 }
 
