@@ -67,8 +67,10 @@ type violation struct {
 }
 
 // mpmBinaryNames are binaries that can open the MPM database when run as
-// a subprocess.
-var mpmBinaryNames = []string{"mpm", "mpm-mcp", "mpm-critic", "mpm-lint"}
+// a subprocess. mpm-update qualifies: it opens the live database for
+// backups, preflight, smoke tests and restores, so an unisolated
+// updater child is the same production hazard as an unisolated mpm.
+var mpmBinaryNames = []string{"mpm", "mpm-mcp", "mpm-critic", "mpm-lint", "mpm-update"}
 
 // sanctionedEnvHelpers are the ways a test may legitimately supply an
 // isolated environment. Each is assumed to pin MPM_WORKSPACE by
@@ -394,6 +396,20 @@ import subprocess "os/exec"
 import "testing"
 func TestX(t *testing.T) {
 	cmd := subprocess.Command("mpm", "info")
+	_ = cmd.Run()
+}`,
+		},
+		{
+			// The standalone updater is a DB-capable binary too: it
+			// opens the live database for backup, preflight,
+			// smoke and restore. An unisolated mpm-update child
+			// must be flagged exactly like an unisolated mpm.
+			name: "unisolated mpm-update invocation",
+			src: `package t
+import ("os"; "os/exec"; "testing")
+func TestX(t *testing.T) {
+	cmd := exec.Command("mpm-update", "--check")
+	cmd.Env = os.Environ()
 	_ = cmd.Run()
 }`,
 		},

@@ -1,0 +1,116 @@
+# release-bundles — publish verified, versioned release bundles.
+#
+# On a version tag push (v*), this builds the Linux amd64 runtime,
+# assembles the bundle with scripts/assemble-release-bundle.sh (the
+# same validator install.sh applies), verifies the artifacts against
+# the tag, and uploads the tarball plus SHA256SUMS to the GitHub
+# release with a build-provenance attestation.
+#
+# DETERMINISM. The release is created if missing, never replaced: the
+# upload uses no --clobber, so re-running the workflow against an
+# existing release fails loudly instead of silently swapping artifacts
+# under a published tag. The verification step pins the contract the
+# updater depends on — tag, bundle identity, checksum coverage and
+# asset naming — so a workflow edit that breaks the updater's
+# selection fails here, not on an operator's machine.
+#
+# PLATFORM POLICY: Linux x86_64 is the only advertised platform. The
+# assembler refuses anything else, and the updater only installs a
+# bundle whose name matches its own platform. Do not add asset names
+# here that the updater cannot select — an unselectable asset is a
+# release no ordinary user can install.
+name: release-bundles
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build the plugin payload
+        run: |
+          cd agent_installation/mpm-opencode
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Build the binaries
+        run: make build
+
+      - name: Assemble the bundle
+        run: |
+          mkdir -p dist-release
+          bash scripts/assemble-release-bundle.sh --tag "${GITHUB_REF_NAME}" --out dist-release
+          ls -la dist-release
+
+      - name: Verify the release artifacts
+        run: |
+          python3 - <<'PY'
+          import json, os, tarfile
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          # Asset names the updater selects (see PlatformAssetOrDefault).
+          # Do not rename without updating the updater in lockstep.
+          archive = f"dist-release/mpm_{tag}_linux_amd64.tar.gz"
+
+          assert os.path.exists(archive), f"missing bundle asset: {archive}"
+          sums = open("dist-release/SHA256SUMS").read()
+          assert f"mpm_{tag}_linux_amd64.tar.gz" in sums, \
+              "SHA256SUMS does not cover the bundle asset"
+
+          # The bundle identity must name the tag being published: the
+          # updater installs releases/<tag>/ and refuses a bundle whose
+          # RELEASE.json disagrees with the expected revision.
+          with tarfile.open(archive) as tf:
+              member = tf.extractfile("RELEASE.json")
+              assert member is not None, "bundle has no RELEASE.json"
+              rel = json.load(member)
+          assert rel.get("revision") == tag, \
+              f"bundle revision {rel.get('revision')!r} != tag {tag!r}"
+          assert rel.get("commit"), "bundle RELEASE.json names no commit"
+          print(f"verified: {archive} is release {tag} ({rel['commit'][:8]})")
+          PY
+
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist-release/mpm_${{ github.ref_name }}_linux_amd64.tar.gz
+
+      - name: Ensure the GitHub release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+
+      - name: Publish to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # No --clobber: already-published artifacts are never
+          # replaced. A re-run against an existing release fails here,
+          # loudly, instead of swapping bytes under a published tag.
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist-release/mpm_${{ github.ref_name }}_linux_amd64.tar.gz \
+            dist-release/SHA256SUMS
