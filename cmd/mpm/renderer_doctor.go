@@ -172,10 +172,16 @@ func (r *DoctorRenderer) renderUsage(u *DoctorUsage) error {
 	return render.BlankLine(r.out)
 }
 
-// renderAttention emits the Doctor Attention section. Three sub-areas:
+// renderAttention emits the Doctor Attention section. Four sub-areas:
 // operational issues (bounded recent substrate/integration/timeout/internal
-// events), audit clusters (high-volume bounded), and security policy
+// events), audit clusters (high-volume bounded), the operator-attention
+// backlog (lesson proposals awaiting review), and security policy
 // (deliberate blocks — informational only, NOT MPM failures).
+//
+// Only the last two are informational in different ways: the security
+// count is a deliberate block, and the lesson-proposal count is a
+// decision the operator has not made. Neither is a fault, and neither
+// reaches the health tally.
 func (r *DoctorRenderer) renderAttention(a *DoctorAttention) error {
 	if err := render.Heading(r.out, "Attention"); err != nil {
 		return err
@@ -202,6 +208,21 @@ func (r *DoctorRenderer) renderAttention(a *DoctorAttention) error {
 	for _, cl := range a.AuditClusters {
 		fmt.Fprintf(r.out, "    %s · %d occurrences · last seen %s\n",
 			cl.Component, cl.Count, formatUnixTimeAgo(cl.LastSeen))
+	}
+	// Operator-attention backlog. Deliberately placed in Attention and
+	// NOT as a Check: a pending lesson proposal is an unmade decision,
+	// not a fault, so it must not become a FAIL, must not inflate the
+	// warning count and must not make a healthy install look unhealthy.
+	if a.LessonProposals != nil {
+		switch {
+		case a.LessonProposals.Unavailable || a.LessonProposals.Pending == nil:
+			fmt.Fprintf(r.out, "  Lesson proposals    unavailable\n")
+		case *a.LessonProposals.Pending == 0:
+			fmt.Fprintf(r.out, "  Lesson proposals    0 pending\n")
+		default:
+			fmt.Fprintf(r.out, "  Lesson proposals    %d pending review\n", *a.LessonProposals.Pending)
+			_ = render.Hint(r.out, "Run `mpm lesson proposals` to review them.")
+		}
 	}
 	if a.SecurityEvents7d > 0 {
 		fmt.Fprintf(r.out, "  Security policy      %d blocked sensitive writes in 7d\n",

@@ -144,7 +144,7 @@ func NewRouter() *CommandRouter {
 		"restore-db": {Name: "restore-db", Description: "Restore database from SQL dump", MinArgs: 1},
 		"directives": {Name: "directives", Description: "Show behavioral directives"},
 		"lifecycle":  {Name: "lifecycle", Description: "Lifecycle asymmetry notes for artifact families", MinArgs: 0, MaxArgs: 1},
-		"status":     {Name: "status", Description: "Show system status", MinArgs: 0},
+		"status":     {Name: "status", Description: "Show system status (incl. lesson proposals awaiting operator review)", MinArgs: 0},
 		"persona":    {Name: "persona", Description: "Manage personas"},
 		"ops":        {Name: "ops", Description: "Engine-room operations (maintenance, diagnostics)"},
 		"onboard":    {Name: "onboard", Description: "Guided setup and verification of an MPM installation", MinArgs: 0, MaxArgs: -1},

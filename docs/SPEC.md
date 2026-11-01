@@ -2604,6 +2604,107 @@ Requeue returns the row to the pool; it does not schedule a synthesis. A requeue
 
 **Not exposed over MCP.** `requeue-deferred` has no `mpm_system` counterpart and no `mpm call` equivalent — reach the drain itself through `mpm call mpm_system --payload '{"action":"compact",...}'` if you need the agent path. The `compact` action's params schema is `additionalProperties: false`, so a requeue parameter cannot be passed even by an agent that guesses the name.
 
+### Operator attention — pending lesson proposals
+
+`mpm lesson proposals` has always listed the review queue, but an operator had
+to already know to run it. `mpm status` and `mpm doctor` now both surface the
+backlog, from one canonical count, so a queue cannot accumulate silently.
+
+**A pending lesson proposal is a DECISION, not a fault.** An agent may propose
+a lesson; only an operator can accept it. The proposal sits between those two
+facts, and the substrate's job is to make it visible without ever deciding it.
+
+Three queues are deliberately distinct, and confusing them is the defect this
+section exists to prevent:
+
+| what you see | what it means | what clears it | is it a fault? |
+|---|---|---|---|
+| **Pending lesson proposals** | an agent proposed a lesson; the operator has not accepted or rejected it | `mpm lesson promote <id>` / `mpm lesson reject <id>` | **no** — an unmade decision |
+| **Spaced memory review** (`mpm review`, Doctor's "Review backlog") | memories due for reinforcement under the spaced-repetition schedule | answering the review, or the window passing | no |
+| **Doctor PASS/WARN/FAIL** | the substrate's own operational health | fixing the fault | **yes** — this is the only one of the three |
+
+The first two never enter the health tally. An installation with a full review
+queue is a healthy installation with work waiting.
+
+#### `mpm status`
+
+The dashboard carries its own `Attention` block, rendered even at zero so
+"nothing is waiting" is visible rather than inferred:
+
+```
+Attention
+  Lesson proposals : 3 pending review
+        → Run `mpm lesson proposals` to review them.
+```
+
+```
+Attention
+  Lesson proposals : 0 pending
+```
+
+If the count cannot be established, the row says `unavailable` — never `0`.
+Zero is the healthy answer, so a failed query must not be allowed to produce it.
+
+`mpm status --json` carries the same number additively. Every pre-existing key
+keeps its meaning:
+
+```json
+"lesson_proposals": { "pending": 3 }
+```
+
+```json
+"lesson_proposals": { "pending": null, "unavailable": true }
+```
+
+#### `mpm doctor`
+
+The same count appears in Doctor's existing `Attention` section, which is where
+non-failing operator signals already live:
+
+```
+MPM · Attention
+
+  Operational issues  0 in 7d
+  Audit clusters      0 active
+  Lesson proposals    3 pending review
+        → Run `mpm lesson proposals` to review them.
+```
+
+JSON, under the existing `attention` object:
+
+```json
+"attention": {
+  "operational_issues_7d": 0,
+  "audit_clusters": [],
+  "lesson_proposals": { "pending": 3 }
+}
+```
+
+A pending proposal is not a `Check`: it contributes nothing to
+`passed`/`warnings`/`failed`, cannot turn a PASS into a WARN, and does not
+change Doctor's exit code. A count that fails degrades **only its own field**
+to `unavailable`; it does not take the operational or cluster sections with it.
+
+#### Reviewing the queue
+
+```bash
+mpm lesson proposals                      # pending only (the default)
+mpm lesson proposals --status all         # every state, for audit
+mpm lesson promote <id>                   # accept: becomes a TRUSTED lesson
+mpm lesson reject <id>                    # decline: stays untrusted, forever
+```
+
+`mpm lesson proposals` is bounded (default 50 rows, `--limit` to narrow), so its
+rendered `count` is the length of the LIST, not the size of the backlog. The
+backlog total is `CountPendingLessonProposals()` in `internal/core`, which is
+what Status and Doctor read.
+
+**The trust boundary is unchanged.** Proposals remain untrusted until an
+operator acts: they are invisible to lesson search, lesson lists and the wake
+context, and promotion through the operator CLI is still the only path from a
+proposal to a trusted lesson. Surfacing the queue — in Status, in Doctor, any
+number of times, in text or JSON — reads the count and writes nothing.
+
 ### CLI-side input/output limits
 
 CLI commands enforce byte and char caps on input payloads and rendered output, plus row-count defaults for `--limit` flags. These are distinct from the §6.4 MCP-output caps: this table is the user-facing CLI surface, where the operator (not the agent) sees the value. Inline per-command `fs.Int("limit", N, ...)` defaults are not listed here — they're already represented in the auto-generated Command Catalogue block below and the per-subcommand description prose.
@@ -2732,7 +2833,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`skill`** — Skill CRUD + workshop (form | refine)
 - **`snooze`** — Suppress from recall (temporary)
 - **`stats`** — Show memory statistics
-- **`status`** — Show system status
+- **`status`** — Show system status (incl. lesson proposals awaiting operator review)
 - **`switch`** — Switch persona/mode interactively
 - **`synthesize`** — Merge near-duplicate memories
 - **`tasks`** — Manage scheduled tasks (upsert|list|delete)
