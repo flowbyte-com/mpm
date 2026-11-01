@@ -499,6 +499,17 @@ older checkout of install.sh with a matching Makefile." 2
     for bin in mpm mpm-mcp mpm-scheduler mpm-critic mpm-telemetry; do
         [ -x "$(build_dir)/$bin" ] || die "build did not produce $(build_dir)/$bin" 2
     done
+    # The standalone updater. Required only by the bundle layout, which
+    # is the only layout that carries it and provisions it (the
+    # non-bundle path deliberately promotes the five substrate binaries
+    # only — see scripts/tests/test_build_install_separation.py). Caught
+    # here, before anything is built into a candidate or promoted, so a
+    # stale build tree fails early instead of at the provisioning step.
+    if [ "$USE_BUNDLE" = "1" ] && [ ! -x "$(build_dir)/mpm-update" ]; then
+        die "the bundle layout requires $(build_dir)/mpm-update, which the build did not produce.
+The updater is the recovery executable: a bundle without it cannot be activated
+(this is the bootstrap gap the bundle exists to close)." 2
+    fi
 
     # The whole point of the build/install split. These are two different
     # directories and must stay that way: writing build output into $PREFIX/bin
@@ -847,15 +858,23 @@ phase_bundle() {
         die "the candidate bundle could not be assembled. Nothing was changed." 3
     }
 
-    # ---- 2. promote the five binaries into the candidate ----
+    # ---- 2. promote the runtime binaries into the candidate ----
+    #
+    # The five substrate binaries PLUS the standalone updater. The
+    # updater is release-scoped here so it validates with the rest of the
+    # runtime and rolls back with it; a second, stable copy is
+    # provisioned at the data-root top level once this release is active
+    # (see rb_provision_stable_updater) because the versioned bin/ is a
+    # symlink into the active release and therefore useless as a
+    # recovery path.
     local trc=0
-    mpm_promote_binaries "$(build_dir)" "$candidate/bin" $BT_BINARIES || trc=$?
+    mpm_promote_binaries "$(build_dir)" "$candidate/bin" $RB_BINARIES || trc=$?
     # The promotion library's lock file lives beside the directory it
     # promoted into. Inside a candidate bundle it is residue, and the
     # bundle must contain nothing but the runtime.
     rm -f "$candidate/.mpm-install.lock"
     case "$trc" in
-        0) log "  promoted ${BT_BINARIES} into the candidate bundle" ;;
+        0) log "  promoted ${RB_BINARIES} into the candidate bundle" ;;
         10) rm -rf "$candidate"; die "binary promotion failed; the candidate bundle was discarded and nothing was changed" 3 ;;
         11) die "binary promotion failed and the rollback was INCOMPLETE. The rollback material named above is your only recoverable copy — do NOT delete it. Nothing was activated." 3 ;;
         12) rm -rf "$candidate"; die "binary promotion refused before modifying anything (see the error above)" 3 ;;
@@ -1020,6 +1039,16 @@ Remove $final if you want to retry from scratch." 3
         if ! rb_revert_layout "$DATA_ROOT" "$PREFIX"; then
             err "  the layout conversion could not be fully undone — see $DATA_ROOT/.legacy-layout-paths"
         fi
+        # The recovery executable travels with the runtime it belongs to.
+        # A rollback that restored the pointer but left the NEW release's
+        # updater in place would give the operator a recovery tool for a
+        # release that is no longer active — and on a first installation
+        # it would leave a tool where there was deliberately none.
+        if ! rb_restore_stable_updater "$DATA_ROOT"; then
+            err "  the previous recovery executable could NOT be restored (see above)."
+            err "  The installation still has SOME updater only if that message did not"
+            err "  name it missing; verify with: ls -l $DATA_ROOT/mpm-update"
+        fi
     }
 
     # ---- 5. activate ----
@@ -1049,8 +1078,52 @@ active again." 3
         die "the promotion was rolled back. The previous runtime is active again." 3
     }
 
+    # ---- 7. provision the standalone recovery executable ----
+    #
+    # LAST, and deliberately so. This mirrors the update workflow's rule
+    # (internal/update/orchestrate.go: "Only now is the stable updater
+    # replaced: every earlier failure leaves the known-good copy in
+    # place, so recovery never depends on a release that never proved
+    # itself."). The active release has passed validation and its layout
+    # is in place, so it is the newest release that has proved itself —
+    # that is the one whose updater should be the recovery tool.
+    #
+    # A promotion that failed at ANY earlier step leaves the previous
+    # standalone copy untouched, so the operator keeps a recovery tool
+    # that is known to work with the runtime they are still running.
+    #
+    # WHY THE INSTALLER MUST DO THIS AT ALL. The updater provisions its
+    # own stable copy, but only on a successful activation — an
+    # already-current `mpm update` returns before that step
+    # (orchestrate.go, AlreadyCurrent). So an installation that starts
+    # without the copy would never gain one. The first installation is
+    # the only surface that can guarantee it, and this is that surface.
+    if ! rb_provision_stable_updater "$DATA_ROOT" "$final" "$rev"; then
+        rollback_promotion "the standalone recovery executable could not be provisioned"
+        die "the release $rev was activated, but the standalone recovery executable could not
+be provisioned at $DATA_ROOT/$RB_UPDATER_BINARY, so the promotion was rolled back.
+The previous runtime is active again.
+
+A runtime with no independent recovery executable cannot be repaired when it
+breaks, and a later update will not repair it (an already-current update returns
+before the provisioning step). Refusing to leave an installation in that state.
+
+Fix the cause above. The previous executable, if any, is still in place." 3
+    fi
+    _bundle_fail_at updater || {
+        rollback_promotion "the promotion was abandoned after provisioning the recovery executable"
+        die "the promotion was rolled back. The previous runtime is active again, and the
+previous recovery executable was restored with it." 3
+    }
+
+    # The promotion is complete. The preserved executable and its journal
+    # are the material a rollback would have needed; drop them now, so the
+    # data root holds no rollback residue from a promotion that succeeded.
+    rb_commit_stable_updater "$DATA_ROOT"
+
     log "  active runtime: releases/$rev"
     log "  stable paths:   $PREFIX/bin -> current/bin, $PREFIX/agent_installation -> current/agent_installation"
+    log "  recovery:       $DATA_ROOT/$RB_UPDATER_BINARY (real file; runs when the runtime does not)"
 }
 
 # _bundle_fail_at <step>
@@ -1061,7 +1134,7 @@ active again." 3
 #                                     completed. The step names are
 #                                     assemble, promote, assets, payload,
 #                                     identity, validate, install,
-#                                     activate, convert.
+#                                     activate, convert, updater.
 #
 # Used to pin the RECOVERY MATRIX of the conversion: a failure at each
 # intermediate step must leave the installation recoverable, and the
@@ -1583,6 +1656,34 @@ phase_runtime_assets() {
 }
 
 
+# recovery_executable_problem <path>
+#
+# The three ways the standalone recovery executable can be unusable, as
+# a message, or the empty string when it is fine.
+#
+# This is deliberately stricter than `[ -x ]`: a SYMLINK is a failure
+# even when it resolves to an executable. In the versioned layout the
+# stable bin/ path is a link into the active release, so a recovery
+# tool that is itself a link dies with the runtime it exists to repair.
+# Accepting it here would report a green validation over an installation
+# with no independent recovery path.
+recovery_executable_problem() {
+    local p="$1"
+    if [ -L "$p" ]; then
+        printf 'is a SYMLINK at %s (must be a real file, independent of the active release)' "$p"
+        return 0
+    fi
+    if [ ! -f "$p" ]; then
+        printf 'missing at %s' "$p"
+        return 0
+    fi
+    if [ ! -x "$p" ]; then
+        printf 'is not executable at %s' "$p"
+        return 0
+    fi
+    return 0
+}
+
 phase_validate() {
     note "VALIDATION"
     local errors=0
@@ -1602,6 +1703,32 @@ phase_validate() {
     else
         err "  ✗ CLI wrapper health_check FAILED"
         errors=$((errors + 1))
+    fi
+
+    # 2b. The standalone recovery executable (bundle layout only).
+    #
+    #      This is the file an operator runs when the active runtime is
+    #      broken, so it must be a REAL file at the data-root top level
+    #      and it must be executable. A SYMLINK here would resolve into
+    #      the release it is meant to repair, which is precisely the
+    #      property that makes it useless as a recovery path — so a
+    #      symlink is a failure, not a pass.
+    #
+    #      The predicate is a function so the three rejection reasons are
+    #      testable on their own (scripts/tests/test_install_updater_bootstrap.py)
+    #      instead of only being reachable through a full install.
+    if [ "$USE_BUNDLE" = "1" ]; then
+        local recovery="$DATA_ROOT/mpm-update"
+        local problem
+        problem="$(recovery_executable_problem "$recovery")"
+        if [ -n "$problem" ]; then
+            err "  ✗ recovery executable: $problem"
+            [ -L "$recovery" ] || [ -f "$recovery" ] || \
+                err "    without it a broken runtime has no repair path"
+            errors=$((errors + 1))
+        else
+            log "  ✓ recovery executable present ($recovery, real file)"
+        fi
     fi
 
     # 3. Lock file
@@ -1736,12 +1863,13 @@ mode_dry_run() {
         log "  # --- VERSIONED RUNTIME BUNDLE (--bundle) ---"
         log "  # the bundle layout replaces the in-place binary promotion above:"
         log "  #   1. assemble a candidate bundle under $DATA_ROOT/staging/<rev>.<pid>/:"
-        log "  #      bin/ (the five binaries), agent_installation/ (the release-scoped"
-        log "  #      host assets and the validated host runtime payload), RELEASE.json"
-        log "  #      (the build identity) and schema/lifecycle_events.sql"
-        log "  #   2. promote the five binaries into the candidate as ONE TRANSACTION"
+        log "  #      bin/ (the five substrate binaries + mpm-update), agent_installation/"
+        log "  #      (the release-scoped host assets and the validated host runtime"
+        log "  #      payload), RELEASE.json (the build identity) and"
+        log "  #      schema/lifecycle_events.sql"
+        log "  #   2. promote those six binaries into the candidate as ONE TRANSACTION"
         log "  #      (scripts/lib/binary_transaction.sh) — a failure leaves no mixture"
-        log "  #   3. VALIDATE the candidate: five executable binaries, no .git, NO STATE"
+        log "  #   3. VALIDATE the candidate: six executable binaries, no .git, NO STATE"
         log "  #      (src/db, backups, mpm_config.json, mode/, persona/ are refused),"
         log "  #      and an identity that matches the binaries inside"
         log "  #   4. install it at $DATA_ROOT/releases/<rev> with a rename(2)"
@@ -1750,6 +1878,12 @@ mode_dry_run() {
         log "  #      become symlinks into current/; the previous real directories are"
         log "  #      MOVED ASIDE (never deleted) and listed in"
         log "  #      $DATA_ROOT/.legacy-layout-paths"
+        log "  #   7. provision the standalone recovery executable: copy the release's"
+        log "  #      mpm-update to $DATA_ROOT/mpm-update as a REAL file (staged,"
+        log "  #      verified byte-identical, then rename(2)). It must not be a symlink"
+        log "  #      into the active release: it is the tool that repairs the runtime"
+        log "  #      when the runtime does not work. A failure here rolls the"
+        log "  #      promotion back rather than leaving a runtime with no repair path."
         log "  # the state (src/db, backups, mpm_config.json, mode/, persona/) is NEVER"
         log "  #   moved, copied, or replaced by any of the above"
     fi

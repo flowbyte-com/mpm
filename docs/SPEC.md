@@ -2742,6 +2742,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`theory`** — Theory CRUD
 - **`topic`** — Manage topics
 - **`tour`** — Walk through cognitive verbs (--demo auto-runs each step; --step N jumps)
+- **`update`** — Update the runtime to a newer release (check, apply, rollback)
 - **`version`** — Show version + build identity
 - **`wake`** — Show wake context (--json, --strict)
 - **`weaken`** — Record weakening (provenance/display; does not affect current retrieval ranking — see §6.3)

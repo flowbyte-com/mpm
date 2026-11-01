@@ -164,6 +164,7 @@ func init() {
 		"save-skill":      skillOptionNames,
 		"theories":        cognitiveVerbOptions,
 		"tour":            {"demo", "step"},
+		"update":          {"to", "branch", "commit", "from", "check", "status", "dry-run", "rollback", "with-db-restore", "allow-dirty", "restart-services", "json", "j"},
 
 		// ── The families ───────────────────────────────────────────────
 		//
@@ -330,6 +331,7 @@ var cliOptionDeferred = map[string]bool{
 	"gc":              true,
 	"backup":          true,
 	"synthesize":      true,
+	"update":          true,
 
 	// Per-command rejections with a message the router cannot match.
 	"info":           true,

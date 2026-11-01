@@ -91,6 +91,7 @@ var cognitiveHelpSections = []cogHelpSection{
 		cmds: []helpCmd{
 			{"backup", "Export database (see mpm ops backup for the engine-room version)", false},
 			{"restore", "Restore from JSON export (see mpm ops restore)", false},
+			{"update", "Update the runtime to a newer release (--check, --status, --rollback)", false},
 			{"review", "Spaced reinforcement review (see mpm ops review)", false},
 		},
 	},
