@@ -351,7 +351,7 @@ func (s *MemoryStore) InitSQLite() error {
 	}
 	ftsAvailable := true
 	for _, ft := range fts {
-		if _, err := s.DB.Exec("CREATE VIRTUAL TABLE IF NOT EXISTS " + ft.name + " USING fts5(" + ft.cols + ", tokenize='porter unicode61')"); err != nil {
+		if _, err := s.execTracked("CREATE VIRTUAL TABLE IF NOT EXISTS " + ft.name + " USING fts5(" + ft.cols + ", tokenize='porter unicode61')", 5); err != nil {
 			slog.Warn("FTS5 not available for table; search will use LIKE fallback", "table", ft.name, "error", err.Error())
 			ftsAvailable = false
 			break
