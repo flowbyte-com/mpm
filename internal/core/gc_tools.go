@@ -306,7 +306,7 @@ func (dm *DatabaseManager) RunGC(opts GCOptions) (*GCRunResult, error) {
 	// Previously RunGC never touched ephemeral_scratchpad, so the 8
 	// orphaned rows flagged by `mpm doctor` accumulated forever.
 	if !opts.DryRun {
-		if _, err := dm.db.Exec(`DELETE FROM ephemeral_scratchpad WHERE decay_at IS NOT NULL AND decay_at < CAST(strftime('%s','now') AS INTEGER)`); err == nil {
+		if _, err := dm.ExecTracked(`DELETE FROM ephemeral_scratchpad WHERE decay_at IS NOT NULL AND decay_at < CAST(strftime('%s','now') AS INTEGER)`, 5); err == nil {
 			// Count is not surfaced in GCRunResult; the doctor check will verify.
 		}
 	}
