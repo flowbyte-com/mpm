@@ -1183,6 +1183,37 @@ phase_symlinks() {
         log "  $target -> $source"
     done
 
+    # The standalone updater's convenience link.
+    #
+    # It names the DATA-ROOT copy, not $PREFIX/bin/mpm-update: bin/ is a
+    # symlink into the ACTIVE RELEASE, so a link through it would die with
+    # the release it is meant to repair. <data root>/mpm-update is a real
+    # file that survives version switches, and the updater replaces it by
+    # rename(2), so this link keeps resolving to the current one after
+    # every update without needing to be recreated.
+    #
+    # DELIBERATELY NOT PART OF THE LOOP ABOVE. That loop `rm -f`s whatever
+    # is at the destination; an operator may already have their own
+    # mpm-update on PATH, and clobbering a real executable to install a
+    # convenience link is not a trade this installer gets to make. A
+    # symlink at the destination is ours to repoint; anything else is left
+    # alone with a warning.
+    local updater_source="$DATA_ROOT/mpm-update"
+    local updater_link="$LOCAL_BIN/mpm-update"
+    if [ ! -x "$updater_source" ]; then
+        log "  $updater_link not created: no standalone updater at $updater_source"
+        log "    (it is provisioned by the bundle layout; the non-bundle layout has none)"
+    elif [ -L "$updater_link" ]; then
+        ln -sfn "$updater_source" "$updater_link"
+        log "  $updater_link -> $updater_source"
+    elif [ -e "$updater_link" ]; then
+        warn "  $updater_link already exists and is NOT a symlink — leaving it untouched"
+        warn "  (invoke the updater directly: $updater_source)"
+    else
+        ln -s "$updater_source" "$updater_link"
+        log "  $updater_link -> $updater_source"
+    fi
+
     # Warn (non-fatal) if ~/.local/bin is not on the user's current PATH.
     # We don't error because (a) some shells source PATH lazily, and
     # (b) many agents spawn subprocesses with an explicit PATH that

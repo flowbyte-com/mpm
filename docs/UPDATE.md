@@ -87,7 +87,10 @@ provisions the executable itself:
   instead of producing a bundle with no recovery tool.
 
 `mpm update --status` reports it (`stable_updater` in `--json`), and
-`install.sh --validate` fails if it is missing or is a symlink.
+`install.sh --validate --bundle` fails if it is missing or is a symlink.
+The `--bundle` is required: the recovery-executable check is a
+bundle-layout check, and without it the validation silently skips the
+one thing this bootstrap guarantees.
 
 ## Threat model
 

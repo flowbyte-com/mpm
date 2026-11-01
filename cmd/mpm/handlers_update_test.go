@@ -179,3 +179,69 @@ func TestUpdate_InProcessStatus(t *testing.T) {
 		t.Errorf("status JSON has no active_rev:\n%s", stdout)
 	}
 }
+
+// recordingUpdateBin writes the arguments it received to a file and
+// prints the count. Lets a test assert the EXACT argv of a delegation.
+func recordingUpdateBin(t *testing.T) (bin, record string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin = filepath.Join(dir, "mpm-update")
+	record = filepath.Join(dir, "argv.txt")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$#\" > \"" + record + "\"\nprintf 'ARG[%s]\\n' \"$@\"\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return bin, record
+}
+
+// TestUpdate_BareForwardsExactlyNoArguments pins the delegation contract
+// for a bare `mpm update`: the standalone binary must receive NO
+// arguments, because a bare invocation means "run the default update".
+//
+// This is the half of the defect that lived in this package: the handler
+// forwarded an empty argv, and the standalone then printed help. The
+// other half — the standalone refusing an empty argv — is pinned in
+// cmd/mpm-update/main_test.go.
+func TestUpdate_BareForwardsExactlyNoArguments(t *testing.T) {
+	bin := buildStampedMpm(t)
+	fake, record := recordingUpdateBin(t)
+	stdout, _, exit := runMpmUpdate(t, bin, []string{"MPM_UPDATE_BIN=" + fake}, "update")
+	if exit != 0 {
+		t.Fatalf("bare delegation failed:\n%s", stdout)
+	}
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("the stub updater was not invoked: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != "0" {
+		t.Errorf("bare `mpm update` forwarded %s argument(s); it must forward none:\n%s", got, stdout)
+	}
+}
+
+// TestUpdate_HelpNeverDelegates pins that help is answered locally: the
+// standalone updater must not run at all, so a help request cannot reach
+// the network, the lock, or the runtime.
+func TestUpdate_HelpNeverDelegates(t *testing.T) {
+	bin := buildStampedMpm(t)
+	fake, record := recordingUpdateBin(t)
+	for _, args := range [][]string{
+		{"update", "--help"},
+		{"update", "-h"},
+		{"update", "help"},
+		{"help", "update"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			_ = os.Remove(record)
+			stdout, _, exit := runMpmUpdate(t, bin, []string{"MPM_UPDATE_BIN=" + fake}, args...)
+			if exit != 0 {
+				t.Errorf("%v exited %d, want 0", args, exit)
+			}
+			if _, err := os.Stat(record); err == nil {
+				t.Errorf("%v ran the standalone updater; help must never update", args)
+			}
+			if !strings.Contains(stdout, "Usage:") && !strings.Contains(stdout, "mpm update") {
+				t.Errorf("%v did not print help:\n%s", args, stdout)
+			}
+		})
+	}
+}
