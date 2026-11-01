@@ -59,8 +59,9 @@ a release has passed its health check, and an *already-current* update
 returns before that step. So the first bundle-mode installation
 provisions the executable itself:
 
-- `mpm-update` is part of the release bundle (`bin/mpm-update`), so it
-  is validated with the rest of the runtime and rolls back with it;
+- `mpm-update` is part of the release bundle
+  (`<data root>/releases/<rev>/bin/mpm-update`), so it is validated with
+  the rest of the runtime and rolls back with it;
 - `install.sh --bundle` then copies it to `<data root>/mpm-update` as a
   **real file** — staged beside the destination, verified
   byte-identical, then swapped by `rename(2)`;
