@@ -688,6 +688,110 @@ class TestProvisioningPrimitive(BootstrapFixture):
         self.assertTrue(journal.is_file(), "no rollback journal was written")
         self.assertEqual(journal.read_text().strip(), "previous")
 
+    # -- symlink-to-directory containment ---------------------------
+    #
+    # If the destination is a SYMLINK TO A DIRECTORY, GNU `mv -f` treats it
+    # as a directory operand: it moves the source INSIDE the linked
+    # directory and leaves the symlink in place. The result is a "success"
+    # that wrote the recovery executable into whatever directory the link
+    # named, and a `mpm-update` that is still not an executable. Both the
+    # replacement and the rollback must REPLACE the entry, never enter it.
+
+    def _make_release(self, rev: str, content: str) -> Path:
+        release = self.data / "releases" / rev / "bin"
+        release.mkdir(parents=True, exist_ok=True)
+        src = release / UPDATER
+        src.write_text(f"#!/usr/bin/env bash\necho '{content}'\n")
+        src.chmod(0o755)
+        return release.parent
+
+    def _provision(self, rev: str) -> subprocess.CompletedProcess:
+        return self.drive(
+            "set +e\n"
+            "load_bundle_lib || exit 9\n"
+            f'rb_provision_stable_updater "{self.data}" '
+            f'"{self.data / "releases" / rev}" "{rev}"; echo "rc=$?"'
+        )
+
+    def test_a_directory_symlink_is_replaced_not_entered(self):
+        # The victim: a directory the symlink points at, with content that
+        # must survive untouched.
+        victim = self.data / "victim-dir"
+        (victim / "nested").mkdir(parents=True)
+        (victim / "keep.txt").write_text("operator data\n")
+        (victim / "nested" / "deep.txt").write_text("nested data\n")
+        before = {p.name: p.read_bytes() for p in victim.rglob("*") if p.is_file()}
+
+        self.standalone_path().symlink_to(victim)
+        self.assertTrue(self.standalone_path().is_symlink())
+
+        release = self._make_release("rev-two", "rev-two")
+        r = self._provision("rev-two")
+        self.assertIn("rc=0", r.stdout, r.stdout + r.stderr)
+
+        # 1. The destination is a REAL executable now.
+        self.assertFalse(self.standalone_path().is_symlink(),
+                         "the directory symlink survived the replacement")
+        self.assert_provisioned_real_file(self.standalone_path(),
+                                          "after replacing a directory symlink")
+        self.assertIn(b"rev-two", self.standalone_path().read_bytes())
+
+        # 2. Nothing was written into the linked directory.
+        after = {p.name: p.read_bytes() for p in victim.rglob("*") if p.is_file()}
+        self.assertEqual(after, before,
+                         "the linked directory was modified: the source was moved inside it")
+        self.assertFalse((victim / "stage").exists())
+        self.assertFalse((victim / UPDATER).exists())
+        self.assertFalse((victim / ".mpm-update.stage").exists())
+
+    def test_rollback_restores_the_exact_previous_directory_symlink(self):
+        victim = self.data / "victim-dir"
+        victim.mkdir()
+        (victim / "keep.txt").write_text("operator data\n")
+        self.standalone_path().symlink_to(victim)
+        target = os.readlink(self.standalone_path())
+
+        # Provision, then roll the promotion back.
+        release = self._make_release("rev-two", "rev-two")
+        self.assertIn("rc=0", self._provision("rev-two").stdout)
+        self.assertFalse(self.standalone_path().is_symlink())
+
+        r = self.drive(
+            "set +e\n"
+            "load_bundle_lib || exit 9\n"
+            f'rb_restore_stable_updater "{self.data}"; echo "rc=$?"'
+        )
+        self.assertIn("rc=0", r.stdout, r.stdout + r.stderr)
+
+        # The exact previous entry is back: the same symlink, same target.
+        self.assertTrue(self.standalone_path().is_symlink(),
+                        "the rollback did not restore the previous symlink")
+        self.assertEqual(os.readlink(self.standalone_path()), target)
+        # And the linked directory is still untouched.
+        self.assertEqual(sorted(p.name for p in victim.iterdir()), ["keep.txt"])
+        self.assertEqual((victim / "keep.txt").read_text(), "operator data\n")
+
+    def test_rollback_after_a_directory_symlink_restores_real_file_when_that_was_previous(self):
+        # The ordinary case must keep working: a real previous executable
+        # is restored as that executable, byte for byte.
+        self.build_dir.joinpath(UPDATER).write_text("#!/usr/bin/env bash\necho 'rev-one'\n")
+        self.build_dir.joinpath(UPDATER).chmod(0o755)
+        first = self.drive(rev="rev-one")
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        previous_bytes = self.standalone_path().read_bytes()
+
+        self._make_release("rev-two", "rev-two")
+        self.assertIn("rc=0", self._provision("rev-two").stdout)
+
+        r = self.drive(
+            "set +e\n"
+            "load_bundle_lib || exit 9\n"
+            f'rb_restore_stable_updater "{self.data}"; echo "rc=$?"'
+        )
+        self.assertIn("rc=0", r.stdout, r.stdout + r.stderr)
+        self.assertFalse(self.standalone_path().is_symlink())
+        self.assertEqual(self.standalone_path().read_bytes(), previous_bytes)
+
     def test_commit_clears_the_rollback_material(self):
         r = self.drive()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

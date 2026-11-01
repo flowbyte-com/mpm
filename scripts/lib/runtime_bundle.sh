@@ -615,6 +615,14 @@ rb_provision_stable_updater() {
     #    then rename(2) the validated staged file straight over the
     #    destination. rename(2) is atomic, so a reader sees either the old
     #    executable or the new one — never neither, never a truncated file.
+    #
+    #    rb_rename_over, NOT `mv -f`. GNU mv treats a destination that is a
+    #    SYMLINK TO A DIRECTORY as a directory operand and moves the source
+    #    INSIDE the linked directory, leaving the symlink in place. That is
+    #    a containment violation — the recovery executable would be written
+    #    into whatever directory the symlink named and `mpm-update` would
+    #    still not be an executable. rb_rename_over uses `mv -T` (or
+    #    os.rename), which replaces the destination entry itself.
     local previous_state="none"
     if [ -e "$dst" ] || [ -L "$dst" ]; then
         if [ ! -f "$dst" ] && [ ! -L "$dst" ]; then
@@ -625,6 +633,12 @@ rb_provision_stable_updater() {
         rm -f "$previous" 2>/dev/null || true
         # -a preserves mode and symlinks as symlinks, so an odd prior
         # state is restored faithfully rather than being normalised away.
+        #
+        # $previous is removed immediately above, so this writes into a
+        # path that does not exist: it cannot descend into a stale symlink
+        # to a directory. (A same-UID process racing that one-instruction
+        # window is outside the threat model — the bundle lock already
+        # excludes concurrent installers.)
         if ! cp -a "$dst" "$previous"; then
             rb_err "could not preserve the existing updater at $previous"
             rm -f "$stage" "$previous" 2>/dev/null || true
@@ -644,7 +658,7 @@ rb_provision_stable_updater() {
         return 1
     fi
 
-    if ! mv -f "$stage" "$dst"; then
+    if ! rb_rename_over "$stage" "$dst"; then
         # rename(2) failed, so the destination is UNTOUCHED — the old
         # executable is still in place. Nothing to restore.
         rb_err "could not install the standalone updater at $dst"
@@ -678,6 +692,12 @@ rb_provision_stable_updater() {
 #
 # Returns 0 when the data root matches its pre-provisioning state (or when
 # provisioning never ran), non-zero when it does not.
+#
+# The restore uses rb_rename_over for the same reason provisioning does: a
+# destination that is a symlink to a directory must be REPLACED, not
+# entered. A saved state that was itself a symlink is restored as that
+# exact symlink, because the journal's copy was taken with `cp -a` (which
+# does not dereference).
 rb_restore_stable_updater() {
     local data_root="$1"
     local dst="$data_root/$RB_UPDATER_BINARY"
@@ -696,13 +716,16 @@ rb_restore_stable_updater() {
                 rb_err "the journal says a previous updater existed but $previous is gone"
                 return 1
             fi
-            if ! mv -f "$previous" "$dst"; then
+            if ! rb_rename_over "$previous" "$dst"; then
                 rb_err "could not restore the previous updater from $previous"
                 return 1
             fi
             rb_log "  recovery executable restored to its previous version"
             ;;
         none)
+            # `rm` never follows a symlink operand, so this removes the
+            # entry (real file or link) and never touches anything it
+            # pointed at.
             rm -f "$dst" 2>/dev/null || true
             rb_log "  recovery executable removed (there was none before this promotion)"
             ;;

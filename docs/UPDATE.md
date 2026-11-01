@@ -74,6 +74,10 @@ provisions the executable itself:
   (never moved), and the validated new one is renamed straight over it.
   There is no interval in which `mpm-update` does not exist — a recovery
   tool that disappears exactly when the runtime breaks is not one;
+- the replacement **replaces the directory entry** rather than following
+  it. A `mpm-update` that is a symlink to a directory is replaced by a
+  real executable, and the directory it named is left untouched; the same
+  rule applies to the rollback;
 - a promotion that **rolls back** restores the previous executable with
   it, so the recovery tool always belongs to the runtime that is actually
   active. On a first installation the restored state is "no updater", and
