@@ -113,17 +113,54 @@ func parsePayloadManifest(raw []byte, origin string) (payloadManifest, error) {
 		case len(p.Files) == 0:
 			return payloadManifest{}, fmt.Errorf("the runtime payload manifest at %s declares a payload for %q with no files (record %d)", origin, p.Adapter, i)
 		}
+		if err := checkPayloadAdapterName(p.Adapter); err != nil {
+			return payloadManifest{}, fmt.Errorf("the runtime payload manifest at %s is invalid: %w", origin, err)
+		}
 		if seen[p.Adapter] {
 			return payloadManifest{}, fmt.Errorf("the runtime payload manifest at %s declares the adapter %q twice", origin, p.Adapter)
 		}
 		seen[p.Adapter] = true
+		declared := map[string]bool{}
 		for _, f := range p.Files {
 			if err := checkPayloadFileName(f); err != nil {
 				return payloadManifest{}, fmt.Errorf("the runtime payload manifest at %s is invalid: %w", origin, err)
 			}
+			if declared[f] {
+				return payloadManifest{}, fmt.Errorf("the runtime payload manifest at %s declares the file %q twice for adapter %q", origin, f, p.Adapter)
+			}
+			declared[f] = true
 		}
 	}
 	return m, nil
+}
+
+// checkPayloadAdapterName rejects an adapter name that is not a
+// single safe directory segment.
+//
+// The adapter participates in paths built by stagePayloads,
+// buildRuntimePayloads and bundle validation
+// (agent_installation/<adapter>/...), so a name like "../.." would
+// redirect filesystem operations outside the authorised source,
+// scratch and bundle roots. A manifest is data, and data must not be
+// able to name a path outside the package it belongs to — the same
+// rule checkPayloadFileName enforces for files.
+func checkPayloadAdapterName(a string) error {
+	if a == "" {
+		return fmt.Errorf("it declares an empty adapter name")
+	}
+	if strings.HasPrefix(a, "/") || filepath.IsAbs(a) {
+		return fmt.Errorf("it declares the absolute adapter path %q", a)
+	}
+	if strings.ContainsAny(a, `/\`) {
+		return fmt.Errorf("it declares the adapter %q, which is not a single directory name", a)
+	}
+	if strings.Contains(a, ":") {
+		return fmt.Errorf("it declares the adapter %q, which is not a single directory name", a)
+	}
+	if clean := filepath.Clean(a); clean == "." || clean == ".." || clean != a {
+		return fmt.Errorf("it declares the adapter %q, which is outside the package", a)
+	}
+	return nil
 }
 
 // checkPayloadFileName rejects a declared file that would escape the
@@ -372,22 +409,59 @@ func unresolvedRelativeImports(pkgDir string) ([]string, error) {
 	return bad, nil
 }
 
+// pathWithinDir reports whether target lies inside dir.
+//
+// Both the lexical path and — for targets that exist — the path after
+// symlink resolution must stay inside. A symlink inside the package
+// that points outside it is an escape, even though the link itself
+// lives in the right directory.
+func pathWithinDir(dir, target string) bool {
+	rel, err := filepath.Rel(dir, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
 // resolvesInPackage reports whether a relative import specifier names a
 // file that is present in the package.
 //
 // The candidate set mirrors the shell validator: the specifier as
 // written, and — when it carries an extension — the same stem with
 // each accepted extension.
+//
+// CONTAINMENT. The resolved file must lie INSIDE the package: a
+// specifier like "../../../outside.js" is unresolved even when a file
+// exists at that location, and a symlink inside the package that
+// points outside it does not count either. Only containment proves the
+// package carries what it imports; mere existence proves nothing about
+// where the bytes live.
 func resolvesInPackage(pkgDir, importer, spec string) bool {
+	root, err := filepath.EvalSymlinks(pkgDir)
+	if err != nil {
+		return false
+	}
 	base := filepath.Clean(filepath.Join(filepath.Dir(importer), filepath.FromSlash(spec)))
+	if !pathWithinDir(pkgDir, base) {
+		return false
+	}
 	candidates := []string{base}
 	if ext := filepath.Ext(base); ext != "" {
 		candidates = append(candidates, strings.TrimSuffix(base, ext)+".js")
 	}
 	for _, c := range candidates {
-		if fi, err := os.Stat(c); err == nil && fi.Mode().IsRegular() {
-			return true
+		fi, err := os.Stat(c)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
 		}
+		real, err := filepath.EvalSymlinks(c)
+		if err != nil {
+			continue
+		}
+		if !pathWithinDir(root, real) {
+			continue
+		}
+		return true
 	}
 	return false
 }

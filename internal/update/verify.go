@@ -229,13 +229,23 @@ func hasGit(bundleDir string) bool {
 //
 // FALLBACK — a bundle assembled before the declaration travelled with
 // the bundle declares nothing. Such a bundle is checked STRUCTURALLY:
-// each runtime package must have a loader-resolvable root entry, and
-// its module graph must resolve. That is weaker (it cannot know which
-// files were required) and never weaker than the check it replaces.
+// each runtime package must carry the legacy OpenCode minimum (a
+// nonempty server.js and dist/index.v2.js) and its module graph must
+// resolve. That is weaker than the declaration (it cannot know which
+// other files were required) and never weaker than the check it
+// replaces.
 func validateBundlePayload(bundleDir string) (bool, string) {
 	manifestPath := filepath.Join(bundleDir, filepath.FromSlash(bundlePayloadManifestRelPath))
 	raw, err := os.ReadFile(manifestPath)
 	if err != nil {
+		// The structural fallback is ONLY for bundles assembled
+		// before the declaration travelled with them. A manifest
+		// that cannot be read for any other reason — permissions,
+		// a directory in its place, I/O failure — is a validation
+		// failure, never a reason to check something else instead.
+		if !os.IsNotExist(err) {
+			return false, fmt.Sprintf("the bundle's payload declaration at %s could not be read: %v", manifestPath, err)
+		}
 		return validateBundlePayloadStructurally(bundleDir)
 	}
 	m, err := parsePayloadManifest(raw, manifestPath)
@@ -291,7 +301,24 @@ func validateBundlePayloadStructurally(bundleDir string) (bool, string) {
 // The root entry is what a directory plugin is resolved BY: OpenCode
 // tries "server" then "index" at the package root, and a directory
 // registered without one is dropped without a warning.
+//
+// LEGACY MINIMUM. A legacy OpenCode package carries its entrypoint at
+// server.js and its compiled entry at dist/index.v2.js, both nonempty.
+// That was the whole pre-manifest predicate, and the entry and
+// module-graph checks below run IN ADDITION to it, not instead of it:
+// a server.js with no imports and no compiled entry is a package that
+// cannot load, and no graph check can see that.
 func validatePackageShape(pkgDir, name string) error {
+	for _, required := range []string{"server.js", filepath.Join("dist", "index.v2.js")} {
+		full := filepath.Join(pkgDir, required)
+		fi, err := os.Stat(full)
+		switch {
+		case err != nil:
+			return fmt.Errorf("the runtime package %q is missing the required %s — a legacy OpenCode package carries a nonempty server.js and dist/index.v2.js", name, filepath.ToSlash(required))
+		case fi.IsDir() || fi.Size() == 0:
+			return fmt.Errorf("the runtime package %q carries an empty %s — a legacy OpenCode package carries a nonempty server.js and dist/index.v2.js", name, filepath.ToSlash(required))
+		}
+	}
 	entry := ""
 	entries, err := os.ReadDir(pkgDir)
 	if err != nil {
