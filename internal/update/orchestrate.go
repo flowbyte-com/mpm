@@ -46,6 +46,14 @@ type Options struct {
 	Fetcher ReleaseFetcher
 	// Builder builds git/local checkouts (default: GoBuilder).
 	Builder Builder
+	// Remote overrides the repository development sources are fetched
+	// from ("" means the upstream GitHub repository).
+	//
+	// It exists so the git path can be exercised against a local
+	// repository without a network. The command line never sets it:
+	// where an update fetches code from is not an operator-facing
+	// choice, it is a property of the installation.
+	Remote string
 	// Now supplies timestamps (tests override).
 	Now func() time.Time
 	// FailAt names a step to fail after, for failure-injection tests

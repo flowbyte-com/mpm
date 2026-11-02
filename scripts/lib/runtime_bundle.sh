@@ -135,6 +135,19 @@ RB_PAYLOAD_MANIFEST_RELPATH="scripts/runtime_payloads.json"
 # repository root.
 RB_PAYLOAD_MANIFEST="runtime_payloads.json"
 
+# Where the declaration travels INSIDE a bundle.
+#
+# A bundle must describe its own contents. The validator that checks a
+# candidate must not depend on a source tree it does not have (a
+# downloaded release) or on a validator built from a different revision
+# than the bundle (a stale one checking a newer bundle). Shipping the
+# declaration with the thing it declares removes both dependencies.
+#
+# The Go updater reads this copy (internal/update/payload.go,
+# bundlePayloadManifestRelPath) and the shell stages it from the same
+# file, so the two producers emit the same shape.
+RB_BUNDLE_PAYLOAD_MANIFEST="agent_installation/runtime_payloads.json"
+
 # Paths a bundle must NEVER carry. These are the state half of the
 # installation; a bundle that carried them would let a version switch
 # replace the operator's data.
@@ -336,6 +349,24 @@ rb_stage_payloads() {
         fi
         rb_log "  runtime payload staged: $staged"
     done <<< "$records"
+
+    # The bundle carries its own declaration.
+    #
+    # The staged payload is validated HERE, but the bundle is validated
+    # again later — by the installer, and by the updater, possibly by a
+    # different build of the validator. A bundle that says what it
+    # carries can be checked against its own contents; one that does
+    # not can only be checked against a list somebody else remembers.
+    local bundle_manifest="$bundle_dir/$RB_BUNDLE_PAYLOAD_MANIFEST"
+    mkdir -p "$(dirname "$bundle_manifest")" || {
+        rb_err "could not create the directory for the bundle's payload declaration"
+        return 1
+    }
+    if ! cp -p "$manifest" "$bundle_manifest"; then
+        rb_err "could not copy the runtime payload declaration into the bundle"
+        return 1
+    fi
+    rb_log "  payload declaration carried at $RB_BUNDLE_PAYLOAD_MANIFEST"
 
     rb_log "  staged $count runtime package payload(s)"
     return 0

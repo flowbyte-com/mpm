@@ -38,7 +38,7 @@ func resolveSource(ctx context.Context, o Options) (Source, error) {
 	case o.WantCommit != "":
 		return Source{Kind: SourceGit, Ref: o.WantCommit, Rev: o.WantCommit, Commit: o.WantCommit}, nil
 	case o.WantBranch != "":
-		sha, err := resolveBranchHead(o.WantBranch)
+		sha, err := resolveBranchHead(o.WantBranch, remoteOf(o))
 		if err != nil {
 			return Source{}, err
 		}
@@ -95,11 +95,11 @@ func isInsideDataRoot(abs, root string) bool {
 
 // resolveBranchHead resolves a branch name against the upstream
 // repository without cloning it.
-func resolveBranchHead(branch string) (string, error) {
+func resolveBranchHead(branch, remote string) (string, error) {
 	if strings.ContainsAny(branch, " \t\n;|&$`(){}[]<>!") {
 		return "", fmt.Errorf("invalid branch name %q", branch)
 	}
-	out, err := exec.Command("git", "ls-remote", "https://github.com/flowbyte-com/mpm.git", "refs/heads/"+branch).Output() //nolint:gosec
+	out, err := exec.Command("git", "ls-remote", remote, "refs/heads/"+branch).Output() //nolint:gosec
 	if err != nil {
 		return "", fmt.Errorf("could not resolve branch %q: %w", branch, err)
 	}
@@ -109,6 +109,17 @@ func resolveBranchHead(branch string) (string, error) {
 	}
 	return fields[0], nil
 }
+
+// remoteOf names the repository development sources come from.
+func remoteOf(o Options) string {
+	if o.Remote != "" {
+		return o.Remote
+	}
+	return upstreamRemote
+}
+
+// upstreamRemote is the repository --branch and --commit fetch from.
+var upstreamRemote = "https://github.com/flowbyte-com/mpm.git"
 
 // stageCandidate assembles the candidate bundle outside the active
 // release, by source kind:
@@ -156,7 +167,7 @@ func stageCandidate(ctx context.Context, o Options, stagingParent string, src So
 		cand.Source.Commit = info.Commit
 		return cand, nil
 	case SourceGit:
-		clone, err := fetchRevision(work, src.Ref)
+		clone, err := fetchRevision(work, src.Ref, remoteOf(o))
 		if err != nil {
 			os.RemoveAll(work)
 			return Candidate{}, err
@@ -197,9 +208,9 @@ func versionTagOf(src Source) string {
 // resolved SHA is re-verified after checkout (fail closed on mismatch).
 // A dirty source is impossible here: the clone starts clean by
 // construction.
-func fetchRevision(workDir, ref string) (string, error) {
+func fetchRevision(workDir, ref, remote string) (string, error) {
 	clone := filepath.Join(workDir, "src")
-	cmd := exec.Command("git", "clone", "--no-checkout", "https://github.com/flowbyte-com/mpm.git", clone) //nolint:gosec
+	cmd := exec.Command("git", "clone", "--no-checkout", remote, clone) //nolint:gosec
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("could not fetch the source: %v\n%s", err, out)
 	}
