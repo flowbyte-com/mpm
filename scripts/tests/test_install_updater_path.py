@@ -16,10 +16,15 @@ to the data-root copy. Two properties matter and are pinned here:
 1. **The link names the data-root copy, never ``current/bin``.** A link
    through ``bin/`` would resolve into the ACTIVE RELEASE and die with
    it — the exact failure mode the stable copy exists to prevent.
-2. **The installer never clobbers an unrelated executable.** The
-   mpm/mpm-mcp links are created with ``rm -f`` first, which is fine for
-   binaries the installer owns. An operator may already have their own
-   ``mpm-update`` on PATH; that file is not the installer's to replace.
+2. **The installer never clobbers an unrelated executable — or an
+   unrelated symlink.** The mpm/mpm-mcp links are created with ``rm -f``
+   first, which is fine for binaries the installer owns. An operator may
+   already have their own ``mpm-update`` on PATH as a real file *or* as
+   a symlink to a different executable; neither is the installer's to
+   replace. Ownership is positively established: only a link that
+   already resolves to the data-root updater is treated as ours (and is
+   then left untouched, not recreated). Everything else is preserved
+   byte-for-byte with a warning naming the direct executable path.
 
 The link also has to SURVIVE an update: the updater replaces the
 data-root file by ``rename(2)``, so the link keeps resolving without
@@ -164,28 +169,105 @@ class TestIdempotence(UpdaterPathFixture):
         self.assertEqual(self.link_target(), target_after_first)
         self.assertTrue(self.link.is_symlink())
 
-    def test_a_retargeted_symlink_is_repointed(self):
+    def test_an_owned_link_is_left_intact_not_repointed(self):
+        # An already-owned link must survive a second install byte-for-byte:
+        # same target string AND same link inode (no ln call at all).
         self.make_recovery("mpm-update", "recovery")
-        self.link.parent.mkdir(parents=True, exist_ok=True)
-        self.link.symlink_to("/some/stale/place")
+        self.drive()
+        self.assertEqual(self.link_target(), str(self.recovery))
+        ino_before = os.lstat(self.link).st_ino
+
         r = self.drive()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self.link_target(), str(self.recovery),
-                         "an existing symlink must be repointed at the data-root copy")
+        self.assertEqual(self.link_target(), str(self.recovery))
+        self.assertEqual(os.lstat(self.link).st_ino, ino_before,
+                         "an owned link was recreated instead of left intact")
+
+
+class TestForeignSymlinksArePreserved(UpdaterPathFixture):
+    """A symlink's existence is not evidence of MPM ownership.
+
+    Only a link that resolves to the standalone updater itself may be
+    kept (untouched); every other symlink — foreign target, dangling
+    target, directory target — must survive the install byte-for-byte,
+    with a warning pointing at the direct executable path.
+    """
+
+    def _foreign_exe(self, body: str = "FOREIGN TOOL") -> Path:
+        other = self._tmp / "other-tool"
+        other.mkdir(exist_ok=True)
+        exe = other / "mpm-update"
+        exe.write_text(f"#!/bin/sh\necho '{body}'\n")
+        exe.chmod(0o755)
+        return exe
+
+    def test_a_foreign_symlink_keeps_its_target(self):
+        self.make_recovery("mpm-update", "recovery")
+        exe = self._foreign_exe()
+        self.link.parent.mkdir(parents=True, exist_ok=True)
+        self.link.symlink_to(exe)
+
+        r = self.drive()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(os.readlink(self.link), str(exe),
+                         "the installer hijacked an operator-owned symlink")
+        self.assertIn("FOREIGN TOOL", exe.read_text())
+        out = subprocess.run([str(self.link)], capture_output=True, text=True, timeout=30)
+        self.assertIn("FOREIGN TOOL", out.stdout,
+                      "the link no longer resolves to the foreign executable")
+        combined = r.stdout + r.stderr
+        self.assertIn("leaving it untouched", combined)
+        self.assertIn(str(self.recovery), combined,
+                      "the warning must point at the direct executable path")
+
+    def test_a_dangling_foreign_symlink_survives(self):
+        self.make_recovery("mpm-update", "recovery")
+        self.link.parent.mkdir(parents=True, exist_ok=True)
+        dangling = self._tmp / "gone" / "mpm-update"
+        self.link.symlink_to(dangling)
+
+        r = self.drive()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(self.link.is_symlink(), "a dangling link was deleted")
+        self.assertEqual(os.readlink(self.link), str(dangling))
+        self.assertFalse(dangling.exists(),
+                         "the installer created a file at the dangling target")
+        self.assertIn("leaving it untouched", r.stdout + r.stderr)
+
+    def test_a_symlink_to_a_directory_is_preserved_and_never_entered(self):
+        self.make_recovery("mpm-update", "recovery")
+        target_dir = self._tmp / "operator-dir"
+        target_dir.mkdir()
+        sentinel = target_dir / "sentinel.txt"
+        sentinel.write_text("operator data\n")
+        self.link.parent.mkdir(parents=True, exist_ok=True)
+        self.link.symlink_to(target_dir)
+
+        before = sorted(p.name for p in target_dir.iterdir())
+        r = self.drive()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(self.link.is_symlink(), "a directory symlink was replaced")
+        self.assertEqual(os.readlink(self.link), str(target_dir))
+        self.assertEqual(sorted(p.name for p in target_dir.iterdir()), before,
+                         "the installer wrote inside a directory behind the link")
+        self.assertEqual(sentinel.read_text(), "operator data\n")
+        self.assertIn("leaving it untouched", r.stdout + r.stderr)
 
 
 class TestNeverClobbersForeignFiles(UpdaterPathFixture):
     def test_a_real_file_at_the_destination_is_not_overwritten(self):
         self.make_recovery("mpm-update", "recovery")
         self.link.parent.mkdir(parents=True, exist_ok=True)
-        self.link.write_text("#!/bin/sh\necho 'OPERATOR OWNED'\n")
+        body = b"#!/bin/sh\necho 'OPERATOR OWNED'\n"
+        self.link.write_bytes(body)
         self.link.chmod(0o755)
 
         r = self.drive()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse(self.link.is_symlink(),
                          "the installer replaced an operator-owned file with a symlink")
-        self.assertIn("OPERATOR OWNED", self.link.read_text())
+        self.assertEqual(self.link.read_bytes(), body,
+                         "an operator-owned executable was modified byte-for-byte")
         # And it says so, rather than failing silently.
         self.assertIn("NOT a symlink", r.stdout + r.stderr)
 
@@ -224,6 +306,15 @@ class TestSurvivesAnUpdate(UpdaterPathFixture):
         self.assertIn("VERSION-TWO", out.stdout,
                       "the convenience link stopped resolving after an atomic update")
         self.assertTrue(self.link.is_symlink(), "the link was replaced during the update")
+
+        # A second install must not disturb the owned link either: same
+        # target string, same link inode (untouched, not recreated).
+        ino_before = os.lstat(self.link).st_ino
+        r = self.drive()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.link_target(), str(self.recovery))
+        self.assertEqual(os.lstat(self.link).st_ino, ino_before,
+                         "a reinstall recreated an owned link instead of leaving it intact")
 
 
 class TestUninstallRemovesOnlyOwnedLinks(UpdaterPathFixture):
