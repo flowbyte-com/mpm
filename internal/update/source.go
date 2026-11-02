@@ -115,6 +115,28 @@ type GoBuilder struct {
 	// PayloadCheck, when true (default), requires the OpenCode payload
 	// to stage — same fail-closed rule as validation.
 	PayloadCheck bool
+	// CacheDir overrides the directory the Go build cache lives in.
+	// Empty means a scratch directory beside the candidate bundle,
+	// never in the operator's HOME. A caller that builds several
+	// candidates can point them at one cache.
+	CacheDir string
+	// PayloadBuilder builds the checkout's runtime package payloads
+	// before they are staged.
+	//
+	// Defaults to buildRuntimePayloads — the documented
+	// `npm ci && npm run build` — because the compiled plugin output
+	// is a build product that is not in source control. A checkout
+	// that has not been built has no payload at all, and the only
+	// alternative to building it is to copy whatever compiled files
+	// happen to be lying around, which is how a bundle ends up
+	// carrying a plugin built from a different revision.
+	//
+	// The environment tells the build where it may write: a scratch
+	// tree for the isolated build, and a cache directory for the
+	// toolchain's caches. Neither is ever inside the operator's HOME.
+	//
+	// A test may substitute its own builder; production never does.
+	PayloadBuilder func(srcDir string, env payloadBuildEnv) (payloadSources, error)
 }
 
 func (b GoBuilder) binaries() []string {
@@ -147,8 +169,13 @@ func (b GoBuilder) BuildFromCheckout(srcDir, dstDir string) (string, error) {
 	// read-only module files across the installation and break
 	// cleanup. The module cache itself is shared read-only, which is
 	// safe and fast.
-	cacheDir := filepath.Join(filepath.Dir(dstDir), "gocache")
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	workDir := filepath.Dir(dstDir)
+	cacheRoot := b.CacheDir
+	if cacheRoot == "" {
+		cacheRoot = filepath.Join(workDir, "cache")
+	}
+	goCache := filepath.Join(cacheRoot, "go")
+	if err := os.MkdirAll(goCache, 0755); err != nil {
 		return "", err
 	}
 	for _, bin := range b.binaries() {
@@ -156,7 +183,7 @@ func (b GoBuilder) BuildFromCheckout(srcDir, dstDir string) (string, error) {
 		cmd := exec.Command(goBin, "build", "-tags", tags, "-ldflags", ld, "-o", out, "./cmd/"+bin) //nolint:gosec
 		cmd.Dir = srcDir
 		cmd.Env = append(os.Environ(),
-			"CGO_CFLAGS="+cflags, "CGO_LDFLAGS="+ldflags, "GOCACHE="+cacheDir)
+			"CGO_CFLAGS="+cflags, "CGO_LDFLAGS="+ldflags, "GOCACHE="+goCache)
 		if raw, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("building %s failed: %v\n%s", bin, err, raw)
 		}
@@ -164,7 +191,22 @@ func (b GoBuilder) BuildFromCheckout(srcDir, dstDir string) (string, error) {
 	if err := WriteRelease(dstDir, commit, commit, time.Now().Unix(), version); err != nil {
 		return "", err
 	}
-	if err := stagePayloadFromCheckout(srcDir, dstDir); err != nil {
+	// The runtime package payload is a BUILD PRODUCT and must be built
+	// from this checkout before it can be staged. Doing it here, in the
+	// checkout the build came from, is what keeps the bundle's payload
+	// and the bundle's identity describing the same revision.
+	env := payloadBuildEnv{
+		Scratch: filepath.Join(workDir, "payload-build"),
+		Cache:   filepath.Join(cacheRoot, "npm"),
+	}
+	if err := os.MkdirAll(env.Scratch, 0755); err != nil {
+		return "", err
+	}
+	sources, err := b.buildPayloads(srcDir, env)
+	if err != nil {
+		return "", err
+	}
+	if err := stagePayloads(srcDir, dstDir, sources); err != nil {
 		if b.payloadRequired() {
 			return "", err
 		}
@@ -173,6 +215,15 @@ func (b GoBuilder) BuildFromCheckout(srcDir, dstDir string) (string, error) {
 		return "", err
 	}
 	return commit, nil
+}
+
+// buildPayloads builds the checkout's runtime package payloads, using
+// the builder the caller supplied or the documented npm build.
+func (b GoBuilder) buildPayloads(srcDir string, env payloadBuildEnv) (payloadSources, error) {
+	if b.PayloadBuilder != nil {
+		return b.PayloadBuilder(srcDir, env)
+	}
+	return buildRuntimePayloads(srcDir, env)
 }
 
 // BuildFlagsOrDefault applies the FTS5 discipline with buildinfo
@@ -238,33 +289,6 @@ func readVersionFile(srcDir string) string {
 		return "unknown"
 	}
 	return strings.TrimSpace(string(raw))
-}
-
-// stagePayloadFromCheckout copies the OpenCode payload through the same
-// rule validation uses: server.js plus dist/index.v2.js, both non-empty.
-func stagePayloadFromCheckout(srcDir, dstDir string) error {
-	for _, f := range []string{
-		"agent_installation/mpm-opencode/server.js",
-		"agent_installation/mpm-opencode/dist/index.v2.js",
-	} {
-		src := filepath.Join(srcDir, f)
-		fi, err := os.Stat(src)
-		if err != nil || fi.IsDir() || fi.Size() == 0 {
-			return fmt.Errorf("the checkout has no usable OpenCode payload (%s missing or empty)", f)
-		}
-		dst := filepath.Join(dstDir, f)
-		if err := os.MkdirAll(filepath.Join(dstDir, "agent_installation", "mpm-opencode", "dist"), 0755); err != nil {
-			return err
-		}
-		raw, err := os.ReadFile(src)
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(dst, raw, 0644); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // stageSchemaDDL embeds the substrate's lifecycle_events DDL so the

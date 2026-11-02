@@ -7,16 +7,92 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// writeTestPayload writes a COMPLETE, LOADABLE runtime package into a
+// bundle, together with the declaration that travels with it.
+//
+// It exists because a bundle's payload is not one file. The plugin's
+// entrypoint imports six compiled siblings, the host registers the
+// package by DIRECTORY, and a package missing any of them loads
+// NOTHING — silently, because the registration itself succeeds.
+//
+// A fixture that staged only server.js and dist/index.v2.js would be
+// exactly the defect this work fixes: a bundle that passes every check
+// and installs a plugin that cannot load.
+//
+// The import graph below mirrors the real one.
+func writeTestPayload(dstDir string) error {
+	files := map[string]string{
+		"server.js": `export { default } from "./dist/index.v2.js";
+`,
+		"dist/index.v2.js": `import "./workspace.js";
+import "./resolve-mpm-binary.js";
+import "./wake-context.js";
+import "./event-envelope.js";
+import "./event-subscriber.js";
+import "./event-mapper.js";
+export const name = "index.v2";
+`,
+		"dist/wake-context.js":       "export const name = \"wake-context\";\n",
+		"dist/event-envelope.js":     "export const name = \"event-envelope\";\n",
+		"dist/event-mapper.js":       "import \"./event-envelope.js\";\nexport const name = \"event-mapper\";\n",
+		"dist/event-subscriber.js":   "import \"./event-envelope.js\";\nimport \"./event-mapper.js\";\nexport const name = \"event-subscriber\";\n",
+		"dist/workspace.js":          "export const name = \"workspace\";\n",
+		"dist/resolve-mpm-binary.js": "export const name = \"resolve-mpm-binary\";\n",
+		"package.json":               "{\n  \"name\": \"mpm-opencode\",\n  \"version\": \"0.1.0\",\n  \"type\": \"module\",\n  \"main\": \"./dist/index.v2.js\"\n}\n",
+	}
+	pkg := filepath.Join(dstDir, "agent_installation", "mpm-opencode")
+	for name, content := range files {
+		full := filepath.Join(pkg, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+			return err
+		}
+	}
+	// The declaration travels with the bundle.
+	manifest := payloadManifest{
+		Version: 1,
+		Payloads: []payloadRecord{{
+			Adapter:   "mpm-opencode",
+			PluginID:  "mpm-opencode",
+			Validator: "mpm_validate_runtime_package_opencode",
+			Files:     sortedKeys(files),
+		}},
+	}
+	raw, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	decl := filepath.Join(dstDir, filepath.FromSlash(bundlePayloadManifestRelPath))
+	if err := os.MkdirAll(filepath.Dir(decl), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(decl, raw, 0644)
+}
+
+// sortedKeys returns a map's keys in a stable order.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // fakeBuilder assembles bundles from shell-script binaries. No Go
 // toolchain, no network: hermetic and fast.
@@ -65,17 +141,8 @@ func (f fakeBuilder) BuildFromCheckout(srcDir, dstDir string) (string, error) {
 		return "", err
 	}
 	if !f.noPayload {
-		for _, p := range []string{
-			"agent_installation/mpm-opencode/server.js",
-			"agent_installation/mpm-opencode/dist/index.v2.js",
-		} {
-			full := filepath.Join(dstDir, p)
-			if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
-				return "", err
-			}
-			if err := os.WriteFile(full, []byte("// payload"), 0644); err != nil {
-				return "", err
-			}
+		if err := writeTestPayload(dstDir); err != nil {
+			return "", err
 		}
 	}
 	for name, content := range f.extraFiles {

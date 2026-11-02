@@ -160,11 +160,11 @@ func ValidateBundle(bundleDir, expectedRev string) BundleReport {
 	}
 
 	// 6. The OpenCode runtime payload (fail-closed).
-	if hasPluginPayload(bundleDir) {
+	if ok, detail := validateBundlePayload(bundleDir); ok {
 		rep.HasPayload = true
-		check("payload", "the OpenCode runtime payload is present", true)
+		check("payload", detail, true)
 	} else {
-		check("payload", "the bundle carries no OpenCode payload — refusing a bundle that would register an empty plugin", false)
+		check("payload", detail, false)
 	}
 
 	// 7. The standalone updater (reported, not required).
@@ -208,12 +208,120 @@ func hasGit(bundleDir string) bool {
 	return found
 }
 
-func hasPluginPayload(bundleDir string) bool {
-	server := filepath.Join(bundleDir, "agent_installation", "mpm-opencode", "server.js")
-	index := filepath.Join(bundleDir, "agent_installation", "mpm-opencode", "dist", "index.v2.js")
-	sfi, serr := os.Stat(server)
-	ifi, ierr := os.Stat(index)
-	return serr == nil && ierr == nil && !sfi.IsDir() && !ifi.IsDir() && sfi.Size() > 0 && ifi.Size() > 0
+// validateBundlePayload proves the bundle's runtime package payload is
+// present and loadable.
+//
+// PRIMARY RULE — the bundle carries its own declaration.
+//
+// The canonical manifest (scripts/runtime_payloads.json) is copied into
+// the bundle when the payload is staged, so the check is data-driven:
+// it names no adapter and no file list, and it depends on neither the
+// source tree the bundle was built from nor the revision the updater
+// binary was built from. A stale updater checking a newer bundle sees
+// the newer bundle's own declaration.
+//
+// SECONDARY RULE — the package must actually load.
+//
+// Every relative import inside a staged package must resolve to a file
+// in that package. The host registers a DIRECTORY, so a package whose
+// module graph is broken loads NOTHING, silently: the registration
+// succeeds and the plugin registry stays empty.
+//
+// FALLBACK — a bundle assembled before the declaration travelled with
+// the bundle declares nothing. Such a bundle is checked STRUCTURALLY:
+// each runtime package must have a loader-resolvable root entry, and
+// its module graph must resolve. That is weaker (it cannot know which
+// files were required) and never weaker than the check it replaces.
+func validateBundlePayload(bundleDir string) (bool, string) {
+	manifestPath := filepath.Join(bundleDir, filepath.FromSlash(bundlePayloadManifestRelPath))
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return validateBundlePayloadStructurally(bundleDir)
+	}
+	m, err := parsePayloadManifest(raw, manifestPath)
+	if err != nil {
+		return false, err.Error()
+	}
+	files := 0
+	for _, p := range m.Payloads {
+		pkgDir := filepath.Join(bundleDir, "agent_installation", p.Adapter)
+		if err := validatePayloadPackage(pkgDir, p); err != nil {
+			return false, err.Error()
+		}
+		files += len(p.Files)
+	}
+	return true, fmt.Sprintf("the runtime package payload is present and loadable (%d package(s), %d declared file(s))", len(m.Payloads), files)
+}
+
+// validateBundlePayloadStructurally checks a bundle that carries no
+// declaration.
+//
+// It finds the runtime packages by their shape rather than by a file
+// list — a package is a directory under agent_installation/ that
+// declares itself with a package.json — and proves each one can load.
+func validateBundlePayloadStructurally(bundleDir string) (bool, string) {
+	aiDir := filepath.Join(bundleDir, "agent_installation")
+	entries, err := os.ReadDir(aiDir)
+	if err != nil {
+		return false, "the bundle carries no OpenCode payload — refusing a bundle that would register an empty plugin"
+	}
+	packages := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pkgDir := filepath.Join(aiDir, e.Name())
+		if _, err := os.Stat(filepath.Join(pkgDir, "package.json")); err != nil {
+			continue // not a runtime package
+		}
+		packages++
+		if err := validatePackageShape(pkgDir, e.Name()); err != nil {
+			return false, err.Error()
+		}
+	}
+	if packages == 0 {
+		return false, "the bundle carries no OpenCode payload — refusing a bundle that would register an empty plugin"
+	}
+	return true, fmt.Sprintf("the runtime package payload is present and loadable (%d package(s); the bundle carries no declaration, so the packages were checked structurally)", packages)
+}
+
+// validatePackageShape proves a runtime package has a loader-resolvable
+// root entry and a resolvable module graph.
+//
+// The root entry is what a directory plugin is resolved BY: OpenCode
+// tries "server" then "index" at the package root, and a directory
+// registered without one is dropped without a warning.
+func validatePackageShape(pkgDir, name string) error {
+	entry := ""
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		base := e.Name()
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		if stem != "server" && stem != "index" {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(pkgDir, base)); err == nil && fi.Mode().IsRegular() && fi.Size() > 0 {
+			entry = base
+			break
+		}
+	}
+	if entry == "" {
+		return fmt.Errorf("the runtime package %q has no loader-resolvable root entry (a server.* or index.* module at the package root) — the host would drop it silently", name)
+	}
+	unresolved, err := unresolvedRelativeImports(pkgDir)
+	if err != nil {
+		return err
+	}
+	if len(unresolved) > 0 {
+		return fmt.Errorf("the runtime package %q has unresolved internal imports: %s", name, strings.Join(unresolved, ", "))
+	}
+	return nil
 }
 
 // mpmReportedCommit runs the candidate mpm --version and extracts the

@@ -228,13 +228,10 @@ esac
 	if err := WriteRelease(dstDir, commit, commit, 1700000000, "v-mig"); err != nil {
 		return "", err
 	}
-	for _, p := range []string{
-		"agent_installation/mpm-opencode/server.js",
-		"agent_installation/mpm-opencode/dist/index.v2.js",
-	} {
-		full := filepath.Join(dstDir, p)
-		os.MkdirAll(filepath.Dir(full), 0755)
-		os.WriteFile(full, []byte("// payload"), 0644)
+	// A COMPLETE, loadable payload: the bundle must carry the whole
+	// package, not the two files that used to be enough to pass.
+	if err := writeTestPayload(dstDir); err != nil {
+		return "", err
 	}
 	return commit, nil
 }
@@ -481,13 +478,10 @@ esac
 	if err := WriteRelease(dstDir, commit, commit, 1700000000, "v-old"); err != nil {
 		return "", err
 	}
-	for _, p := range []string{
-		"agent_installation/mpm-opencode/server.js",
-		"agent_installation/mpm-opencode/dist/index.v2.js",
-	} {
-		full := filepath.Join(dstDir, p)
-		os.MkdirAll(filepath.Dir(full), 0755)
-		os.WriteFile(full, []byte("// payload"), 0644)
+	// A COMPLETE, loadable payload: the bundle must carry the whole
+	// package, not the two files that used to be enough to pass.
+	if err := writeTestPayload(dstDir); err != nil {
+		return "", err
 	}
 	return commit, nil
 }

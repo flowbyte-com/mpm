@@ -23,6 +23,7 @@ Hermeticity: every root is a fresh mktemp directory and nothing
 resolves into the real ~/.mpm.
 """
 
+import json
 import os
 import re
 import shutil
@@ -775,6 +776,130 @@ class TestRollbackValidation(BundleFixture):
         self.assertTrue((self.data_root / "bin" / "mpm").is_file())
         self.assertTrue(
             (self.data_root / "agent_installation" / "adapter" / "file.txt").is_file()
+        )
+
+
+class TestBundleCarriesItsPayloadDeclaration(unittest.TestCase):
+    """A bundle must describe its own contents.
+
+    The validator that checks a candidate must not depend on a source
+    tree it does not have (a downloaded release) or on a validator
+    built from a different revision than the bundle (a stale one
+    checking a newer bundle). Shipping the declaration with the thing
+    it declares removes both dependencies.
+
+    The Go updater reads the copy at
+    agent_installation/runtime_payloads.json (internal/update/
+    payload.go, bundlePayloadManifestRelPath), so the shell staging
+    path must put it exactly there.
+    """
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp(prefix="mpm-decl-test-"))
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+        self.source = self._tmp / "source"
+        self.bundle = self._tmp / "bundle"
+
+    def _stage(self):
+        """Run the real staging function over a minimal source tree."""
+        # The manifest the staging reads.
+        manifest = self.source / "scripts" / "runtime_payloads.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "payloads": [
+                        {
+                            "adapter": "mpm-opencode",
+                            "plugin_id": "mpm-opencode",
+                            "validator": "mpm_validate_runtime_package_opencode",
+                            "files": list(OPENCODE_MANIFEST),
+                        }
+                    ],
+                },
+                indent=2,
+            )
+        )
+        # The staging library the function sources.
+        stage_lib = (
+            self.source / "agent_installation" / "scripts" / "stage_runtime_package.sh"
+        )
+        stage_lib.parent.mkdir(parents=True, exist_ok=True)
+        stage_lib.write_text(
+            "#!/usr/bin/env bash\n"
+            "stage_runtime_package() {\n"
+            "  local src=\"$1\" bundle=\"$2\" plugin=\"$3\"; shift 3\n"
+            "  local rel dest\n"
+            "  mkdir -p \"$bundle/agent_installation/mpm-opencode/dist\"\n"
+            "  for rel in \"$@\"; do\n"
+            "    dest=\"$bundle/agent_installation/mpm-opencode/$rel\"\n"
+            "    mkdir -p \"$(dirname \"$dest\")\"\n"
+            "    cp \"$src/$rel\" \"$dest\"\n"
+            "  done\n"
+            "  echo \"$bundle/agent_installation/mpm-opencode\"\n"
+            "}\n"
+        )
+        # The adapter's sources: every declared file, present.
+        adapter = self.source / "agent_installation" / "mpm-opencode"
+        for rel in OPENCODE_MANIFEST:
+            dest = adapter / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(f"// {rel}\n")
+
+        driver = self._tmp / "drive.sh"
+        driver.write_text(
+            textwrap.dedent(f"""\
+                set -uo pipefail
+                . "{LIB}"
+                rb_stage_payloads "{self.source}" "{self.bundle}"
+                echo "rc=$?"
+            """)
+        )
+        driver.chmod(0o755)
+        return subprocess.run(
+            ["bash", str(driver)], capture_output=True, text=True, timeout=120
+        )
+
+    def test_the_declaration_travels_inside_the_bundle(self):
+        r = self._stage()
+        self.assertIn("rc=0", r.stdout, r.stderr)
+        carried = self.bundle / "agent_installation" / "runtime_payloads.json"
+        self.assertTrue(
+            carried.is_file(),
+            "the bundle must carry its own payload declaration; a validator "
+            "that reads a list somebody else remembers can check the wrong "
+            "bundle",
+        )
+        # And it is the manifest that was staged from, unchanged.
+        original = json.loads(
+            (self.source / "scripts" / "runtime_payloads.json").read_text()
+        )
+        self.assertEqual(json.loads(carried.read_text()), original)
+
+    def test_the_go_updater_reads_the_same_path(self):
+        # The two producers must agree on WHERE the declaration travels.
+        # The Go side names the path in one constant; the shell side in
+        # one variable. A drift between them means the Go validator
+        # reads a file the shell never writes.
+        go = (REPO_ROOT / "internal" / "update" / "payload.go").read_text()
+        m = re.search(
+            r'bundlePayloadManifestRelPath\s*=\s*"([^"]+)"', go
+        )
+        self.assertIsNotNone(
+            m, "the Go updater must name the path the declaration travels at"
+        )
+        lib = LIB.read_text()
+        m2 = re.search(r'RB_BUNDLE_PAYLOAD_MANIFEST="([^"]+)"', lib)
+        self.assertIsNotNone(
+            m2, "the shell staging path must name the path the declaration travels at"
+        )
+        self.assertEqual(
+            m.group(1),
+            m2.group(1),
+            "the Go updater and the shell staging path disagree on where the "
+            "bundle's payload declaration travels; the Go validator would "
+            "read a file the shell never writes",
         )
 
 

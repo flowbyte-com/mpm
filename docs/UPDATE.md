@@ -18,6 +18,15 @@ mpm update --commit <sha>     # development: an exact commit
 mpm update --from ~/projects/mpm   # development: a local checkout
 ```
 
+The three development sources need a **build toolchain**: Go (always),
+plus Node.js 20 or newer and npm. A development source is compiled from
+a checkout, and the OpenCode plugin's compiled output is a build
+product — it is not in source control, so a checkout that has never
+been built has no plugin payload at all. The updater builds it (in an
+isolated copy, so your checkout is left untouched), and refuses the
+update if the build fails. Updating from a **published release** needs
+no toolchain at all: the release ships the compiled payload.
+
 ## Architecture
 
 An installation has two halves with different lifetimes:
@@ -97,7 +106,7 @@ provisions the executable itself:
 | malicious archive (path escape, symlinks) | fail-closed extraction: no absolute paths, no `..`, no links, per-file and total size caps |
 | mixture of two builds | RELEASE.json commit must equal the candidate `mpm --version` report |
 | bundle carrying operator data | forbidden-list refusal (`src/db`, `mpm_config.json`, …) |
-| bundle registering an empty plugin | payload presence is fail-closed, not advisory |
+| bundle registering an empty plugin | the whole declared package must be present and loadable: every file the payload manifest declares, and every relative import resolving inside the package. Fail-closed, not advisory |
 | concurrent updates racing on one data root | exclusive file lock; the second updater is refused, never queued |
 | migration stranding a rollback | schema fingerprint recorded at backup time; a changed shape refuses a runtime-only rollback and names the recovery options; a failed activation with a migrated schema verifies the old runtime against a scratch copy before falling back, otherwise stops degraded (never silently restores the database) |
 | silent database restore | runtime rollback and database restore are separate operations; the restore needs `--with-db-restore --force` |
@@ -126,6 +135,19 @@ GitHub build-provenance attestation verifiable with
   runtime, must resolve to a commit, and must be clean unless
   `--allow-dirty` is given. The install stays independent of the
   checkout after promotion.
+
+A development source is COMPILED, so it needs the toolchain: Go, plus
+Node.js 20 or newer and npm for the OpenCode plugin payload. The
+plugin's compiled output is a build product, not a source file — the
+updater builds it in an isolated copy of the adapter (your checkout is
+never written to) and refuses the update if the build fails. There is
+no fallback to an installed plugin or to compiled files left over from
+another revision: a bundle must carry a payload built from the
+revision it claims, or it must not be built at all.
+
+The **published release** path needs none of this. A release bundle is
+assembled by the release pipeline, which builds the payload in its own
+environment, so updating from a release needs no Go, Node or Git.
 
 `--to` names a release tag. (`--version` cannot take a value: the
 router reserves it for build-identity reporting, so the update flag is
