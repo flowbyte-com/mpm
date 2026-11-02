@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -45,7 +46,7 @@ import (
 // source tests.
 type devSourceFixture struct {
 	// root is the scratch directory holding everything shared. It is
-	// removed when the test binary exits.
+	// removed when the test binary exits — see fixture_lifecycle_test.go.
 	root string
 	// checkout is a real MPM source checkout — a git repository with
 	// the payload manifest and the plugin sources, but with NO
@@ -93,7 +94,34 @@ func sharedDevSource(t *testing.T) *devSourceFixture {
 // tests must not depend on that tree's state, and the fixture must be
 // able to be dirty or clean independently of it.
 func prepareDevSource() (*devSourceFixture, error) {
-	root, err := os.MkdirTemp("", "mpm-devsource-")
+	return prepareDevSourceIn("")
+}
+
+// devSourceFailurePoint injects a setup failure at a named stage, so
+// the cleanup path can be exercised without breaking a real fixture.
+//
+// It is a test-only seam: an empty value (the normal case) changes
+// nothing.
+var devSourceFailurePoint string
+
+// injectDevSourceFailure returns an error when the named stage is the
+// one a test asked to fail at.
+func injectDevSourceFailure(stage string) error {
+	if devSourceFailurePoint == stage {
+		return fmt.Errorf("injected development-source fixture failure at stage %q", stage)
+	}
+	return nil
+}
+
+// prepareDevSourceIn prepares the fixture with its scratch root
+// created in tmpDir. The empty string means the host's default
+// temporary directory.
+//
+// EVERY failure path releases the root. A partially prepared fixture
+// is exactly the scratch that accumulates: the leak this file exists
+// to remove started with a root that was created and then abandoned.
+func prepareDevSourceIn(tmpDir string) (*devSourceFixture, error) {
+	root, err := newFixtureRoot(tmpDir)
 	if err != nil {
 		return nil, err
 	}
@@ -103,25 +131,40 @@ func prepareDevSource() (*devSourceFixture, error) {
 		checkout: filepath.Join(root, "checkout"),
 		branch:   "mpm-update-devsource-test",
 	}
-	if err := os.MkdirAll(f.cache, 0755); err != nil {
+	// fail releases the root and returns the error. Every stage below
+	// goes through it.
+	fail := func(err error) (*devSourceFixture, error) {
+		_ = removeFixtureRoot(root)
 		return nil, err
+	}
+	if err := injectDevSourceFailure("root"); err != nil {
+		return fail(err)
+	}
+	if err := os.MkdirAll(f.cache, 0755); err != nil {
+		return fail(err)
 	}
 	if err := copySourceTree(f.checkout); err != nil {
-		return nil, err
+		return fail(err)
+	}
+	if err := injectDevSourceFailure("copy"); err != nil {
+		return fail(err)
 	}
 	if err := initFixtureRepo(f.checkout); err != nil {
-		return nil, err
+		return fail(err)
+	}
+	if err := injectDevSourceFailure("repo"); err != nil {
+		return fail(err)
 	}
 	f.commit = runGit(f.checkout, "rev-parse", "HEAD")
 	if f.commit == "" {
-		return nil, fmt.Errorf("the fixture repository has no HEAD at %s", f.checkout)
+		return fail(fmt.Errorf("the fixture repository has no HEAD at %s", f.checkout))
 	}
 	runGit(f.checkout, "checkout", "-b", f.branch)
 	// The substrate binary, so a disposable root can be given the real
 	// schema.
 	f.mpm = filepath.Join(root, "bin", "mpm")
 	if err := os.MkdirAll(filepath.Dir(f.mpm), 0755); err != nil {
-		return nil, err
+		return fail(err)
 	}
 	build := exec.Command("go", "build", "-tags", "fts5", "-o", f.mpm, "./cmd/mpm") //nolint:gosec
 	build.Dir = f.checkout
@@ -129,7 +172,10 @@ func prepareDevSource() (*devSourceFixture, error) {
 		"CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1", "CGO_LDFLAGS=-lm",
 		"GOCACHE="+filepath.Join(f.cache, "go"))
 	if out, err := build.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("the substrate binary could not be built: %v\n%s", err, out)
+		return fail(fmt.Errorf("the substrate binary could not be built: %v\n%s", err, out))
+	}
+	if err := injectDevSourceFailure("build"); err != nil {
+		return fail(err)
 	}
 	return f, nil
 }
@@ -146,44 +192,124 @@ func copySourceTree(dst string) error {
 	}
 	// internal/update → the module root.
 	src = filepath.Dir(filepath.Dir(src))
-	return filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
+	return copySourceTreeFrom(src, dst)
+}
+
+// copySourceTreeFrom copies src into dst.
+//
+// # THE BOUNDARY IS EXPLICIT: THE TRACKED FILE SET
+//
+// A directory walk has no boundary. It follows whatever it finds, and
+// when the destination lives INSIDE the source — which is what happens
+// when TMPDIR is inside the checkout — the walk descends into the
+// directory it is writing and copies its own output, over and over,
+// until the filesystem is full.
+//
+// The tracked file set cannot contain the destination: the destination
+// is untracked by construction, so the copy is finite by construction,
+// whatever TMPDIR is.
+//
+// The tracked file set also EXCLUDES, by construction, everything the
+// copy must not carry: the repository's own metadata (a .git directory
+// or a linked worktree's .git FILE), the compiled plugin output (the
+// build's product, not the source's), an installed dependency tree
+// and the build directory. A fresh clone has exactly this shape, and
+// the fixture is a fresh clone by definition.
+func copySourceTreeFrom(src, dst string) error {
+	files, err := planSourceCopy(src, dst)
+	if err != nil {
+		return err
+	}
+	for _, rel := range files {
+		from := filepath.Join(src, filepath.FromSlash(rel))
+		to := filepath.Join(dst, filepath.FromSlash(rel))
+		if !pathWithinDir(dst, to) {
+			return fmt.Errorf("the fixture copy of %s would land outside %s", rel, dst)
+		}
+		fi, err := os.Lstat(from)
 		if err != nil {
 			return err
 		}
-		rel, rerr := filepath.Rel(src, path)
-		if rerr != nil {
-			return rerr
-		}
-		if rel == "." {
-			return os.MkdirAll(dst, 0755)
-		}
-		// Never carry the compiled payload: it is the build's output.
-		// Nor the repository's own metadata, its build artifacts, or an
-		// installed dependency tree.
-		if fi.IsDir() && (fi.Name() == "dist" || fi.Name() == "node_modules" ||
-			fi.Name() == ".git" || fi.Name() == ".build") {
-			return filepath.SkipDir
-		}
-		// A linked worktree's ".git" is a FILE, not a directory: it
-		// points at the real repository's worktree metadata. Copying
-		// it would make `git init` REINITIALIZE THE REAL REPOSITORY
-		// instead of creating a fresh one — the fixture's commits
-		// would land in the developer's checkout. Never copy it.
-		if fi.Name() == ".git" {
-			return nil
-		}
-		if fi.IsDir() {
-			return os.MkdirAll(filepath.Join(dst, rel), 0755)
-		}
+		// A symlink is never followed: the copy would then read bytes
+		// from wherever it points, which may be anywhere on the
+		// filesystem. The link itself is not part of the source tree
+		// the fixture builds from.
 		if !fi.Mode().IsRegular() {
-			return nil
+			continue
 		}
-		raw, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return rerr
+		raw, err := os.ReadFile(from)
+		if err != nil {
+			return err
 		}
-		return os.WriteFile(filepath.Join(dst, rel), raw, fi.Mode().Perm())
-	})
+		if err := os.MkdirAll(filepath.Dir(to), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(to, raw, fi.Mode().Perm()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// planSourceCopy enumerates exactly which files a fixture copy
+// contains.
+//
+// It fails closed: a source that is not a git checkout has no bounded
+// file set, and a copy without a boundary is the defect this replaces.
+func planSourceCopy(src, dst string) ([]string, error) {
+	absSrc, err := filepath.Abs(src)
+	if err != nil {
+		return nil, err
+	}
+	absDst, err := filepath.Abs(dst)
+	if err != nil {
+		return nil, err
+	}
+	if absSrc == absDst {
+		return nil, fmt.Errorf("the fixture destination %s is the source itself", absDst)
+	}
+	raw, err := runGitRaw(absSrc, "ls-files", "-z", "--", ".")
+	if err != nil {
+		return nil, fmt.Errorf("the fixture source %s is not a git checkout, so its file set cannot be bounded: %w", absSrc, err)
+	}
+	var files []string
+	for _, name := range strings.Split(raw, "\x00") {
+		if name == "" {
+			continue
+		}
+		rel := filepath.ToSlash(filepath.Clean(name))
+		if rel == "." || rel == ".." {
+			continue
+		}
+		if filepath.Base(rel) == ".git" {
+			// The repository's own metadata never travels: a linked
+			// worktree's .git is a FILE pointing at the REAL
+			// repository, and `git init` beside it would
+			// reinitialize THAT repository.
+			continue
+		}
+		// A tracked file INSIDE the destination would mean the copy
+		// writes into a tree it is reading. Refuse rather than guess.
+		if pathWithinDir(absDst, filepath.Join(absSrc, filepath.FromSlash(rel))) {
+			return nil, fmt.Errorf("the fixture source %s tracks %s, which is inside the fixture destination %s; refusing a copy that would read and write the same tree", absSrc, rel, absDst)
+		}
+		files = append(files, rel)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// runGitRaw runs a git command and returns its RAW output.
+//
+// The output is not trimmed: `git ls-files -z` is a NUL-separated
+// list, and trimming it would corrupt the last entry.
+func runGitRaw(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...) //nolint:gosec
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %v in %s failed: %v", args, dir, err)
+	}
+	return string(out), nil
 }
 
 // initFixtureRepo turns the copied tree into a git repository, so the
@@ -191,13 +317,21 @@ func copySourceTree(dst string) error {
 // checkout.
 //
 // It refuses to touch a repository it did not create: any pre-existing
-// git metadata in dir is removed first, and the new repository's
-// identity is verified afterwards. Without that check a stray ".git"
-// file in the copied tree would reinitialize whatever repository it
-// points at, and the fixture's commits would land in the developer's
-// own checkout.
+// git metadata in dir is a REFUSAL, not something to delete. A linked
+// worktree's ".git" is a FILE pointing at the real repository's
+// worktree metadata, and `git init` beside it would reinitialize THAT
+// repository — the fixture's commits would land in the developer's own
+// checkout. Deleting the file first would have been the other half of
+// the same hazard, so the copy never carries it and the initialiser
+// refuses to find it.
+//
+// After initialising, the repository's git dir is verified to live
+// inside dir: that is what makes "this is the fixture's own
+// repository" a checked fact rather than an assumption.
 func initFixtureRepo(dir string) error {
-	if err := os.RemoveAll(filepath.Join(dir, ".git")); err != nil {
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+		return fmt.Errorf("the fixture directory %s already carries git metadata; refusing to initialise a repository this fixture did not create", dir)
+	} else if !os.IsNotExist(err) {
 		return err
 	}
 	if _, err := runGitErr(dir, "init", "--quiet"); err != nil {
@@ -223,6 +357,13 @@ func initFixtureRepo(dir string) error {
 	}
 	if filepath.Clean(top) != filepath.Clean(dir) {
 		return fmt.Errorf("the fixture repository is rooted at %s, want %s", top, dir)
+	}
+	gitDir, err := runGitErr(dir, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return err
+	}
+	if !pathWithinDir(dir, gitDir) {
+		return fmt.Errorf("the fixture repository's git dir is %s, which is outside %s", gitDir, dir)
 	}
 	return nil
 }
@@ -582,7 +723,7 @@ func TestAFailedDevelopmentBuildChangesNothing(t *testing.T) {
 	// BEFORE the build, which is a different scenario than the one
 	// under test.
 	broken := filepath.Join(dev.root, "broken-checkout")
-	if err := copyTree(broken, dev.checkout); err != nil {
+	if err := copySourceTreeFrom(dev.checkout, broken); err != nil {
 		t.Fatal(err)
 	}
 	if err := initFixtureRepo(broken); err != nil {
@@ -705,6 +846,10 @@ func assertDatabaseIntact(t *testing.T, root string) {
 }
 
 // copyTree copies a directory tree.
+//
+// It is retained for fixtures that copy a tree that is NOT a git
+// checkout. It never descends into the destination and never copies
+// git metadata, so it cannot recurse into its own output.
 func copyTree(dst, src string) error {
 	return filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
 		if err != nil {
@@ -716,6 +861,11 @@ func copyTree(dst, src string) error {
 		}
 		if rel == "." {
 			return os.MkdirAll(dst, 0755)
+		}
+		// Never descend into the destination: a copy into a tree it is
+		// reading copies its own output, forever.
+		if fi.IsDir() && pathWithinDir(dst, path) {
+			return filepath.SkipDir
 		}
 		if fi.IsDir() {
 			if fi.Name() == ".git" || fi.Name() == "node_modules" {
