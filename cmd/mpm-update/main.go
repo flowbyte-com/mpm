@@ -78,10 +78,6 @@ func main() {
 }
 
 func run(args []string) int {
-	if len(args) == 0 {
-		fmt.Print(usage)
-		return 0
-	}
 	for _, a := range args {
 		if a == "--version" || a == "-v" {
 			printBinaryVersion()
@@ -228,7 +224,7 @@ func run(args []string) int {
 	if check {
 		return runCheck(ctx, o, jsonOut)
 	}
-	return runUpdate(ctx, o, jsonOut)
+	return updateRunner(ctx, o, jsonOut)
 }
 
 func splitFlag(a string) (name, value string, hasValue bool) {
@@ -319,6 +315,12 @@ func runCheck(ctx context.Context, o update.Options, jsonOut bool) int {
 	fmt.Printf("  %s\n", out.Report)
 	return 0
 }
+
+// updateRunner is the default update workflow's entry point. It is a
+// variable so a dispatch test can prove that a BARE invocation reaches
+// the workflow — without resolving a release, touching the network, or
+// performing an update. Production always uses runUpdate.
+var updateRunner = runUpdate
 
 func runUpdate(ctx context.Context, o update.Options, jsonOut bool) int {
 	out, err := update.Update(ctx, o)

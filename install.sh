@@ -1148,6 +1148,30 @@ _bundle_fail_at() {
 }
 
 
+# updater_link_is_owned reports whether the symlink at $1 resolves to $2.
+#
+# This is the install-side twin of uninstall.sh's verify_owned_symlink:
+# same predicate (resolved target equality, nothing looser), same shape,
+# deliberately duplicated rather than shared — the installer test
+# harness sources a stripped copy of this file, so a lazily loaded
+# library would not be present under test. Keep the two in sync.
+updater_link_is_owned() {
+    local path="$1"
+    local expected_target="$2"
+    [ -L "$path" ] || return 1
+    local link_target
+    link_target="$(readlink "$path" 2>/dev/null)" || return 1
+    # Resolve to absolute (canonical) form for comparison. Read-only:
+    # cd only normalises the path string, nothing is written anywhere —
+    # in particular a link pointing at a directory is never entered for
+    # any purpose but naming it in the comparison.
+    local abs_target
+    abs_target="$(cd "$(dirname -- "$path")" && cd "$(dirname -- "$link_target")" 2>/dev/null && pwd)/$(basename -- "$link_target")" || return 1
+    abs_target="${abs_target%/}"
+    expected_target="${expected_target%/}"
+    [ "$abs_target" = "$expected_target" ]
+}
+
 # Symlink mpm + mpm-mcp into ~/.local/bin so subprocesses that inherit
 # the user PATH can resolve them by name.
 #
@@ -1182,6 +1206,62 @@ phase_symlinks() {
         ln -s "$source" "$target"
         log "  $target -> $source"
     done
+
+    # The standalone updater's convenience link.
+    #
+    # It names the DATA-ROOT copy, not $PREFIX/bin/mpm-update: bin/ is a
+    # symlink into the ACTIVE RELEASE, so a link through it would die with
+    # the release it is meant to repair. <data root>/mpm-update is a real
+    # file that survives version switches, and the updater replaces it by
+    # rename(2), so this link keeps resolving to the current one after
+    # every update without needing to be recreated.
+    #
+    # DELIBERATELY NOT PART OF THE LOOP ABOVE. That loop `rm -f`s whatever
+    # is at the destination; an operator may already have their own
+    # mpm-update on PATH, and clobbering a real executable to install a
+    # convenience link is not a trade this installer gets to make.
+    #
+    # OWNERSHIP IS POSITIVE, NEVER ASSUMED. A symlink's mere existence
+    # proves nothing: it may be the operator's own link to a different
+    # executable, a dangling leftover, or a link to a directory. Only a
+    # link that already resolves to the standalone updater below is
+    # treated as ours (and is then left untouched, not recreated).
+    # Everything else is preserved byte-for-byte with a warning naming
+    # the direct executable path.
+    #
+    # The twin rule lives in uninstall.sh's verify_owned_symlink, which
+    # refuses to DELETE a link that does not resolve to the same target.
+    # The two predicates must stay identical: if one changes, change the
+    # other, or install and uninstall will disagree about what "ours"
+    # means. (Deliberately a twin rather than shared code: the installer
+    # test harness sources a stripped copy of this file, so a lazily
+    # loaded library would not be present under test.)
+    local updater_source="$DATA_ROOT/mpm-update"
+    local updater_link="$LOCAL_BIN/mpm-update"
+    if [ ! -x "$updater_source" ]; then
+        log "  $updater_link not created: no standalone updater at $updater_source"
+        log "    (it is provisioned by the bundle layout; the non-bundle layout has none)"
+    elif updater_link_is_owned "$updater_link" "$updater_source"; then
+        # Owned link: already points at our standalone updater. Leave the
+        # inode alone — repointing it would be pointless churn, and the
+        # updater's rename(2) replacement keeps it resolving on its own.
+        log "  $updater_link -> $updater_source (already owned, left intact)"
+    elif [ -L "$updater_link" ]; then
+        # Foreign, dangling, or directory symlink: preserve unchanged.
+        # No `ln -sfn` here, in any form — there is no safe repoint of a
+        # link whose ownership cannot be established, and the unsafe forms
+        # can additionally resolve through a directory target.
+        warn "  $updater_link already exists and does not point at $updater_source — leaving it untouched"
+        warn "  (invoke the updater directly: $updater_source)"
+    elif [ -e "$updater_link" ]; then
+        warn "  $updater_link already exists and is NOT a symlink — leaving it untouched"
+        warn "  (invoke the updater directly: $updater_source)"
+    else
+        # Truly absent: neither symlink nor file. Plain `ln -s` (no -f,
+        # no -n) cannot follow or replace anything that exists.
+        ln -s "$updater_source" "$updater_link"
+        log "  $updater_link -> $updater_source"
+    fi
 
     # Warn (non-fatal) if ~/.local/bin is not on the user's current PATH.
     # We don't error because (a) some shells source PATH lazily, and

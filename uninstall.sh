@@ -346,6 +346,17 @@ build_plan() {
         fi
     done
 
+    # 3b. The standalone updater's convenience link names the DATA-ROOT
+    #     copy, not $PREFIX/bin, so it needs its own ownership check.
+    #     A real file at that path is never removed: the installer would
+    #     not have created one.
+    local updater_link="$LOCAL_BIN/mpm-update"
+    if [ -L "$updater_link" ] && verify_owned_symlink "$updater_link" "$DATA_ROOT/mpm-update"; then
+        PLAN_RUNTIME_SYMLINKS+=("$updater_link")
+    elif [ -e "$updater_link" ] || [ -L "$updater_link" ]; then
+        warn "skipping $updater_link — does not point at $DATA_ROOT/mpm-update (refusing to delete foreign executable)"
+    fi
+
     # 4. Installed binaries.
     #
     # THE BUNDLE LAYOUT IS A DIFFERENT SHAPE. In the versioned-bundle
