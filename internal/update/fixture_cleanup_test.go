@@ -106,7 +106,24 @@ func TestCleanupFailureFailsTheTestRun(t *testing.T) {
 	pathFile := filepath.Join(probeDir, "root-path")
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestCleanupFailureFailsTheTestRun$", "-test.v") //nolint:gosec
-	cmd.Env = append(os.Environ(), cleanupProbeEnv+"=1", cleanupProbePathEnv+"="+pathFile)
+	// The child is this same test binary — an MPM-capable binary — so
+	// it must not inherit an environment that could resolve the
+	// operator's MPM state. MPM_WORKSPACE and HOME are both pinned to
+	// temporary directories, which closes both resolution paths:
+	// config.GetMPMDir's $HOME/.mpm fallback and the CWD fallback.
+	// os/exec dedups Env with the last entry winning, so this
+	// overrides an ambient value rather than racing it.
+	//
+	// The rest of the ambient environment is inherited deliberately:
+	// the child runs this package's own TestMain, and a hermetic
+	// environment without GOCACHE/GOMODCACHE would relocate the Go
+	// module cache into a temporary HOME.
+	cmd.Env = append(os.Environ(),
+		"MPM_WORKSPACE="+t.TempDir(),
+		"HOME="+t.TempDir(),
+		cleanupProbeEnv+"=1",
+		cleanupProbePathEnv+"="+pathFile,
+	)
 	out, err := cmd.CombinedOutput()
 
 	// The child's scratch is removed whether the assertions below pass
