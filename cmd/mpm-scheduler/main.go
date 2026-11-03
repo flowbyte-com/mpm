@@ -161,8 +161,9 @@ func main() {
 
 	// ── Handler registry ────────────────────────────────────────────────
 	//
-	// Adding a new system kind = register one line here. No central
-	// dispatch edit, no recompile of unrelated code paths.
+	// Adding a new system kind = register one line in
+	// scheduler.RegisterSystemHandlers. No central dispatch edit, no
+	// recompile of unrelated code paths.
 	//
 	// snapshot         → atomic SQLite .backup (replaces cron + shell script)
 	// critic_audit     → Critic audit cycle (lands once internal/critic ships)
@@ -184,16 +185,16 @@ func main() {
 	//                    rename, source attribution, world-readable
 	//                    refuse) — see internal/scheduler/ingest.go.
 	// (anything else)  → notification kind, passes through to opportunistic fold
-	s.Register("snapshot", scheduler.SnapshotHandler)
-	// The critic-audit handler is bound to the RESOLVED workspace and
-	// database, so the critic audits the same substrate this scheduler
-	// dispatches against — even when --db selected a workspace other
-	// than the environment's.
-	s.Register("critic_audit", scheduler.NewCriticAuditHandler(workspace, resolvedDB))
-	s.Register("gc", scheduler.GCHandler)
-	s.Register("broadcast", scheduler.BroadcastHandler)
-	s.Register("cascade_summary", scheduler.NewCascadeSummaryHandler(logger))
-	s.Register("drill", scheduler.DrillHandler)
+	//
+	// The registration lives in the scheduler package so that the set of
+	// kinds this daemon dispatches is ONE list, and the ownership
+	// invariant — no handler kind may be an agent-owned kind — can be
+	// tested against it. See internal/scheduler/system_handlers.go.
+	scheduler.RegisterSystemHandlers(s, scheduler.SystemHandlerDeps{
+		Workspace:    workspace,
+		CriticDBPath: resolvedDB,
+		Logger:       logger,
+	})
 	s.RegisterTickHandler("cascade_drain", scheduler.NewCascadeDrainHandler(
 		dm,
 		logger,

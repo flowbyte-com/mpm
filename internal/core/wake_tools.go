@@ -261,6 +261,119 @@ func BlockedWakeKindError(kind string) error {
 	)
 }
 
+// AgentOwnedWakeKinds are the wake kinds the AGENT's notification
+// surface owns.
+//
+// A wake kind belongs to exactly one owner. The agent owns the kinds
+// below: the opportunistic fold (CheckPendingWakes) delivers them to
+// the agent and retires them (fired=1) when the agent acknowledges
+// them. Every OTHER kind belongs to the scheduler, which dispatches it
+// through a registered handler and retires it after the handler
+// returns.
+//
+// The list is an ALLOWLIST, so the default is DENY: a kind this tree
+// does not know is not the agent's. That direction is the one that
+// matters, because the failure it prevents is silent. A fold that
+// retires a scheduler-owned wake loses the work — the handler never
+// runs — and nothing in the tree records the loss.
+//
+// The membership is the CODE's, not a document's:
+//
+//   - "notification" — the default kind. An untagged wake is one
+//     (scheduler.Wake.Kind() defaults to "notification" for an absent
+//     kind), and the scheduler's hasHandler() already refuses
+//     "notification" so the two surfaces cannot both act on one wake.
+//   - "cascade" — the cascade materializer's booking. The fold
+//     delivers it under the per-call cap (MaxCascadeWakePerCheck).
+//   - "cron" — the recurring-task bookkeeping rows. The scheduler's
+//     ad-hoc claim excludes them (dispatchClaimNextAdHocWake) and the
+//     fold is their delivery path: the row carries the directive_id
+//     the agent has to consult.
+//
+// Everything else — snapshot, critic_audit, gc, broadcast,
+// cascade_summary, drill, and any kind a future binary introduces — is
+// scheduler-owned, because the scheduler is what runs it.
+var AgentOwnedWakeKinds = []string{"notification", "cascade", "cron"}
+
+// WakeKindAgentOwned reports whether a wake kind belongs to the agent's
+// notification surface rather than to the scheduler's.
+//
+// The predicate lives in the core module because BOTH sides of the
+// boundary need it: the fold (CheckPendingWakes, in this package) and
+// the scheduler's handler registry (internal/scheduler, in the root
+// module, which imports this one). Two copies of the list would be
+// two chances to drift.
+//
+// An EMPTY kind is agent-owned: an absent or empty kind is an untagged
+// wake, which is a notification wake (the same reading
+// scheduler.Wake.Kind() takes).
+//
+// The comparison is exact: no prefix, no case-folding, no trimming.
+func WakeKindAgentOwned(kind string) bool {
+	if kind == "" {
+		return true
+	}
+	for _, owned := range AgentOwnedWakeKinds {
+		if kind == owned {
+			return true
+		}
+	}
+	return false
+}
+
+// wakeKindSQL builds the kind filter for a fold query.
+//
+// kinds is the set of kinds the branch matches. untaggedMatches says
+// whether a row with no kind — absent, empty, or malformed metadata —
+// counts as a match.
+//
+// The CASE form is deliberate: json_extract RAISES on malformed JSON,
+// so the validity probe has to come first. An unguarded call turns one
+// corrupt row into "no wake is ever delivered again", because every
+// caller of the fold swallows the query error. ResolveWake's matcher
+// probes json_valid for the same reason.
+//
+// The kinds are inlined rather than bound, because every value that
+// reaches here comes from AgentOwnedWakeKinds — a fixed list in this
+// package, never from a caller.
+func wakeKindSQL(kinds []string, untaggedMatches bool) string {
+	untagged := "0"
+	if untaggedMatches {
+		untagged = "1"
+	}
+	var b strings.Builder
+	b.WriteString("CASE\n")
+	b.WriteString("    WHEN metadata IS NULL OR metadata = '' THEN " + untagged + "\n")
+	b.WriteString("    WHEN json_valid(metadata) = 0 THEN " + untagged + "\n")
+	b.WriteString("    WHEN json_extract(metadata, '$.kind') IS NULL THEN " + untagged + "\n")
+	b.WriteString("    WHEN json_extract(metadata, '$.kind') = '' THEN " + untagged + "\n")
+	b.WriteString("    WHEN json_extract(metadata, '$.kind') IN (")
+	for i, k := range kinds {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString("'" + k + "'")
+	}
+	b.WriteString(") THEN 1\n")
+	b.WriteString("    ELSE 0\n")
+	b.WriteString("END = 1")
+	return b.String()
+}
+
+// agentOwnedSubset returns the requested kinds that are the agent's.
+//
+// A request that names only scheduler-owned kinds matches nothing: the
+// agent's surface cannot see the scheduler's work.
+func agentOwnedSubset(requested []string) []string {
+	out := make([]string, 0, len(requested))
+	for _, k := range requested {
+		if WakeKindAgentOwned(k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, createdBy string, metadata map[string]interface{}) (map[string]interface{}, error) {
 	if reason == "" {
 		return nil, fmt.Errorf("reason is required")
@@ -547,13 +660,18 @@ func isValidWakeResolveReason(reason string) bool {
 // winner and the other an empty list.
 //
 // Kinds filter:
+//
 //   - kinds nil/empty: backward-compatible default. Surfaces notification
 //     wakes (kind='notification' or kind absent on metadata). Cron-injected
 //     and other system-kind wakes are excluded.
-//   - kinds contains "*": surface every pending wake regardless of kind.
+//   - kinds contains "*": surface every AGENT-OWNED pending wake
+//     regardless of kind. The scheduler's kinds are NOT crossed into:
+//     a wake the scheduler owns must reach its handler, and a fold
+//     that retired it would lose the work silently.
 //   - kinds is a specific list: surface only wakes whose metadata.kind
 //     matches one of the entries (json_extract IN (...)). Wakes with
-//     no kind set are excluded by this branch.
+//     no kind set are excluded by this branch. A requested kind the
+//     scheduler owns matches nothing.
 //
 // Cascade wake cap:
 //
@@ -570,8 +688,9 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 	defer tx.Rollback()
 
 	// Build the kind-filter clause. Three branches:
-	//   "*" anywhere  -> no filter (surface everything)
-	//   specific list -> IN clause on json_extract(metadata, '$.kind')
+	//   "*" anywhere  -> every AGENT-OWNED wake, whatever its kind
+	//   specific list -> IN clause on json_extract(metadata, '$.kind'),
+	//                    narrowed to the agent-owned requested kinds
 	//   nil / empty   -> backward-compat default (notification only)
 	whereExtra := ""
 	args := []interface{}{nowUnix}
@@ -586,21 +705,23 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 
 	switch {
 	case includeAll:
-		// Surface every pending wake regardless of metadata.kind.
+		// Every AGENT-OWNED pending wake, whatever its kind. The
+		// scheduler's kinds are excluded here: the fold retires a wake
+		// it delivers, and a scheduler-owned wake must reach its
+		// handler instead.
+		whereExtra = ` AND (` + wakeKindSQL(AgentOwnedWakeKinds, true) + `)`
 	case len(kinds) > 0:
-		placeholders := make([]string, 0, len(kinds))
-		for _, k := range kinds {
-			placeholders = append(placeholders, "?")
-			args = append(args, k)
+		// Only the requested kinds, and only the ones that are the
+		// agent's. A request that names only scheduler-owned kinds
+		// matches nothing at all.
+		allowed := agentOwnedSubset(kinds)
+		if len(allowed) == 0 {
+			return []map[string]interface{}{}, nil
 		}
-		whereExtra = ` AND json_extract(metadata, '$.kind') IN (` + strings.Join(placeholders, ",") + `)`
+		whereExtra = ` AND (` + wakeKindSQL(allowed, false) + `)`
 	default:
 		// Backward-compat default: only notification-kind wakes.
-		whereExtra = ` AND (
-		    metadata IS NULL OR metadata = ''
-		    OR json_extract(metadata, '$.kind') IS NULL
-		    OR json_extract(metadata, '$.kind') = 'notification'
-		  )`
+		whereExtra = ` AND (` + wakeKindSQL([]string{"notification"}, true) + `)`
 	}
 
 	rows, err := tx.Query(

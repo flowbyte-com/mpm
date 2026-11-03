@@ -382,6 +382,8 @@ Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule)
 Lifecycle asymmetry: delete_task is permanent removal of the task row. For reversibility / preserving history, prefer upsert_task with status='paused' (the row stays, the scheduler skips it, you can flip back to 'active' later without losing state).
 The resolve action is the explicit, audited mechanism for retiring a non-scheduled-task wake without consuming it through the delivery path (the CheckPendingWakes / list cycle). Idempotent; refuses scheduled_tasks-owned rows. Required params: wake_id, reason (reconciled|obsolete|superseded|already_satisfied). The reason taxonomy is canonical and bounded — see internal/core/wake_tools.go:isValidWakeResolveReason.
 
+Wake ownership: a wake kind has exactly one owner. The agent owns notification (explicit or untagged), cascade and cron — the kinds the check surface delivers and retires. Every other kind (snapshot, critic_audit, gc, broadcast, cascade_summary, drill, and any unknown kind) belongs to the scheduler, which runs it through a registered handler. The check action therefore never retires a scheduler-owned wake: kinds=["*"] surfaces every AGENT-OWNED pending wake, and a kinds list naming a scheduler-owned kind surfaces nothing. The list action is a read-only queue inspection and is not narrowed.
+
 Cron-wake retention model (the bookkeeping rows emitted by recurring cron tasks):
 
 - Each cron task (e.g. epistemic-compaction on a 1-minute schedule) emits one scheduled_wakes row per minute, tagged kind=cron.
