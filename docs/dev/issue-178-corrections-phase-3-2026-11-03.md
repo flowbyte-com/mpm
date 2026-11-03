@@ -1,8 +1,31 @@
 # Issue #178 — reliability corrections, phase 3
 
+> ## ⚠ §§7.1–7.6 (the M1–M6 delivery-state plan) are SUPERSEDED
+>
+> **Do not implement M1–M6 as written.** An independent engineering review
+> found the proposal in §7 is not implementation-safe. One of its steps — the
+> claim predicate in §7.3.1 — would convert the open duplicate-execution
+> window into a **permanent-loss** window, which is strictly worse than the
+> residual it replaces.
+>
+> | | |
+> |---|---|
+> | **Superseded** | §§7.1, 7.2, 7.3, 7.4, 7.5 and 7.6 — the whole delivery-state redesign and its M1–M6 migration plan. |
+> | **Not superseded** | §§1–6, the cascade materialization correction and its regression tests, which stand on their own review. |
+> | **What replaces it** | The corrected requirements in **§7.0**, and the revised engineering report: <https://github.com/flowbyte-com/mpm/issues/178#issuecomment-6606813378> |
+>
+> §§7.1–7.6 are retained **verbatim** below as the historical record of what was
+> proposed and why. They are kept so the reasoning — and the review that
+> corrected it — stays legible. **They are not a specification.**
+
 **Date:** 2026-11-03
 **Base:** `origin/main` at `77738cfd1663f2aee5d27172c916afe618bf4644`
 **Issue:** #178 — *"90 bare pool writes still lose their artifact to ordinary lock contention"*
+
+The base line records the tree every measurement in this document was taken
+against. `main` has since advanced (PR #212 merged as `6e47ba99`); that merge
+is test infrastructure and touches no file this document measures, so no
+finding here is affected by it.
 
 Phases 1 and 2 are recorded in
 [`issue-178-corrections-phase-1-2026-10-29.md`](issue-178-corrections-phase-1-2026-10-29.md).
@@ -12,8 +35,10 @@ honest account of what is still exposed — including the scheduler's
 duplicate-delivery window, which phase 3 deliberately does **not** close.
 
 **Issue #178 is not closed by this work.** The issue tracks a wider inventory,
-and the highest-impact residual is architectural. Section 7 states what has to
-happen before it can responsibly be closed.
+and the highest-impact residual is architectural. Section 7.0 records the
+corrected requirements for the delivery-state work that has to precede
+closure; the superseded proposal it replaces is retained below for the record
+only.
 
 ---
 
@@ -454,14 +479,136 @@ producer of the non-idempotent kinds, so it does not widen the window.
 Closing it needs durable claims, leases, acknowledgements, or per-handler
 deduplication — a delivery-state redesign across the scheduler, the core, and
 every handler. The mission explicitly asks for a **proposal** in that case,
-not an unreviewed change. Phase 1 recorded the first sketch; this section
-refines it into a testable migration plan.
+not an unreviewed change. Phase 1 recorded the first sketch; **§7.0** records
+the corrected requirements an implementation has to meet, after an
+independent review found the plan this section originally proposed was not
+implementation-safe.
 
 ---
 
-## 7. The delivery-state redesign — proposal and migration plan
+## 7. The delivery-state redesign — SUPERSEDED proposal, and the corrected requirements
+
+### 7.0 The corrected delivery-state requirements (this section supersedes §§7.1–7.6)
+
+**§§7.1–7.6 below are superseded. Do not implement M1–M6 as written.** This
+subsection states what a delivery-state redesign must get right; it does not
+restate the redesign itself. The full design — the schema, the migration
+mechanics, the regression tests for the first step, and the corrected PR
+sequence — is in the revised engineering report:
+
+> **Revised engineering report (independent review, 2026-11-03):**
+> <https://github.com/flowbyte-com/mpm/issues/178#issuecomment-6606813378>
+>
+> That report is the authoritative source for the delivery-state work. What
+> follows is the list of corrections it established, each of which §§7.1–7.6
+> violate. The report also carries a handler-by-handler idempotency matrix,
+> the failure-window analysis, and the migration and rollback contract.
+
+**The eight corrections.**
+
+**C1 — `fired` is retirement, not delivery.** It records "no longer pending
+for normal delivery", never "the handler ran". `fired = 1` is written by five
+paths across the codebase: the scheduler settlement
+(`internal/core/wake_settlement.go:96,103`), the agent fold
+(`internal/core/wake_tools.go:671`), explicit resolution
+(`internal/core/wake_tools.go:478`) and the two retirement sweeps
+(`internal/scheduler/wake_expiration.go:182,501`). **Four of the five never run
+a handler.** §7.5's M1 backfill would therefore assert deliveries that did not
+happen.
+
+**C2 — `delivery_state` must be an independent axis.** Not a projection of
+`fired`, and not a replacement for it. §7.2 declares `fired` a projection of
+`delivery_state = 'delivered'`; that conflates two different questions — "has
+the scheduler run this wake's handler?" and "is this wake still pending?" —
+and it is not implementable, because it would require *every* writer of
+`fired`, including the fold and the sweeps, to also write `delivery_state`.
+Only three of the sixteen `fired` reader sites ask a dispatch question; the
+other thirteen ask a retirement question and must keep reading `fired`.
+
+**C3 — Do not backfill `delivered` from `fired`.** There is no column on a
+`scheduled_wakes` row that records "the scheduler's handler ran":
+`fired_by` is written only by the resolver, `dispatched_at` only by the
+notification claim, and `metadata.last_error` only by the settlement — and it
+is set to `NULL` on a *successful* settlement
+(`internal/core/wake_settlement.go:97-99`). A backfill would fabricate a
+delivery and would become load-bearing the moment any reader trusts the
+column. `kind = 'cron'` rows are never deliverable at all: no handler is
+registered for them, and the notification claim excludes them.
+
+**C4 — An expired claim must actually be reclaimable.** §7.3.1's predicate is
+
+```sql
+WHERE id = ? AND delivery_state = 'pending'
+  AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+```
+
+A crashed claim leaves `delivery_state = 'claimed'`, so the predicate never
+matches it and the lease clause is dead code. The lease has to be reachable:
+`delivery_state = 'pending' OR (delivery_state = 'claimed' AND
+lease_expires_at < ?)`. §7.3.2 states the opposite intent — *"a claim whose
+`lease_expires_at` has passed may be re-claimed"* — so intent and SQL
+disagree. **As written, the design turns the open duplicate-execution window
+into a permanent-loss window: the wake is claimed, the process dies, and
+nothing ever delivers it again.** That is strictly worse than today's
+residual.
+
+**C5 — Preserve `target_time` eligibility.** §7.3.4 replaces the due-wake
+predicate with `WHERE delivery_state = 'pending' AND (lease_expires_at IS NULL
+OR lease_expires_at < ?)` — dropping `target_time <= ?` entirely. Every wake,
+including ones scheduled for next week, becomes due. The due-time predicate is
+not part of the delivery-state axis and must survive it.
+
+**C6 — Keep notification delivery separate from scheduler-owned delivery.**
+The notification path has its own claim (`internal/scheduler/dispatch.go:78`),
+its own audit trail (`dispatched_at`) and its own retirement semantics that
+the agent fold depends on. It is not the source of the duplicate-execution
+risk. Merging the two axes is what makes §7.5's M2 — *"teach every reader of
+`fired` to read `delivery_state` instead"* — incoherent: it would touch
+sixteen reader sites and break thirteen of them.
+
+**C7 — Account for rollback to older binaries.** `mpm-update --rollback`
+restores the runtime and deliberately leaves the database alone; the updater
+never opens it. An older binary's settlement writes `fired = 1` and **not**
+`delivery_state = 'delivered'`. Under §7.3's claim predicate that row is still
+`delivery_state = 'pending'` — i.e. re-claimable and re-executed. A migration
+window followed by a rollback would therefore *create* a duplicate-execution
+window that does not exist today. The migration must be strictly additive and
+NULL-defaulted, and the rollback policy must be written down.
+
+**C8 — Do not promise exactly-once external effects through SQLite
+settlement alone.** A settlement records that a handler ran; it cannot make
+the handler's external effect happen once. A broadcast fans out to other
+agents' processes and a drill spawns a harness — neither is inside the
+transaction. §7.4's per-handler guards are what bound a duplicate's cost, and
+§7.4's premise needs correcting on two handlers: `broadcast` already
+deduplicates its fan-out by content (`shared.bcast_event_wakes.wake_id` is the
+primary key and the insert is `INSERT OR IGNORE`), and `gc` takes its own
+24-hour compare-and-swap cooldown **before** its work
+(`cmd/mpm/handlers_gc.go:174`), so it is at-most-once and its residual risk
+is a *lost* GC rather than a duplicated one.
+
+**What a first implementation must not do.** The superseded plan's M1
+backfills `delivery_state` from `fired`, and its M2 switches the readers.
+Both are unsafe, for the reasons in C1–C3 and C6. A first step must be
+**strictly additive and behaviour-neutral**: new columns with no backfill, no
+reader and no writer touched, and a migration that is idempotent, forward-only
+— schema rollback is not permitted — and applied by the first new-binary
+process that opens the database, never by the updater, which does not open it.
+
+**The full requirements, the schema, the migration mechanics, the regression
+tests for the first step, and the corrected PR sequence are in the revised
+engineering report.** This document does not restate them: the report is the
+specification, and §7.0 is the list of ways the superseded plan fails it.
+
+*Everything below this line is the superseded proposal, retained verbatim as
+the historical record of what was proposed and why. It is **not** a
+specification and **must not be implemented as written** — read §7.0 first.*
+
+---
 
 ### 7.1 The target semantics
+
+> **SUPERSEDED — see §7.0. Not to be implemented as written.**
 
 **At-least-once delivery with idempotent effects** — the standard, achievable
 semantics. *Not* exactly-once: exactly-once would require the effect and the
@@ -469,6 +616,12 @@ record of the effect to be one atomic act, and a broadcast to another agent's
 process cannot be.
 
 ### 7.2 The schema change
+
+> **SUPERSEDED — see §7.0 (C2, C3). Not to be implemented as written.**
+>
+> In particular: the `NOT NULL DEFAULT 'pending'` column below cannot
+> distinguish "not tracked" from "pending", and the projection this section
+> declares for `fired` is not implementable.
 
 Add three columns to `scheduled_wakes`:
 
@@ -484,6 +637,11 @@ backwards compatibility with every existing reader (`mpm wake`,
 `check_wakes`, `ResolveWake`).
 
 ### 7.3 The claim, the lease, and the settlement
+
+> **SUPERSEDED — see §7.0 (C4, C5, C7). Not to be implemented as written.**
+>
+> In particular: the claim predicate in 7.3.1 below makes lease recovery
+> unreachable, and the due-wake query in 7.3.4 below drops `target_time`.
 
 1. **The claim is a conditional `UPDATE`** inside one short transaction:
 
@@ -513,6 +671,12 @@ backwards compatibility with every existing reader (`mpm wake`,
 
 ### 7.4 Per-handler idempotency — the part that does the real work
 
+> **SUPERSEDED — see §7.0 (C8). Not to be implemented as written.**
+>
+> In particular: the premise for `broadcast` and `gc` in the table below is
+> wrong. `broadcast` already deduplicates its fan-out by content, and `gc` is
+> at-most-once because its compare-and-swap cooldown is taken before the work.
+
 The lease bounds *how often* a duplicate happens; the per-handler guard
 bounds *what a duplicate costs*. Each handler needs one of:
 
@@ -524,6 +688,11 @@ bounds *what a duplicate costs*. Each handler needs one of:
 | `snapshot`, `cascade_summary` | Cheap guards: the work is a read or a summary write, and a repeat is harmless. They need the lease, not a dedupe key. |
 
 ### 7.5 The migration plan, in testable steps
+
+> **SUPERSEDED — see §7.0 (C1, C2, C3, C6, C7). Not to be implemented as written.**
+>
+> **Every row of the table below is superseded.** In particular M1's backfill
+> and M2's reader switch are unsafe; see §7.0 C1–C3 and C6.
 
 Each step is independently mergeable and independently revertible.
 
@@ -538,6 +707,8 @@ Each step is independently mergeable and independently revertible.
 
 ### 7.6 What M6 must not claim
 
+> **SUPERSEDED — see §7.0 (C8). Not to be implemented as written.**
+
 A re-delivery after a lease expiry is still a **re-delivery**. The guarantee
 M6 buys is **one effect**, not one execution: the handler may run twice, but
 the second run must be a no-op. That is the honest limit of the design, and
@@ -549,7 +720,7 @@ the test must assert the *effect* count, not the *execution* count.
 
 | # | Risk | Impact | Status |
 |---|---|---|---|
-| **1** | **The scheduler's duplicate-delivery crash window.** A crash between the handler and the settlement re-runs the handler. `broadcast` fans out to other agents; `drill` spawns a harness. | **High** — the effects cannot be undone. | **Open by design.** Section 7 is the proposal and the migration plan. Not fixed by phase 3. |
+| **1** | **The scheduler's duplicate-delivery crash window.** A crash between the handler and the settlement re-runs the handler. `broadcast` fans out to other agents; `drill` spawns a harness. | **High** — the effects cannot be undone. | **Open by design.** §7.0 records the corrected requirements; the superseded plan in §§7.1–7.6 is not to be implemented. Not fixed by phase 3. |
 | **2** | **The cascade outbox transitions.** A lost transition revived the intent and duplicated the theory; a lost requeue defeated the dead-letter cap. | **High** — duplicated artifacts and an unbounded retry. | **Fixed in phase 3.** |
 | **3** | **The ratchet cannot see `ExecContext`.** A new bare write in that shape would not be caught by either guard. | **Medium** — a detector hole, not a live defect (all 12 existing sites are benign). | **Corrected in phase 3's second PR.** |
 | **4** | **A duplicate cascade WAKE for the same theory.** After a revival, the same theory can be woken twice — the theory is now shared, but `scheduleCascadeWake` does not dedupe against the intent's `wake_scheduled` flag in that path. | **Low** — bounded by the scheduler's per-check delivery cap. | **Open and recorded.** Not fixed: the fix belongs with the delivery-state redesign, which must define per-handler dedupe anyway. |
@@ -572,13 +743,15 @@ for every site the audit can see, with two qualifications:
    accepted.** The window is not a write-contention defect: no retry budget
    can close it, and the phase-1 correction already removed the *contention*
    path to it (a lost settlement is now retried). What remains is a
-   process-death window, which needs the delivery-state redesign in §7.
+   process-death window, which needs the delivery-state redesign whose
+   requirements are recorded in **§7.0**.
 
 **The recommended path to closure:**
 
 1. Merge phase 3's two PRs (the cascade correction and the ratchet coverage).
 2. Land the delivery-state redesign as its own, separately-reviewed series
-   (M1–M6 above).
+   built to the requirements in **§7.0** — *not* to M1–M6, which are superseded
+   (§§7.1–7.6).
 3. Re-run the audit against the resulting tree and confirm that the bare-pool
    sites are all in the classified bands of §1.5, with class 6 empty.
 4. Close #178 with a citation to that audit — **not** to a bare-write count.
