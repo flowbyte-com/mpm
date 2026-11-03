@@ -108,17 +108,28 @@ func TestCleanupFailureFailsTheTestRun(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestCleanupFailureFailsTheTestRun$", "-test.v") //nolint:gosec
 	cmd.Env = append(os.Environ(), cleanupProbeEnv+"=1", cleanupProbePathEnv+"="+pathFile)
 	out, err := cmd.CombinedOutput()
+
+	// The child's scratch is removed whether the assertions below pass
+	// or FAIL: a regression test that leaves scratch behind when it
+	// fails is the same defect this suite is about.
+	rootBytes, rerr := os.ReadFile(pathFile)
+	root := ""
+	if rerr == nil {
+		root = strings.TrimSpace(string(rootBytes))
+	}
+	if root != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(root)) })
+	}
+
 	if err == nil {
 		t.Fatalf("the run reported success although its cleanup failed:\n%s", out)
 	}
 	if !strings.Contains(string(out), "could not be cleaned up") {
 		t.Errorf("the run failed without saying that its cleanup failed:\n%s", out)
 	}
-	rootBytes, rerr := os.ReadFile(pathFile)
 	if rerr != nil {
 		t.Fatalf("the child did not report the root it could not clean up: %v\n%s", rerr, out)
 	}
-	root := strings.TrimSpace(string(rootBytes))
 	if root == "" {
 		t.Fatalf("the child reported an empty root path:\n%s", out)
 	}
@@ -127,13 +138,9 @@ func TestCleanupFailureFailsTheTestRun(t *testing.T) {
 	}
 	// The child could not remove the root, so the root is still there:
 	// the cleanup did not fall back to deleting what it could not
-	// prove it owns. The parent removes it, so the probe leaves no
-	// scratch behind.
+	// prove it owns.
 	if _, err := os.Stat(root); err != nil {
 		t.Errorf("the failed cleanup deleted a path it did not own: %v", err)
-	}
-	if err := os.RemoveAll(filepath.Dir(root)); err != nil {
-		t.Errorf("the probe's scratch could not be removed: %v", err)
 	}
 }
 
