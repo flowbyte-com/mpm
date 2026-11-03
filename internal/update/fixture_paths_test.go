@@ -429,3 +429,43 @@ func TestFixtureCopyRefusesANonRegularTrackedPath(t *testing.T) {
 		t.Error("the copy wrote a non-regular tracked path into the destination")
 	}
 }
+
+// TestFixtureCopyVerifiesTheEffectivePathIsInsideTheSource proves the
+// second gate BITES.
+//
+// The openat traversal makes a symlinked component impossible, and this
+// is the independent measurement on top of it: the effective path of
+// the file that was actually opened must lie inside the authorised
+// source root. A file outside it is refused.
+func TestFixtureCopyVerifiesTheEffectivePathIsInsideTheSource(t *testing.T) {
+	work := t.TempDir()
+	repo := pathRepo(t, work, map[string]string{"README.md": "# fixture\n"})
+
+	root, err := openSourceRoot(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+
+	outside := filepath.Join(work, "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Open(outside, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if err := verifyEffectivePath(root, fd, "outside.txt"); err == nil {
+		t.Error("the effective-path check accepted a file outside the source root")
+	}
+
+	inside, err := unix.Open(filepath.Join(repo, "README.md"), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(inside) }()
+	if err := verifyEffectivePath(root, inside, "README.md"); err != nil {
+		t.Errorf("the effective-path check refused a file inside the source root: %v", err)
+	}
+}

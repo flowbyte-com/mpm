@@ -60,6 +60,11 @@ import (
 // by walking down from the authorised source root, one non-symlink
 // component at a time.
 //
+// And it is MEASURED as well as structured: the effective path of the
+// file that was actually opened is read back from /proc/self/fd and
+// checked against the resolved source root. The first gate is the
+// construction; the second is the observation of the result.
+//
 // What this does NOT claim: the source ROOT itself is resolved once
 // (EvalSymlinks) and then opened; if the root is swapped between that
 // resolution and that open, the copy reads the tree that is at the
@@ -174,6 +179,9 @@ func readTrackedFile(root *sourceRoot, rel string) ([]byte, os.FileMode, error) 
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, 0, fmt.Errorf("the fixture source path %s is not a regular file; refusing to copy it", rel)
 	}
+	if err := verifyEffectivePath(root, fd, rel); err != nil {
+		return nil, 0, err
+	}
 
 	var buf bytes.Buffer
 	chunk := make([]byte, 64*1024)
@@ -193,6 +201,33 @@ func readTrackedFile(root *sourceRoot, rel string) ([]byte, os.FileMode, error) 
 		}
 	}
 	return buf.Bytes(), os.FileMode(st.Mode & 0o777), nil
+}
+
+// verifyEffectivePath checks that the file just opened really lives
+// INSIDE the authorised source root.
+//
+// The openat traversal above already makes a symlinked component
+// impossible, but the requirement is stated in terms of the EFFECTIVE
+// path, and the effective path is observable: /proc/self/fd names the
+// file that was actually opened, after every symlink has been
+// resolved. This is the second, independent gate — the first is
+// structural, this one is a measurement.
+//
+// It fails CLOSED: a path that cannot be verified is not copied. The
+// repository targets Linux (systemd units, unix syscalls), where
+// /proc/self/fd is always present.
+func verifyEffectivePath(root *sourceRoot, fd int, rel string) error {
+	effective, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
+	if err != nil {
+		return fmt.Errorf("the fixture source path %s cannot be verified to be inside %s: %w", rel, root.real, err)
+	}
+	// A file unlinked while it was open has no path any more. The
+	// kernel says so in the link itself.
+	effective = strings.TrimSuffix(effective, " (deleted)")
+	if !resolvedPathWithin(root.real, effective) {
+		return fmt.Errorf("the fixture source path %s resolves to %s, which is outside the fixture source %s; refusing to copy it", rel, effective, root.real)
+	}
+	return nil
 }
 
 // openTrackedFile opens the final component of a tracked path.
