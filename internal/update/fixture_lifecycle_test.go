@@ -2,6 +2,7 @@ package update
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -83,11 +84,48 @@ func registeredFixtureRootCount() int {
 	return len(fixtureRoots.paths)
 }
 
+// fixtureCleanupOut is where cleanup diagnostics are written.
+//
+// It is a variable so a test can capture what cleanup said. The
+// default is the standard error stream: a cleanup failure that is
+// only visible in a log the test run does not print is not observable.
+var fixtureCleanupOut = struct {
+	mu sync.Mutex
+	w  io.Writer
+}{w: os.Stderr}
+
+// fixtureCleanupDiag writes a cleanup diagnostic.
+func fixtureCleanupDiag(format string, args ...any) {
+	fixtureCleanupOut.mu.Lock()
+	defer fixtureCleanupOut.mu.Unlock()
+	if fixtureCleanupOut.w == nil {
+		return
+	}
+	fmt.Fprintf(fixtureCleanupOut.w, format, args...)
+}
+
+// captureFixtureCleanupOutput redirects cleanup diagnostics into w
+// until the returned function restores the previous destination.
+func captureFixtureCleanupOutput(w io.Writer) (restore func()) {
+	fixtureCleanupOut.mu.Lock()
+	previous := fixtureCleanupOut.w
+	fixtureCleanupOut.w = w
+	fixtureCleanupOut.mu.Unlock()
+	return func() {
+		fixtureCleanupOut.mu.Lock()
+		fixtureCleanupOut.w = previous
+		fixtureCleanupOut.mu.Unlock()
+	}
+}
+
 // removeFixtureRoot removes one fixture root.
 //
 // It refuses to remove a directory it cannot prove it owns: the
 // sentinel must be inside it. A path that merely LOOKS like an MPM
 // temporary directory is never removed.
+//
+// A refusal is an ERROR, not a silent success: the caller is told the
+// root is still there.
 func removeFixtureRoot(path string) error {
 	if path == "" {
 		return nil
@@ -109,22 +147,53 @@ func removeFixtureRoot(path string) error {
 	return nil
 }
 
-// cleanupFixtureRoots removes every registered root.
+// cleanupFixtureRoots removes every registered root and REPORTS the
+// failures.
 //
 // It is called once, after the last test has finished. Cleanup that
 // ran per test would remove a SHARED fixture while another test still
 // needed it — the fixture is shared precisely because the build it
 // holds is expensive.
-func cleanupFixtureRoots() {
+//
+// A root that cannot be removed does not stop the others from being
+// removed, and it is never removed by a fallback: the ownership proof
+// is what authorises the deletion, and a deletion that could not prove
+// ownership does not happen at all. The failure is reported, with the
+// root's path, so the run says which scratch survived.
+func cleanupFixtureRoots() []error {
 	fixtureRoots.mu.Lock()
 	paths := append([]string(nil), fixtureRoots.paths...)
 	fixtureRoots.mu.Unlock()
+	return cleanupRoots(paths)
+}
+
+// cleanupRoots removes the given roots and reports the failures.
+func cleanupRoots(paths []string) []error {
+	var failures []error
 	for _, p := range paths {
-		// Best effort: a root that cannot be removed must not stop the
-		// others from being removed, and must not fail the run that
-		// just passed.
-		_ = removeFixtureRoot(p)
+		if err := removeFixtureRoot(p); err != nil {
+			failure := fmt.Errorf("the fixture root %s could not be cleaned up: %w", p, err)
+			failures = append(failures, failure)
+			fixtureCleanupDiag("%v\n", failure)
+		}
 	}
+	return failures
+}
+
+// cleanupExitCode maps a test run's outcome and its cleanup failures
+// onto the process exit code.
+//
+// A run whose scratch could not be cleaned up is a FAILED run, even
+// when every test passed: the fixture owns resources it did not
+// release, and that is a defect in the fixture, not a detail.
+func cleanupExitCode(runCode int, failures []error) int {
+	if len(failures) == 0 {
+		return runCode
+	}
+	if runCode == 0 {
+		return 1
+	}
+	return runCode
 }
 
 // newFixtureRoot creates a disposable root and registers it for
@@ -155,10 +224,17 @@ func newFixtureRoot(tmpDir string) (string, error) {
 //
 // It deliberately does not call os.Exit before the cleanup: os.Exit
 // skips deferred functions, so the cleanup would never run.
+//
+// A cleanup failure makes the run FAIL: the exit code is the tests'
+// own code, raised to a failure when the fixture could not release
+// the resources it owns.
 func TestMain(m *testing.M) {
 	exitCode := 0
 	func() {
-		defer cleanupFixtureRoots()
+		defer func() {
+			failures := cleanupFixtureRoots()
+			exitCode = cleanupExitCode(exitCode, failures)
+		}()
 		exitCode = m.Run()
 	}()
 	os.Exit(exitCode)
