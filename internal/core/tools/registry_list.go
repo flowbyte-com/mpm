@@ -384,6 +384,8 @@ The resolve action is the explicit, audited mechanism for retiring a non-schedul
 
 Wake ownership: a wake kind has exactly one owner. The agent owns notification (explicit or untagged), cascade and cron — the kinds the check surface delivers and retires. Every other kind (snapshot, critic_audit, gc, broadcast, cascade_summary, drill, and any unknown kind) belongs to the scheduler, which runs it through a registered handler. The check action therefore never retires a scheduler-owned wake: kinds=["*"] surfaces every AGENT-OWNED pending wake, and a kinds list naming a scheduler-owned kind surfaces nothing. The list action is a read-only queue inspection and is not narrowed.
 
+Arming authorisation: the schedule action may arm only the kinds the agent owns (notification, cascade, cron, or untagged). A request naming a scheduler-owned kind (drill, broadcast, snapshot, gc, critic_audit, cascade_summary) or an unknown kind is refused and creates no wake row; the error names the kind and the armable set. A metadata.kind that is present but not a string is refused as malformed. Internal producers (the scheduler's ingest handler, the cascade materializer, the reconcile loop, the cron runner) keep their existing capabilities and arm through the DB-layer producer, which is not narrowed.
+
 Cron-wake retention model (the bookkeeping rows emitted by recurring cron tasks):
 
 - Each cron task (e.g. epistemic-compaction on a 1-minute schedule) emits one scheduled_wakes row per minute, tagged kind=cron.
@@ -404,7 +406,7 @@ Cron-wake retention model (the bookkeeping rows emitted by recurring cron tasks)
 						"reason":         {"type": "string"},
 						"target_time":   {"type": "string"},
 						"theory_id":     {"type": "string"},
-						"metadata":      {"type": "object"},
+						"metadata":      {"type": "object", "description": "Optional wake metadata. The 'kind' discriminator selects the wake's owner: 'notification' (the default when absent), 'cascade' and 'cron' are agent-owned and may be armed; any other value is scheduler-owned and the schedule action refuses it."},
 						"kinds":        {"type": "array", "items": {"type": "string"}},
 						"session_id":    {"type": "string"},
 						"include_fired":  {"type": "boolean"},

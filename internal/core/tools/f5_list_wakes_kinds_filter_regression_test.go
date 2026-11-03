@@ -27,18 +27,23 @@ import (
 )
 
 // scheduleWakeWithKind schedules a future wake with the given metadata.kind
-// value. handleScheduleWake passes metadata through to ScheduleWake, which
-// stores it as a JSON column; ListScheduledWakes reads it back via
-// json_extract on the wake row. This is the same shape the production
-// code path uses (cascade wakes, gc wakes, etc. set metadata.kind).
+// value. ScheduleWake stores metadata as a JSON column; ListScheduledWakes
+// reads it back via json_extract on the wake row. This is the same shape the
+// production code path uses (cascade wakes, gc wakes, etc. set metadata.kind).
+//
+// The fixture arms through the DB-LAYER PRODUCER, not through
+// handleScheduleWake. The agent-facing scheduling surface may arm only the
+// kinds the agent owns (notification, cascade, cron) — the scheduler-owned
+// kinds are refused there, because the agent must not be able to arm work
+// the scheduler will execute (see wake_arming_authorisation_test.go). The
+// internal producers keep that capability, and the LIST surface is a
+// read-only inspection that must still see scheduler-owned rows that
+// already exist: that is exactly what this fixture creates.
 func scheduleWakeWithKind(t *testing.T, dm *internal.DatabaseManager, reason string, kind string) {
 	t.Helper()
 	future := time.Now().Add(2 * time.Hour).Unix()
-	if _, err := handleScheduleWake(dm, internal.ActiveContext{}, map[string]interface{}{
-		"reason":      reason,
-		"target_time": time.Unix(future, 0).UTC().Format(time.RFC3339),
-		"metadata":    map[string]interface{}{"kind": kind},
-	}); err != nil {
+	if _, err := dm.ScheduleWake(reason, time.Unix(future, 0).UTC().Format(time.RFC3339), "", "test",
+		map[string]interface{}{"kind": kind}); err != nil {
 		t.Fatalf("schedule %s: %v", reason, err)
 	}
 }
