@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,6 +75,38 @@ import (
 // An unsafe path is REFUSED, not skipped: a copy that silently omitted
 // a symlinked path would report success while carrying neither the
 // file nor the reason.
+//
+// # THE DESTINATION SIDE HAS THE SAME HAZARD, POINTED THE OTHER WAY
+//
+// A write that follows a symlink lands wherever the link points. So
+// the destination is written the way the source is read:
+//
+//   - the destination root is opened as a directory handle;
+//   - every intermediate component is opened relative to the handle
+//     above it, with O_DIRECTORY|O_NOFOLLOW, so a component that is a
+//     symlink cannot be entered;
+//   - the final component is created with O_CREAT|O_EXCL|O_NOFOLLOW:
+//     it cannot be a symlink, and it cannot already exist.
+//
+// The final open is CREATE-ONLY. The fixture copies into a tree it has
+// just created, so a file that is already at a tracked path means the
+// destination is not the one the fixture made — a reused tree, or a
+// poisoned one — and the copy refuses it rather than overwriting
+// whatever it finds.
+//
+// The check and the open are the same syscall at every step, so a
+// component cannot be swapped for a symlink between them.
+//
+// What this does NOT claim: the destination root is created with
+// os.MkdirAll, which resolves the root's own ANCESTORS. The root is
+// the fixture's own scratch directory, created by the fixture, so its
+// ancestry is not attacker-controlled; and the root itself is opened
+// with O_NOFOLLOW, so a destination that IS a symlink is refused.
+//
+// The destination root's handle is opened once and HELD for the whole
+// copy. Every write is relative to that handle, so a destination path
+// that is replaced while the copy runs cannot redirect a write: the
+// writes land in the directory the copy opened, or they fail.
 
 // errTrackedFileAbsent marks a tracked path that is not present in the
 // working tree.
@@ -120,6 +153,12 @@ func copySourceTreeFrom(src, dst string) error {
 	}
 	defer root.close()
 
+	dest, err := openDestinationRoot(dst)
+	if err != nil {
+		return err
+	}
+	defer dest.close()
+
 	for _, rel := range files {
 		raw, mode, err := readTrackedFile(root, rel)
 		if err != nil {
@@ -132,7 +171,7 @@ func copySourceTreeFrom(src, dst string) error {
 			}
 			return err
 		}
-		if err := writeFixtureFile(dst, rel, raw, mode); err != nil {
+		if err := writeFixtureFile(dest, rel, raw, mode); err != nil {
 			return err
 		}
 	}
@@ -311,51 +350,190 @@ func isSymlinkAt(dirFD int, comp string) bool {
 	return st.Mode&unix.S_IFMT == unix.S_IFLNK
 }
 
-// writeFixtureFile writes one copied file into the destination.
+// destinationRoot is an open handle on the fixture's destination tree.
 //
-// The destination is checked the same way the source is: a component
-// that is a symlink is refused rather than written through, because a
-// write through a symlink lands wherever the link points — possibly
-// outside the fixture's own root.
-func writeFixtureFile(dst, rel string, raw []byte, mode os.FileMode) error {
-	to := filepath.Join(dst, filepath.FromSlash(rel))
-	if !pathWithinDir(dst, to) {
-		return fmt.Errorf("the fixture copy of %s would land outside %s", rel, dst)
-	}
-	if err := checkFixtureDestinationPath(dst, rel); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(to), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(to, raw, mode.Perm())
+// The handle, not the path, is the authority for every write. It is
+// opened ONCE for the whole copy, so a destination path that is
+// replaced while the copy runs cannot redirect a write: the writes go
+// to the directory the copy opened, or they fail.
+//
+// A destination whose root has been unlinked underneath the copy fails
+// the write rather than continuing: the kernel refuses to create a
+// file in a directory that has been removed. That is what keeps the
+// recursion tests' tripwire effective — it replaces the destination
+// with a regular file, and the copy stops.
+type destinationRoot struct {
+	fd int
 }
 
-// checkFixtureDestinationPath refuses a destination path whose
-// directory components are not real directories.
-func checkFixtureDestinationPath(dst, rel string) error {
-	parts := strings.Split(filepath.FromSlash(rel), string(filepath.Separator))
-	if len(parts) < 2 {
-		return nil
+// close releases the destination root's handle.
+func (d *destinationRoot) close() {
+	if d.fd >= 0 {
+		_ = unix.Close(d.fd)
+		d.fd = -1
 	}
-	cur := dst
-	for _, comp := range parts[:len(parts)-1] {
-		cur = filepath.Join(cur, comp)
-		fi, err := os.Lstat(cur)
+}
+
+// openDestinationRoot creates the destination tree if it does not
+// exist, and opens it as a directory handle.
+//
+// The root is opened with O_NOFOLLOW: a destination that is a symlink
+// is refused, because a symlinked destination is exactly how a write
+// leaves the tree the fixture created.
+//
+// The ancestors of the root are resolved by the kernel exactly as
+// filepath.EvalSymlinks resolves them, and the root's own final
+// component is the one O_NOFOLLOW refuses, so the handle names the
+// same directory the path names.
+func openDestinationRoot(dst string) (*destinationRoot, error) {
+	abs, err := filepath.Abs(dst)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(abs, 0755); err != nil {
+		return nil, fmt.Errorf("the fixture destination %s cannot be created: %w", abs, err)
+	}
+	fd, err := unix.Open(abs, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("the fixture destination %s cannot be opened as a directory: %w", abs, err)
+	}
+	return &destinationRoot{fd: fd}, nil
+}
+
+// writeFixtureFile writes one copied file into the destination.
+//
+// The destination is written the way the source is read: every
+// component is opened relative to the directory handle above it, with
+// O_NOFOLLOW, so no component can be a symlink and none can be swapped
+// for one between the check and the open.
+//
+// The final component is created with O_EXCL, so the copy never
+// overwrites anything that is already there.
+func writeFixtureFile(dest *destinationRoot, rel string, raw []byte, mode os.FileMode) error {
+	parts := strings.Split(rel, "/")
+	parentFD, err := openDestinationDir(dest, parts[:len(parts)-1], rel)
+	if err != nil {
+		return err
+	}
+	if parentFD != dest.fd {
+		defer func() { _ = unix.Close(parentFD) }()
+	}
+	return createFixtureFile(parentFD, parts[len(parts)-1], rel, raw, mode)
+}
+
+// openDestinationDir opens the directory that holds the final
+// component of a tracked path, creating it if it does not exist.
+//
+// Each component is opened relative to the handle above it, with
+// O_DIRECTORY|O_NOFOLLOW: a component that is a symlink cannot be
+// entered, so a write cannot be redirected through one.
+//
+// A component that does not exist is created with mkdirat, which
+// cannot create a symlink, and is then opened the same way. The open
+// still refuses a symlink, so a component swapped in between the two
+// is caught.
+func openDestinationDir(dest *destinationRoot, parts []string, rel string) (int, error) {
+	rootFD := dest.fd
+	dirFD := rootFD
+	for _, comp := range parts {
+		next, err := unix.Openat(dirFD, comp, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil && errors.Is(err, unix.ENOENT) {
+			if mkerr := unix.Mkdirat(dirFD, comp, 0755); mkerr != nil && !errors.Is(mkerr, unix.EEXIST) {
+				if dirFD != rootFD {
+					_ = unix.Close(dirFD)
+				}
+				return -1, fmt.Errorf("the fixture destination path %s cannot create the directory %q: %w", rel, comp, mkerr)
+			}
+			next, err = unix.Openat(dirFD, comp, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		}
 		if err != nil {
-			if os.IsNotExist(err) {
+			terr := destinationPathError(rel, comp, dirFD, err)
+			if dirFD != rootFD {
+				_ = unix.Close(dirFD)
+			}
+			return -1, terr
+		}
+		if dirFD != rootFD {
+			_ = unix.Close(dirFD)
+		}
+		dirFD = next
+	}
+	return dirFD, nil
+}
+
+// createFixtureFile creates the final component of a tracked path and
+// writes the copied bytes into it.
+//
+// The open is CREATE-ONLY and NOFOLLOW:
+//
+//   - O_EXCL means the file cannot already exist. With O_CREAT, a
+//     path that names a symlink fails with EEXIST whatever the link
+//     points at, so a symlink at the final filename is refused rather
+//     than written through;
+//   - O_NOFOLLOW is the second, redundant gate on the same property.
+//
+// The fixture copies into a tree it has just created, so a file that is
+// already there means the destination is not the one the fixture made,
+// and the copy refuses it rather than overwriting whatever it finds.
+func createFixtureFile(parentFD int, name, rel string, raw []byte, mode os.FileMode) error {
+	fd, err := unix.Openat(parentFD, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(mode.Perm()))
+	if err != nil {
+		if errors.Is(err, unix.EEXIST) {
+			if isSymlinkAt(parentFD, name) {
+				return fmt.Errorf("the fixture destination path %s is a symlink; refusing to write through it", rel)
+			}
+			return fmt.Errorf("the fixture destination path %s already exists; refusing to write over it", rel)
+		}
+		return fmt.Errorf("the fixture destination path %s cannot be created: %w", rel, err)
+	}
+	if err := writeAll(fd, raw); err != nil {
+		// A half-written file is worse than no file: remove it, so a
+		// failed copy does not leave a truncated one behind.
+		_ = unix.Unlinkat(parentFD, name, 0)
+		_ = unix.Close(fd)
+		return fmt.Errorf("the fixture destination path %s cannot be written: %w", rel, err)
+	}
+	if err := unix.Close(fd); err != nil {
+		return fmt.Errorf("the fixture destination path %s cannot be closed: %w", rel, err)
+	}
+	return nil
+}
+
+// writeAll writes every byte of buf to fd.
+func writeAll(fd int, buf []byte) error {
+	for len(buf) > 0 {
+		n, err := unix.Write(fd, buf)
+		if n > 0 {
+			buf = buf[n:]
+		}
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
 				continue
 			}
 			return err
 		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("the fixture destination path %s traverses the symlink %q; refusing to write through it", cur, comp)
-		}
-		if !fi.IsDir() {
-			return fmt.Errorf("the fixture destination path %s traverses %q, which is not a directory", cur, comp)
+		if n == 0 {
+			return io.ErrShortWrite
 		}
 	}
 	return nil
+}
+
+// destinationPathError explains why a destination component could not
+// be opened.
+//
+// A component that is a symlink is named as one: the kernel reports
+// ENOTDIR — not ELOOP — when a component that must be a directory is a
+// symlink, because O_DIRECTORY|O_NOFOLLOW refuses the link without
+// following it.
+func destinationPathError(rel, comp string, dirFD int, err error) error {
+	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
+		if isSymlinkAt(dirFD, comp) {
+			return fmt.Errorf("the fixture destination path %s traverses the symlink %q; refusing to write through it", rel, comp)
+		}
+		return fmt.Errorf("the fixture destination path %s traverses %q, which is not a directory; refusing to write into it", rel, comp)
+	}
+	return fmt.Errorf("the fixture destination path %s cannot be opened: %w", rel, err)
 }
 
 // planSourceCopy enumerates exactly which files a fixture copy
