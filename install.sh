@@ -819,8 +819,22 @@ phase_bundle() {
     # still have output to write, and the producer is then killed by
     # SIGPIPE — which, under pipefail and set -e, turns into an exit
     # status of 141 with no diagnostic at all. See rb_reported_commit.
-    local commit version epoch
-    commit="$(rb_reported_commit "$(build_dir)/mpm")"
+    #
+    # The probe's STATUS is checked here as well as its value, and the
+    # check is explicit. A binary that prints a valid commit and THEN
+    # fails has not reported its identity successfully, and its revision
+    # label must not be taken from it. The check cannot be left to the
+    # assignment's own status: under `set -e` that would abort the
+    # installation without saying what went wrong, and the distinction
+    # between "the binary reported NO commit" (the provenance fallback
+    # below) and "the binary FAILED" would be lost.
+    local commit version epoch probe_status=0
+    commit="$(rb_reported_commit "$(build_dir)/mpm")" || probe_status=$?
+    if [ "$probe_status" -ne 0 ]; then
+        die "the build's mpm binary failed to report its build commit (exit $probe_status).
+The installation stops here: a binary that cannot report its own identity cannot be
+given one, and the revision label would be a guess. Nothing was installed." 3
+    fi
     [ -n "$commit" ] || commit="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" commit 2>/dev/null || printf 'unknown')"
     version="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" version 2>/dev/null || printf 'unknown')"
     epoch="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" build-epoch 2>/dev/null || printf '0')"
