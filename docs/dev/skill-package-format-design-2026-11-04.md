@@ -1,6 +1,6 @@
 # MPM Skill Packages — a multi-file skill format
 
-> **Status: Proposed — at the architecture approval gate.**
+> **Status: Proposed — at the second independent review gate.**
 >
 > This document is a design proposal. It contains no implementation, no
 > schema migration, and no behaviour change. Nothing in the product changes
@@ -9,6 +9,26 @@
 >
 > **Base commit:** `f8d4b95aefe60a0880409a8905ce2c4d92d22c00` (`main`).
 > **Scope:** the skill collection only.
+
+---
+
+**Revision 2 — remediation of the first independent review.** This revision
+incorporates the twelve corrections (R1–R12) required by the independent review
+of revision 1.
+
+**The architecture is unchanged.** Option B — a manifest, file rows and
+content-addressed blobs in three additive SQLite tables — is retained, as are
+the blobstore hard rule, the per-file scanning model, the compatibility
+requirements in §3.3, and the evidence base in §11. Every correction is a
+localised change to the *contract*, not a redesign: three corrections (R1, R2,
+R7) change what an existing write path must refuse to do, five (R3, R4, R8,
+R9, R11) correct statements the document made about itself, and four (R5, R6,
+R10, R12) correct the threat model.
+
+**§15 is the R1–R12 disposition matrix** — for each correction: the original
+problem, the revised specification section, the resolution, the supporting
+evidence, and the remaining risk. **§12 separates the decisions this revision
+resolves** from the choices that still require the operator's answer.
 
 ---
 
@@ -22,17 +42,31 @@ format and the persistence, security and retrieval contracts that go with it.
 **The recommendation is:** keep the existing single-document skill exactly as
 it is, and add a *package* layer beside it rather than replacing it. A package
 is a manifest plus immutable file contents, stored in three new SQLite tables
-that are **additive** — no existing table, row, index or trigger is modified,
-and rollback is dropping three tables.
+that are **additive** — no existing table, row, index or trigger is modified.
+The two rollbacks are different operations and are named separately in §6.1: a
+**binary rollback** (lossless, blind) and a **schema rollback** (destructive,
+and the only one that destroys package bytes).
 
 **What is being asked for:** approval of the design in §4–§10, and answers to
-the ten operator decisions in §12. No code is proposed for merge by this
-document.
+the operator decisions still open in §12.2. The decisions this revision
+resolves — the effective version of a versionless package, the immutability of
+a published package, the scope of the agent-facing surface, the behaviour of a
+missing scanner, the scope of age-based pruning, and the shape of the export
+contract — are settled in §12.1 with their rationale and evidence, and are not
+re-opened here.
 
 **What is deliberately not decided here:** the cross-workspace shared-database
-extension (decision **O4**), binary-asset defaults (**O3**), and whether a
-published package may be replaced in place (**O2**). Each has a recommendation
-and a cost.
+extension (decision **O4**, §12.2), binary-asset defaults (**O3**, §12.2), and the
+size-cap constants (**O6**, §12.2). Each has a recommendation and a cost.
+
+**One correction is not a design choice.** The first revision asserted, in
+§5.8, that a later `save --force` "resurrects and replaces" a packaged
+skill's projection. The repository does not do that, and cannot: the legacy
+write path replaces `memories.content` in place and knows nothing about
+package rows. Revision 2 makes the legacy path **fail closed** against a
+packaged skill rather than assert a behaviour the substrate does not have
+(**R1**). The same applies to the atomicity claim (**R2**) and to the
+restore-allow-list claim (**R8**).
 
 ---
 
@@ -99,6 +133,22 @@ ParseNameAndVersionFromID("skill:system-prompt-writer-v1.0.0")
 That is what makes §5.1's choice — the package's primary key *is* the skill
 id — workable for this package without any special case.
 
+The same holds for the *effective* version this design assigns to a
+versionless package (§5.2), which is a pre-release identifier rather than a
+plain release. Measured against MPM's own helpers:
+
+```
+SkillIDForNameAndVersion("system-prompt-writer", "1.0.0-unversioned")
+  → "skill:system-prompt-writer-v1.0.0-unversioned"
+ParseNameAndVersionFromID("skill:system-prompt-writer-v1.0.0-unversioned")
+  → name="system-prompt-writer" version="1.0.0-unversioned"   (round-trips)
+```
+
+The round trip works because the id format splits on the **first** `-v`, and a
+skill name may not contain `-v` (§3.1, `internal/core/skill.go:194-200`). The
+pre-release suffix therefore does not disturb identity parsing. The ordering
+that makes it usable is measured in §5.2.
+
 The package was also probed with Go's `archive/zip` to establish what the
 standard library does and does not defend against. Those results are the
 evidence base for §7 and are reproduced in §11.
@@ -135,6 +185,15 @@ evidence base for §7 and are reproduced in §11.
 | The MCP surface is a single `mpm_skills` aggregator with an action enum | `internal/core/tools/registry_list.go:337-376` |
 | The action enum is pinned to contain `save`, `read`, `list`; **adding** actions is compatible | `internal/core/tools/schema_guard_test.go:548-575` |
 | There is no bulk skill import, and no generic ZIP utility with path guards anywhere in the tree | `internal/core/reference_new.go:110-144` is the only `archive/zip` use |
+| The skill write path is **not** composable into a caller's transaction: the new-row path owns its own `db.Begin()`/`tx.Commit()`, and the force path is a bare `db.Exec` with no transaction | `internal/core/skill_db.go:652`, `735`, `624` |
+| The transaction-aware write primitive that *is* composable is `saveMemoryRow`, reached through the `txNode` adapter — this is the substrate's own tx-aware insert | `internal/core/db.go:4472`, `internal/core/skill_db.go:730` |
+| The force path replaces `memories.content` **in place** under the same id, and knows nothing about package rows | `internal/core/skill_db.go:624-631` |
+| The MCP `save` handler passes `force` straight from the payload to that force path | `internal/core/tools/handlers.go:3758` |
+| The MCP `read` handler returns `skill.Body` inlined, with no provenance envelope | `internal/core/tools/handlers.go:3794-3818` |
+| `mpm prune --older-than` is a **collection-blind hard delete** — no `collection` filter, only directives are excluded | `internal/core/web_db.go:1781-1792` |
+| The poison-phrase scanner reads an operator-editable **file** and **fails open** if that file cannot be read; the secret scanner is in-process and cannot | `internal/core/memory.go:845-851` |
+| There is **no** schema-version gate anywhere in the tree — `PRAGMA user_version` appears in no file — so an old binary opens a newer database without complaint | (absent from the tree) |
+| The MCP registry's **only** path-shaped parameter in the whole tool surface is `filepath` on `mpm_references`; `mpm_skills` has none, and there is no path-confinement helper in the tool layer | `internal/core/tools/registry_list.go:217` |
 
 ### 3.2 The blobstore hazard
 
@@ -158,6 +217,18 @@ Two further hazards live in the memory layer:
   expires_at IS NOT NULL AND expires_at < now` — not collection-aware except
   for directives (`internal/core/memory.go:1791-1801`). Skills are safe today
   only because they are written with `expires_at` NULL.
+* **`mpm prune --older-than` is a collection-blind hard delete.**
+  `DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL AND
+  <DirectiveExclusionClause>` — there is **no `collection` filter**; only
+  directives are excluded (`internal/core/web_db.go:1781-1792`, reached from
+  `cmd/mpm/maint_cmds.go:139-141`). This is an *explicit operator command*, not
+  an automatic expiry, and it removes skill rows of any age. **Package bytes
+  have no second copy**: they came from a third-party archive and exist
+  nowhere else, and the foreign-key cascade in §9 takes the package row and
+  the file rows with the skill row. The bytes are then gone.
+  (`PruneNeverAccessed` is safe — it requires `is_long_term = 0`, and skills are
+  written `is_long_term = 1`. The default `mpm prune` is `PruneExpired`, which
+  skills do not match because `expires_at` is NULL.)
 * **The read paths disagree about expiry.** `MemoryExpireClause` is applied by
   export and search but **not** by `ReadSkill` or `ListSkills`
   (`internal/core/web_db.go:42` versus `internal/core/skill_db.go:268`, `370`).
@@ -166,6 +237,12 @@ Two further hazards live in the memory layer:
 **Conclusion, carried into §4:** no byte of a skill package may ever enter
 `internal/blobstore` or the blob directory. Permanent skill assets and a
 24-hour TTL are not compatible, and the failure is silent.
+
+**A second conclusion, carried into §5.8 and §6:** a package's bytes are
+unrecoverable once the owning skill row is deleted, because there is no second
+copy and no upstream archive MPM can re-fetch. Any deletion path that is
+collection-blind must therefore be taught about packages before packages exist
+(§6, §12.1 **O13**).
 
 ### 3.3 Compatibility requirements
 
@@ -183,6 +260,16 @@ stage in §10.
 | **C7** | `mpm backup` / `mpm restore-db` round-trips a database that contains packages |
 | **C8** | Shredding a skill takes its package with it |
 | **C9** | Promotion semantics are unchanged: shared means `is_global=1`, in place |
+| **C10** | **A legacy write can never silently diverge from a package.** A `save --force` (CLI or MCP) against a skill that owns a package is **refused** with a distinct status; it does not replace the projection (**R1**) |
+| **C11** | **A package import is one transaction.** The manifest row, the file rows, the blob rows, the `memories` projection and the `is_latest` flip commit together or not at all (**R2**) |
+| **C12** | **A package import cannot report success without a complete scan.** If a required scanner cannot run, the import is refused (**R10**) |
+| **C13** | **The agent-facing surface cannot create packages.** Import is operator-driven; the agent-facing package surface is read-only (**R4**) |
+| **C14** | **An export never silently drops package content.** A skills export that cannot carry package bytes says so, in the response and in the CLI output (**R11**) |
+| **C15** | **A packaged skill is not silently destroyed by an age-based prune** (**R7**) |
+
+C10–C15 are the acceptance criteria for the corrections themselves. They are
+not new features: each one is a *refusal* or a *disclosure* that the
+corresponding correction adds to an existing path.
 
 ### 3.4 Extension points
 
@@ -192,7 +279,9 @@ stage in §10.
 | **E2** | New actions on the `mpm_skills` aggregator, plus new CLI subcommands |
 | **E3** | `metadata` JSON on the skill row as the pointer to the package — the same idiom as `derived_from_skill_id` |
 | **E4** | `isSensitiveContent` and `isPoisonedAt` are reusable per file, not just per document |
-| **E5** | `SaveSkillWithInvocation` is the canonical write path. A package import should route its projection through it rather than reimplementing the write |
+| **E5** | **`saveMemoryRow`, reached through the `txNode` adapter, is the canonical tx-aware write primitive for the projection** — the definition is `internal/core/db.go:4472` and the skills call site is `internal/core/skill_db.go:730`. The import owns the transaction and writes the projection through it. `SaveSkillWithInvocation` is **not** the primitive: its new-row path opens and commits its own transaction (`:652`, `:735`) and its force path is a bare `db.Exec` with no transaction at all (`:624`), so it cannot be composed into a caller's transaction. A thin tx-aware skill writer may be extracted from it, but the transaction must belong to the importer (**R2**) |
+| **E6** | The force path is the one in-place content writer for a skills row in the whole tree (`internal/core/skill_db.go:625`), so the package-immutability guard is a single branch in a single function, plus its CLI and MCP surfaces (**R1**) |
+| **E7** | `DirectiveExclusionClause` is the precedent for a collection-scoped exemption in a hard delete; the skills exemption follows the same shape (**R7**) |
 
 ---
 
@@ -251,12 +340,14 @@ be deleted while a file row references it.
 
 *Atomic import* — one SQLite transaction covers the manifest row, the file
 rows, the blob rows, the `memories` projection and the `is_latest` flip. It is
-all-or-nothing by construction.
+all-or-nothing by construction. **The importer owns that transaction** and
+writes the projection through the tx-aware primitive in §3.4 E5, because
+`SaveSkillWithInvocation` cannot be composed into it (**R2**).
 
 *Content immutability* — blob rows are insert-only. A published file's bytes
-are never rewritten in place; a change is a new row. (The one exception — an
-explicit force-overwrite — is decision **O2**, and is stated plainly in §5.8
-rather than glossed.)
+are never rewritten in place; a change is a new row. A published package is
+**never** replaced in place at all: the legacy force path is refused against
+it (§5.8, **R1**).
 
 *Deduplication* — identical bytes across packages are stored once, in the
 blob table, keyed by SHA-256. A shared library of packages does not multiply
@@ -281,8 +372,22 @@ of blobs with no referencing file row. Deliberately **not** the blobstore's
 expiry model.
 
 *Schema migration* — three `CREATE TABLE IF NOT EXISTS` statements. An old
-binary ignores the tables; a new binary creates them at boot. Rollback is
-`DROP TABLE` on three tables and touches nothing else.
+binary ignores the tables; a new binary creates them at boot.
+
+*Rollback* — **two different operations, with opposite characteristics**, and
+the document uses one word for both. They are named separately here and
+throughout (**R9**):
+
+| operation | package bytes | everything else |
+|---|---|---|
+| **Binary rollback (lossless, blind)** — an old binary runs against a database that has the package tables | **retained but invisible**: the rows are still in the file, and they reappear when the new binary returns | untouched |
+| **Schema rollback (destructive)** — `DROP TABLE` on the three tables | **irreversibly destroyed**, including third-party files that exist nowhere else | untouched |
+
+Binary rollback is *blind* in a specific sense: the old binary has no schema
+gate to warn it, so it opens the newer database without complaint (§3.1) and
+simply does not know the tables are there. It is **not** free of
+consequences: an old binary's own backup contains the package tables, and the
+old binary's `restore-db` allow-list does not accept them — see §6 (**R8**).
 
 *Performance* — point lookups on primary keys. Package files are deliberately
 **not** FTS-indexed, so retrieval cost is unchanged from today.
@@ -326,13 +431,40 @@ SQLite as the blob table's key in Option B.
 ### 4.4 The recommendation
 
 **Option B**, with Option C's content-addressing kept as the blob table's
-primary key, plus one hard rule:
+primary key, plus two hard rules:
 
-> No byte of a skill package ever enters `internal/blobstore` or the blob
-> directory. Skill assets are permanent; the blobstore's default TTL is
-> 24 hours and its GC has no referential check.
+> **Rule 1 — the blobstore.** No byte of a skill package ever enters
+> `internal/blobstore` or the blob directory. Skill assets are permanent; the
+> blobstore's default TTL is 24 hours and its GC has no referential check.
 
-A regression test (§10, T31) pins this.
+> **Rule 2 — the filesystem.** No byte of a skill package is ever
+> **materialised as an intermediate file**. An importer reads bytes into memory
+> and writes them into a database column — never a staging file, never a
+> temporary file, never a file in the workspace. The **only** place package
+> bytes reach the filesystem is the `.skill` archive an operator explicitly
+> asks for with `mpm skill export`, and that is the *artefact*, not an
+> intermediate.
+
+Rule 2 is the real defence for **both** import paths, and it is what makes the
+ZIP entry-type check's limitation harmless rather than surprising. A symlink
+entry in an archive is a string; a directory entry is a string; a device entry
+is a string. There is no path by which an archive entry can become a
+filesystem object, so the attack the entry-type check was written to stop
+cannot occur. The entry-type check remains as a **secondary, conditional**
+guard (§7, threat 3) — not as the control.
+
+Rule 1 is pinned by a regression test (§10, P9; §13 T31). Rule 2 is pinned by
+the same stage's assertion that an **import** writes nothing to the
+filesystem.
+
+**One consequence, stated so it is not a surprise later.** Because Rule 2
+holds, the ZIP entry-type check is *redundant for safety* on the import path
+— it can only cause a refusal, never enable an escape. That is the correct
+direction: a false refusal costs the operator one archive, a false acceptance
+would have cost a filesystem. The export path is not covered by Rule 2 — it
+writes a real file — so the export writer is the one place where the archive's
+entry types are read *again* on the way out, and it writes the canonical paths
+and the stored bytes, not the archive's original entry names or modes.
 
 ---
 
@@ -362,18 +494,58 @@ effective version.
 MPM assigns an *effective version* and records the override **separately**,
 in the manifest and in the package row — never in the third-party file.
 
-* Default effective version: **`1.0.0`** (decision **O1**).
+* Default effective version: **`1.0.0-unversioned`** (§12.1, **O1**).
 * The operator may override it: `--version 2.1.0`.
-* The record is `version_override: {"declared": null, "effective": "1.0.0",
-  "reason": "package_declares_no_version"}`.
+* The record is `version_override: {"declared": null, "effective":
+  "1.0.0-unversioned", "reason": "package_declares_no_version"}`.
 
-`1.0.0` rather than `0.0.0`, because `cmd/mpm/r9_t52_skill_version_test.go:16-18`
-explicitly rejects defaulting to `0.0.0` on the grounds that it "obscures
-authoring intent". A third-party package with no version is a *released*
-artefact from its author's point of view; `1.0.0` is the honest reading.
-`0.0.0` would also sort below every genuinely versioned skill in the
-semver-max resolution, which would quietly make imported packages
-un-discoverable by name.
+**Why a pre-release identifier and not `1.0.0`.** The first revision used
+`1.0.0`, and that is wrong in a way that only shows up later. If the
+effective version is `1.0.0`, then when the package's author later ships a
+**genuine** `1.0.0` — now with a `version:` field — the import collides with
+the versionless import: same `(name, version)`, different `package_hash`, so
+§5.7 rejects it as `version_conflict`. Semver has no way to say "this `1.0.0`
+is newer than that `1.0.0`", and the author cannot publish `1.0.1` without
+lying about the version. The **only** way to install the genuine release would
+be to force-overwrite a published id in place — precisely the mutation §5.8
+refuses — leaving one id carrying two `package_hash` values over its lifetime
+(**R3**).
+
+`1.0.0-unversioned` is a semver **pre-release**, and pre-releases sort
+*below* the corresponding release. Measured against the repository's own
+`golang.org/x/mod/semver`:
+
+```
+semver.IsValid("v1.0.0-unversioned")            = true
+semver.Compare("v1.0.0-unversioned", "v1.0.0")  = -1   ← a later genuine 1.0.0 WINS
+semver.Compare("v1.0.0-unversioned", "v0.9.0")  = +1   ← still above every older release
+semver.Compare("v1.0.0-unversioned", "v1.0.0-rc1") = +1
+```
+
+So the effective version is **installable alongside** a later genuine `1.0.0`
+(the genuine release becomes `is_latest`, and both packages coexist), it
+remains discoverable by name among genuinely versioned skills, and it cannot
+collide with an author-declared `1.0.0` because the pre-release suffix is
+distinguishable. The id round-trips (§2.5).
+
+**The first revision's justification was mis-cited and is withdrawn.** It
+claimed `1.0.0` was chosen because `cmd/mpm/r9_t52_skill_version_test.go:16-18`
+"explicitly rejects" defaulting to `0.0.0`. Lines 16–18 of that file are a
+**rationale note in a test header**, not a constraint:
+
+```
+// We do NOT default-version to "0.0.0" / content-hash: that would
+// obscure authoring intent and break downstream tooling that parses
+// the id suffix.
+```
+
+Nothing in the substrate forbids `0.0.0`: `validateSkillNameAndVersion`
+(`internal/core/skill.go:181-203`) rejects only an empty version, a colon,
+whitespace, and `-v` in the *name*, and `semver.IsValid("v0.0.0")` is `true`.
+The note's actual objection — that `0.0.0` "sorts below every genuinely
+versioned skill" — is answered by the pre-release form, which sorts above
+every older genuine release and below the genuine `1.0.0`. `0.0.0` is dropped
+from consideration.
 
 **The third-party file is never rewritten.** The stored bytes are exactly what
 the archive contained.
@@ -393,6 +565,13 @@ transformation occurs at all. When it does not, the projection differs by
 exactly one inserted frontmatter line, and the difference is disclosed in the
 import response.
 
+**The projection hash is a live invariant, not a record.** Because the legacy
+write path can replace `memories.content` in place (§3.1), the two hashes
+could diverge — and `projection_sha256` would become a false statement. That
+is exactly why the legacy force path is refused against a packaged skill
+(§5.8, **R1**): the refusal is what keeps this table true.
+
+
 ### 5.3 Entrypoint discovery
 
 **Rule:** the entrypoint is `SKILL.md` at the package root.
@@ -404,7 +583,7 @@ prefix. The operator's archive has exactly one top-level directory,
 package.
 
 An archive whose entries do not all share one top-level directory is rejected
-as `ambiguous_package_root` (decision **O9**). An operator may name the
+as `ambiguous_package_root` (decision **O9**, §12.2). An operator may name the
 entrypoint explicitly with `--entrypoint`, and the choice is recorded in the
 manifest.
 
@@ -436,16 +615,28 @@ package with non-ASCII names, export writes the NFC form, so the round trip is
 stable but not byte-identical to a third-party archive that used NFD. §11
 records the evidence.
 
+**The canonical path is the identity; `raw_path` is a display artefact.**
+§9's `PRIMARY KEY (skill_id, path)` stores the **canonical** path — the
+NFC-normalised, case-collision-checked, POSIX-separated form defined above.
+Two package files are the same file exactly when their canonical paths are
+equal, and nothing else. `raw_path` records the name as it appeared in the
+source archive, and it is **display-only**: it is never used to address a
+file, never compared for identity, and never written to by an export. The
+practical consequence: a package imported from an NFD-named archive and the
+same package re-imported from an NFC-named archive produce the **same** rows
+and the same `package_hash`, and the display-only `raw_path` differs between
+them.
+
 ### 5.5 The file manifest
 
 ```json
 {
   "format": "mpm-skill-package/1",
   "name": "system-prompt-writer",
-  "version": "1.0.0",
+  "version": "1.0.0-unversioned",
   "declared_version": null,
   "version_override": {
-    "effective": "1.0.0",
+    "effective": "1.0.0-unversioned",
     "reason": "package_declares_no_version"
   },
   "entrypoint": "SKILL.md",
@@ -458,7 +649,8 @@ records the evidence.
       "size_bytes": 12976,
       "content_type": "text/markdown; charset=utf-8",
       "role": "entrypoint",
-      "executable": false
+      "executable": false,
+      "scanned": {"secret": true, "poison": true}
     },
     {
       "path": "references/principles.md",
@@ -466,7 +658,8 @@ records the evidence.
       "size_bytes": 11011,
       "content_type": "text/markdown; charset=utf-8",
       "role": "reference",
-      "executable": false
+      "executable": false,
+      "scanned": {"secret": true, "poison": true}
     },
     {
       "path": "references/templates.md",
@@ -474,7 +667,8 @@ records the evidence.
       "size_bytes": 8176,
       "content_type": "text/markdown; charset=utf-8",
       "role": "reference",
-      "executable": false
+      "executable": false,
+      "scanned": {"secret": true, "poison": true}
     }
   ],
   "package_hash": "…"
@@ -486,11 +680,20 @@ records the evidence.
   script) with the entrypoint special-cased.
 * `content_type` comes from a small, explicit allow-list keyed on extension
   plus a content sniff — never a general MIME guesser.
+* **`scanned` records what actually ran, per file.** It is not a constant
+  `true`: it is set from the outcome of the scan, and it is `false` for a
+  scanner that did not run. For a binary asset the poison scan does not apply
+  (§7.1), so the entry is `{"secret": true, "poison": false}` — a **disclosed
+  skip**, not a claim of safety. A scan that could not run at all is an
+  import **refusal**, not a `false` entry: nothing is written, so no row can
+  ever record a scan that did not happen (**R10**, §7 threat 14).
 * `package_hash` is the SHA-256 of the **canonical manifest JSON**: object
   keys sorted, no insignificant whitespace, UTF-8, `files` sorted by path. It
   deliberately does **not** depend on the archive container, so
   export → import is stable across ZIP writers, compression levels and
-  timestamps.
+  timestamps. The `scanned` block is part of the manifest and therefore part
+  of the hash: two packages with identical bytes but different scan outcomes
+  are not the same package.
 
 ### 5.6 Import and export fidelity
 
@@ -503,8 +706,9 @@ export → import → export reproduces the same `package_hash`.
 
 | situation | behaviour |
 |---|---|
-| Same `(name, effective version)`, same `package_hash` | **Idempotent.** No write. The response reports `already_installed`. |
-| Same `(name, effective version)`, different `package_hash` | **Conflict.** Rejected with `version_conflict` unless `--force`. |
+| Same `(name, effective version)`, same `package_hash` | **Idempotent.** No write. The response reports `already_installed`. If the skill was soft-shredded, the re-import **resurrects** it — the import path is not the legacy force path (§5.8.1), so R1's refusal does not apply to it. |
+| Same `(name, effective version)`, different `package_hash` | **Conflict.** Rejected with `version_conflict`. There is no `--force` escape: a published package is immutable (§5.8, **R1**). |
+| A **versionless** package and a later **genuine** `1.0.0` of the same name | **Two packages, not a conflict.** The versionless one has effective version `1.0.0-unversioned` and the genuine one has `1.0.0`; they are different `(name, version)` pairs, so both install, and the genuine release becomes `is_latest` (§5.2, **R3**). |
 | A different version of the same name | A new package. The prior version stays, exactly as today's skills behave. `is_latest` flips inside the same transaction. |
 | A file whose SHA-256 already exists in the blob table | Stored once and shared. This is deduplication, not a duplicate-package signal. |
 | A different skill name with the same entrypoint hash | Advisory only: the response carries `possible_duplicate_content`. It does not block. |
@@ -513,11 +717,25 @@ The idempotence rule mirrors the existing reference-manifest import
 behaviour — re-running the same manifest reports `unchanged` and writes
 nothing (`internal/core/reference_batch.go:1-31`).
 
+**Why the conflict row has no `--force`.** The first revision allowed a
+forced overwrite of a published package, by analogy with `save --force`. That
+analogy was the error R1 identified: `save --force` overwrites
+`memories.content` in place under the same id, so a forced package
+overwrite would have to reproduce the import's scanning, hashing, manifest and
+version logic in a second code path — or leave the manifest describing the
+previous document. Refusing is smaller, safer, and consistent with §5.8. An
+operator who needs to change a package publishes a **new version**.
+
 ### 5.8 Deletion, shredding and immutability
 
 * **Soft shred** (`mpm skill delete`) stamps `deleted_at` on the skill row. The
   package row and its file rows stay — recoverable, exactly as today's soft
-  shred is. A later `save --force` resurrects and replaces both.
+  shred is. **A later `save --force` does *not* resurrect a packaged skill**:
+  it is refused by the guard in §5.8.1, so the package stays soft-shredded
+  until it is explicitly re-imported — the import path is not the legacy
+  force path, and a re-import of the same `package_hash` resurrects the row
+  (§5.7). That is a consequence of R1's refusal, and it is stated here rather
+  than discovered at runtime.
 * **Hard shred** (`mpm skill shred`) deletes the `memories` row. The foreign
   keys cascade: package row, then file rows. The blob rows become
   unreferenced and are garbage-collection candidates.
@@ -525,13 +743,63 @@ nothing (`internal/core/reference_batch.go:1-31`).
 On immutability, precisely:
 
 * A file's bytes are **never mutated in place**. Blob rows are insert-only.
-* A published `(name, version)` normally always resolves to the same bytes.
-* **The exception** is an explicit, audited force-overwrite, which deletes the
-  old file rows and inserts the new ones in one transaction. This is the
-  direct analogue of today's `SaveSkill(force=true)`, which overwrites
-  `memories.content` in place. If the operator wants packaged versions to be
-  strictly immutable, that is decision **O2** and the recommended policy is
-  to refuse the force-overwrite and require a version bump.
+* A published `(name, version)` always resolves to the same bytes.
+* **A published package is never replaced in place, by any path.** Not by a
+  package import (§5.7), and not by the legacy write path — see below.
+
+#### 5.8.1 The legacy write path is refused against a packaged skill (**R1**)
+
+**What the substrate does today.** `SaveSkillWithInvocation`'s force branch
+replaces `memories.content` **in place under the same id**
+(`internal/core/skill_db.go:624-631`). It knows nothing about packages — it
+cannot, the tables do not exist yet — and it is reached with `force` taken
+straight from the MCP payload (`internal/core/tools/handlers.go:3758`) and
+from `SaveSkill` (`internal/core/skill_db.go:476`). It is the **only** in-place
+content writer for a skills row in the whole tree.
+
+**What would happen without a guard.** After a legacy `save --force` against a
+packaged skill:
+
+* `read` returns the **new** body and `read_file(path=SKILL.md)` returns the
+  **old** bytes — one skill id, two different entrypoint bodies, depending on
+  which API is asked;
+* `projection_sha256` (§5.2) no longer matches `memories.content`, so the
+  derivation is no longer auditable;
+* the package row, the file rows and the blobs all still describe the
+  **previous** document.
+
+**The correction: fail closed.** When a `skill_packages` row exists for the
+skill id, a legacy `save --force` — from the CLI or from the MCP surface —
+is **refused** with a distinct status:
+
+```
+package_immutable: skill "system-prompt-writer" v1.0.0-unversioned is a
+package; its entrypoint and manifest are immutable. Publish a new version
+instead of force-overwriting the projection.
+```
+
+**Nothing is written.** The refusal happens before the projection write, so
+the id, the manifest, the file rows and the hashes all continue to describe
+the same document. There is no partial state, no diverged projection, and no
+silent divergence to discover later.
+
+**Why refusal, and not package-aware rewriting.** Teaching the legacy path to
+rewrite package rows would require reproducing the import's scanner, hashing,
+manifest and version logic in a second code path — a second place where a
+security control could be forgotten. Refusing is smaller, has one behaviour,
+and is consistent with §5.7. It also makes §12.1 **O2** decidable: the answer
+is *no*, and the answer is enforced rather than merely recommended.
+
+**Scope.** The guard is one branch in one function (`internal/core/skill_db.go`),
+plus its CLI and MCP surfaces. `SaveSkillAndDeprecatePrior`
+(`internal/core/skill_db.go:1021-1065`) touches `metadata` only, and the
+workshop's save call passes `force=false` — neither is an in-place content
+write and neither needs the guard.
+
+**Consequence for the operator.** `save --force` on a packaged skill no
+longer behaves as it does for a legacy single-document skill. That is a
+deliberate divergence, it is stated here rather than discovered later, and
+it is the direct cost of keeping one id from carrying two documents.
 
 ### 5.9 Promotion and copy semantics
 
@@ -556,7 +824,7 @@ its cost.
 **No existing row is touched.** The package tables are empty for every skill
 that is not a package. Existing single-document skills keep working with no
 change at all, and can optionally be *re-imported* as a one-file package
-(§10, T02) to gain the package surface.
+(§13 T02) to gain the package surface.
 
 **Migration mechanics.** Three `CREATE TABLE IF NOT EXISTS` statements, applied
 at boot alongside the existing table groups, following the `reference_docs`
@@ -571,30 +839,149 @@ in the schema sources to appear on that list. The three new tables must be
 registered in both places, or **restore fails**. This is a stage-P1
 requirement, not a follow-up.
 
-**Rollback** is `DROP TABLE` on three tables. Nothing else in the schema or
-the data is affected, so rollback is total and lossless for everything that
-existed before. The only loss is the package data itself.
-
 **Backup improves.** Because the bytes live in the database, `mpm backup`
 (`sqlite3 .dump`) carries them and `mpm restore-db` restores them. This is
 the first MPM store whose payload is genuinely covered by the backup.
+
+### 6.1 The two rollbacks are different operations (**R9**)
+
+The first revision used one word — "rollback" — for two operations with
+opposite characteristics. They are named separately here, and the runbook in
+§10 P1 carries both.
+
+| | **binary rollback (lossless, blind)** | **schema rollback (destructive)** |
+|---|---|---|
+| what it is | an old binary runs against a database that has the package tables | `DROP TABLE` on the three package tables |
+| package bytes | **retained but invisible** — still in the file; they reappear when the new binary returns | **irreversibly destroyed**, including third-party files that exist nowhere else |
+| everything else | untouched | untouched |
+| operator-visible signal | none — there is no schema-version gate anywhere in the tree (§3.1), so the old binary opens the newer database without complaint | the tables are gone |
+| pre-condition | **export the packages first** (§6.2) | **export the packages first** — this is the only copy |
+
+**"Lossless" applies to the database, not to the operator's ability to use
+it.** A binary rollback preserves the bytes on disk, but it also creates the
+restore incompatibility in §6.2. The two are not independent.
+
+**"Blind" is the accurate word for the old binary's view.** An old binary has
+no way to know the three tables exist; it does not warn, it does not refuse,
+and it does not adapt. Nothing in the substrate would tell an operator that a
+package was present.
+
+### 6.2 After a binary rollback, `mpm restore-db` of a new-binary backup fails closed (**R8**)
+
+This is the correction the first revision missed, and it has a real cost.
+
+**The mechanism.** `mpm backup` is `sqlite3 .dump` — **generic**. It does not
+know which tables exist. So:
+
+* a backup taken by the **new** binary **contains** the three package tables;
+* an **old** binary's `mpm restore-db` rejects any dump naming a table that
+  is not on its `CanonicalMPMSchema` allow-list (§3.1) — and the three package
+  tables are not on it.
+
+Therefore:
+
+> **After a binary rollback, restoring a backup taken by the new binary
+> fails closed.** The old binary can produce a backup it cannot restore, and
+> it can refuse a backup it produced itself once the new binary has run.
+
+**This is a property of the existing allow-list, and the allow-list is not
+weakened to hide it.** Relaxing `restore-db` to skip unknown tables with a
+warning would trade a loud, safe refusal for a silent, partial restore —
+exactly the class of failure the validator exists to prevent. It is also a
+change to an existing fail-closed component, which is outside this design's
+scope and would need its own decision and its own review.
+
+**The operator procedure is therefore mandatory, not advisory:**
+
+1. **Before any binary rollback**, export every package to a `.skill` archive:
+   `mpm skill export <name> --output <file>.skill` for each package, or the
+   batch form delivered by stage P7 (§6.3).
+2. Verify the exports exist and are non-empty.
+3. Only then roll the binary back.
+4. The old binary's `restore-db` will still refuse a new-binary dump. Restore
+   with the **old** binary from a backup taken **before** packages existed, or
+   restore with the new binary.
+
+**Why this is stated rather than designed away.** The alternative — making the
+old binary able to restore a package-bearing dump — is impossible without
+changing the old binary, which by definition is not being changed. The
+incompatibility is a property of the rollback, not a defect to be papered
+over.
+
+### 6.3 The export contract: no silent loss (**R11**)
+
+The first revision contradicted itself on `mpm export --collection skills`:
+the compatibility matrix said the package metadata is not exported, while
+**O8** recommended carrying it "as a follow-up after P6". The matrix's
+version is the one an implementer would have built, and it is a **silent data
+loss** path: an operator's "export my skills" workflow loses every reference
+file, and so does the workspace-to-workspace move that **O4** nominates as the
+transport. The bytes exist nowhere else.
+
+**The contract, in two stages:**
+
+| stage | behaviour |
+|---|---|
+| **Before full package export exists** (from P4 — the first stage in which a package can exist — until P7) | `mpm export --collection skills` **carries the skill row only**, and it **says so**: the export response and the CLI output carry an explicit **loss marker** naming every skill whose package was not included, with the count. The marker is not a warning that can be missed — it names the affected skills. |
+| **Full package export** (stage P7) | `mpm export --collection skills` emits, alongside the skill rows, one `.skill` archive per package, using the same deterministic writer as `mpm skill export` (§5.6), so the archive is byte-identical to one produced by the single-package command. |
+
+**The marker is the contract, not a stopgap.** Before P7, an export that
+drops package content must be **explicit about it**. A caller that reads the
+export response learns that reference files were omitted and which skills
+were affected; a caller that does not read it still sees the marker on the
+CLI's standard output. There is no configuration in which the loss is
+silent.
+
+**Stage P4 delivers the marker**, because P4 is the first stage in which a
+package can exist — the instant it does, `mpm export --collection skills`
+becomes a loss path, and the marker must exist in the same release that
+introduces the loss. P7 then removes the need for the marker by making the
+export complete. The stage order is therefore dependency-clean: no stage
+depends on behaviour delivered only by a later one.
+
+### 6.4 Age-based pruning must not remove a packaged skill (**R7**)
+
+`mpm prune --older-than` is a **collection-blind hard delete**
+(`internal/core/web_db.go:1781-1792`): no `collection` filter, only
+directives excluded. It removes a skill row of any age, and the foreign-key
+cascade takes the package row and the file rows with it. A package's bytes
+have no second copy, so the bytes are then gone (§3.2).
+
+**The correction: `collection = 'skills'` is excluded from `PruneOlderThan`.**
+This mirrors the existing directive exemption — `DirectiveExclusionClause` is
+already the exclusion mechanism in that statement (§3.4 E7) — and it is the
+smaller of the two available corrections. The alternative, "require the
+operator to export before pruning", would require a per-row check inside a
+bulk delete and would still leave a race between the check and the delete.
+
+**What is *not* changed.** `PruneNeverAccessed` is already safe (it requires
+`is_long_term = 0`; skills are written `is_long_term = 1`), and the default
+`mpm prune` is `PruneExpired`, which skills do not match because
+`expires_at` is NULL. Only `PruneOlderThan` needs the exemption.
+
+**The operator can still remove a packaged skill deliberately.** A hard shred
+(`mpm skill shred`) still cascades and still destroys the package bytes — that
+is its purpose. What is removed is the *unintentional*, *bulk*, *age-based*
+destruction of third-party content that exists nowhere else.
 
 ### Compatibility matrix
 
 | existing surface | effect |
 |---|---|
 | `mpm save-skill --file` | unchanged |
-| `mpm call mpm_skills` with `save` | unchanged |
+| `mpm call mpm_skills` with `save` | unchanged for every skill that is not a package; **refused** with `package_immutable` for a packaged skill (**R1**, C10) |
 | `mpm read-skill` | unchanged |
-| `mpm call mpm_skills` with `read` | existing fields unchanged; gains one **optional** `package` object |
+| `mpm call mpm_skills` with `read` | existing fields unchanged; gains one `package` object, **present whenever the skill is a package** (**R6**) and absent otherwise |
 | `mpm call mpm_skills` with `list` | unchanged — `SkillSummary` is not modified at all |
 | `mpm list-skills` | unchanged |
 | Discovery and the wake context | unchanged — no package byte is ever inlined |
 | `mpm skill delete` / `mpm skill shred` | unchanged semantics; the package cascades on a hard shred |
 | `mpm call mpm_skills` with `promote_to_global` | unchanged semantics; also flips the package row |
 | `mpm skill workshop` | unchanged |
-| `mpm backup` / `mpm restore-db` | extended to carry packages |
-| `mpm export --collection skills` | unchanged; package metadata is not exported (decision **O8**) |
+| `mpm backup` / `mpm restore-db` | extended to carry packages; an **old** binary refuses a new-binary dump (§6.2) |
+| `mpm export --collection skills` | carries the skill row; **explicitly marks** every package it cannot carry (§6.3); full package export follows in P7 |
+| `mpm prune --older-than` | **excludes** `collection = 'skills'` (§6.4, **R7**) |
+| The agent-facing package surface | **read-only** — no import action (**R4**, C13) |
 
 ---
 
@@ -614,7 +1001,7 @@ The findings below are not assertions about `archive/zip`; they are measured.
 |---|---|---|
 | 1 | **ZIP slip / path traversal** | Every entry name is canonicalised and rejected if it contains a `..` segment, is absolute, or carries a drive-letter prefix. The joined path is then verified to lie inside the root. `archive/zip` performs **no** path sanitisation: `../evil.md` and `/etc/passwd` are read verbatim. |
 | 2 | **Absolute paths** | Rejected explicitly. `filepath.IsAbs` catches `/etc/passwd` — but **only on the host platform**; see threat 4. |
-| 3 | **Symlinks, FIFOs, devices** | `zip.File.Mode()` exposes the entry's type bits. An entry whose type is neither regular nor directory is rejected as `unsupported_entry_type`. A measured probe shows `L---------` (symlink), `p---------` (FIFO) and `D---------` (device) are all distinguishable. Directory entries are skipped, never stored. |
+| 3 | **Symlinks, FIFOs, devices** | **Best-effort and conditional, not the control.** `zip.File.Mode()` exposes the entry's type bits *only when the archive's central-directory creator byte says Unix*. An entry whose type is neither regular nor directory is rejected as `unsupported_entry_type` — **but that rejection is not available for every archive** (**R5**). A ZIP written without Unix attributes carries a FAT/MS-DOS creator byte, and `Mode()` then reports every entry as `0666` regular: a symlink, a FIFO and a device all **pass** the type check as regular files. The real defence is Rule 2 in §4.4: an import writes package bytes into a database column and never materialises them as a file, so an entry of any type cannot become a filesystem object. The **directory** path has a genuinely stronger guarantee — `os.Lstat` is reliable — so the two paths are described separately below. |
 | 4 | **Windows drive letters and separators** | Rejected by an explicit check, **not** by `filepath.IsAbs`. On Linux `/etc/passwd` is absolute but `C:\Windows\System32\evil.dll` is not — a Linux-only absolute-path test would let it through. Backslashes are rejected in any position. |
 | 5 | **Hardlinks** | Not representable in ZIP. On the directory-import path, `os.Lstat` is used, never `os.Stat`, so a symlink is never followed; a hardlinked file is simply a regular file, and MPM stores bytes, not inodes. |
 | 6 | **Duplicate paths** | Two entries with the same canonical path are rejected as `duplicate_path`. |
@@ -622,16 +1009,106 @@ The findings below are not assertions about `archive/zip`; they are measured.
 | 8 | **Unicode normalisation** | Paths are normalised to NFC; two names that normalise to the same path are rejected as `path_unicode_collision`. Measured: `café.md` in NFC is 12 bytes and in NFD is 13, they are distinct Go strings, and lowercasing does not unify them — the normalisation has to be done explicitly. Control characters and NUL are rejected. |
 | 9 | **ZIP bombs / extreme ratios** | Three independent caps: a per-entry declared-size cap, a **count of actual bytes read** through a limited reader, and a total-uncompressed cap across the package. The byte count is not optional: a measured 4 MiB zero file compresses to 4 195 bytes — a **999.8:1** ratio — and the declared size is an attacker-controlled header, so the only trustworthy number is the one the importer counts. |
 | 10 | **Lying size headers** | `archive/zip` catches a declared size *smaller* than the real payload (it reports `zip: not a valid zip file` after reading 0 bytes) and a declared size *larger* than the payload (it reads what is there and then reports `unexpected EOF`). Both are treated as `archive_invalid`, but the byte cap stands independently because the header can be made self-consistent. |
-| 11 | **Excessive file count or total size** | Caps: 512 files, 32 MiB total uncompressed, 4 MiB per file, and 256 KiB for the entrypoint. The entrypoint cap matters because `ListSkills` parses frontmatter out of every skill row's full `content` on every call — a multi-megabyte entrypoint would slow every skill listing in the workspace. |
+| 11 | **Excessive file count or total size** | Caps: 512 files, 32 MiB total uncompressed, 4 MiB per file, and 256 KiB for the entrypoint. The entrypoint cap matters because `ListSkills` parses frontmatter out of every skill row's full `content` on every call — a multi-megabyte entrypoint would slow every skill listing in the workspace. **The caps are enforced *during* traversal, not after enumeration** (**R12**): the walk stops at the 513th entry, and the byte counters are checked as bytes are read, so a directory holding ten million entries is never fully walked, `Lstat`'d and measured. On the ZIP path the archive itself bounds the entry count, but the same in-flight counters apply. |
 | 12 | **Malformed archives** | Reader errors are surfaced as `archive_invalid`. Every entry is read **to EOF**, which is what makes the CRC check run (§13). |
 | 13 | **Corrupt stored bytes** | `archive/zip` **does** verify the CRC — a single flipped content byte yields `zip: checksum error` — **but only when the entry is read to EOF**. A bounded read stops early and skips the check entirely. Therefore: the importer reads every entry to EOF, and the bounded read API (§8) **does not claim** CRC verification. Separately, every stored file's SHA-256 is re-verified on read, and a mismatch is refused rather than returned. |
-| 14 | **Secret leakage** | **Every file** is scanned with MPM's existing `isSensitiveContent` (30 patterns) and `isPoisonedAt` (20 default phrases) before insertion. Today the scanner sees only `memories.content` — the entrypoint. A package's reference files would bypass it entirely without this change. This is the most important gap the design closes. Binary files are scanned for the high-signal secret patterns only, since scanning arbitrary binary bytes for the full pattern set produces false positives. |
-| 15 | **Prompt injection** | The poison-phrase scanner runs on every file. It is a backstop, not a guarantee: it matches twenty fixed phrases, so an oblique injection would pass. The behavioural control is that package content is returned as **data**, not as instructions — every read carries a provenance envelope naming it as third-party package content with its hash and its scanned status (§8). |
-| 16 | **Unsupported executable payloads** | Scripts are stored but flagged `executable: true` in the manifest, and **never executed**. MPM has no code path from package bytes to execution. Executable *binaries* (ELF, PE, Mach-O magic) are rejected by default, with an explicit opt-in that still only stores bytes (decision **O3**). |
-| 17 | **Partial imports** | One transaction covers the manifest row, the file rows, the blob rows, the `memories` projection and the `is_latest` flip. Validation runs *before* the transaction opens, so a rejected archive writes nothing at all. A failed import leaves zero rows — verified in §10, T08. |
+| 14 | **Secret leakage** | **Every file** is scanned with MPM's existing `isSensitiveContent` (30 patterns) and `isPoisonedAt` (20 default phrases) before insertion. Today the scanner sees only `memories.content` — the entrypoint. A package's reference files would bypass it entirely without this change. This is the most important gap the design closes. Binary files are scanned for the high-signal secret patterns only, since scanning arbitrary binary bytes for the full pattern set produces false positives. **The poison scanner can fail open** — it reads an operator-editable file and returns "not poisoned" if that file cannot be read — so a package import **fails closed** with `scanner_unavailable` when the phrase file is unreadable (**R10**, §7.3). A skipped scan is never reported as a successful scan. |
+| 15 | **Prompt injection** | The poison-phrase scanner runs on every file. It is a backstop, not a guarantee: it matches twenty fixed phrases, so an oblique injection would pass. The behavioural control is that package content is returned as **data**, not as instructions — and **the provenance is carried on the response that inlines the content**: the `read` response carries a `package` object with the entrypoint's `entrypoint_sha256` and its `scanned` status, and it is **present whenever the skill is a package**, not optional (**R6**). The `read_file` response carries the file's own hash and scan status. The **honest limit** of this control: the entrypoint body is still inlined into the agent's context without a per-read textual banner, so the guarantee is *machine-checkable provenance on every response*, not *a human-readable warning in the text*. |
+| 16 | **Unsupported executable payloads** | Scripts are stored but flagged `executable: true` in the manifest, and **never executed**. MPM has no code path from package bytes to execution. Executable *binaries* (ELF, PE, Mach-O magic) are rejected by default, with an explicit opt-in that still only stores bytes (decision **O3**, §12.2). |
+| 17 | **Partial imports** | One transaction covers the manifest row, the file rows, the blob rows, the `memories` projection and the `is_latest` flip. **The importer owns that transaction** and writes the projection through the tx-aware primitive in §3.4 E5, so the claim is true rather than aspirational (**R2**). Validation runs *before* the transaction opens, so a rejected archive writes nothing at all. A failed import leaves zero rows — verified in §13, T08. |
 | 18 | **An import that passes the entrypoint but poisons a reference** | Blocked by threat 14, and the *whole* import rolls back, not just the offending file. |
+| 19 | **A directory walk that escapes the import root** | The walk uses `os.Lstat` and never follows a symlink; it **refuses to descend into a symlinked directory** and **refuses to leave the resolved root** after each hop, so a symlink inside the tree cannot be used to pull in bytes from elsewhere on the filesystem (**R12**, **R4**). The resolved root is computed once with `filepath.EvalSymlinks` and compared against every candidate before it is read. |
 
-### 7.1 Scanner coverage by file class
+### 7.1 The entry-type check, stated exactly (**R5**)
+
+The two import paths do **not** have the same guarantee, and the first
+revision stated them as if they did.
+
+| | ZIP path | Directory path |
+|---|---|---|
+| how the entry's type is determined | `zip.File.Mode()`, which interprets the external attributes **only when the central-directory creator byte says Unix** | `os.Lstat` on the real filesystem |
+| symlink entry detected? | **only** for a Unix-attribute archive | yes, always |
+| FIFO / device entry detected? | **only** for a Unix-attribute archive | yes, always |
+| FAT/MS-DOS creator byte | `Mode()` reports `0666` regular for **every** entry — symlink, FIFO and device all pass the type check | not applicable |
+| what actually makes it safe | **Rule 2** (§4.4): an import writes the bytes into a database column and never materialises them as a file | **Rule 2**, plus `Lstat` |
+
+**Measured.** The same five entries, under a Unix creator byte and under a
+FAT creator byte:
+
+```
+-- creator = Unix --
+  "pkg/SKILL.md"  mode=-rw-r--r--  type=----------  regular=true   → accepted
+  "pkg/link.md"   mode=Lrwxrwxrwx  type=L---------  symlink=true  → rejected
+  "pkg/fifo"      mode=prw-r--r--  type=p---------  regular=false → rejected
+  "pkg/dev"       mode=Drw-r--r--  type=D---------  regular=false → rejected
+  "pkg/sub/"      mode=drwxr-xr-x  type=d---------  dir=true      → skipped
+
+-- creator = FAT/MS-DOS (the same archive, one byte changed per record) --
+  "pkg/SKILL.md"  mode=-rw-rw-rw-  type=----------  regular=true   → accepted
+  "pkg/link.md"   mode=-rw-rw-rw-  type=----------  regular=true   → ACCEPTED AS A REGULAR FILE
+  "pkg/fifo"      mode=-rw-rw-rw-  type=----------  regular=true   → ACCEPTED AS A REGULAR FILE
+  "pkg/dev"       mode=-rw-rw-rw-  type=----------  regular=true   → ACCEPTED AS A REGULAR FILE
+  "pkg/sub/"      mode=-rw-rw-rw-  type=----------  regular=true   → treated as a regular file
+```
+
+The type check's availability depends on **an attacker-chosen header byte**.
+It is therefore a defence in depth, not a boundary. The boundary is Rule 2.
+
+**What follows for the implementation.** The type check stays, and its
+`unsupported_entry_type` refusal stays — it is free, and it rejects the
+common case. But the *contract* is Rule 2, and no acceptance criterion may
+depend on the type check being available. §13 T16 and T35 test exactly this:
+T16 is the Unix-attribute case, T35 is the FAT-attribute case, and **both are
+accepted** — with the FAT case accepted *because* the bytes never reach the
+filesystem, not because the type check caught it.
+
+**One interaction worth stating.** Under a FAT creator byte a directory entry
+is not detected as a directory either, so it falls through to the **canonical
+path rules** of §5.4 — and a canonical path may not carry a trailing `/`. A
+directory entry named `pkg/sub/` is therefore rejected as a non-canonical
+path, by a rule that does not depend on the archive's attributes at all. A
+directory entry named `pkg/sub` (no trailing slash) is simply a zero-byte
+file, and it is stored as one: a zero-length row, and no filesystem object.
+Both outcomes are safe, and neither depends on the type check.
+
+### 7.2 The scanner's fail-open path, and the fail-closed import (**R10**)
+
+The two scanners are not symmetric, and the difference is load-bearing.
+
+| scanner | how it works | can it fail open? |
+|---|---|---|
+| `isSensitiveContent` — the secret scanner | 30 in-process regular expressions | **no.** There is no external dependency to become unreadable |
+| `isPoisonedAt` — the poison scanner | reads an **operator-editable file** of toxic phrases | **yes.** If that file cannot be read, the function returns "not poisoned" (`internal/core/memory.go:845-851`) and the scan **passes everything** |
+
+That asymmetry is invisible from the outside, which is exactly why it needs a
+stated contract: a skipped scan and a successful scan look identical to the
+caller.
+
+**The contract: a package import fails closed.**
+
+> If the toxic-phrase scanner cannot load its phrase file, the import is
+> **refused** with `scanner_unavailable`, and **nothing is written** — no
+> manifest row, no file row, no blob row, no projection.
+
+**Why refusal rather than a warning.** A warning would let an import report
+`success: true` on content that was never checked against the one scanner
+that looks for prompt injection. The design's threats 14, 15 and 18 all rest
+on that scan; an import that skipped it would be exactly the "skipped scan
+reported as successful" outcome the correction forbids. Refusing costs the
+operator one command and one clear message; it removes a silent hole.
+
+**The asymmetry is stated rather than fixed here.** Closing the poison
+scanner's own fail-open path is a change to an existing component with its
+own callers, and it is outside this design's scope. The package import does
+not depend on that being fixed — it checks for itself.
+
+**What a successful import therefore guarantees.** For every file it stores,
+the manifest records which scanners actually ran (§5.5). A binary asset
+records a **disclosed skip** (`poison: false` — the poison scan does not apply
+to binary bytes, §7.3). There is no way for a row to record a scan that did
+not happen, because an import that could not scan does not write a row at all.
+
+### 7.3 Scanner coverage by file class
 
 | class | detection | stored | secret scan | poison scan | FTS-indexed | executable |
 |---|---|---|---|---|---|---|
@@ -639,20 +1116,33 @@ The findings below are not assertions about `archive/zip`; they are measured.
 | reference Markdown | `references/**.md` | yes | full | full | **no** | no |
 | other text | `.txt`, `.json`, `.yaml`, `.yml` | yes | full | full | no | no |
 | script | `.sh`, `.py`, `.js`, `.rb`, `.pl` | yes, flagged | full | full | no | **never** |
-| binary asset | `.png`, `.jpg`, `.svg`, `.pdf`, `.woff2` | opt-in | secret patterns only | no | no | no |
+| binary asset | `.png`, `.jpg`, `.svg`, `.pdf`, `.woff2` | opt-in | secret patterns only | **no — a disclosed skip** | no | no |
 | executable binary | ELF / PE / Mach-O | **rejected** by default | — | — | — | — |
 
-### 7.2 Trust boundaries
+The "no" in the poison column for a binary asset is a **recorded skip**, not a
+pass and not a failure: the poison scanner matches prose phrases, and running
+it over arbitrary binary bytes produces meaningless output. The manifest
+records it as `{"secret": true, "poison": false}` so a reader can tell the
+difference between "scanned and clean" and "not applicable" (§5.5).
+
+### 7.4 Trust boundaries
 
 * **B1 — archive to MPM.** Untrusted. Everything is canonicalised, bounded and
-  scanned before a single row is written.
+  scanned before a single row is written. The scan is **fail-closed**: if a
+  required scanner cannot run, the import is refused (§7.2).
 * **B2 — MPM store to agent.** Semi-trusted. The bytes were scanned at import,
   but the scanner is a backstop against a fixed phrase list, not a proof of
-  safety. The read envelope labels provenance so the agent can tell package
-  content from MPM-authored content.
+  safety. Every response that carries package content carries **machine-checkable
+  provenance** — the file's hash and its scan status — so an agent can tell
+  package content from MPM-authored content without parsing a banner out of a
+  prose body (§7, threat 15; §8.2; §8.5).
 * **B3 — agent to execution.** None. MPM does not execute package content.
   Any future "run this skill's script" feature is a separate design with its
   own gate, and is explicitly out of scope here.
+* **B4 — agent to the filesystem.** **None in the first cut.** The
+  agent-facing surface cannot create a package, cannot name a filesystem path
+  and cannot cause a byte to be read from disk (**R4**, §8.3). Import is
+  operator-driven.
 
 ---
 
@@ -661,9 +1151,9 @@ The findings below are not assertions about `archive/zip`; they are measured.
 ### 8.1 Backward-compatibility rules
 
 * The `read` action with no new parameter returns **today's fields
-  unchanged**; it gains one *optional* object (§8.2) that a caller that
-  ignores it never sees. The `list` action and `SkillSummary` are **not
-  modified at all**.
+  unchanged**; for a skill that **is** a package it gains one object (§8.2)
+  that a caller that ignores it never sees. The `list` action and
+  `SkillSummary` are **not modified at all**.
 * The new actions are additive to the `mpm_skills` action enum. The pinned
   `save` / `read` / `list` entries remain, so the existing schema guard
   (`internal/core/tools/schema_guard_test.go:548-575`) still passes.
@@ -682,62 +1172,146 @@ today.
   the original file, so the returned body is byte-identical to what today's
   `read` would return for that document.
 * When the package declares no version, the projection has one frontmatter
-  line added, and the response gains an optional `version_override` object
-  describing exactly that. No existing field changes.
-* **No package file is ever inlined by `read`.** The agent must ask for a
-  specific file.
+  line added, and the response carries a `version_override` object describing
+  exactly that. No existing field changes.
+* **No package file other than the entrypoint is ever inlined by `read`.**
+  The agent must ask for a specific file.
 
-The `read` response gains one optional top-level object when the skill has a
-package:
+#### 8.2.1 The provenance object is **not** optional for a packaged skill (**R6**)
+
+The first revision described the `package` object as *optional*, and it
+carried only `entrypoint`, `file_count`, `package_hash` and `version_override`
+— no per-file hash and no scan status. Meanwhile the `read` action inlines the
+entrypoint body straight into the agent's context
+(`internal/core/tools/handlers.go:3814` returns `skill.Body`), with no
+provenance marker on it at all. So the one piece of package content most
+likely to carry an injection — the entrypoint, the only file inlined by
+default — came back with nothing an agent could check.
+
+**The correction.** The `package` object is **present whenever the skill is a
+package**, and it carries the entrypoint's hash and its scan status:
 
 ```json
 {
   "success": true,
-  "id": "skill:system-prompt-writer-v1.0.0",
+  "id": "skill:system-prompt-writer-v1.0.0-unversioned",
   "name": "system-prompt-writer",
-  "version": "1.0.0",
+  "version": "1.0.0-unversioned",
   "body": "…",
   "is_global": false,
   "package": {
     "entrypoint": "SKILL.md",
+    "entrypoint_sha256": "783ece4b3869ae42d2d46f540d01d1da0f61147a8eada519eff15941b46d423d",
     "file_count": 3,
     "package_hash": "…",
-    "version_override": {"declared": null, "effective": "1.0.0",
+    "scanned": true,
+    "version_override": {"declared": null, "effective": "1.0.0-unversioned",
                          "reason": "package_declares_no_version"}
   }
 }
 ```
+
+* `entrypoint_sha256` is the hash of the **original** file bytes, as supplied
+  (§5.2) — not of the projection. The caller can therefore verify that the
+  body it is looking at derives from that file.
+* `scanned` is `true` only when every scanner that applies to the entrypoint
+  actually ran and passed. It is not a constant: a package whose import
+  recorded a disclosed skip reports that skip in the `files` listing, and the
+  import would have been refused outright if a required scanner could not run
+  (§7.2).
+* For a skill that is **not** a package, the object is **absent** — so C1
+  holds exactly: a caller of today's API sees today's response byte-for-byte
+  for every skill that is not a package.
+
+**What this guarantee is, and is not.** It is **machine-checkable provenance on
+every response that carries package content**: a hash and a scan status, on
+the `read` response and on the `read_file` response, that an agent or a tool
+can verify and act on. It is **not** a human-readable warning banner inside
+the entrypoint prose — the body is returned as the same string it is today.
+The poison scanner remains a backstop against a fixed phrase list, and this
+design does not claim it is more than that (§7, threat 15).
 
 `list` is deliberately **not** enriched. `SkillSummary` has no JSON tags, so it
 serialises with Go field names; adding a field would change the shape of a
 structure that the wake context, the proactive-recall hint and `mpm info` all
 consume. Discovery stays byte-identical.
 
-### 8.3 New actions
+### 8.3 New actions — and what is **not** on the agent-facing surface (**R4**)
 
-| action | purpose |
-|---|---|
-| `import` | import a package from a `.skill` archive or a directory |
-| `files` | list a package's files — **metadata only, no content** |
-| `read_file` | read one file, optionally bounded |
-| `export` | write the package back out as a `.skill` archive |
-| `verify` | re-hash every stored file and report integrity |
+| action | purpose | on the agent-facing surface? |
+|---|---|---|
+| `files` | list a package's files — **metadata only, no content** | **yes** — read-only |
+| `read_file` | read one file, optionally bounded | **yes** — read-only |
+| `verify` | re-hash every stored file and report integrity | **yes** — read-only |
+| `export` | write the package back out as a `.skill` archive | **no** in the first cut — it writes to the filesystem |
+| `import` | import a package from a `.skill` archive or a directory | **no** in the first cut — **CLI only** |
+
+**Why there is no agent-facing `import` action.** The first revision gave the
+MCP surface an `import` action with a required `path` parameter. That would
+have been the **first** action in the whole tool surface to accept a
+filesystem path that may name a **directory**, and it specified no
+confinement, no allow-listed root and no operator-consent gate.
+
+The scale of that is worth stating plainly, because it is the substance of the
+correction rather than a stylistic preference:
+
+* The MCP registry's **only** path-shaped parameter today is `filepath` on
+  `mpm_references` (`internal/core/tools/registry_list.go:217`), and that one
+  names a **file** with an extension allow-list. `mpm_skills` has no path
+  parameter at all. There is **no path-confinement helper anywhere in the
+  tool layer** — no `confine`, no `safePath`, no `resolveWithin`, no
+  `ensureUnder`, and no `filepath.EvalSymlinks`.
+* An agent could therefore have pointed `path` at any directory the MPM
+  process can read — the live workspace, `~/.ssh`, `/etc` — and imported up to
+  512 files and 32 MiB of it.
+* Those bytes are then stored **durably**, and are surfaced to **other
+  agents** through discovery, `read` and `read_file`.
+
+That is a read primitive, an amplifier (durable, and replicated into other
+agents' contexts) and a persistence mechanism, in one action, on the surface
+whose stated purpose is to give an agent a *bounded* vocabulary.
+
+**The correction: import is operator-driven.** The CLI
+(`mpm skill import <path>`) keeps an arbitrary path, because the CLI *is* the
+operator. The agent-facing package surface is **read-only** — `files`,
+`read_file` and `verify` — and can neither create a package nor name a
+filesystem path (§7.4, B4). Nothing in this design's motivation requires an
+agent to *create* packages; the motivation is that agents should be able to
+*use* them, progressively and with provenance.
+
+**The deferred question, for the operator.** Whether a *later* stage should
+add an agent-facing import — and if so, confined to an operator-configured
+import root, with the same explicit consent gate that `promote_to_global`
+already uses (`internal/core/skill_db.go:788-796`) — is **§12.2 O14**. It is
+not answered here, and nothing in stages P1–P9 depends on the answer.
+
+**The directory-walk confinement that applies to the CLI path anyway.**
+Operator-driven does not mean unconfined. The CLI's directory import must
+still: use `os.Lstat` and never follow a symlink; **refuse to descend into a
+symlinked directory**; **refuse to leave the resolved import root** after each
+hop; and enforce the file-count and byte caps **during** the walk, not after
+enumeration (§7, threats 11 and 19; **R12**). The walk's resolved root is
+computed once with `filepath.EvalSymlinks` and every candidate is compared
+against it before it is read.
 
 Parameters (all additive; the `params` object is already
 `additionalProperties: true`):
 
 | action | parameters |
 |---|---|
-| `import` | `path` (required), `version`, `name`, `entrypoint`, `force`, `allow_binary` |
 | `files` | `skill_id`, or `name` + `version` |
 | `read_file` | `skill_id`, or `name` + `version`; `path` (required); `offset`, `limit`, `max_bytes`, `raw` |
-| `export` | `skill_id`, or `name` + `version`; `output` |
 | `verify` | `skill_id`, or `name` + `version` |
+| `import` *(CLI only)* | `path` (required), `version`, `name`, `entrypoint`, `allow_binary` |
+| `export` *(CLI only in the first cut)* | `skill_id`, or `name` + `version`; `output` |
+
+Note that `import` has **no `force` parameter** (§5.7, §5.8): a published
+package is immutable, so there is nothing for a force flag to do.
 
 ### 8.4 Command line
 
 ```bash
-mpm skill import <path> [--version V] [--entrypoint P] [--name N] [--force]
+mpm skill import <path> [--version V] [--entrypoint P] [--name N]
                       [--allow-binary] [--json]
 mpm skill files  <name|id> [--version V] [--json]
 mpm skill read-file <name|id> --path P [--offset N] [--limit N]
@@ -750,9 +1324,12 @@ mpm skill verify <name|id> [--version V] [--json]
 containing a package, or a single Markdown file (which becomes a one-file
 package).
 
+`mpm skill import` is **operator-driven** and is the only import surface in
+the first cut (§8.3).
+
 ### 8.5 Response shapes
 
-`files` — metadata only:
+`files` — metadata only, including the scan status of each file:
 
 ```json
 {
@@ -762,7 +1339,8 @@ package).
   "files": [
     {"path": "SKILL.md", "sha256": "783ece4b…", "size_bytes": 12976,
      "content_type": "text/markdown; charset=utf-8", "role": "entrypoint",
-     "executable": false}
+     "executable": false,
+     "scanned": {"secret": true, "poison": true}}
   ]
 }
 ```
@@ -780,7 +1358,7 @@ package).
   "offset": 0,
   "next_offset": null,
   "source": "skill_package",
-  "scanned": true
+  "scanned": {"secret": true, "poison": true}
 }
 ```
 
@@ -790,11 +1368,11 @@ package).
 {
   "success": true,
   "status": "installed",
-  "skill_id": "skill:system-prompt-writer-v1.0.0",
+  "skill_id": "skill:system-prompt-writer-v1.0.0-unversioned",
   "name": "system-prompt-writer",
-  "version": "1.0.0",
+  "version": "1.0.0-unversioned",
   "declared_version": null,
-  "version_override": {"effective": "1.0.0", "reason": "package_declares_no_version"},
+  "version_override": {"effective": "1.0.0-unversioned", "reason": "package_declares_no_version"},
   "entrypoint": "SKILL.md",
   "entrypoint_sha256": "783ece4b…",
   "projection_sha256": "…",
@@ -805,35 +1383,67 @@ package).
 }
 ```
 
-`status` is one of `installed`, `already_installed` (idempotent re-import) or
-`replaced` (a forced overwrite).
+`status` is one of `installed` or `already_installed` (idempotent re-import).
+There is no `replaced`: a published package is immutable (§5.7, §5.8). A
+refused import reports `success: false` with a reason code and writes nothing.
 
 ### 8.6 Bounded and partial reads
 
-`read_file` accepts `offset` (a line index), `limit` (a line count) and
-`max_bytes`. The default byte cap is 64 KiB and the hard cap is 1 MiB. A
-truncated response carries `truncated: true` and a `next_offset` the caller can
-resume from.
+`read_file` accepts `offset` (a **line index**), `limit` (a **line count**) and
+`max_bytes` (a **byte cap**). The default byte cap is 64 KiB and the hard cap
+is 1 MiB. A truncated response carries `truncated: true` and a `next_offset`
+the caller can resume from.
+
+**`next_offset` is defined precisely**, because the three parameters use
+different units and the interaction was left implicit in the first revision:
+
+* `offset` and `next_offset` are **line indices**, zero-based, into the file's
+  line sequence. `offset: 0` is the first line. `next_offset` is always the
+  index of the **first line that was not returned**, so a caller resumes with
+  `offset = next_offset` and no line is ever skipped or repeated.
+* **`next_offset` names a line, not a byte.** The byte cap is applied *after*
+  the line range is selected, and it never selects a different range.
+* **A line cut in half by the byte cap is not returned.** The implementation
+  reads whole lines only: the byte cap truncates at a line boundary, and the
+  line that would have crossed the cap is left for the next call. A partially
+  returned line would corrupt the caller's line-index bookkeeping, and a
+  partially returned *Markdown* line could change its meaning.
+* **The byte cap therefore reduces the number of lines returned**, not their
+  integrity. A file whose first line alone exceeds the cap returns **zero**
+  lines, `truncated: true`, and `next_offset` equal to the original `offset` —
+  which is the honest answer, and the reason the default cap is 64 KiB rather
+  than something small.
+* `next_offset` is `null` when the response is not truncated.
+* `limit` bounds the line count; `max_bytes` bounds the bytes. Whichever
+  binds first ends the read, and `next_offset` reflects that.
 
 **A bounded read does not verify the CRC** — the standard library only checks
 it at end-of-stream (§7, threat 13). The response's `sha256` is the hash of
 the **stored** bytes, which was verified at import and can be re-verified with
-`verify`; it is not a claim that this particular read was end-to-end.
+`verify`; it is not a claim that this particular read was end-to-end. The
+per-file SHA-256 in the response is re-verified against the stored bytes on
+every read, so a corrupted stored file is refused rather than returned
+(§13 T34).
 
 ### 8.7 Progressive retrieval and context economy
 
 | call | bytes loaded |
 |---|---|
 | discovery / `list` / wake context | **zero** package bytes |
-| `read` | the entrypoint projection only |
+| `read` | the entrypoint projection only, plus its hash and scan status |
 | `files` | manifest metadata only |
 | `read_file` | exactly one file, optionally bounded |
-| `export` | everything, but to a file, not to the agent's context |
+| `export` *(CLI only in the first cut)* | everything, but to a file, not to the agent's context |
 
 Nothing in the API returns a whole package into an agent's context by
 default. The reference package's own convention (§2.3) — an entrypoint that
 names its references — is exactly the progressive pattern this API supports:
 read the entrypoint, see `references/templates.md`, fetch that file.
+
+**And nothing on the agent-facing surface can *add* package bytes.** There is
+no import action, no filesystem path parameter, and no way for an agent to
+cause a byte to be read from disk (§8.3, §7.4 B4). The progressive pattern
+runs one way: an operator installs, an agent reads.
 
 The wake-context catalogue is capped at 20 entries
 (`internal/core/wake_skills.go:5-16`) and each entry is a metadata-only
@@ -858,30 +1468,35 @@ CREATE TABLE IF NOT EXISTS skill_package_blobs (
 
 -- The package manifest. One row per skill version that has a package.
 CREATE TABLE IF NOT EXISTS skill_packages (
-    skill_id      TEXT PRIMARY KEY,
-    name          TEXT NOT NULL,
-    version       TEXT NOT NULL,
-    format        TEXT NOT NULL DEFAULT 'mpm-skill-package/1',
-    entrypoint    TEXT NOT NULL,
-    manifest      TEXT NOT NULL,
-    package_hash  TEXT NOT NULL,
-    source_sha256 TEXT,
-    is_global     INTEGER NOT NULL DEFAULT 0,
-    created_at    INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-    updated_at    INTEGER,
+    skill_id          TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    version           TEXT NOT NULL,
+    declared_version  TEXT,
+    version_source    TEXT NOT NULL,
+    format            TEXT NOT NULL DEFAULT 'mpm-skill-package/1',
+    entrypoint        TEXT NOT NULL,
+    entrypoint_sha256 TEXT NOT NULL,
+    manifest          TEXT NOT NULL,
+    package_hash      TEXT NOT NULL,
+    source_sha256     TEXT,
+    is_global         INTEGER NOT NULL DEFAULT 0,
+    created_at        INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    updated_at        INTEGER,
     FOREIGN KEY (skill_id) REFERENCES memories(id) ON DELETE CASCADE
 );
 
 -- One row per file in a package.
 CREATE TABLE IF NOT EXISTS skill_package_files (
-    skill_id      TEXT NOT NULL,
-    path          TEXT NOT NULL,
-    sha256        TEXT NOT NULL,
-    size_bytes    INTEGER NOT NULL,
-    content_type  TEXT NOT NULL,
-    role          TEXT NOT NULL,
-    executable    INTEGER NOT NULL DEFAULT 0,
-    raw_path      TEXT,
+    skill_id         TEXT NOT NULL,
+    path             TEXT NOT NULL,
+    sha256           TEXT NOT NULL,
+    size_bytes       INTEGER NOT NULL,
+    content_type     TEXT NOT NULL,
+    role             TEXT NOT NULL,
+    executable       INTEGER NOT NULL DEFAULT 0,
+    secret_scanned   INTEGER NOT NULL DEFAULT 0,
+    poison_scanned   INTEGER NOT NULL DEFAULT 0,
+    raw_path         TEXT,
     PRIMARY KEY (skill_id, path),
     FOREIGN KEY (skill_id) REFERENCES skill_packages(skill_id) ON DELETE CASCADE,
     FOREIGN KEY (sha256) REFERENCES skill_package_blobs(sha256) ON DELETE NO ACTION
@@ -895,6 +1510,22 @@ Notes on the shape:
 
 * The primary key of `skill_packages` **is** the skill id (§5.1). There is no
   second identity space and no mapping table.
+* `path` is the **canonical** path — NFC-normalised, POSIX-separated,
+  collision-checked — and it is the file's identity. `raw_path` is the name as
+  it appeared in the source archive and is **display-only**: it never
+  addresses a file and is never compared for identity (§5.4).
+* `entrypoint_sha256` is the hash of the **original** entrypoint bytes, as
+  supplied. `projection_sha256` lives inside the manifest JSON, because it is
+  a property of the derived projection rather than of the package.
+* `declared_version` and `version_source` record **how** the effective
+  version was arrived at — `declared` (the file carried a `version:`) or
+  `package_declares_no_version` (the pre-release default of §5.2, or an
+  operator override). A row therefore always says whether its version came
+  from the package or from MPM.
+* `secret_scanned` and `poison_scanned` record **which scanners actually ran
+  on this file** (§5.5, §7.2). A binary asset has `poison_scanned = 0` — a
+  disclosed skip. A row can never claim a scan that did not happen, because an
+  import that could not scan does not write a row at all.
 * `ON DELETE NO ACTION` on the blob foreign key means a blob that is still
   referenced by a file row **cannot** be deleted. The garbage collector
   therefore deletes file rows first and unreferenced blobs second.
@@ -903,28 +1534,80 @@ Notes on the shape:
   reference this blob" cheaply.
 * The tables are created in dependency order — blobs, packages, files — so no
   foreign key ever points at a table that does not exist yet.
-* The package tables are **not** FTS-indexed, deliberately (§12, **O5**).
+* The package tables are **not** FTS-indexed, deliberately (§12.2 **O5**).
 * `is_global` on the package row mirrors the skill row, so promotion is a
   single consistent flip.
+
+**The collector's safety depends on the import's atomicity.** A blob row and
+the file row that references it are committed **together**, in the one
+transaction the importer owns (§3.4 E5, §4.2, **R2**). That is what makes the
+reference check sound: the collector can never observe a blob row whose
+referencing file row is not yet committed, and can therefore never decide that
+a blob is unreferenced while an import is in flight. A future refactor that
+splits the import across two transactions would break the collector's safety
+guarantee **without breaking any test that does not specifically check for
+it** — which is why the dependency is stated here rather than left implicit.
 
 ---
 
 ## 10. Stages
 
 Each stage is a separate pull request, independently testable, and green on
-its own. No stage depends on a later one.
+its own.
 
-| stage | content | acceptance |
-|---|---|---|
-| **P1** | The three tables, the DDL, the `CanonicalMPMSchema` registration, and the `TestCanonicalSchemaSync` guard | A fresh database has the tables; an old database is upgraded in place; a dump containing the tables restores; the sync guard is green |
-| **P2** | Path canonicalisation, collision detection, NFC normalisation, the manifest type, canonical JSON, `package_hash` — pure functions | Unit tests for every rejection rule in §7, threats 1, 4, 6, 7, 8 |
-| **P3** | Directory import: path rules, limits, per-file scanning, the derived projection with the version override, the single-transaction write, idempotence | The operator's package imported from an extracted directory produces the §2.5 hashes and the expected projection; a rejected file leaves nothing behind |
-| **P4** | The ZIP reader: entry-type rejection, path rejection, byte caps, ratio caps, CRC verification by full read | The operator's `.skill` imports with the same `package_hash` as the directory import; the malicious fixture set is rejected with the right reason codes |
-| **P5** | The read API: `files`, `read_file`, bounded reads, hash verification, the provenance envelope | A reference read returns the exact bytes; a corrupted stored file is refused with `content_hash_mismatch` |
-| **P6** | The export writer: deterministic ZIP output, the round trip, export of a legacy single-document skill as a one-file package | `package_hash` is stable across export → import; two exports of one package are byte-identical |
-| **P7** | The CLI subcommands, the `mpm_skills` action enum extension, the registry description, the schema-guard pins | The documentation gate is green; the existing `save` / `read` / `list` pins still pass; the new actions are pinned by new guards |
-| **P8** | Promotion of packages, the operator-invoked blob collector with its reference check, the blobstore-isolation test | `is_global` flips on both rows; the collector never deletes a referenced blob; `mpm blob gc` leaves the package tables untouched |
-| **P9** | The `docs/SPEC.md` skill section, the agent-protocol note that package content is data, and the promotion of this document out of `docs/dev/` | The spec describes the shipped behaviour; the library entry carries a status label |
+**The ordering rule.** No stage depends on behaviour delivered only by a
+later stage. The dependency graph below is therefore written out explicitly,
+and each stage's *depends on* column names only stages that precede it.
+
+The stage order was **re-ordered in revision 2**. The first revision's order
+put the read API and the export writer *before* the CLI surface, which was
+fine, but it also put the **export loss marker** nowhere — and the marker is
+needed in the same release that first makes a package exist (§6.3). It also
+left the write primitives implicit: the first revision's "directory import"
+stage was supposed to produce an atomic import, but the tx-aware write
+primitive it depends on (§3.4 E5) was never given a stage of its own, which
+made the atomicity claim in threat 17 unimplementable as staged.
+
+| stage | content | depends on | acceptance |
+|---|---|---|---|
+| **P1** | The three tables, the DDL, the `CanonicalMPMSchema` registration, the `TestCanonicalSchemaSync` guard, and the **rollback runbook** (§6.1, §6.2) | — | A fresh database has the tables; an old database is upgraded in place; a dump containing the tables restores; the sync guard is green; the runbook names both rollbacks and states the export-before-rollback precondition |
+| **P2** | Path canonicalisation, collision detection, NFC normalisation, the manifest type, canonical JSON, `package_hash` — pure functions | — | Unit tests for every rejection rule in §7, threats 1, 4, 6, 7, 8; the canonical path is the identity and `raw_path` is display-only (§5.4) |
+| **P3** | **The write primitives and the guards.** The tx-aware skill writer (a thin extraction from `SaveSkillWithInvocation` that writes the projection through `saveMemoryRow` via `txNode`), the **package-immutability guard** on the legacy force path, and the **skills exemption** from `PruneOlderThan` | P1 | The guard refuses a `save --force` against a packaged skill with `package_immutable` and writes nothing; `mpm prune --older-than` does not remove a skill that owns a package; the projection can be written inside a caller's transaction (**R1**, **R2**, **R7**) |
+| **P4** | **Directory import**: path rules, limits enforced *during* the walk, symlinked-directory refusal, root confinement, per-file scanning with the **fail-closed** scanner check, the derived projection with the pre-release effective version, the single-transaction write, idempotence — **and the export loss marker** (§6.3) | P1, P2, P3 | The operator's package imported from an extracted directory produces the §2.5 hashes and the expected projection; a rejected file leaves nothing behind; an unreadable toxic-phrase file refuses the import with `scanner_unavailable` and writes nothing; `mpm export --collection skills` names every package it cannot carry (**R3**, **R10**, **R11**) |
+| **P5** | **ZIP import**: entry-type rejection (best-effort), path rejection, byte caps, ratio caps, CRC verification by full read | P1, P2, P3, P4 | The operator's `.skill` imports with the same `package_hash` as the directory import; the malicious fixture set is rejected with the right reason codes; **the FAT-creator archive is accepted, and no byte reaches the filesystem** (**R5**) |
+| **P6** | **The read API**: `files`, `read_file`, bounded reads with the defined `next_offset`, hash verification, the non-optional provenance object | P1, P2 | A reference read returns the exact bytes; a corrupted stored file is refused with `content_hash_mismatch`; the `read` response for a packaged skill carries `entrypoint_sha256` and `scanned`; `next_offset` names a line and never repeats or skips one (**R6**) |
+| **P7** | **The export writer**: deterministic ZIP output, the round trip, export of a legacy single-document skill as a one-file package, and the **full skills export** that emits one `.skill` archive per package (§6.3) | P1, P2, P4, P5 | `package_hash` is stable across export → import; two exports of one package are byte-identical; `mpm export --collection skills` now carries every package and no longer needs the loss marker |
+| **P8** | **The CLI and MCP surfaces**: the CLI subcommands, the read-only `mpm_skills` action extension (`files`, `read_file`, `verify`), the registry description, the schema-guard pins | P4, P5, P6, P7 | The documentation gate is green; the existing `save` / `read` / `list` pins still pass; the new actions are pinned by new guards; **no agent-facing action accepts a filesystem path** (**R4**) |
+| **P9** | **Promotion, garbage collection and the spec**: promotion of packages, the operator-invoked blob collector with its reference check, the blobstore-isolation test, the "no byte reaches the filesystem" test, the `docs/SPEC.md` skill section, the agent-protocol note that package content is data, and the promotion of this document out of `docs/dev/` | P1, P4 | `is_global` flips on both rows; the collector never deletes a referenced blob; `mpm blob gc` leaves the package tables untouched; an import writes nothing to the filesystem; the spec describes the shipped behaviour; the library entry carries a status label |
+
+**Why P3 exists as its own stage.** The corrections in R1, R2 and R7 are all
+changes to **existing write paths**, not new features:
+
+* R1 changes what the legacy force path does when a package row exists. That
+  is a change to `SaveSkillWithInvocation`, which is used by the CLI, by the
+  MCP surface and by the workshop.
+* R2 creates the tx-aware write primitive the importer depends on. Extracting
+  it from `SaveSkillWithInvocation` is a refactor of that function, and it
+  must land — and be green — **before** the importer that uses it.
+* R7 changes a hard delete that runs on a completely different code path
+  (`mpm prune --older-than`).
+
+Landing them together with the importer would have put three unrelated
+behavioural changes into one pull request, each of which could regress
+independently. Separated, each is a small, reviewable, independently green
+change, and the importer stage can then assume them.
+
+**Why the export loss marker is in P4 and not P7.** The marker exists because
+packages exist. P4 is the first stage in which a package can exist, so P4 is
+the first stage in which `mpm export --collection skills` becomes a loss
+path. Shipping the loss without the marker would be a silent data-loss
+release; shipping the marker a stage early would be a warning about a
+condition that cannot yet occur. P4 is exactly the right point, and it does
+not depend on anything from P5–P7.
+
+**Why P8 comes after the read API.** The MCP action extension exposes
+`files`, `read_file` and `verify` — all of which are P6's behaviour. P8
+therefore consumes P6 and cannot be reordered before it.
 
 ---
 
@@ -944,9 +1627,25 @@ one; the `..` cases need an explicit traversal check; and
 `C:\Windows\System32\evil.dll` is **not** absolute on Linux, so a
 Linux-only absolute check would miss it.
 
-**Entry types are detectable.** With the correct `fs.FileMode` values, the
-reader reports `L---------` for a symlink, `p---------` for a FIFO,
-`D---------` for a device and `d---------` for a directory.
+**Entry types are detectable — but only under a Unix creator byte.** With the
+correct `fs.FileMode` values, the reader reports `L---------` for a symlink,
+`p---------` for a FIFO, `D---------` for a device and `d---------` for a
+directory. **Rewrite the archive's creator byte from Unix to FAT/MS-DOS** —
+one byte per central-directory record, which is what a ZIP written without
+Unix attributes carries — and the same entries become:
+
+```
+link -rw-rw-rw-  type=----------  regular=true   → passes the type check
+fifo -rw-rw-rw-  type=----------  regular=true   → passes the type check
+dev  -rw-rw-rw-  type=----------  regular=true   → passes the type check
+dir  -rw-rw-rw-  type=----------  regular=true   → passes the type check
+```
+
+`FileHeader.Mode()` interprets the external attributes **only** when the
+creator byte says Unix. This is the measurement behind **R5** and §7.1, and it
+is the reason the entry-type check is stated as best-effort and the "no byte
+reaches the filesystem" rule (Rule 2, §4.4) is stated as the actual
+boundary.
 
 **A lying size header is caught, but only at end-of-stream.** A declared size
 of 10 bytes against a 200 000-byte payload yields `zip: not a valid zip file`
@@ -978,22 +1677,75 @@ Today's skill scan covers `memories.content` only. Without a per-file scan, a
 package's reference files would reach the database unscanned, and those files
 are exactly where an author would put an API key.
 
+### 11.1 The corrections, and the measurement behind each
+
+The twelve corrections are not stylistic. Each one is a statement the
+repository contradicts, and each was verified against the code at
+`f8d4b95a` before this revision was written.
+
+| correction | what was measured | where |
+|---|---|---|
+| **R1** | The force branch replaces `memories.content` **in place** under the same id — `UPDATE memories SET content = ? … WHERE id = ?` — and it is the only in-place content writer for a skills row in the tree. `force` reaches it straight from the MCP payload. | `internal/core/skill_db.go:624-631`, `internal/core/tools/handlers.go:3758` |
+| **R2** | `SaveSkillWithInvocation` cannot be composed into a caller's transaction: the new-row path owns its own `db.Begin()`/`tx.Commit()`, and the force path is a bare `db.Exec` with no transaction at all. The tx-aware primitive that *is* composable is `saveMemoryRow`, reached through the `txNode` adapter. | `internal/core/skill_db.go:652`, `735`, `624`, `730`; `internal/core/db.go:4472` |
+| **R3** | `semver.IsValid("v1.0.0-unversioned")` is `true`; `semver.Compare` against `v1.0.0` is **-1** and against `v0.9.0` is **+1**. The id `skill:system-prompt-writer-v1.0.0-unversioned` round-trips to name `system-prompt-writer`, version `1.0.0-unversioned`. | `internal/core/skill.go:174-202`; §2.5, §5.2 |
+| **R4** | The MCP registry contains **exactly one** path-shaped parameter in the whole tool surface — `filepath` on `mpm_references`, which names a *file* with an extension allow-list. `mpm_skills` has none. There is no path-confinement helper in the tool layer: no `confine`, `safePath`, `resolveWithin`, `ensureUnder`, and no `filepath.EvalSymlinks`. | `internal/core/tools/registry_list.go:217`, `337-376` |
+| **R5** | The creator-byte measurement above: under a FAT/MS-DOS creator byte, `Mode()` reports every entry as `0666` regular, and a symlink, a FIFO and a device all **pass** the type check. | §7.1, §11 above |
+| **R6** | The MCP read handler returns `"body": skill.Body` with **no** provenance envelope — no hash, no scan status. The `package` object the first revision proposed carried `entrypoint`, `file_count`, `package_hash` and `version_override`, and was optional. | `internal/core/tools/handlers.go:3794-3818` |
+| **R7** | `PruneOlderThan` is `DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL AND <DirectiveExclusionClause>` — there is **no `collection` filter**. Only directives are excluded. | `internal/core/web_db.go:1781-1792` |
+| **R8** | `PRAGMA user_version` appears **nowhere** in the tree: there is no schema-version gate, so an old binary opens a newer database without complaint. `mpm backup` is `sqlite3 .dump` — generic — and `restore-db` rejects any table not on `CanonicalMPMSchema`. | `internal/core/sql_dump_validator.go:530+`; §6.2 |
+| **R9** | The two operations are materially different: the binary rollback leaves the rows in the file, the schema rollback destroys them. The first revision used one word for both. | §6.1 |
+| **R10** | `isPoisonedAt` returns `(false, "")` when `loadPoisonPhrasesAt` fails, so an unreadable phrase file makes the poison scan **pass everything**. The secret scanner is 30 in-process regexes and cannot fail this way. | `internal/core/memory.go:845-851` |
+| **R11** | The first revision contradicted itself: the compatibility matrix said the package metadata is not exported, while **O8** recommended carrying it "as a follow-up after P6". | §6.3 |
+| **R12** | The directory path has no archive to bound it: a directory holding ten million entries would be fully walked, `Lstat`'d and measured before the first rejection, unless the caps are enforced in flight. | §7, threats 11 and 19 |
+
+**Two measurements are deliberately *not* claimed.** The first revision's
+rationale note for `1.0.0` was a **comment** in a test header, not a
+constraint, and is withdrawn in §5.2. And no acceptance criterion in this
+document depends on the ZIP entry-type check being available — T35 exists
+specifically to prove that (§13).
+
 ---
 
-## 12. Open operator decisions
+## 12. Operator decisions
+
+The decisions are split by **status**, not by topic. §12.1 records the
+decisions this revision **resolves** — each with its rationale, the evidence
+behind it, and the correction that settled it. §12.2 records the choices that
+**still require the operator's answer**.
+
+### 12.1 Resolved architectural decisions
+
+These are settled by this revision. They are recorded here rather than left
+implicit in the prose so that a reader can see exactly what was decided, on
+what evidence, and by which correction.
+
+| | decision | resolution | rationale and evidence | settled by |
+|---|---|---|---|---|
+| **O1** | The effective version for a package that declares none | **`1.0.0-unversioned`**, overridable with `--version` | A pre-release sorts **below** the genuine `1.0.0` and **above** every older genuine release (`semver.Compare` = -1 against `v1.0.0`, +1 against `v0.9.0`), so a later genuine release can be installed alongside it without a force-overwrite, and the package stays discoverable by name. The id round-trips. The `1.0.0` default is withdrawn: it collides with a later genuine `1.0.0` of the same package. `0.0.0` is withdrawn: its only stated objection was discoverability, which the pre-release form solves, and the constraint it was justified against turned out to be a comment in a test header rather than a rule. | **R3**, §5.2 |
+| **O2** | May a published package be replaced in place by a force-overwrite? | **No.** The legacy `save --force` against a packaged skill is **refused** with `package_immutable`, and nothing is written | A published package has one projection, one manifest and one set of file rows; an in-place rewrite would have to reproduce the import's scanner, hashing, manifest and version logic in a second code path, or leave the manifest describing the previous document. Refusal is smaller, has one behaviour, and is consistent with §5.7. The divergence from today's `save --force` is deliberate and stated. | **R1**, §5.8.1 |
+| **O7** | Should `read` gain a `package` object? | **Yes, and it is not optional for a packaged skill.** It carries `entrypoint_sha256` and `scanned` | The `read` action inlines the entrypoint body — the one piece of package content most likely to carry an injection — and it came back with nothing an agent could check. Making the object present-when-packaged and carrying the hash and the scan status gives every response that carries package content machine-checkable provenance, while leaving every non-packaged skill's response byte-identical to today's. | **R6**, §8.2.1 |
+| **O8** | Does `mpm export --collection skills` carry the package? | **It must not lose it silently.** Before full package export exists, the export **names** every package it cannot carry; stage P7 then makes the export complete | The first revision contradicted itself on this row, and the matrix's version — the one an implementer would have built — is a silent data-loss path for content that exists nowhere else. The marker is the contract until the export is complete. | **R11**, §6.3 |
+| **O11** | Does the agent-facing surface get an `import` action in the first cut? | **No.** Import is **CLI-only**; the agent-facing package surface is read-only (`files`, `read_file`, `verify`) | An agent-facing `import` would be the first action in the tool surface to accept a path that may name a directory, with no confinement helper anywhere in the tool layer. It would be a read primitive, an amplifier (durable, and replicated into other agents' contexts) and a persistence mechanism in one action. Nothing in the design's motivation requires an agent to *create* packages. | **R4**, §8.3 |
+| **O12** | If the toxic-phrase file is unreadable, does the import refuse or warn? | **Refuse**, with `scanner_unavailable`, and write nothing | A warning would let an import report success on content never checked against the one scanner that looks for prompt injection. The secret scanner cannot fail open; the poison scanner can, because it reads an operator-editable file. The refusal costs one command; the alternative costs a silent hole. | **R10**, §7.2 |
+| **O13** | May `mpm prune --older-than` remove a skill that owns a package? | **No.** `collection = 'skills'` is excluded from `PruneOlderThan` | The prune is a **collection-blind hard delete** with no `collection` filter, and a package's bytes have no second copy. The exclusion mirrors the existing directive exemption. A deliberate hard shred still cascades — what is removed is unintentional bulk destruction of third-party content. | **R7**, §6.4 |
+
+### 12.2 Open operator decisions
+
+These are **not** settled by this revision. Each has a recommendation and a
+cost, and each needs the operator's answer before the stage that implements it
+begins.
 
 | | decision | recommendation | cost of the alternative |
 |---|---|---|---|
-| **O1** | The effective version for a package that declares none | `1.0.0`, overridable with `--version` | `0.0.0` sorts below every versioned skill, which makes imported packages un-discoverable by name. Requiring an explicit `--version` makes the common case a two-step flow. |
-| **O2** | May a published package be replaced in place by a force-overwrite? | Allow, with an audit row, and offer an `immutable_packages` policy flag | Refusing outright is simpler and strictly safer, but diverges from today's `save --force` behaviour, which overwrites in place. |
 | **O3** | Are binary assets stored by default? | Reject by default; `--allow-binary` opts in | Storing them by default puts unscannable bytes in the database for a collection whose value is textual. |
 | **O4** | Cross-workspace sharing: extend the shared database, or use the archive as the transport? | The archive. No shared-schema change in the first cut | Extending the shared database means adding the three tables to the shared schema, a migration on every shared database, and deciding whether the shared copy is a reference or a copy. |
 | **O5** | Should package files be searchable through FTS? | No. FTS stays on the entrypoint only | Yes makes `mpm skill search` find a phrase buried in a reference, but every reference file becomes an indexed memory row — the Option A problem (§4.1). |
 | **O6** | Are the size caps right — 512 files, 32 MiB total, 4 MiB per file, 256 KiB entrypoint? | Adopt as defaults; make them constants | Larger caps slow `ListSkills`, which parses every skill row's full content. |
-| **O7** | Should `read` gain the optional `package` object? | Yes — additive, and it lets an agent discover that references exist without a separate call | Without it, an agent must call `files` speculatively to learn whether a skill is a package. |
-| **O8** | Should `mpm export --collection skills` carry package metadata? | Yes, as a follow-up after P6 | Without it, an exported skill row alone is not enough to reconstruct a package. |
 | **O9** | Package layouts: a single root directory, or files at the archive's top level? | Accept exactly one — a single root directory, or a flat top level. Multiple roots are rejected | Accepting multiple roots needs a rule for which file is the entrypoint, which is guesswork. |
 | **O10** | The operator's package has no `when_to_use`. MPM's validator emits `missing_when_to_use` as a **warning**, so the import succeeds with a warning. Should a package import require it? | Warn, do not block — but the operator should decide, because requiring it would reject the reference package | Requiring it would enforce discovery quality, at the cost of rejecting legitimate third-party packages that use a prose description instead |
+| **O14** | Should a *later* stage add an agent-facing import, and if so, confined to what root and with what consent gate? | **Defer.** If it is ever added, confine it to an operator-configured import root and reuse the `confirm=true` gate that `promote_to_global` already uses, rather than inventing a new convention | Adding it sooner re-opens the **R4** finding on the agent-facing surface. Nothing in stages P1–P9 depends on this answer. |
+| **O15** | Where does the full skills export put its per-package `.skill` archives (§6.3, stage P7)? | A sibling directory named for the export, one archive per package, named `<name>-<version>.skill` | A single flat archive would need a multi-package container format, which is a new format with its own identity and import rules — larger than the correction requires. |
+| **O16** | Should the `ListSkills` read path be refactored so it no longer parses frontmatter out of every skill row's full content? | **Out of scope for this design.** The 256 KiB entrypoint cap (O6) stands as the mitigation | The refactor would remove the cap's *reason* and make package entrypoints cheap regardless of size. It touches a hot read path used by discovery, the wake context and `mpm info`, and it is not required by any correction in this revision. It is recorded here so it is not lost. |
 
 ---
 
@@ -1005,41 +1757,63 @@ named.
 | # | scenario | expected | stage |
 |---|---|---|---|
 | **T01** | An existing single-document skill, unchanged | Save, read and list behave exactly as today; no package row is created | P1 |
-| **T02** | Import a legacy single-document skill as a package | One file row; the projection equals the original bytes; `projection_sha256 == entrypoint_sha256` | P3 |
-| **T03** | Directory import of the reference package | Three file rows with the §2 hashes; the entrypoint is `SKILL.md` | P3 |
-| **T04** | ZIP import of the reference package | Identical result to T03, including `package_hash` | P4 |
-| **T05** | A package whose entrypoint declares no version | The effective version is `1.0.0`; `version_override` is recorded; **the stored `SKILL.md` bytes are unchanged**; the projection carries `version: 1.0.0` | P3 |
-| **T06** | A relative reference read | `read_file` with `path=references/templates.md` returns the exact bytes; the hash matches; no other file is returned | P5 |
-| **T07** | Identical-content round trip | export → import preserves `package_hash` and every per-file hash; two exports are byte-identical | P6 |
-| **T08** | Atomic failure — a secret in the third file | Zero package rows, zero blob rows, zero `memories` rows; the database is byte-identical to before | P3 |
+| **T02** | Import a legacy single-document skill as a package | One file row; the projection equals the original bytes; `projection_sha256 == entrypoint_sha256` | P4 |
+| **T03** | Directory import of the reference package | Three file rows with the §2 hashes; the entrypoint is `SKILL.md` | P4 |
+| **T04** | ZIP import of the reference package | Identical result to T03, including `package_hash` | P5 |
+| **T05** | A package whose entrypoint declares no version | The effective version is **`1.0.0-unversioned`**; `version_override` is recorded; **the stored `SKILL.md` bytes are unchanged**; the projection carries `version: 1.0.0-unversioned` | P4 |
+| **T06** | A relative reference read | `read_file` with `path=references/templates.md` returns the exact bytes; the hash matches; no other file is returned | P6 |
+| **T07** | Identical-content round trip | export → import preserves `package_hash` and every per-file hash; two exports are byte-identical | P7 |
+| **T08** | Atomic failure — a secret in the third file | Zero package rows, zero blob rows, zero `memories` rows; the database is byte-identical to before | P4 |
 | **T09** | Backup and restore | A restored database has the same package bytes, hashes, manifest and `memories` projection | P1 |
-| **T10** | Cross-agent sharing — promotion | `is_global=1` on both the skill row and the package row; the file rows are shared by reference, not copied; `ListSkills` with the shared scope shows the skill | P8 |
-| **T11** | Cross-workspace sharing | Export from one workspace, import into another; the `package_hash` matches | P6 |
-| **T12** | Version upgrade | v1.0.0 and v1.1.0 both exist; `is_latest` moves to v1.1.0; the v1.0.0 files are intact | P3 |
-| **T13** | Malicious: ZIP slip | An entry named `../../etc/passwd` is rejected with `path_traversal`; nothing is written | P4 |
-| **T14** | Malicious: absolute path | An entry named `/etc/passwd` is rejected with `absolute_path` | P4 |
-| **T15** | Malicious: Windows path | An entry named `C:\Windows\x.dll` is rejected — a Linux-only absolute check would miss this, so the test is specific | P4 |
-| **T16** | Malicious: symlink entry | An entry carrying the symlink mode bit is rejected with `unsupported_entry_type` | P4 |
-| **T17** | Malicious: duplicate path | Two entries with the same name are rejected with `duplicate_path` | P4 |
-| **T18** | Malicious: case collision | `Ref.md` and `ref.md` are rejected with `path_case_collision` | P4 |
-| **T19** | Malicious: Unicode collision | NFC and NFD forms of one name are rejected with `path_unicode_collision` | P4 |
-| **T20** | Malicious: ZIP bomb | A 64 MiB zero entry is rejected with `size_limit`; the process's memory stays bounded | P4 |
-| **T21** | Malicious: lying header | A declared size of 10 against a 200 000-byte payload is rejected with `archive_invalid` | P4 |
-| **T22** | Malicious: CRC corruption | A flipped content byte is rejected with `checksum_mismatch` — which requires the importer to read to EOF | P4 |
-| **T23** | Malicious: a secret in a reference file | An API key in `references/x.md` is rejected with `scanner_secret`, and the whole import rolls back | P3 |
-| **T24** | Malicious: a poison phrase in a reference file | Rejected with `scanner_poison` | P3 |
-| **T25** | Malicious: an executable payload | A script with the executable bit is stored, flagged `executable: true`, and **never executed**; no code path connects package content to execution | P3 |
-| **T26** | Malformed archive | A truncated or non-ZIP file is rejected with `archive_invalid`; no partial state | P4 |
-| **T27** | Idempotence | Importing the same package twice reports `already_installed` the second time and creates no new rows | P3 |
-| **T28** | A different version of the same name | Both exist; the latest flips | P3 |
-| **T29** | The same version with different content, without `--force` | Rejected with `version_conflict` | P3 |
-| **T30** | Shredding | Soft shred leaves the package recoverable; hard shred removes the package and file rows, and the blob becomes a collection candidate | P8 |
-| **T31** | Blobstore isolation | `mpm blob gc` and `mpm ops gc` leave the package tables and the blob rows untouched | P8 |
-| **T32** | Discovery weight | With 200 skills each carrying a package, `list` and the wake context contain no package byte, and the `available_skills` shedding behaviour is unchanged | P7 |
-| **T33** | Bounded read | `read_file` with a byte cap returns no more than the cap, sets `truncated: true`, and returns a `next_offset` | P5 |
-| **T34** | A corrupted stored file | Mutating a blob row's bytes makes `read_file` refuse with `content_hash_mismatch` | P5 |
+| **T10** | Cross-agent sharing — promotion | `is_global=1` on both the skill row and the package row; the file rows are shared by reference, not copied; `ListSkills` with the shared scope shows the skill | P9 |
+| **T11** | Cross-workspace sharing | Export from one workspace, import into another; the `package_hash` matches | P7 |
+| **T12** | Version upgrade | v1.0.0 and v1.1.0 both exist; `is_latest` moves to v1.1.0; the v1.0.0 files are intact | P4 |
+| **T13** | Malicious: ZIP slip | An entry named `../../etc/passwd` is rejected with `path_traversal`; nothing is written | P5 |
+| **T14** | Malicious: absolute path | An entry named `/etc/passwd` is rejected with `absolute_path` | P5 |
+| **T15** | Malicious: Windows path | An entry named `C:\Windows\x.dll` is rejected — a Linux-only absolute check would miss this, so the test is specific | P5 |
+| **T16** | Malicious: symlink entry — **Unix-attribute archive** | An entry carrying the symlink mode bit is rejected with `unsupported_entry_type` | P5 |
+| **T17** | Malicious: duplicate path | Two entries with the same name are rejected with `duplicate_path` | P5 |
+| **T18** | Malicious: case collision | `Ref.md` and `ref.md` are rejected with `path_case_collision` | P5 |
+| **T19** | Malicious: Unicode collision | NFC and NFD forms of one name are rejected with `path_unicode_collision` | P5 |
+| **T20** | Malicious: ZIP bomb | A 64 MiB zero entry is rejected with `size_limit`; the process's memory stays bounded | P5 |
+| **T21** | Malicious: lying header | A declared size of 10 against a 200 000-byte payload is rejected with `archive_invalid` | P5 |
+| **T22** | Malicious: CRC corruption | A flipped content byte is rejected with `checksum_mismatch` — which requires the importer to read to EOF | P5 |
+| **T23** | Malicious: a secret in a reference file | An API key in `references/x.md` is rejected with `scanner_secret`, and the whole import rolls back | P4 |
+| **T24** | Malicious: a poison phrase in a reference file | Rejected with `scanner_poison` | P4 |
+| **T25** | Malicious: an executable payload | A script with the executable bit is stored, flagged `executable: true`, and **never executed**; no code path connects package content to execution | P4 |
+| **T26** | Malformed archive | A truncated or non-ZIP file is rejected with `archive_invalid`; no partial state | P5 |
+| **T27** | Idempotence | Importing the same package twice reports `already_installed` the second time and creates no new rows | P4 |
+| **T28** | A different version of the same name | Both exist; the latest flips | P4 |
+| **T29** | The same version with different content | Rejected with `version_conflict`; there is **no** force escape | P4 |
+| **T30** | Shredding | Soft shred leaves the package recoverable; hard shred removes the package and file rows, and the blob becomes a collection candidate | P9 |
+| **T31** | Blobstore isolation | `mpm blob gc` and `mpm ops gc` leave the package tables and the blob rows untouched | P9 |
+| **T32** | Discovery weight | With 200 skills each carrying a package, `list` and the wake context contain no package byte, and the `available_skills` shedding behaviour is unchanged | P8 |
+| **T33** | Bounded read | `read_file` with a byte cap returns no more than the cap, sets `truncated: true`, and returns a `next_offset` | P6 |
+| **T34** | A corrupted stored file | Mutating a blob row's bytes makes `read_file` refuse with `content_hash_mismatch` | P6 |
 
-### 13.1 Fixture strategy
+### 13.1 The corrections' acceptance rows
+
+Rows **T35–T44** exist because the corrections make claims that the original
+matrix did not test. Each one is a statement the first revision made that the
+repository contradicts, so each has a row.
+
+| # | scenario | expected | stage | correction |
+|---|---|---|---|---|
+| **T35** | **Malicious: a FAT/MS-DOS creator byte** — the same symlink, FIFO and device entries, with the central-directory creator byte rewritten from Unix to FAT | The entries are **accepted** as regular files — the type check is not available — and the import **succeeds**, because **no byte of the package reaches the filesystem** (Rule 2). The test asserts both halves: the import did not fail on the entry type, and no file was created anywhere | P5 | **R5**, §7.1 |
+| **T36** | **The legacy write path against a packaged skill** | `save --force` — CLI **and** MCP — is refused with `package_immutable`; the `memories` row, the manifest, the file rows and both hashes are **unchanged**; the `read` body and the `read_file` entrypoint bytes still agree | P3 | **R1**, §5.8.1 |
+| **T37** | **Atomicity across the whole import** | A failure injected after the blob rows are written and before the commit leaves **zero** rows of every kind, and no blob row is visible to the collector | P3, P4 | **R2**, §3.4 E5 |
+| **T38** | **A versionless package and a later genuine `1.0.0` of the same name** | Both import successfully; the ids are `…-v1.0.0-unversioned` and `…-v1.0.0`; `is_latest` points at the genuine `1.0.0`; the versionless package's files are intact | P4 | **R3**, §5.2 |
+| **T39** | **The agent-facing surface** | The `mpm_skills` registry carries **no** action that accepts a filesystem path; there is no import action; `files`, `read_file` and `verify` take only a skill id or a name and version | P8 | **R4**, §8.3 |
+| **T40** | **The provenance on `read`** | The `read` response for a packaged skill **always** carries the `package` object with `entrypoint_sha256` and `scanned`; for a skill that is not a package the object is **absent** and every other field is byte-identical to today's response | P6 | **R6**, §8.2.1 |
+| **T41** | **Age-based prune against a packaged skill** | `mpm prune --older-than 1s` leaves the packaged skill and its package row intact; it still removes an ordinary, non-packaged skill of the same age | P3 | **R7**, §6.4 |
+| **T42** | **The restore allow-list is not weakened** | A dump naming the three package tables is still **rejected** by a binary whose `CanonicalMPMSchema` does not list them — the refusal is unchanged and loud | P1 | **R8**, §6.2 |
+| **T43** | **The scanner cannot be skipped** | With the toxic-phrase file made unreadable, the import is refused with `scanner_unavailable` and **nothing is written**; the response does not report success, and no row records a scan that did not happen | P4 | **R10**, §7.2 |
+| **T44** | **The export never loses a package silently** | Before full package export exists, `mpm export --collection skills` **names** every package it did not carry, in the response and on standard output; after P7 it carries every package and the marker is gone | P4, P7 | **R11**, §6.3 |
+| **T45** | **The walk's limits are enforced in flight** | A directory holding more than 512 files is refused **during** the walk — the walk stops at the 513th entry rather than enumerating the tree — and the total-byte cap is checked as bytes are read | P4 | **R12**, §7 threat 11 |
+| **T46** | **The walk refuses to leave the import root** | A symlinked directory inside the import root is **not descended into**, and a symlink pointing outside the resolved root is refused; the refusal is `symlinked_directory` or `path_escapes_root` | P4 | **R12**, §7 threat 19 |
+| **T47** | **The bounded read's `next_offset`** | `next_offset` names a **line** index; resuming from it returns the next unread line with no gap and no repeat; a line cut by the byte cap is not partially returned | P6 | O-b, §8.6 |
+
+### 13.2 Fixture strategy
 
 * **Golden packages.** A `testdata` tree holding the operator's package
   extracted, byte-exact, with a recorded SHA-256 so the test asserts the
@@ -1051,6 +1825,20 @@ named.
 * **The one binary fixture.** The operator's `.skill` archive itself, kept
   byte-exact with a recorded hash, because its exact bytes are the
   compatibility contract.
+* **The creator-byte pair.** The same hostile archive generated **twice**: once
+  with Unix attributes and once with the central-directory creator byte
+  rewritten to FAT/MS-DOS. The generator must write the archive with
+  `zip.Writer` and then patch the byte, because `zip.Writer` **overwrites**
+  `CreatorVersion`, `ExternalAttrs` and the size fields — hand-rolling them
+  proves nothing. This pair is what makes T16 and T35 meaningful rather than
+  vacuous (§7.1).
+* **The symlinked-directory fixture.** A directory tree containing a symlink to
+  a directory inside the root and a symlink to a directory outside it, for
+  T46. The fixture is built on disk by the test, not committed as a symlink,
+  so it survives a checkout that does not preserve symlinks.
+* **The unreadable-scanner fixture.** A toxic-phrase file that cannot be
+  read, for T43. It is created by the test at a path the test then makes
+  unreadable — never by committing an unreadable file.
 * **Data-driven expectations.** Each fixture carries a manifest describing the
   expected outcome — the reason code, and whether anything at all was written
   — so the table above is data rather than fifty hand-written assertions.
@@ -1063,11 +1851,72 @@ named.
 
 | | |
 |---|---|
-| **Architecture** | Three new additive SQLite tables. No existing table, row, index or trigger is modified; rollback is dropping three tables. |
+| **Architecture** | Three new additive SQLite tables. No existing table, row, index or trigger is modified. |
 | **Persistence** | A manifest per package version, one row per file, and content-addressed blob rows for the bytes. Referential integrity by foreign key, atomic import by transaction, deduplication by content hash. |
-| **Hard rule** | No package byte ever enters the blobstore. Its 24-hour TTL and its referential-check-free GC would delete permanent skill assets silently. |
-| **Compatibility** | Existing single-document skills are untouched. The `read` action keeps its envelope and gains one optional field; `list` and `SkillSummary` are not modified; discovery carries no package byte. |
-| **Third-party integrity** | The operator's `SKILL.md` is stored byte-exact. The `memories` projection is a separate, labelled derivation that adds a `version` line when the original lacks one, with both hashes recorded. |
-| **Security** | Every file is path-canonicalised, bounded, type-checked and scanned — per file, which is the control that today covers only the entrypoint. Importing never executes anything. |
-| **Retrieval** | Progressive: discovery reads nothing, `read` reads the entrypoint, `files` reads metadata, `read_file` reads one bounded file. |
-| **Open** | Ten operator decisions in §12, with a recommendation and a cost for each. |
+| **Hard rules** | **Rule 1:** no package byte ever enters the blobstore — its 24-hour TTL and its referential-check-free GC would delete permanent skill assets silently. **Rule 2:** an import never materialises package bytes as a file — the bytes are a database column, which is what makes the ZIP entry-type check's limitation harmless rather than surprising. The only file package bytes reach is the `.skill` archive an operator explicitly asks for. |
+| **Compatibility** | Existing single-document skills are untouched. The `read` action keeps today's fields and gains a `package` object **only** for a packaged skill; `list` and `SkillSummary` are not modified; discovery carries no package byte. |
+| **Immutability** | A published package is never replaced in place, by any path. A legacy `save --force` against a packaged skill is **refused** with `package_immutable` and writes nothing. |
+| **Third-party integrity** | The operator's `SKILL.md` is stored byte-exact. The `memories` projection is a separate, labelled derivation that adds a `version` line when the original lacks one, with both hashes recorded. A versionless package's effective version is `1.0.0-unversioned`, so a later genuine `1.0.0` installs alongside it. |
+| **Security** | Every file is path-canonicalised, bounded and scanned — per file, which is the control that today covers only the entrypoint. The scan is **fail-closed**: an import that cannot scan writes nothing. The **agent-facing surface cannot create packages**; import is operator-driven. Importing never executes anything. |
+| **Retrieval** | Progressive: discovery reads nothing, `read` reads the entrypoint plus its hash and scan status, `files` reads metadata, `read_file` reads one bounded file. |
+| **Lifecycle** | A packaged skill is not removed by an age-based prune. A binary rollback (lossless, blind) and a schema rollback (destructive) are separate operations, and a binary rollback makes `restore-db` of a new-binary backup fail closed — so packages are exported before a rollback. |
+| **Decisions** | Seven resolved in §12.1, with their rationale and evidence; nine still open in §12.2, with a recommendation and a cost for each. |
+| **Corrections** | Twelve required corrections (R1–R12) are dispositioned in §15. |
+
+---
+
+## 15. The R1–R12 disposition matrix
+
+One row per required correction. Each row states the **original problem**, the
+**revised specification section**, the **resolution**, the **supporting
+evidence**, and the **remaining risk**.
+
+The corrections were all verified against the code at `f8d4b95a` before this
+revision was written; the evidence column cites the measurement, not the
+reviewer's assertion of it. §11.1 is the evidence table; this is the
+disposition.
+
+| # | original problem | revised section | resolution | supporting evidence | remaining risk |
+|---|---|---|---|---|---|
+| **R1** | §5.8 asserted that "a later `save --force` resurrects and replaces" a packaged skill's projection. The legacy force path replaces `memories.content` **in place** under the same id and knows nothing about package rows, so the projection and the manifest would silently diverge: `read` would return the new body while `read_file` returned the old bytes, and `projection_sha256` would become false. | §5.8.1 (new), §5.7, §3.4 E6, §3.3 C10, §6 matrix, §12.1 **O2** | **Fail closed.** When a `skill_packages` row exists for the id, a legacy `save --force` — CLI and MCP — is **refused** with `package_immutable`, before any write. Nothing is written, so the id, the manifest, the file rows and the hashes all keep describing the same document. A published package is never replaced in place by any path. | The force branch is `UPDATE memories SET content = ? … WHERE id = ?` at `internal/core/skill_db.go:624-631`; it is the **only** in-place content writer for a skills row in the tree; `force` reaches it straight from the MCP payload at `internal/core/tools/handlers.go:3758`; `SaveSkillAndDeprecatePrior` touches `metadata` only and the workshop passes `force=false`. | **Deliberate divergence:** `save --force` on a packaged skill no longer behaves as it does for a legacy skill. An operator who relied on it will now get a refusal and must publish a new version. This is stated in §5.8.1 rather than discovered at runtime. The guard must also be applied to *every* future in-place writer of a skills row; the design names the one that exists today, and a code comment should point at the package tables so a later writer does not add a second. |
+| **R2** | §4.2 and threat 17 claimed "one transaction covers the manifest row, the file rows, the blob rows, the `memories` projection and the `is_latest` flip", while §3.4 E5 named `SaveSkillWithInvocation` as the write path. That method cannot be composed into a caller's transaction, so either the import was not atomic or E5 was false — the two could not both hold. | §3.4 E5, §4.2, §7 threat 17, §9 note, §10 P3, §13 T37 | **E5 now names the tx-aware primitive.** The importer **owns** the transaction and writes the projection through `saveMemoryRow` reached via the `txNode` adapter. A thin tx-aware skill writer may be extracted from `SaveSkillWithInvocation`, but the transaction belongs to the importer. The collector's safety is stated as depending on this (§9). | `SaveSkillWithInvocation`'s new-row path opens and commits **its own** transaction (`db.Begin()` at `internal/core/skill_db.go:652`, `tx.Commit()` at `:735`); its force path is a bare `db.Exec` with **no transaction at all** (`:624`). The composable primitive is `saveMemoryRow` via `txNode` (`:730`). | The extraction is a refactor of a function used by the CLI, the MCP surface and the workshop. It is isolated in its own stage (P3) so it can be reviewed and can regress independently. A future refactor that splits the import across two transactions would break the collector's safety **without breaking any test that does not specifically check for it** — which is why the dependency is stated in §9 rather than left implicit. |
+| **R3** | §5.2's effective version `1.0.0` collides with a later **genuine** `1.0.0` of the same package. The import would be rejected as `version_conflict`, semver cannot order two `1.0.0`s, and the only escape would be a force-overwrite of a published id — the very mutation R1 forbids. The stated justification was also mis-cited: a comment in a test header was presented as a hard constraint. | §5.2, §2.5, §5.5, §5.7, §12.1 **O1**, §13 T05, T38 | **The effective version is `1.0.0-unversioned`**, a semver pre-release. It sorts **below** a genuine `1.0.0` and **above** every older genuine release, so both can coexist and the genuine release becomes `is_latest`. Explicit `--version` overrides are retained. The `1.0.0` and `0.0.0` options are withdrawn and the mis-citation is corrected in place. | `semver.IsValid("v1.0.0-unversioned")` is `true`; `semver.Compare` is **-1** against `v1.0.0` and **+1** against `v0.9.0`. The id `skill:system-prompt-writer-v1.0.0-unversioned` round-trips to name `system-prompt-writer`, version `1.0.0-unversioned`. `validateSkillNameAndVersion` (`internal/core/skill.go:181-203`) rejects only an empty version, a colon, whitespace and `-v` in the *name* — nothing forbids a pre-release suffix. | The version string is slightly awkward in an id, and an operator who reads `1.0.0-unversioned` as "a version below 1.0.0" is right. It is a **prerelease**, so a package that declares `1.0.0-rc1` would be ordered **above** it — an unlikely but real ordering oddity. The `--version` override exists for the operator who does not want the default. |
+| **R4** | §8.3 gave the MCP surface an `import` action with a required `path` parameter. It would have been the first action in the whole tool surface to accept a path naming a **directory**, with no confinement, no allow-listed root and no consent gate — an agent could have imported up to 512 files / 32 MiB from anywhere the MPM process can read, stored them durably, and surfaced them to other agents. | §8.3 (rewritten), §8.1, §8.7, §7.4 B4, §3.3 C13, §12.1 **O11**, §12.2 **O14**, §13 T39 | **Import is CLI-only in the first cut.** The agent-facing package surface is read-only — `files`, `read_file` and `verify` — and no agent-facing action accepts a filesystem path. The CLI keeps an arbitrary path because the CLI *is* the operator, and the CLI's directory walk still uses `Lstat`, refuses symlinked directories and refuses to leave the resolved root. | The MCP registry's **only** path-shaped parameter is `filepath` on `mpm_references` (`internal/core/tools/registry_list.go:217`), which names a *file* with an extension allow-list; `mpm_skills` has none (`registry_list.go:337-376`). There is **no** path-confinement helper in the tool layer — no `confine`, `safePath`, `resolveWithin`, `ensureUnder`, and no `filepath.EvalSymlinks`. | The operator loses the ability to have an agent install a package. That is the intended trade, and the deferred question (whether a later stage adds a **confined** import with a consent gate) is recorded as **O14** rather than answered here. If a future stage adds an agent-facing import, it must re-derive the confinement from scratch — the current design deliberately does not build that machinery. |
+| **R5** | §7 threat 3 stated the ZIP entry-type rejection unconditionally. `zip.File.Mode()` interprets the external attributes **only** when the archive's creator byte says Unix, so in a FAT/MS-DOS archive a symlink, a FIFO and a device all **pass** the type check as regular files. The design's stated defence was the wrong one. | §4.4 Rule 2 (new), §7 threat 3, §7.1 (new), §7.4, §13 T16, T35 | **The real invariant is stated first:** an import never materialises package bytes as a file, so an entry of any type cannot become a filesystem object. The entry-type check is retained as a **secondary, best-effort** guard, explicitly conditional on Unix attributes. The directory path's guarantee is stated separately — `os.Lstat` is reliable. | Under a Unix creator byte: `link` → `L---------`, `fifo` → `p---------`, `dev` → `D---------`. With the creator byte rewritten to FAT: all three become `-rw-rw-rw-` with `type=----------` and `regular=true` — they **pass** the type check. `FileHeader.Mode()` reads the external attributes only for a Unix creator. | The type check is available for exactly the archives an attacker is most likely to write *with* Unix attributes. The protection therefore rests entirely on Rule 2, and Rule 2 must hold for **both** import paths. T35 exists specifically to prove the FAT case is safe, and P9 asserts that an import writes nothing to the filesystem. A future feature that materialises package bytes on disk during an import would void the whole argument — which is why Rule 2 is stated as a hard rule beside the blobstore rule rather than as a note in the threat table. |
+| **R6** | §7 threat 15 claimed "every read carries a provenance envelope … with its hash and its scanned status". The `read` action returns the entrypoint body **inlined**, and the optional `package` object carried no per-file hash and no scan status — so the content most likely to carry an injection came back with nothing checkable. | §8.2.1 (new), §8.2, §8.5, §5.5, §9 schema columns, §12.1 **O7**, §13 T40 | **The `package` object is present whenever the skill is a package** and carries `entrypoint_sha256` and `scanned`. The manifest records per-file `secret_scanned` / `poison_scanned`, and the `files` and `read_file` responses carry the file's own status. A skill that is not a package has **no** object, so today's response is byte-identical. The honest limit is stated: this is machine-checkable provenance on every response, not a textual banner in the prose body. | The MCP read handler returns `"body": skill.Body` with no envelope at all (`internal/core/tools/handlers.go:3794-3818`). The first revision's proposed object carried `entrypoint`, `file_count`, `package_hash` and `version_override` — no hash, no scan status. | The poison scanner remains a backstop against a fixed twenty-phrase list, and an oblique injection still passes it. The provenance tells an agent *what* it is reading and *whether it was scanned*; it does not tell the agent the content is safe. The textual banner is still absent from the body, which means a human reading a transcript sees no marker. This is stated rather than glossed. |
+| **R7** | §3.2's prune analysis covered only the `expires_at` path. `mpm prune --older-than` is a **collection-blind hard delete** — no `collection` filter, only directives excluded — so it removes skill rows of any age, the cascade takes the package rows with them, and the third-party bytes are then gone: they exist nowhere else. | §3.2, §6.4 (new), §3.3 C15, §12.1 **O13**, §13 T41 | **`collection = 'skills'` is excluded from `PruneOlderThan`**, mirroring the existing directive exemption. `PruneNeverAccessed` and the default `PruneExpired` are already safe and are not changed. A deliberate hard shred still cascades — what is removed is unintentional bulk destruction. | `PruneOlderThan` is `DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL AND <DirectiveExclusionClause>` — **no `collection` filter** (`internal/core/web_db.go:1781-1792`). `PruneNeverAccessed` requires `is_long_term = 0` and skills are written `is_long_term = 1`; the default prune is `PruneExpired` and skills have `expires_at` NULL. | The exemption is a **blanket** one: a packaged skill can no longer be removed by age, and an operator with many legacy skills must remove them deliberately (shred, or export-then-delete) — which is more work for them. The alternative (a per-row check inside a bulk delete) was rejected as larger and racy. The operator's answer is **O13**, and the recommendation is the exemption. |
+| **R8** | §4.2's "an old binary ignores the tables" is true for *operation* and false for *restore*. `mpm backup` is a generic `sqlite3 .dump`, so an old binary's backup **contains** the package tables, and the old binary's `restore-db` rejects any table not on its allow-list. The document implied rollback was uneventful. | §6.2 (new), §6.1, §3.1, §10 P1 runbook, §13 T42 | **Stated explicitly, and the allow-list is not weakened.** After a binary rollback, `mpm restore-db` of a new-binary backup **fails closed**. The operator procedure is mandatory: export every package to a `.skill` archive **before** rolling back, verify the exports, then roll back; and restore with the new binary or from a pre-package backup. Relaxing the validator to skip unknown tables is explicitly out of scope and would be a change to an existing fail-closed component. | `PRAGMA user_version` appears **nowhere** in the tree, so there is no schema gate and an old binary opens a newer database without complaint. `restore-db` rejects any dump naming a table not on `CanonicalMPMSchema` (`internal/core/sql_dump_validator.go:530+`), and the first revision's own §3.1 already recorded that a new table not on the list makes restore fail. | The operator can still create the situation — take a backup with the new binary, roll back, and be unable to restore it with the old binary. The runbook (P1) and §6.2 state the procedure, but the procedure is procedural, not enforced. The alternative — making the old binary able to restore a package-bearing dump — is impossible without changing the old binary, which by definition is not being changed. |
+| **R9** | §4.2, §6 and §14 used one word — "rollback" — for two operations with opposite characteristics: a binary rollback (lossless but blind) and a schema rollback (destructive). "Rollback is total and lossless for everything that existed before" read as though no data were at risk. | §6.1 (new), §4.2, §14, §10 P1 | **Named separately throughout**: *binary rollback (lossless, blind)* and *schema rollback (destructive)*, with a table contrasting what happens to the package bytes, to everything else, to the operator-visible signal, and to the pre-condition. §6.2's restore incompatibility is stated as part of the binary rollback, not as a separate surprise. | The two operations are materially different: the binary rollback leaves the rows in the file (they reappear when the new binary returns) while the schema rollback destroys them. The absence of a schema gate (§R8) is what makes the binary rollback "blind". | The naming does not remove the risk of the destructive operation — it makes it legible. The schema rollback still destroys third-party content that exists nowhere else, which is why §6.1 makes "export the packages first" the pre-condition for **both** rollbacks. |
+| **R10** | §7 threats 14, 15, 18 and acceptance row T24 all rest on the poison scan, but `isPoisonedAt` **fails open**: if the operator's toxic-phrase file cannot be read, it returns "not poisoned" and the scan passes everything. The design did not say so, and a skipped scan is indistinguishable from a successful one. | §7.2 (new), §7 threat 14, §7.3, §5.5, §9 schema columns, §12.1 **O12**, §13 T43 | **The import fails closed** with `scanner_unavailable` and writes nothing. The fail-open behaviour of the underlying scanner is disclosed rather than fixed here (closing it is a change to an existing component with other callers). The manifest records **which scanners actually ran** per file, so a disclosed skip (a binary asset) is distinguishable from a pass. | `isPoisonedAt` returns `(false, "")` when `loadPoisonPhrasesAt` fails (`internal/core/memory.go:845-851`). The asymmetry is real: `isSensitiveContent` is 30 in-process regexes and cannot fail this way; the poison scanner reads an operator-editable **file** and can. | An operator whose phrase file is unreadable cannot import packages at all until they fix it. That is the intended direction — a refusal is visible, a skipped scan is not — but it is a new hard failure for an operator who did not know the file was unreadable. The message must say which file is unreadable. The underlying fail-open path in `isPoisonedAt` remains open to *other* callers; this design does not close it and does not claim to. |
+| **R11** | §6's compatibility matrix said `mpm export --collection skills` does not export package metadata, while **O8** recommended carrying it "as a follow-up after P6". The document contradicted itself, and the matrix's version — the one an implementer would have built — is a **silent data loss** path for content that exists nowhere else, and it defeats the archive-as-transport that **O4** nominates. | §6.3 (new), §6 matrix, §10 P4 and P7, §12.1 **O8**, §13 T44 | **The contradiction is resolved and the loss is made explicit in two stages.** Before full package export exists, the export **names** every package it cannot carry — in the response and on the CLI's standard output. Stage P7 then makes the export complete, emitting one `.skill` archive per package. The marker ships in **P4**, the first stage in which a package can exist, so the loss is never silent in any release. | The first revision's matrix row and its **O8** row said different things about the same surface. The bytes' single-copy property is established in §3.2 and §6.4. | Until P7 lands, an operator's "export my skills" workflow still loses the reference files — it just now **says so**, and names the affected skills. The marker's presence is a design decision about how loudly to fail, and its exact wording is not specified. Where the P7 archives are placed is **O15**. |
+| **R12** | §7 threat 11's caps were described as if enforced when files are *accepted*. The directory path has no archive to bound it, so a directory holding ten million entries would be fully walked, `Lstat`'d and measured before the first rejection. | §7 threats 11 and 19 (new), §8.3, §10 P4, §13 T45, T46 | **The caps are enforced *during* traversal** — the walk stops at the 513th entry and the byte counters are checked as bytes are read. The walk **refuses to descend into a symlinked directory** and **refuses to leave the resolved root**, with the root resolved once via `filepath.EvalSymlinks` and every candidate compared against it before it is read. This also closes part of **R4**. | The ZIP path is naturally bounded by the archive; the directory path is not, and nothing in the substrate bounds it. `os.Lstat` never follows a symlink, which is what makes the symlinked-directory refusal implementable. | The refusals are new reason codes (`symlinked_directory`, `path_escapes_root`) that an operator may meet on a legitimate package that happens to symlink its assets — a real possibility for a package that vendors a shared directory. The refusal is safe and loud; whether an operator can override it is **not** decided here, and is left for the operator's judgment. |
+
+### 15.1 The seven optional improvements
+
+The review offered seven optional improvements. Their disposition is recorded
+here so that none is silently dropped.
+
+| | improvement | disposition |
+|---|---|---|
+| **O-a** | Fix `ListSkills` so it no longer parses frontmatter out of every skill row's full content; the entrypoint cap then becomes unnecessary | **Not adopted.** The 256 KiB entrypoint cap (O6) stands as the mitigation. The refactor touches a hot read path used by discovery, the wake context and `mpm info`, and no correction in this revision requires it. Recorded as **O16** so it is not lost. |
+| **O-b** | Specify the bounded-read interaction: which line `next_offset` names, and whether a partially-returned line is flagged | **Adopted.** §8.6 now defines `offset`/`next_offset` as zero-based **line** indices, states that `next_offset` names the first line not returned, that a line cut by the byte cap is **not** partially returned, and what happens when a single line exceeds the cap. Pinned by T47. |
+| **O-c** | State the blob collector's dependence on the single-transaction import | **Adopted.** §9 states that a blob row and its referencing file row are committed together in the importer's one transaction, and that splitting the import would break the collector's safety **without** breaking any test that does not specifically check for it. |
+| **O-d** | Say that the canonical path is the primary key and `raw_path` is display-only | **Adopted.** §5.4 states it, §9 restates it against the DDL, and P2's acceptance names it. |
+| **O-e** | Promote the "bytes never touch the filesystem" invariant to a first-class rule beside the blobstore hard rule | **Adopted.** It is **Rule 2** in §4.4, and it is the real defence for both import paths (**R5**). It is also asserted by a test in P9. |
+| **O-f** | Name `saveMemoryRow` in E5 so the tx-aware write primitive is discoverable | **Adopted.** §3.4 E5 names `saveMemoryRow` and the `txNode` adapter, and explains why `SaveSkillWithInvocation` cannot serve (**R2**). |
+| **O-g** | Add the two `archive/zip` behaviours that are not rows: the FAT-creator archive and the directory walk's symlinked-directory refusal | **Adopted.** T35 is the FAT-creator row (and it asserts the *acceptance*, not the rejection) and T46 is the symlinked-directory refusal. §13.2 records the fixture strategy for both, including the generator constraint that `zip.Writer` overwrites the creator byte — so a hand-rolled fixture cannot make T35 vacuous. |
+
+### 15.2 What this revision did not do
+
+* **It did not redesign the subsystem.** Option B, the blobstore rule, the
+  per-file scanning model and the compatibility requirements in §3.3 are
+  unchanged.
+* **It did not implement anything.** No production code, no migration, no
+  schema change. The document remains a proposal at the review gate.
+* **It did not refactor `ListSkills`.** See **O-a** and **O16**.
+* **It did not weaken the restore allow-list** to hide the binary-rollback
+  incompatibility (**R8**).
+* **It did not close the poison scanner's own fail-open path** (**R10**); it
+  made the package import fail closed instead, and said so.
+* **It did not mark the architecture approved.** Approval is the operator's
+  decision and the second reviewer's; this revision stops at the review gate.
