@@ -44,13 +44,40 @@ package internal
 //
 // WHAT COUNTS
 // -----------
-// A bare pool write is a direct `Exec` call whose receiver is a pool
-// handle (`*.db`, `*.DB`, `*.SQLDB()`, a local `db`/`q`/`ex` handle)
-// with a write-verb SQL (DML and DDL alike — a growing DDL count must
-// also trip review, since DDL wants a transaction, not a budget), that
-// is NOT lexically inside a `WithTx` callback and NOT on a `tx`
-// handle. `node.Tx().Exec(...)` is transaction-owned and is not
-// counted.
+// A bare pool write is a direct `Exec` OR `ExecContext` call whose
+// receiver is a pool handle (`*.db`, `*.DB`, `*.SQLDB()`, a local
+// `db`/`q`/`ex` handle) with a write-verb SQL (DML and DDL alike — a
+// growing DDL count must also trip review, since DDL wants a
+// transaction, not a budget), that is NOT lexically inside a `WithTx`
+// callback and NOT on a `tx` handle. `node.Tx().Exec(...)` is
+// transaction-owned and is not counted.
+//
+// THE ExecContext SHAPE
+// ---------------------
+// `ExecContext(ctx, query, args...)` puts the query in the SECOND
+// argument — `Args[0]` is the context. A scanner that reads `Args[0]`
+// sees the context, not the SQL, and every `ExecContext` write is
+// invisible to it.
+//
+// That is not hypothetical: the phase-0 audit scanner
+// (`internal/audit/barewritescan`, from the unmerged audit branch)
+// matched the method name `ExecContext` but still read `Args[0]`, so it
+// classified all 17 of those sites as non-writes and left them out of
+// the inventory entirely. The merged ratchet matched only the method
+// name `Exec`, and had the same blind spot for the same reason.
+//
+// A detector that cannot see a write shape cannot keep that shape
+// honest, and the shape is one line away from every future caller. So
+// this scanner resolves the SQL from the argument position that
+// matches the method:
+//
+//	Exec(query, args...)         → Args[0]
+//	ExecContext(ctx, query, ...) → Args[1]
+//
+// The 12 bare-pool `ExecContext` sites that exist today are recorded in
+// the allowlist below with a reason each, exactly like the `Exec` sites.
+// The other 5 are transaction-owned (`tx.ExecContext` inside an explicit
+// `BeginTx`) and are correctly not counted.
 //
 // The classification is syntactic and therefore an approximation —
 // see the audit document for the shapes that defeat it
@@ -164,6 +191,10 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "UPDATE memories SET embedding = ?, embedding_source = ?, embedding_dimension = ?, embedding_model = ? WHERE id = ?",
 		Why:   reasonMigrationOnce,
 		Count: 1},
+	{File: "cmd/mpm/backfill_embeddings.go",
+		SQL:   "UPDATE reference_chunks SET embedding = NULL, embedding_source = 'null', embedding_dimension = NULL, embedding_model = NULL",
+		Why:   reasonMigrationOnce,
+		Count: 1},
 	{File: "cmd/mpm/handlers_gc.go",
 		SQL:   "DELETE FROM memories WHERE deleted_at IS NOT NULL AND deleted_at < strftime('%s','now', '-30 days') AND",
 		Why:   reasonPropagated,
@@ -212,6 +243,22 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "UPDATE memories SET weight = MIN(weight + 1, 9), last_accessed_at = CAST(strftime('%s','now', '+' || ? || ' seconds') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL",
 		Why:   reasonPropagated,
 		Count: 1},
+	{File: "internal/blobstore/fs.go",
+		SQL:   "INSERT INTO blobs (id, source_tool, source_call_id, session_id, size_bytes, content_type, created_at, expires_at, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		Why:   reasonPropagated,
+		Count: 1},
+	{File: "internal/blobstore/fs.go",
+		SQL:   "DELETE FROM blobs WHERE id = ?",
+		Why:   reasonPropagated,
+		Count: 2},
+	{File: "internal/blobstore/fs.go",
+		SQL:   "DELETE FROM blobs WHERE expires_at < ?",
+		Why:   reasonPropagated,
+		Count: 1},
+	{File: "internal/core/active_uptime.go",
+		SQL:   "INSERT INTO memory_settling_baselines (memory_id, baseline_active_seconds, captured_at) SELECT m.id, ?, CAST(strftime('%s','now') AS INTEGER) FROM memories m WHERE m.deleted_at IS NULL AND NOT EXISTS ( SELECT 1 FROM memory_settling_baselines b WHERE b.memory_id = m.id ) ORDER BY m.id LIMIT ?",
+		Why:   reasonPropagated,
+		Count: 1},
 	{File: "internal/core/admission_db.go",
 		SQL:   "INSERT INTO admission_log ( id, doc_id, chunk_id, admit, content, confidence, reason, justification, admission_model, created_at ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		Why:   reasonPropagated,
@@ -236,6 +283,10 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "DELETE FROM epistemic_cascade_outbox WHERE status IN ('materialized', 'failed') AND updated_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER)",
 		Why:   reasonMigrationOnce,
 		Count: 1},
+	{File: "internal/core/cascade_wake_reconcile.go",
+		SQL:   "UPDATE epistemic_cascade_outbox SET wake_scheduled = 1, updated_at = ? WHERE id = ? AND wake_scheduled = 0",
+		Why:   reasonPropagated,
+		Count: 1},
 	{File: "internal/core/cluster_proposals.go",
 		SQL:   "UPDATE audit_cluster_proposals SET status = ?, snooze_until = ? WHERE cluster_key = ?",
 		Why:   reasonPropagated,
@@ -244,6 +295,10 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "UPDATE audit_cluster_proposals SET status = ?, snooze_until = NULL WHERE cluster_key = ?",
 		Why:   reasonPropagated,
 		Count: 2},
+	{File: "internal/core/compact.go",
+		SQL:   "INSERT INTO system_config (key, raw_json, content_hash) VALUES ('compaction.last_run', ?, '') ON CONFLICT(key) DO UPDATE SET raw_json = excluded.raw_json, updated_at = CAST(strftime('%s','now') AS INTEGER)",
+		Why:   reasonPropagated,
+		Count: 1},
 	{File: "internal/core/contradiction_log.go",
 		SQL:   "INSERT OR IGNORE INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity, detected_by, detected_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
 		Why:   reasonPropagated,
@@ -528,6 +583,14 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "UPDATE raw_memories SET status='approved', memory_id=?, updated_at=? WHERE id=?",
 		Why:   reasonMigrationOnce,
 		Count: 1},
+	{File: "internal/core/reference_db.go",
+		SQL:   "UPDATE reference_chunks SET embedding = ?, embedding_source = ?, embedding_dimension = ?, embedding_model = ? WHERE id = ?",
+		Why:   reasonPropagated,
+		Count: 1},
+	{File: "internal/core/reference_db.go",
+		SQL:   "UPDATE reference_chunks SET embedding = ?, embedding_source = 'provider', embedding_dimension = ?, embedding_model = ? WHERE id = ?",
+		Why:   reasonPropagated,
+		Count: 1},
 	{File: "internal/core/reference_ingest.go",
 		SQL:   "UPDATE reference_docs SET title = ?, tags = ?, import_reason = ?, file_path = ?, source_kind = COALESCE(NULLIF(?, ''), source_kind), source_url = COALESCE(NULLIF(?, ''), source_url), requested_url = COALESCE(NULLIF(?, ''), requested_url), fetched_at = COALESCE(NULLIF(?, 0), fetched_at), http_etag = COALESCE(NULLIF(?, ''), http_etag), http_last_modified = COALESCE(NULLIF(?, ''), http_last_modified), last_indexed = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
 		Why:   reasonPropagated,
@@ -572,6 +635,10 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "UPDATE memories SET is_global = 1, metadata = json_set(COALESCE(metadata, '{}'), '$.derived_from_skill_id', ?, '$.promoted_at', strftime('%s','now')) WHERE id = ? AND collection = 'skills' AND deleted_at IS NULL",
 		Why:   reasonPropagated,
 		Count: 1},
+	{File: "internal/core/similarity_candidates_store.go",
+		SQL:   "INSERT OR IGNORE INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity, detected_by, detected_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+		Why:   reasonPropagated,
+		Count: 1},
 	{File: "internal/core/testhelpers.go",
 		SQL:   "CREATE TABLE memories ( id TEXT PRIMARY KEY, collection TEXT, content TEXT, session_id TEXT, tags TEXT, metadata TEXT, embedding BLOB, weight REAL, confidence REAL, retrieval_priority REAL, importance REAL, created_at INTEGER, updated_at INTEGER, deleted_at INTEGER, reference_id TEXT, content_hash TEXT, is_prime_directive INTEGER, toxicity_score REAL, is_long_term INTEGER, reinforcement_count INTEGER, last_accessed_at INTEGER, expires_at INTEGER, source_db TEXT, source_id TEXT, promoted_at REAL, is_global INTEGER ); CREATE TABLE schema_migrations ( id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL );",
 		Why:   reasonTestFixture,
@@ -586,6 +653,10 @@ var barePoolAllowlist = []barePoolEntry{
 		Count: 1},
 	{File: "internal/core/vector_index.go",
 		SQL:   "INSERT OR REPLACE INTO (memory_id, cluster_id, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+		Why:   reasonPropagated,
+		Count: 1},
+	{File: "internal/core/wake_tools.go",
+		SQL:   "INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, fired, created_by, metadata) VALUES (?, ?, ?, NULL, 0, ?, ?)",
 		Why:   reasonPropagated,
 		Count: 1},
 	{File: "internal/core/web_db.go",
@@ -643,6 +714,28 @@ type barePoolSite struct {
 	File string
 	Line int
 	SQL  string
+}
+
+// bareWriteMethod returns the argument index at which the SQL lives for
+// a write method, and whether the method is a write method at all.
+//
+// The index is the whole point of this function: `Exec(query, args...)`
+// puts the query first, `ExecContext(ctx, query, args...)` puts the
+// CONTEXT first. A scanner that assumes one position for both misses
+// every site of the other shape.
+//
+// A method that takes a context but whose SQL is not resolvable from a
+// fixed position is not silently ignored: the caller resolves the SQL
+// and, if it cannot, the site is simply not counted — the same
+// fail-open the `Exec` path has always had for a variable query.
+func bareWriteMethod(name string) (sqlArgIndex int, ok bool) {
+	switch name {
+	case "Exec":
+		return 0, true
+	case "ExecContext":
+		return 1, true
+	}
+	return 0, false
 }
 
 // isPoolReceiver reports whether the receiver of an Exec call is a
@@ -720,10 +813,14 @@ func scanBarePoolSource(rel string, src []byte) ([]barePoolSite, error) {
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Exec" {
+		if !ok {
 			return true
 		}
-		if len(call.Args) == 0 {
+		sqlIdx, isWriteMethod := bareWriteMethod(sel.Sel.Name)
+		if !isWriteMethod {
+			return true
+		}
+		if len(call.Args) <= sqlIdx {
 			return true
 		}
 		recv, ok := receiverOf(call)
@@ -733,7 +830,7 @@ func scanBarePoolSource(rel string, src []byte) ([]barePoolSite, error) {
 		if inTx(call.Pos()) {
 			return true
 		}
-		sql := resolveSQL(call.Args[0], scope)
+		sql := resolveSQL(call.Args[sqlIdx], scope)
 		if !bareWriteVerb.MatchString(sql) {
 			return true
 		}
@@ -1023,6 +1120,60 @@ func firstLine(s string) string {
 	return s
 }
 
+// TestBarePoolAllowlistDetectsReintroducedExecContextWrite is the
+// non-vacuity control for the ExecContext shape.
+//
+// The phase-0 audit scanner matched the METHOD NAME `ExecContext` and
+// still read the SQL from `Args[0]` — the context — so every
+// `ExecContext` write was classified as a non-write and left out of the
+// inventory. The first version of this ratchet did not match the method
+// name at all. Both blind spots hid the same 17 sites.
+//
+// This test pins the fix from both ends:
+//   - the classifier must SEE a bare `ExecContext` write (a synthetic
+//     source, so it keeps proving the SHAPE as the tree changes); and
+//   - the allowlist must not contain the synthetic shape, so a live
+//     reintroduction fails the completeness guard rather than passing
+//     because a detector could not see it.
+func TestBarePoolAllowlistDetectsReintroducedExecContextWrite(t *testing.T) {
+	const shape = "UPDATE probe_target SET last_seen_at = ? WHERE id = ?"
+	const file = "internal/core/probe.go"
+
+	// The synthetic source uses the ExecContext shape: the query is the
+	// SECOND argument, because the first is the context.
+	src := "package internal\n" +
+		"func probe(ctx context.Context, dm *DatabaseManager) { _, _ = dm.db.ExecContext(ctx, `" + shape + "`, 1, \"x\") }\n"
+	sites, err := scanBarePoolSource(file, []byte(src))
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(sites) != 1 {
+		t.Fatalf("a bare ExecContext write must be detected as a bare pool write (got %d sites)", len(sites))
+	}
+	if !strings.Contains(sites[0].SQL, "probe_target") {
+		t.Fatalf("the detected site must carry the RESOLVED SQL, not the context: %q", sites[0].SQL)
+	}
+
+	// And the shape must not be allowlisted: a live reintroduction has
+	// to fail the completeness guard.
+	if _, ok := allowlistIndex()[barePoolIdentity(file, sites[0].SQL)]; ok {
+		t.Fatalf("the synthetic ExecContext shape resolves to an allowlisted identity: " +
+			"a live bare ExecContext write would pass the guard")
+	}
+
+	// The same shape expressed through Exec is detected too, so the two
+	// spellings cannot hide behind each other.
+	srcExec := "package internal\n" +
+		"func probe(dm *DatabaseManager) { _, _ = dm.db.Exec(`" + shape + "`, 1, \"x\") }\n"
+	sitesExec, err := scanBarePoolSource(file, []byte(srcExec))
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(sitesExec) != 1 {
+		t.Fatalf("the Exec spelling of the same shape must be detected (got %d sites)", len(sitesExec))
+	}
+}
+
 // TestBarePoolScannerFlagsRepresentativeShapes is the negative control:
 // the classifier must catch every bare shape — including a deliberately
 // reintroduced defect — and must not flag the guarded or
@@ -1059,6 +1210,24 @@ func TestBarePoolScannerFlagsRepresentativeShapes(t *testing.T) {
 			1,
 		},
 		{
+			// The shape the phase-0 scanner and the first version of
+			// this ratchet both MISSED: the query is the SECOND
+			// argument, because the first is the context.
+			"bare dm.db.ExecContext is caught",
+			"package p\nfunc f(ctx context.Context, dm *M) { _, _ = dm.db.ExecContext(ctx, `INSERT INTO t VALUES (?)`, 1) }\ntype M struct { db *D }\ntype D struct{}\nfunc (d *D) ExecContext(ctx context.Context, q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
+			"bare dm.SQLDB().ExecContext is caught",
+			"package p\nfunc f(ctx context.Context, dm *M) { _, _ = dm.SQLDB().ExecContext(ctx, `UPDATE t SET a = 1`) }\ntype M struct{}\nfunc (m *M) SQLDB() *D { return nil }\ntype D struct{}\nfunc (d *D) ExecContext(ctx context.Context, q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
+			"bare local db.ExecContext is caught",
+			"package p\nfunc f(ctx context.Context, db *D) { _, _ = db.ExecContext(ctx, `CREATE TABLE t (a)`) }\ntype D struct{}\nfunc (d *D) ExecContext(ctx context.Context, q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
 			"guarded ExecTracked is not flagged",
 			"package p\nfunc f(dm *M) { _, _ = dm.ExecTracked(`INSERT INTO t VALUES (?)`, 5, 1) }\ntype M struct{}\nfunc (m *M) ExecTracked(q string, n int, a ...interface{}) (int, error) { return 0, nil }\n",
 			0,
@@ -1069,6 +1238,14 @@ func TestBarePoolScannerFlagsRepresentativeShapes(t *testing.T) {
 			0,
 		},
 		{
+			// A transaction-owned ExecContext is a transaction-owned
+			// ExecContext: the SQL is still the second argument, but the
+			// receiver is the transaction.
+			"tx.ExecContext inside a WithTx callback is not flagged",
+			"package p\nfunc f(ctx context.Context, dm *M) { _ = dm.WithTx(func(tx *T) error { _, _ = tx.ExecContext(ctx, `UPDATE t SET a = 1`); return nil }) }\ntype M struct{}\ntype T struct{}\nfunc (m *M) WithTx(fn func(*T) error) error { return fn(nil) }\nfunc (t *T) ExecContext(ctx context.Context, q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			0,
+		},
+		{
 			"node.Tx().Exec is not flagged",
 			"package p\nfunc f(n *N) { _, _ = n.Tx().Exec(`DELETE FROM t`) }\ntype N struct{}\ntype T struct{}\nfunc (n *N) Tx() *T { return nil }\nfunc (t *T) Exec(q string, a ...interface{}) (int, error) { return 0, nil }\n",
 			0,
@@ -1076,6 +1253,11 @@ func TestBarePoolScannerFlagsRepresentativeShapes(t *testing.T) {
 		{
 			"a read is not flagged",
 			"package p\nfunc f(dm *M) { _, _ = dm.db.Query(`SELECT * FROM t`) }\ntype M struct { db *D }\ntype D struct{}\nfunc (d *D) Query(q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			0,
+		},
+		{
+			"a read via ExecContext is not flagged",
+			"package p\nfunc f(ctx context.Context, dm *M) { _, _ = dm.db.ExecContext(ctx, `SELECT * FROM t`) }\ntype M struct { db *D }\ntype D struct{}\nfunc (d *D) ExecContext(ctx context.Context, q string, a ...interface{}) (int, error) { return 0, nil }\n",
 			0,
 		},
 	}

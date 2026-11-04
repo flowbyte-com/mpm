@@ -694,10 +694,20 @@ func (f *FilesystemBackend) GCSweepOrphans(ctx context.Context, grace time.Durat
 
 	for _, id := range orphanIDs {
 		log.Printf("blobstore: orphan DB row %q has no payload file, removing", id)
-		_, err := f.db.ExecContext(ctx, `DELETE FROM blobs WHERE id = ?`, id)
-		if err == nil {
-			stats.OrphansDeleted++
+		if _, err := f.db.ExecContext(ctx, `DELETE FROM blobs WHERE id = ?`, id); err != nil {
+			// The row stays in the table and the NEXT sweep retries it,
+			// so the consequence of a lost delete is a delay, not a
+			// stranded artifact. It is still REPORTED rather than
+			// discarded: this sweep already reports every other
+			// database failure the same way (the exists check below
+			// logs and counts), and a silently swallowed write is the
+			// defect class issue #178 audits.
+			slog.Warn("blob_gc: orphan row delete failed; the row stays and the next sweep retries it",
+				"id", id, "err", err)
+			stats.OrphansSkipped++
+			continue
 		}
+		stats.OrphansDeleted++
 	}
 
 	slog.Info("blob_gc_run",
