@@ -380,9 +380,11 @@ Lifecycle asymmetry: promote_to_global is one-way / additive. The local row is p
 Use when: you need to schedule a check-in, reminder, or follow-up task to fire automatically at a specific time without the agent running continuously. Wakes survive agent restarts — the scheduler fires them regardless of what session is active.
 Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule) fire once and are marked fired.
 Lifecycle asymmetry: delete_task is permanent removal of the task row. For reversibility / preserving history, prefer upsert_task with status='paused' (the row stays, the scheduler skips it, you can flip back to 'active' later without losing state).
-The resolve action is the explicit, audited mechanism for retiring a non-scheduled-task wake without consuming it through the delivery path (the CheckPendingWakes / list cycle). Idempotent; refuses scheduled_tasks-owned rows. Required params: wake_id, reason (reconciled|obsolete|superseded|already_satisfied). The reason taxonomy is canonical and bounded — see internal/core/wake_tools.go:isValidWakeResolveReason.
+The resolve action is the explicit, audited mechanism for retiring a wake without consuming it through the delivery path (the CheckPendingWakes / list cycle). Idempotent; retires only the agent-owned kinds (notification — explicit or untagged — cascade and cron); a scheduler-owned or unknown kind is refused with status not_a_wake and the wake stays pending for its handler. Required params: wake_id, reason (reconciled|obsolete|superseded|already_satisfied). The reason taxonomy is canonical and bounded — see internal/core/wake_tools.go:isValidWakeResolveReason.
 
 Wake ownership: a wake kind has exactly one owner. The agent owns notification (explicit or untagged), cascade and cron — the kinds the check surface delivers and retires. Every other kind (snapshot, critic_audit, gc, broadcast, cascade_summary, drill, and any unknown kind) belongs to the scheduler, which runs it through a registered handler. The check action therefore never retires a scheduler-owned wake: kinds=["*"] surfaces every AGENT-OWNED pending wake, and a kinds list naming a scheduler-owned kind surfaces nothing. The list action is a read-only queue inspection and is not narrowed.
+
+Arming authorisation: the schedule action may arm only the kinds the agent owns (notification, cascade, cron, or untagged). A request naming a scheduler-owned kind (drill, broadcast, snapshot, gc, critic_audit, cascade_summary) or an unknown kind is refused and creates no wake row; the error names the kind and the armable set. A metadata.kind that is present but not a string is refused as malformed. Internal producers (the scheduler's ingest handler, the cascade materializer, the reconcile loop, the cron runner) keep their existing capabilities and arm through the DB-layer producer, which is not narrowed.
 
 Cron-wake retention model (the bookkeeping rows emitted by recurring cron tasks):
 
@@ -404,7 +406,7 @@ Cron-wake retention model (the bookkeeping rows emitted by recurring cron tasks)
 						"reason":         {"type": "string"},
 						"target_time":   {"type": "string"},
 						"theory_id":     {"type": "string"},
-						"metadata":      {"type": "object"},
+						"metadata":      {"type": "object", "description": "Optional wake metadata. The 'kind' discriminator selects the wake's owner: 'notification' (the default when absent), 'cascade' and 'cron' are agent-owned and may be armed; any other value is scheduler-owned and the schedule action refuses it."},
 						"kinds":        {"type": "array", "items": {"type": "string"}},
 						"session_id":    {"type": "string"},
 						"include_fired":  {"type": "boolean"},

@@ -27,7 +27,6 @@
 package internal
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -69,10 +68,10 @@ func TestD1_ScheduleResolve_RoundTrip_ScheduleDefaultsKind(t *testing.T) {
 }
 
 // TestD1_ScheduleResolve_CallerKindPreserved confirms the producer
-// fix does not overwrite a caller-supplied `kind`. Cascade and
-// cron-scheduled-task rows MUST keep their discriminator so they
-// route correctly through the lifecycle (cascade wakes go via
-// resolve; cron-scheduled-task rows go via delete_task).
+// fix does not overwrite a caller-supplied `kind`. Cascade and cron
+// rows MUST keep their discriminator so they route correctly through
+// the lifecycle — both are agent-owned kinds, and the agent may
+// retire either of them through the resolve surface.
 func TestD1_ScheduleResolve_CallerKindPreserved(t *testing.T) {
 	dm, err := NewDatabaseManager(t.TempDir())
 	require.NoError(t, err)
@@ -102,9 +101,9 @@ func TestD1_ScheduleResolve_CallerKindPreserved(t *testing.T) {
 // side fix: ResolveWake must NOT reject rows whose `metadata` is
 // NULL or empty (legacy rows authored before the producer fix).
 // Prior behavior was: the substring check failed → row was rejected
-// as "not_a_wake; use delete_task". Post-fix: json_extract on a
-// NULL/empty metadata returns NULL → "" matches the wake-kind
-// switch's empty-string case → wake row, proceed.
+// as "not_a_wake". Post-fix: json_extract on a NULL/empty metadata
+// returns NULL → "" is an untagged wake, and an untagged wake is
+// agent-owned → wake row, proceed.
 func TestD1_ResolveWake_AcceptsLegacyNullMetadata(t *testing.T) {
 	dm, err := NewDatabaseManager(t.TempDir())
 	require.NoError(t, err)
@@ -148,12 +147,64 @@ func TestD1_ResolveWake_AcceptsLegacyEmptyMetadataJson(t *testing.T) {
 	require.Equal(t, "resolved", status)
 }
 
-// TestD1_ResolveWake_RejectsScheduledTaskKind pins the boundary:
-// rows whose `metadata.kind` is something other than
-// cascade / cascade_summary / notification are NOT wake rows and
-// must be retired via delete_task. This guards against the fix
-// over-widening the discriminator.
-func TestD1_ResolveWake_RejectsScheduledTaskKind(t *testing.T) {
+// TestD1_ResolveWake_RejectsSchedulerOwnedKind pins the boundary:
+// rows whose `metadata.kind` is a SCHEDULER-owned kind are not the
+// agent's, and the agent must not retire them.
+//
+// 2026-11-04 (wake-ownership correction): this test used to pin the
+// refusal of `cron` on the theory that a cron row was a
+// scheduled_tasks row owned by `delete_task`. That was wrong twice
+// over: a cron wake is a `scheduled_wakes` row (the cron producer
+// injects one per tick), and `delete_task` does not apply to it. Under
+// the wake-ownership model — the same model the arming gate and the
+// opportunistic fold use — `cron` is an AGENT-owned kind: the fold
+// delivers it, and it carries the `directive_id` the agent has to
+// consult. The resolver therefore ACCEPTS it, and refuses the kinds
+// the scheduler dispatches through a registered handler.
+//
+// The discriminator is now WakeKindAgentOwned, the single policy the
+// whole wake lifecycle shares.
+func TestD1_ResolveWake_RejectsSchedulerOwnedKind(t *testing.T) {
+	dm, err := NewDatabaseManager(t.TempDir())
+	require.NoError(t, err)
+	defer dm.Close()
+
+	// cascade_summary is the scheduler's: it has a registered handler
+	// (scheduler.SystemHandlerCascadeSummary). An agent that retires it
+	// suppresses the handler's run for that drain.
+	_, err = dm.db.Exec(
+		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, recurring_rule, fired, created_by, metadata)
+		 VALUES (?, ?, ?, NULL, NULL, 0, ?, ?)`,
+		"wk-cascade-summary-001", timeUnix(t, 3600), "cascade summary wake row", "cascade-drain",
+		`{"kind":"cascade_summary"}`,
+	)
+	require.NoError(t, err)
+
+	resolved, status, err := dm.ResolveWake("wk-cascade-summary-001", "reconciled", "")
+	require.Error(t, err, "a scheduler-owned row must NOT be resolvable by the agent")
+	require.False(t, resolved)
+	require.Equal(t, "not_a_wake", status)
+	require.Contains(t, err.Error(), "scheduler-owned",
+		"the rejection error must say the row belongs to the scheduler; got %q", err.Error())
+
+	// The row must still be pending for its handler.
+	var fired int
+	require.NoError(t, dm.db.QueryRow(
+		`SELECT fired FROM scheduled_wakes WHERE id = ?`, "wk-cascade-summary-001",
+	).Scan(&fired))
+	require.Equal(t, 0, fired,
+		"a refused resolve must leave the scheduler-owned wake pending")
+}
+
+// TestD1_ResolveWake_AcceptsAgentOwnedCronKind is the inverse half of
+// the boundary above.
+//
+// A cron wake is the agent's own: the fold delivers it and the agent
+// acts on it. The resolver must therefore accept it, exactly as it
+// accepts a notification or a cascade wake. Before the ownership
+// correction it was refused with a message pointing at `delete_task`,
+// which is not a surface that can retire a `scheduled_wakes` row.
+func TestD1_ResolveWake_AcceptsAgentOwnedCronKind(t *testing.T) {
 	dm, err := NewDatabaseManager(t.TempDir())
 	require.NoError(t, err)
 	defer dm.Close()
@@ -161,19 +212,16 @@ func TestD1_ResolveWake_RejectsScheduledTaskKind(t *testing.T) {
 	_, err = dm.db.Exec(
 		`INSERT INTO scheduled_wakes (id, target_time, reason, theory_id, recurring_rule, fired, created_by, metadata)
 		 VALUES (?, ?, ?, NULL, NULL, 0, ?, ?)`,
-		"wk-cron-001", timeUnix(t, 3600), "cron-style scheduled task row", "cron-owner",
+		"wk-cron-001", timeUnix(t, 3600), "cron wake row", "cron-owner",
 		`{"kind":"cron","directive_id":"epistemic-compaction"}`,
 	)
 	require.NoError(t, err)
 
 	resolved, status, err := dm.ResolveWake("wk-cron-001", "reconciled", "")
-	require.Error(t, err, "cron-kind row must NOT be resolvable as a wake")
-	require.False(t, resolved)
-	require.Equal(t, "not_a_wake", status)
-	require.True(t,
-		strings.Contains(err.Error(), "delete_task") ||
-			strings.Contains(err.Error(), "scheduled task"),
-		"rejection error must guide caller to delete_task; got %q", err.Error())
+	require.NoError(t, err,
+		"a cron wake is agent-owned and must be resolvable; got status=%q err=%v", status, err)
+	require.True(t, resolved)
+	require.Equal(t, "resolved", status)
 }
 
 // TestD1_PersistenceAcrossReopen pins wake row persistence after
@@ -230,11 +278,18 @@ func TestD1_OverdueRemainsResolvable(t *testing.T) {
 }
 
 // TestD1_OrdinaryScheduledTaskSemanticsUnchanged pins the inverse
-// boundary: handleScheduleWake with `kind: cron` (a row type owned
-// by delete_task, NOT by resolve) MUST still be produced correctly
-// AND MUST be rejectable via ResolveWake. Adding the default
-// `kind=notification` MUST NOT break the boundary between wake
-// rows and scheduled-task rows.
+// boundary: a wake the producer authors with `kind: cron` MUST still
+// be produced correctly AND MUST still be retirable by the agent.
+//
+// 2026-11-04 (wake-ownership correction): this test used to assert
+// that a cron-kind row was NOT resolvable, on the theory that cron
+// rows belong to `delete_task`. That conflated two different tables:
+// the recurring TASK lives in `scheduled_tasks` and is owned by
+// `delete_task` / `upsert_task`, while the cron WAKE is a
+// `scheduled_wakes` row the cron producer injects and the fold
+// delivers. Under the wake-ownership model the cron wake is the
+// agent's, so the agent may retire it — which is what the resolver
+// now does.
 func TestD1_OrdinaryScheduledTaskSemanticsUnchanged(t *testing.T) {
 	dm, err := NewDatabaseManager(t.TempDir())
 	require.NoError(t, err)
@@ -248,10 +303,11 @@ func TestD1_OrdinaryScheduledTaskSemanticsUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	id := out["id"].(string)
 
-	// Resolve must refuse — this row is owned by delete_task.
-	_, status, err := dm.ResolveWake(id, "reconciled", "")
-	require.Error(t, err)
-	require.Equal(t, "not_a_wake", status)
+	// Resolve must succeed — a cron wake is the agent's own kind.
+	resolved, status, err := dm.ResolveWake(id, "reconciled", "")
+	require.NoError(t, err, "a cron wake is agent-owned and must be resolvable; got status=%q", status)
+	require.True(t, resolved)
+	require.Equal(t, "resolved", status)
 }
 
 // TestD1_ResolveWake_ReasonEnumUnchanged pins the rest of the

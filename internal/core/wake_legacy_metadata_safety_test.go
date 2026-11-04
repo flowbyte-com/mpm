@@ -10,10 +10,12 @@
 //  5. treat malformed/non-JSON metadata as a wake row (json_extract
 //     returns NULL on parse error rather than raising a SQL error
 //     that becomes an internal failure),
-//  6. preserve the cascade / cascade_summary / notification kind
-//     values as wake rows,
-//  7. reject `cron` and any unrecognized kind as
-//     `(false, "not_a_wake")`.
+//  6. preserve the notification / cascade / cron kind values as wake
+//     rows — the three kinds the AGENT owns, and therefore the only
+//     kinds it may retire (see WakeKindAgentOwned),
+//  7. reject `cascade_summary` and any unrecognized kind as
+//     `(false, "not_a_wake")` — those are the scheduler's kinds, and
+//     the agent may not retire a wake the scheduler has to run.
 package internal
 
 import (
@@ -40,9 +42,9 @@ func TestLegacyMetadataSafety(t *testing.T) {
 		{"valid_json_no_kind", `{"source":"legacy-v1","weight":0.5}`, true},
 		{"malformed_json", `not-actually-json{`, true},
 		{"valid_json_kind_cascade", `{"kind":"cascade","source":"x"}`, true},
-		{"valid_json_kind_cascade_summary", `{"kind":"cascade_summary"}`, true},
 		{"valid_json_kind_notification", `{"kind":"notification"}`, true},
-		{"valid_json_kind_cron", `{"kind":"cron","directive_id":"d-1"}`, false},
+		{"valid_json_kind_cron", `{"kind":"cron","directive_id":"d-1"}`, true},
+		{"valid_json_kind_cascade_summary", `{"kind":"cascade_summary"}`, false},
 		{"valid_json_kind_other", `{"kind":"other-unknown"}`, false},
 	}
 
