@@ -165,6 +165,17 @@ type MaterializationReport struct {
 	// means intents are stranded in `processing` with no reconciler
 	// looking for them — the operator must requeue or fail them by hand.
 	RevertFailed int
+	// TransitionFailed is the count of intents whose OUTBOX STATE
+	// TRANSITION did not land: markMaterialized, markFailed or
+	// requeueIntent returned an error.
+	//
+	// A non-zero count means an intent's terminal (or retry) state was
+	// NOT recorded. The intent stays `processing`, where the restart
+	// reaper revives it, so the obligation is not lost — but it is
+	// delayed, and the report is where the operator sees it. Before this
+	// counter existed, a lost transition was visible only as an audit
+	// line, and the batch report claimed a clean outcome.
+	TransitionFailed int
 }
 
 // MaterializeBatch claims up to `limit` pending intents, materializes each
@@ -198,8 +209,20 @@ func (cm *CascadeMaterializer) MaterializeBatch(ctx context.Context, limit int) 
 		default:
 		}
 
-		result := cm.processIntent(ctx, intent)
+		result, transitionErr := cm.processIntent(ctx, intent)
 		report.Processed++
+		if transitionErr != nil {
+			// The intent's state transition did not land. The intent stays
+			// `processing`, where the restart reaper revives it — so the
+			// obligation survives, but it is delayed and the operator must
+			// be told. Before this counter existed the failure was visible
+			// only as an audit line, and the batch report claimed a clean
+			// outcome.
+			report.TransitionFailed++
+			cm.dm.LogAudit(AuditError, "cascade-materializer",
+				"intent state transition failed (the intent stays in processing and the "+
+					"restart reaper will revive it): "+transitionErr.Error(), "", nil)
+		}
 		switch result {
 		case resultMaterialized:
 			report.Materialized++
@@ -226,7 +249,11 @@ const (
 )
 
 // processIntent handles a single claimed intent end-to-end.
-func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent CascadeIntent) processResult {
+//
+// The returned error is a STATE-TRANSITION failure: the intent's next
+// state was not recorded. The classification is still returned, and the
+// caller reports the failure rather than losing it in an audit line.
+func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent CascadeIntent) (processResult, error) {
 	// ── Downstream liveness check ─────────────────────────────────────────
 	// Before producing a cascade theory (and its wake), verify the
 	// downstream artifact still exists and is not superseded. A cascade
@@ -254,8 +281,9 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 			cm.auditFor(AuditError, "cascade-materializer",
 				fmt.Sprintf("failed to mark stale-downstream intent %s as failed: %v",
 					intent.ID, err), "cascade_state_transition_failed", nil)
+			return resultSuppressed, fmt.Errorf("mark stale-downstream intent %s as failed: %w", intent.ID, err)
 		}
-		return resultSuppressed
+		return resultSuppressed, nil
 	}
 
 	// ── Depth guard ────────────────────────────────────────────────────────
@@ -279,8 +307,9 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 		if err := cm.markFailed(intent.ID, "depth exceeded MaxCascadeDepth"); err != nil {
 			cm.auditFor(AuditError, "cascade-materializer",
 				fmt.Sprintf("failed to mark suppressed intent %s as failed: %v", intent.ID, err), "cascade_state_transition_failed", nil)
+			return resultSuppressed, err
 		}
-		return resultSuppressed
+		return resultSuppressed, nil
 	}
 
 	// ── Materialize ─────────────────────────────────────────────────────────
@@ -290,7 +319,14 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 	}
 
 	// ── Mark materialized ────────────────────────────────────────────────────
+	//
+	// The transition is reported to the caller when it does not land. The
+	// work continues either way: the theory EXISTS, so a wake for it is
+	// still useful, and the intent stays `processing` where the restart
+	// reaper revives it.
+	var transitionErr error
 	if err := cm.markMaterialized(intent.ID, theoryID); err != nil {
+		transitionErr = fmt.Errorf("mark intent %s as materialized (theory=%s): %w", intent.ID, theoryID, err)
 		cm.auditFor(AuditError, "cascade-materializer",
 			fmt.Sprintf("failed to mark intent %s as materialized (theory=%s): %v", intent.ID, theoryID, err), "cascade_state_transition_failed", nil)
 	}
@@ -317,12 +353,16 @@ func (cm *CascadeMaterializer) processIntent(ctx context.Context, intent Cascade
 		}
 	}
 
-	return resultMaterialized
+	return resultMaterialized, transitionErr
 }
 
 // handleMaterializeError classifies a materialization error and updates
 // the intent's retry state appropriately.
-func (cm *CascadeMaterializer) handleMaterializeError(intent CascadeIntent, err error) processResult {
+//
+// The returned error is a STATE-TRANSITION failure: the classification
+// succeeded, but the intent's next state was not recorded. The caller
+// reports it; the batch continues.
+func (cm *CascadeMaterializer) handleMaterializeError(intent CascadeIntent, err error) (processResult, error) {
 	newAttempt := intent.AttemptCount + 1
 
 	if newAttempt >= cm.opts.MaxRetries {
@@ -341,8 +381,9 @@ func (cm *CascadeMaterializer) handleMaterializeError(intent CascadeIntent, err 
 		if markErr := cm.markFailed(intent.ID, err.Error()); markErr != nil {
 			cm.auditFor(AuditError, "cascade-materializer",
 				fmt.Sprintf("failed to mark intent %s as dead-letter: %v", intent.ID, markErr), "cascade_state_transition_failed", nil)
+			return resultFailed, fmt.Errorf("mark intent %s as dead-letter: %w", intent.ID, markErr)
 		}
-		return resultFailed
+		return resultFailed, nil
 	}
 
 	// Retryable: compute exponential backoff and requeue.
@@ -352,9 +393,13 @@ func (cm *CascadeMaterializer) handleMaterializeError(intent CascadeIntent, err 
 	if requeueErr := cm.requeueIntent(intent.ID, newAttempt, nextRetry); requeueErr != nil {
 		cm.auditFor(AuditError, "cascade-materializer",
 			fmt.Sprintf("failed to requeue intent %s (attempt %d): %v", intent.ID, newAttempt, requeueErr), "cascade_requeue_failed", nil)
+		// The requeue is where attempt_count is written. If it does not
+		// land, the counter does not advance and the dead-letter cap can
+		// never be reached for this intent. Report it.
+		return resultSkipped, fmt.Errorf("requeue intent %s (attempt %d): %w", intent.ID, newAttempt, requeueErr)
 	}
 
-	return resultSkipped
+	return resultSkipped, nil
 }
 
 // materializeTheory creates one pending theory through the normal
@@ -430,6 +475,26 @@ func (cm *CascadeMaterializer) materializeTheory(ctx context.Context, intent Cas
 	// Build cascade metadata for top-level storage in the theory row.
 	// Stored top-level (not nested) so cascade queries can filter and
 	// read directly without parsing nested blobs.
+	//
+	// EVERY FIELD HERE MUST BE A FUNCTION OF THE INTENT, NOT OF THE RUN.
+	//
+	// The save layer's F19 identity probe (saveMemoryRow) computes an
+	// identity hash over (content hash, tags, stable metadata) and
+	// returns the EXISTING row's id when an identical live row is found.
+	// That probe is what makes a re-materialization idempotent — and it
+	// only fires when the metadata is byte-identical between two runs.
+	//
+	// `generated_at` used to be a wall-clock stamp, which made every run
+	// produce a DIFFERENT identity hash, so the probe never fired and a
+	// re-materialization created a SECOND theory row: a duplicated
+	// artifact asserting the same conclusion about the same downstream
+	// artifact, with the first one orphaned (no outbox row pointing at
+	// it) and still promotable by an operator.
+	//
+	// The intent's own creation time is the stable anchor: it is written
+	// once, when the invalidation was enqueued, and it identifies the
+	// cascade. The row's own created_at column still records when the
+	// theory was materialised, so no information is lost.
 	cascadeFields := map[string]interface{}{
 		"cascade":                   true,
 		"cascade_version":           1,
@@ -438,7 +503,7 @@ func (cm *CascadeMaterializer) materializeTheory(ctx context.Context, intent Cas
 		"downstream_artifact_id":   intent.DownstreamArtifactID,
 		"downstream_artifact_type":  intent.DownstreamArtifactType,
 		"cascade_depth":            intent.CascadeDepth,
-		"generated_at":              time.Now().UTC().Format(time.RFC3339),
+		"generated_at":              time.Unix(intent.CreatedAt, 0).UTC().Format(time.RFC3339),
 	}
 	if intent.TriggerEvidenceID.Valid {
 		cascadeFields["trigger_evidence_id"] = intent.TriggerEvidenceID.String
@@ -652,15 +717,28 @@ func (cm *CascadeMaterializer) claimCascadeIntents(limit int) ([]CascadeIntent, 
 // AND materialized_theory_id matches. Returns an error on mismatch so
 // the caller can leave the row in 'processing' for restart-recovery
 // to re-materialize (idempotently — the theory is identified by the
-// invalidation_event_id + downstream_artifact_id, so a re-run produces
-// the same theory).
+// intent's stable cascade metadata, so the F19 identity probe returns
+// the SAME theory rather than creating a second one).
+//
+// The write carries the substrate's statement-level budget of 5 (the same
+// budget its siblings revertToPending and markWakeScheduled carry). It is
+// not an ordinary write: it is the ONLY record that the intent reached its
+// terminal state. A bare pool write here loses the transition to ordinary
+// contention, and the row stays 'processing' — where the restart reaper
+// revives it, and the materialization runs AGAIN.
+//
+// The re-run is now safe (the theory is identified by the intent's stable
+// metadata, so the F19 identity probe returns the existing theory rather
+// than creating a second one), but the transition still must not be lost:
+// a lost 'materialized' means the intent is re-materialised and re-woken
+// on the reaper's schedule rather than on its own.
 func (cm *CascadeMaterializer) markMaterialized(intentID, theoryID string) error {
 	now := time.Now().Unix()
-	_, err := cm.dm.db.Exec(`
+	_, err := cm.dm.ExecTracked(`
 		UPDATE epistemic_cascade_outbox
 		SET status = 'materialized', materialized_theory_id = ?, updated_at = ?
 		WHERE id = ?
-	`, theoryID, now, intentID)
+	`, 5, theoryID, now, intentID)
 	if err != nil {
 		return fmt.Errorf("markMaterialized exec: %w", err)
 	}
@@ -687,13 +765,21 @@ func (cm *CascadeMaterializer) markMaterialized(intentID, theoryID string) error
 }
 
 // markFailed moves an intent to dead-letter state (status='failed').
+//
+// It carries the substrate's statement-level budget of 5 for the same
+// reason markMaterialized does: this write is the ONLY record that the
+// intent reached its terminal state. A bare pool write here loses the
+// dead-letter mark to ordinary contention, and the intent stays
+// 'processing' — where the restart reaper revives it, and the
+// dead-letter ATTEMPT CAP never advances, because attempt_count is
+// written only by requeueIntent.
 func (cm *CascadeMaterializer) markFailed(intentID, terminalError string) error {
 	now := time.Now().Unix()
-	_, err := cm.dm.db.Exec(`
+	_, err := cm.dm.ExecTracked(`
 		UPDATE epistemic_cascade_outbox
 		SET status = 'failed', terminal_error = ?, updated_at = ?
 		WHERE id = ?
-	`, terminalError, now, intentID)
+	`, 5, terminalError, now, intentID)
 	return err
 }
 
@@ -778,13 +864,24 @@ func (cm *CascadeMaterializer) downstreamNotLive(intent CascadeIntent) (skip boo
 
 // requeueIntent updates the attempt count and next-retry timestamp for
 // a retryable failure.
+//
+// It carries the substrate's statement-level budget of 5 because this
+// write carries the DEAD-LETTER CAP. attempt_count is written HERE and
+// NOWHERE ELSE on the retry path, so if this write is lost to ordinary
+// contention the counter does not advance: the restart reaper revives the
+// intent with the SAME attempt_count, the next attempt computes the SAME
+// newAttempt, and a poison pill that keeps losing this one write retries
+// forever without ever reaching the terminal dead-letter state.
+//
+// The write is a SET, not an increment, so a retry inside the budget
+// applies it exactly once.
 func (cm *CascadeMaterializer) requeueIntent(intentID string, attemptCount int, nextRetryUnix int64) error {
 	now := time.Now().Unix()
-	_, err := cm.dm.db.Exec(`
+	_, err := cm.dm.ExecTracked(`
 		UPDATE epistemic_cascade_outbox
 		SET status = 'pending', attempt_count = ?, next_retry_at = ?, updated_at = ?
 		WHERE id = ?
-	`, attemptCount, nextRetryUnix, now, intentID)
+	`, 5, attemptCount, nextRetryUnix, now, intentID)
 	return err
 }
 
