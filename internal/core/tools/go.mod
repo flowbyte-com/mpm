@@ -6,6 +6,7 @@ require (
 	github.com/flowbyte-com/mpm-core v0.0.0
 	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v0.55.1
+	github.com/mattn/go-sqlite3 v1.14.37
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -14,7 +15,6 @@ require (
 	github.com/dlclark/regexp2 v1.11.0 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728 // indirect
-	github.com/mattn/go-sqlite3 v1.14.37 // indirect
 	github.com/pkoukk/tiktoken-go v0.1.8 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect

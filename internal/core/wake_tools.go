@@ -78,6 +78,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -489,6 +490,37 @@ func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, createdBy 
 // row) — secrets should never be passed as the reference; if the
 // caller needs to record sensitive evidence, the canonical evidence
 // tool is the right surface.
+//
+// TRANSACTION-LEVEL CONTENTION (2026-11-04, issue #178)
+// -------------------------------------------------------
+// The resolver READS the wake row and then WRITES it. That read-then-
+// write pair is what makes a DEFERRED transaction vulnerable: the read
+// takes the transaction's read snapshot, and the write has to upgrade it
+// to the write lock. In WAL mode ANY commit by another connection between
+// those two points invalidates the snapshot, and the upgrade fails with
+// SQLITE_BUSY_SNAPSHOT.
+//
+// SQLITE_BUSY_SNAPSHOT is NOT ordinary contention. It shares its primary
+// code (SQLITE_BUSY) and its message ("database is locked") with it, so
+// the two are indistinguishable by text — only the EXTENDED code tells
+// them apart. It is also never serviced by the busy handler, so
+// busy_timeout is never consulted (the error returns in microseconds),
+// and a statement-level retry can NEVER clear it: the snapshot belongs to
+// the transaction, and the transaction's snapshot does not change between
+// attempts.
+//
+// The remedy is therefore a TRANSACTION RESTART against a fresh snapshot,
+// which is what dm.WithTx does (bounded by TxSnapshotMaxAttempts). The
+// pre-fix code bypassed BOTH retry layers — it opened its own deferred
+// transaction with dm.db.Begin() and wrote with a raw tx.Exec — so two
+// concurrent resolutions of DIFFERENT agent-owned wakes could lose one
+// resolution with "resolve wake: update: database is locked".
+//
+// The transactional body below is replay-safe: every side effect it
+// produces lives inside the transaction (so an abandoned attempt's write
+// rolls back with it), the UPDATE is guarded by `fired = 0` (so a re-run
+// cannot double-resolve), and the audit row is written OUTSIDE the
+// transaction (so a re-run cannot duplicate it).
 func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference string) (resolved bool, status string, err error) {
 	if wakeID == "" {
 		return false, "missing_wake_id", fmt.Errorf("resolve wake: wake_id is required")
@@ -500,129 +532,159 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 	// Single tx: look up + atomic claim. The UPDATE with WHERE
 	// fired=0 prevents two concurrent resolve calls from racing
 	// the same wake to a "double-resolved" audit row.
-	tx, err := dm.db.Begin()
-	if err != nil {
-		return false, "tx_begin_failed", fmt.Errorf("resolve wake: begin: %w", err)
-	}
-	defer tx.Rollback()
+	//
+	// The transaction is opened by dm.WithTx, not by a bare
+	// dm.db.Begin(), because the resolver's read-then-write pair needs
+	// the TRANSACTION-level restart on a stale snapshot (see the method
+	// doc). WithTx owns that budget; the body below must not open its
+	// own transaction, and must not retry its own statements around it.
+	var (
+		outcome         string
+		auditCreatedBy  string
+		auditResolvedAt int64
+	)
+	txErr := dm.WithTx(func(node DBNode) error {
+		// Per-attempt state. WithTx re-runs this callback against a
+		// FRESH transaction when the previous attempt's snapshot went
+		// stale, so the captured state must be RESET, not accumulated.
+		outcome = ""
+		auditCreatedBy = ""
+		auditResolvedAt = 0
 
-	var fired int
-	var createdBy string
-	var metadata string
-	row := tx.QueryRow(`
+		var fired int
+		var createdBy string
+		var metadata string
+		row := node.QueryRowTracked(`
 		SELECT fired, created_by, COALESCE(metadata, '')
 		FROM scheduled_wakes WHERE id = ?
 	`, wakeID)
-	if scanErr := row.Scan(&fired, &createdBy, &metadata); scanErr != nil {
-		if scanErr == sql.ErrNoRows {
-			return false, "wake_not_found", fmt.Errorf("resolve wake: wake %q not found", wakeID)
+		if scanErr := row.Scan(&fired, &createdBy, &metadata); scanErr != nil {
+			if scanErr == sql.ErrNoRows {
+				return &wakeResolveStatusError{status: "wake_not_found", err: fmt.Errorf("resolve wake: wake %q not found", wakeID)}
+			}
+			return &wakeResolveStatusError{status: "lookup_failed", err: fmt.Errorf("resolve wake: lookup: %w", scanErr)}
 		}
-		return false, "lookup_failed", fmt.Errorf("resolve wake: lookup: %w", scanErr)
-	}
 
-	// The KIND PROBE. The row's metadata.kind selects the wake's
-	// OWNER, and the owner decides whether the agent may retire it.
-	//
-	// 2026-09-22 release-blocker D-1: the prior substring check
-	// (`strings.Contains(metadata, `"kind":`)`) was brittle — it
-	// missed rows whose `metadata` JSON was NULL or empty (e.g.
-	// rows authored before ScheduleWake authored `kind=notification`
-	// by default), and it conflated "kind absent" with "scheduled
-	// task". The canonical matcher now uses json_extract (the same
-	// surface CheckPendingWakes uses).
-	//
-	// 2026-09-22 verification pass: hardened the probe against
-	// pre-fix data with arbitrarily-corrupted metadata. SQLite's
-	// json_extract raises an error on malformed JSON rather than
-	// returning NULL — which would surface as `lookup_failed` and
-	// fail every write through the wake lifecycle for legacy rows.
-	// The matcher now guards the json_extract with json_valid so
-	// malformed input collapses to NULL (which we already accept as
-	// "kind absent" → untagged notification wake). Three inputs the
-	// legacy compat branch covers, in order:
-	//   1. metadata IS NULL            → JSON validity probe skipped,
-	//                                    treat as no kind.
-	//   2. metadata == ''              → same.
-	//   3. json_valid(metadata) == 0   → malformed / non-JSON text;
-	//                                    treat as no kind rather
-	//                                    than raising a SQL parse
-	//                                    error.
-	//   4. otherwise                  → SELECT json_extract(...,
-	//                                    '$.kind').
-	//
-	// 2026-11-04 (wake-ownership correction): the probe's OUTPUT is
-	// interpreted by the shared ownership policy, not by a local
-	// allowlist. A kind absent from the metadata is an untagged wake
-	// — a notification wake, which the agent owns. A kind the agent
-	// does not own belongs to the scheduler.
-	var rowKind sql.NullString
-	if err := tx.QueryRow(
-		`SELECT CASE
+		// The KIND PROBE. The row's metadata.kind selects the wake's
+		// OWNER, and the owner decides whether the agent may retire it.
+		//
+		// 2026-09-22 release-blocker D-1: the prior substring check
+		// (`strings.Contains(metadata, `"kind":`)`) was brittle — it
+		// missed rows whose `metadata` JSON was NULL or empty (e.g.
+		// rows authored before ScheduleWake authored `kind=notification`
+		// by default), and it conflated "kind absent" with "scheduled
+		// task". The canonical matcher now uses json_extract (the same
+		// surface CheckPendingWakes uses).
+		//
+		// 2026-09-22 verification pass: hardened the probe against
+		// pre-fix data with arbitrarily-corrupted metadata. SQLite's
+		// json_extract raises an error on malformed JSON rather than
+		// returning NULL — which would surface as `lookup_failed` and
+		// fail every write through the wake lifecycle for legacy rows.
+		// The matcher now guards the json_extract with json_valid so
+		// malformed input collapses to NULL (which we already accept as
+		// "kind absent" → untagged notification wake). Three inputs the
+		// legacy compat branch covers, in order:
+		//   1. metadata IS NULL            → JSON validity probe skipped,
+		//                                    treat as no kind.
+		//   2. metadata == ''              → same.
+		//   3. json_valid(metadata) == 0   → malformed / non-JSON text;
+		//                                    treat as no kind rather
+		//                                    than raising a SQL parse
+		//                                    error.
+		//   4. otherwise                  → SELECT json_extract(...,
+		//                                    '$.kind').
+		//
+		// 2026-11-04 (wake-ownership correction): the probe's OUTPUT is
+		// interpreted by the shared ownership policy, not by a local
+		// allowlist. A kind absent from the metadata is an untagged wake
+		// — a notification wake, which the agent owns. A kind the agent
+		// does not own belongs to the scheduler.
+		var rowKind sql.NullString
+		if err := node.QueryRowTracked(
+			`SELECT CASE
 		    WHEN ? IS NULL OR ? = '' THEN NULL
 		    WHEN json_valid(?) = 0 THEN NULL
 		    ELSE json_extract(?, '$.kind')
 		 END`,
-		metadata, metadata, metadata, metadata,
-	).Scan(&rowKind); err != nil {
-		return false, "lookup_failed", fmt.Errorf("resolve wake: probe kind: %w", err)
-	}
-	kind := ""
-	if rowKind.Valid {
-		kind = rowKind.String
-	}
-
-	// OWNERSHIP GATE. The agent may retire only the kinds it OWNS:
-	// notification (explicitly or untagged), cascade and cron. Every
-	// other kind — snapshot, critic_audit, gc, broadcast,
-	// cascade_summary, drill, and any kind a future binary
-	// introduces — belongs to the scheduler, which runs it through a
-	// registered handler. The agent may not retire one: the resolver
-	// sets fired=1, the scheduler's QueryDueWakes selects only
-	// fired=0 rows, and the handler would never run.
-	//
-	// This is the same predicate the arming gate uses
-	// (internal/core/tools/handlers.go) and the same one the
-	// opportunistic fold uses, so the three surfaces cannot disagree
-	// about which kinds are the agent's.
-	if !WakeKindAgentOwned(kind) {
-		return false, "not_a_wake",
-			fmt.Errorf("resolve wake: row %q has metadata.kind=%q which is a scheduler-owned kind; "+
-				"the scheduler runs it through a registered handler, so the agent cannot retire it", wakeID, kind)
-	}
-
-	if fired != 0 {
-		// Already resolved — idempotent no-op. No audit row.
-		if err := tx.Commit(); err != nil {
-			return false, "tx_commit_failed", fmt.Errorf("resolve wake: commit no-op: %w", err)
+			metadata, metadata, metadata, metadata,
+		).Scan(&rowKind); err != nil {
+			return &wakeResolveStatusError{status: "lookup_failed", err: fmt.Errorf("resolve wake: probe kind: %w", err)}
 		}
-		return true, "already_resolved", nil
-	}
+		kind := ""
+		if rowKind.Valid {
+			kind = rowKind.String
+		}
 
-	now := time.Now().Unix()
-	res, execErr := tx.Exec(`
+		// OWNERSHIP GATE. The agent may retire only the kinds it OWNS:
+		// notification (explicitly or untagged), cascade and cron. Every
+		// other kind — snapshot, critic_audit, gc, broadcast,
+		// cascade_summary, drill, and any kind a future binary
+		// introduces — belongs to the scheduler, which runs it through a
+		// registered handler. The agent may not retire one: the resolver
+		// sets fired=1, the scheduler's QueryDueWakes selects only
+		// fired=0 rows, and the handler would never run.
+		//
+		// This is the same predicate the arming gate uses
+		// (internal/core/tools/handlers.go) and the same one the
+		// opportunistic fold uses, so the three surfaces cannot disagree
+		// about which kinds are the agent's.
+		if !WakeKindAgentOwned(kind) {
+			return &wakeResolveStatusError{status: "not_a_wake",
+				err: fmt.Errorf("resolve wake: row %q has metadata.kind=%q which is a scheduler-owned kind; "+
+					"the scheduler runs it through a registered handler, so the agent cannot retire it", wakeID, kind)}
+		}
+
+		if fired != 0 {
+			// Already resolved — idempotent no-op. No audit row.
+			outcome = "already_resolved"
+			return nil
+		}
+
+		now := time.Now().Unix()
+		res, execErr := node.ExecTracked(`
 		UPDATE scheduled_wakes
 		SET fired = 1, fired_at = ?, fired_by = ?
 		WHERE id = ? AND fired = 0
-	`, now, "wake-resolver", wakeID)
-	if execErr != nil {
-		return false, "update_failed", fmt.Errorf("resolve wake: update: %w", execErr)
-	}
-	affected, raErr := res.RowsAffected()
-	if raErr != nil {
-		return false, "rows_affected_failed", fmt.Errorf("resolve wake: rows-affected: %w", raErr)
-	}
-	if affected == 0 {
-		// Lost the race (another resolver fired this wake first).
-		// Treat as already_resolved — the audit trail will reflect
-		// whichever resolver won.
-		if err := tx.Commit(); err != nil {
-			return false, "tx_commit_failed", fmt.Errorf("resolve wake: commit race: %w", err)
+	`, wakeResolveWriteRetries, now, "wake-resolver", wakeID)
+		if execErr != nil {
+			return &wakeResolveStatusError{status: "update_failed", err: fmt.Errorf("resolve wake: update: %w", execErr)}
 		}
-		return true, "already_resolved", nil
+		affected, raErr := res.RowsAffected()
+		if raErr != nil {
+			return &wakeResolveStatusError{status: "rows_affected_failed", err: fmt.Errorf("resolve wake: rows-affected: %w", raErr)}
+		}
+		if affected == 0 {
+			// Lost the race (another resolver fired this wake first).
+			// Treat as already_resolved — the audit trail will reflect
+			// whichever resolver won.
+			outcome = "already_resolved"
+			return nil
+		}
+
+		outcome = "resolved"
+		auditCreatedBy = createdBy
+		auditResolvedAt = now
+		return nil
+	})
+	if txErr != nil {
+		// Map the failure onto the resolver's status taxonomy. WithTx
+		// produces exactly three kinds of failure: a CALLBACK error
+		// (which carries its own status), a failed COMMIT (ambiguous —
+		// the write may or may not be durable), and a failed BEGIN.
+		var statusErr *wakeResolveStatusError
+		switch {
+		case errors.As(txErr, &statusErr):
+			return false, statusErr.status, statusErr.err
+		case errors.Is(txErr, ErrTxCommitAmbiguous):
+			return false, "tx_commit_failed", fmt.Errorf("resolve wake: commit: %w", txErr)
+		default:
+			return false, "tx_begin_failed", fmt.Errorf("resolve wake: begin: %w", txErr)
+		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return false, "tx_commit_failed", fmt.Errorf("resolve wake: commit: %w", err)
+	if outcome == "already_resolved" {
+		return true, "already_resolved", nil
 	}
 
 	// Forensic log — every wake resolution is a state transition.
@@ -634,18 +696,61 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 	// result reference (a pointer, NOT the raw content of the
 	// resolution — e.g. the theory id that was disproven, the new
 	// artifact id that superseded the downstream).
+	//
+	// The audit row is written OUTSIDE the transaction, deliberately.
+	// Inside it, a transaction restart would replay the write and emit
+	// a SECOND audit row for one resolution; outside it, exactly one
+	// row is emitted per successful resolution.
 	dm.LogAudit(AuditInfo, "wake-resolver",
 		fmt.Sprintf("resolve_wake %s reason=%s", wakeID, reason),
 		"",
 		AuditContext{
 			"wake_id":          wakeID,
 			"reason":           reason,
-			"created_by":       createdBy,
-			"resolved_at":      now,
+			"created_by":       auditCreatedBy,
+			"resolved_at":      auditResolvedAt,
 			"result_reference": resultReference,
 		})
 	return true, "resolved", nil
 }
+
+// wakeResolveWriteRetries is the statement-level retry budget for the
+// resolver's UPDATE.
+//
+// It covers ORDINARY contention: another connection may hold the write
+// lock, and SQLite's busy handler already waits out busy_timeout before
+// the driver ever sees an error, so the budget only has to cover what is
+// left over. Five is the substrate's documented write budget (issue #164).
+//
+// It does NOT cover SQLITE_BUSY_SNAPSHOT, and it is not meant to.
+// txNode.ExecTracked returns a snapshot conflict to the caller
+// IMMEDIATELY (without burning the backoff), because a statement-level
+// retry can never clear it — the snapshot belongs to the transaction.
+// The ENCLOSING transaction (dm.WithTx) is what restarts it.
+const wakeResolveWriteRetries = 5
+
+// wakeResolveStatusError carries the resolver's public status alongside the
+// underlying error.
+//
+// The resolver's transactional body runs inside dm.WithTx, whose callback
+// can only return an error. The status taxonomy the public envelope
+// exposes (wake_not_found, lookup_failed, not_a_wake, update_failed, …)
+// therefore rides along with the error and is unpacked by the caller.
+//
+// The wrapper UNWRAPS to the underlying error, which matters: WithTx
+// classifies the callback's error with errors.As, so a wrapped
+// SQLITE_BUSY_SNAPSHOT is still recognised as a snapshot conflict and
+// still triggers the transaction restart — and a wrapped context
+// cancellation is still recognised as a cancellation, so an abandoned
+// attempt is not replayed.
+type wakeResolveStatusError struct {
+	status string
+	err    error
+}
+
+func (e *wakeResolveStatusError) Error() string { return e.err.Error() }
+
+func (e *wakeResolveStatusError) Unwrap() error { return e.err }
 
 // isValidWakeResolveReason reports whether reason is one of the canonical
 // resolution reasons. The set is intentionally bounded so the audit
