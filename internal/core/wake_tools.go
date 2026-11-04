@@ -466,13 +466,22 @@ func (dm *DatabaseManager) ScheduleWake(reason, targetTime, theoryID, createdBy 
 //
 // Refusal semantics:
 //   - wake_id not found → (false, "wake_not_found")
-//   - wake_id references a scheduled_tasks row → rejected (the
-//     schedule rows are owned by `delete_task`; mixing the two
-//     surfaces would let an agent accidentally retire a recurring
-//     schedule).
+//   - the row's metadata.kind is a SCHEDULER-owned kind →
+//     (false, "not_a_wake"). Those rows belong to the scheduler: it
+//     runs them through a registered handler, and the agent may not
+//     retire one, because retiring it would suppress that handler's
+//     run. A row whose kind is absent is an untagged notification
+//     wake and IS resolvable.
 //   - already fired → (true, "already_resolved") — no-op success.
-//   - cascade wake resolved with the supplied reason → (true,
-//     "resolved") and an audit row is emitted.
+//   - agent-owned wake resolved with the supplied reason →
+//     (true, "resolved") and an audit row is emitted.
+//
+// The kind gate is the SHARED wake-ownership policy
+// (WakeKindAgentOwned), the same one the opportunistic fold and the
+// agent-facing arming gate use. One policy, one list, no drift: a
+// kind the agent may not SEE (because the fold would retire it) is a
+// kind it may not ARM, and a kind the agent owns is a kind it may
+// retire.
 //
 // Safe-credential contract: reason is bounded to the enum below; no
 // arbitrary string is accepted. result_reference, if supplied, is
@@ -511,13 +520,8 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 		return false, "lookup_failed", fmt.Errorf("resolve wake: lookup: %w", scanErr)
 	}
 
-	// Refuse to act on scheduled_tasks-owned rows. The schedule
-	// row has a separate lifecycle (delete_task / upsert_task) and
-	// retiring a wake via the cascade-resolution surface would
-	// silently bypass the schedule owner's controls. The canonical
-	// discriminator is the metadata.kind column: cascade / cron /
-	// notification wakes flow through scheduled_wakes; scheduled
-	// recurring task rows live in a separate table.
+	// The KIND PROBE. The row's metadata.kind selects the wake's
+	// OWNER, and the owner decides whether the agent may retire it.
 	//
 	// 2026-09-22 release-blocker D-1: the prior substring check
 	// (`strings.Contains(metadata, `"kind":`)`) was brittle — it
@@ -525,17 +529,7 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 	// rows authored before ScheduleWake authored `kind=notification`
 	// by default), and it conflated "kind absent" with "scheduled
 	// task". The canonical matcher now uses json_extract (the same
-	// surface CheckPendingWakes uses) so that:
-	//   - `json_extract(...) IS NULL`        → notification default
-	//                                           (matches CheckPendingWakes
-	//                                            backward-compat branch)
-	//   - `json_extract(...) = 'notification'` → notification explicit
-	//   - `json_extract(...) = 'cascade'` /
-	//     `json_extract(...) = 'cascade_summary'` → cascade wake
-	// Any of the above is a wake row; anything else is a scheduled
-	// task row and must be retired via delete_task. Note: cascade /
-	// cascade_summary and notification are wake kinds; 'cron' or
-	// other unknown values are scheduled-task kinds.
+	// surface CheckPendingWakes uses).
 	//
 	// 2026-09-22 verification pass: hardened the probe against
 	// pre-fix data with arbitrarily-corrupted metadata. SQLite's
@@ -544,8 +538,8 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 	// fail every write through the wake lifecycle for legacy rows.
 	// The matcher now guards the json_extract with json_valid so
 	// malformed input collapses to NULL (which we already accept as
-	// "kind absent" → wake row). Three inputs the legacy compat
-	// branch covers, in order:
+	// "kind absent" → untagged notification wake). Three inputs the
+	// legacy compat branch covers, in order:
 	//   1. metadata IS NULL            → JSON validity probe skipped,
 	//                                    treat as no kind.
 	//   2. metadata == ''              → same.
@@ -555,6 +549,12 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 	//                                    error.
 	//   4. otherwise                  → SELECT json_extract(...,
 	//                                    '$.kind').
+	//
+	// 2026-11-04 (wake-ownership correction): the probe's OUTPUT is
+	// interpreted by the shared ownership policy, not by a local
+	// allowlist. A kind absent from the metadata is an untagged wake
+	// — a notification wake, which the agent owns. A kind the agent
+	// does not own belongs to the scheduler.
 	var rowKind sql.NullString
 	if err := tx.QueryRow(
 		`SELECT CASE
@@ -570,12 +570,24 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 	if rowKind.Valid {
 		kind = rowKind.String
 	}
-	switch kind {
-	case "cascade", "cascade_summary", "notification", "":
-		// wake row, proceed
-	default:
+
+	// OWNERSHIP GATE. The agent may retire only the kinds it OWNS:
+	// notification (explicitly or untagged), cascade and cron. Every
+	// other kind — snapshot, critic_audit, gc, broadcast,
+	// cascade_summary, drill, and any kind a future binary
+	// introduces — belongs to the scheduler, which runs it through a
+	// registered handler. The agent may not retire one: the resolver
+	// sets fired=1, the scheduler's QueryDueWakes selects only
+	// fired=0 rows, and the handler would never run.
+	//
+	// This is the same predicate the arming gate uses
+	// (internal/core/tools/handlers.go) and the same one the
+	// opportunistic fold uses, so the three surfaces cannot disagree
+	// about which kinds are the agent's.
+	if !WakeKindAgentOwned(kind) {
 		return false, "not_a_wake",
-			fmt.Errorf("resolve wake: row %q has metadata.kind=%q which is not a wake kind; use delete_task for scheduled tasks", wakeID, kind)
+			fmt.Errorf("resolve wake: row %q has metadata.kind=%q which is a scheduler-owned kind; "+
+				"the scheduler runs it through a registered handler, so the agent cannot retire it", wakeID, kind)
 	}
 
 	if fired != 0 {

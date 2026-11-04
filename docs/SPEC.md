@@ -2804,6 +2804,8 @@ The agent's list is an allowlist, so the default is deny: an unknown kind is not
 
 The gate is at the agent-facing boundary, not in the DB-layer producer: `ScheduleWake` is shared with the internal producers — the scheduler's ingest handler, the cascade materializer, the wake reconcile loop and the cron task runner — and those keep their existing capabilities, including the kinds the agent may not arm. A `metadata.kind` that is present but not a string is refused as malformed, because such a wake is delivered by nobody and dispatched by nobody.
 
+**Resolution authorisation.** The same policy governs the explicit, audited retirement path. `mpm_wakes resolve` names one wake id and retires it (`fired=1`, `fired_by="wake-resolver"`, one audit row). It may retire only the kinds the agent owns — `notification` (explicitly or untagged), `cascade` and `cron`. A scheduler-owned kind is refused with status `not_a_wake`, the wake stays pending, and the scheduler dispatches it as usual: retiring one would set `fired=1`, the scheduler's due-wake query selects only `fired=0` rows, and the handler would never run. An unknown or malformed kind is refused the same way. The reason taxonomy, the idempotent re-resolve behaviour (`already_resolved`, no second audit row), the audit attribution and the response envelope are unchanged. A cron wake is a `scheduled_wakes` row the agent owns — not a `scheduled_tasks` row — so `delete_task` does not apply to it and is no longer named as guidance.
+
 #### Agentic Cron (Recurring Tasks)
 
 *Recurring workflows with fail-fast directive validation — catch typos at upsert, not silent wake drops at 3 AM.*
