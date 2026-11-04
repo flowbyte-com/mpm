@@ -331,7 +331,27 @@ func (s *Scheduler) Close() error {
 // Register attaches a HandlerFunc for the given wake kind. Registering
 // overwrites any previous handler for that kind. Adding a new system kind
 // is a one-line operation; central dispatch never needs editing.
+//
+// A kind that belongs to the AGENT's notification surface is REFUSED.
+// The agent's kinds are delivered and retired by the opportunistic
+// fold; a handler for one of them would execute the same wake twice —
+// once by the fold, once by the scheduler.
+//
+// The refusal is logged rather than silent, and it leaves the kind
+// unhandled, so the misconfiguration is visible in the daemon's log
+// instead of being discovered as a wake that ran twice.
+//
+// The boundary is defined in the core module (core.WakeKindAgentOwned)
+// because the fold lives there and the two halves must not drift.
 func (s *Scheduler) Register(kind string, h HandlerFunc) {
+	if core.WakeKindAgentOwned(kind) {
+		if s.log != nil {
+			s.log.Error("refusing to register a handler for an agent-owned wake kind",
+				"kind", kind,
+				"reason", "the opportunistic fold delivers and retires this kind; a handler would execute the same wake twice")
+		}
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.handlers[kind] = h
