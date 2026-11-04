@@ -811,8 +811,16 @@ phase_bundle() {
     # Git. That is what makes the label trustworthy in a Git-free source
     # tree, and it guarantees that the label and the binary's own
     # reported identity cannot disagree.
+    #
+    # The probe is rb_reported_commit, and it is the SAME probe the
+    # bundle validator uses to ask a bundle's binary the same question.
+    # It reads the binary's output to EOF on purpose: a probe whose
+    # consumer exits at the match closes the pipe while the producer may
+    # still have output to write, and the producer is then killed by
+    # SIGPIPE — which, under pipefail and set -e, turns into an exit
+    # status of 141 with no diagnostic at all. See rb_reported_commit.
     local commit version epoch
-    commit="$("$(build_dir)/mpm" --version 2>/dev/null | awk '/commit:/{print $2; exit}')"
+    commit="$(rb_reported_commit "$(build_dir)/mpm")"
     [ -n "$commit" ] || commit="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" commit 2>/dev/null || printf 'unknown')"
     version="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" version 2>/dev/null || printf 'unknown')"
     epoch="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" build-epoch 2>/dev/null || printf '0')"

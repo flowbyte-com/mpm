@@ -414,6 +414,39 @@ PY
 
 # ---------- validation ----------
 
+# rb_reported_commit <binary>
+#
+# The build commit a runtime binary reports about itself.
+#
+# WHY THE CONSUMER READS TO EOF
+# -----------------------------
+# The obvious way to write this is
+#
+#     "$binary" --version | awk '/commit:/{print $2; exit}'
+#
+# and it is wrong in a way that only shows up when the producer has
+# more than one thing to say. The `exit` closes the read end of the
+# pipe the moment the commit line is seen. If the producer still has
+# output to write — a second section, a trailing line, anything — that
+# write now fails with EPIPE and the producer is killed by SIGPIPE.
+#
+# Under `set -o pipefail` the pipeline's status is then the producer's
+# SIGPIPE status, 141. The statement that captures it is a bare
+# assignment under `set -e`, so 141 becomes the CALLER's exit status:
+# an installation that dies with 141 and says nothing at all about what
+# it was doing. The identity was extracted correctly; only the STATUS
+# was wrong, and the status is what killed the run.
+#
+# Reading to EOF costs one extra read and cannot change the value: the
+# FIRST commit line is still the one that is reported. The count is
+# what keeps it to the first one, and the ABSENCE of `exit` is what
+# keeps the pipe open until the producer is done.
+rb_reported_commit() {
+    local binary="${1:-}"
+    [ -n "$binary" ] || return 1
+    "$binary" --version 2>/dev/null | awk '/commit:/{ if (count == 0) { print $2; count = 1 } }'
+}
+
 # rb_validate_bundle <bundle_dir> [expected_rev]
 #
 # Everything that must be true before a bundle is allowed to become the
@@ -498,7 +531,7 @@ rb_validate_bundle() {
     local commit reported
     commit="$(rb_release_field "$bundle" commit)"
     if [ -n "$commit" ] && [ "$commit" != "unknown" ]; then
-        reported="$("$bundle/bin/mpm" --version 2>/dev/null | awk '/commit:/{print $2; exit}')"
+        reported="$(rb_reported_commit "$bundle/bin/mpm")"
         if [ -z "$reported" ]; then
             rb_err "the bundle's mpm binary did not report a build commit"
             return 1
