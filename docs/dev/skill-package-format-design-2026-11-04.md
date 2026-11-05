@@ -36,6 +36,17 @@ states the recommendation and the cost and records the choice as open
 (**O17**, §12.2). It does **not** record an approval the operator has not
 given.
 
+**One further correction to C-1 was found after this revision's first pass**,
+and it is folded in here. The root derivation it first wrote counted
+*directories* and so refused a flat package carrying more than one content
+directory — which is exactly the shape §5.6's export writer produces. The
+derivation is now anchored on the **entrypoint** instead: the package root is
+the entrypoint's parent directory, a root-level `SKILL.md` permits arbitrary
+canonical sibling paths and content directories, and only genuinely
+**competing package roots** are refused. **§16.1** records the correction and
+the measurement behind it, and **T48**'s fixture is now a multi-directory
+package so the property is pinned.
+
 **§16 is the C-1–C-5 disposition matrix** — for each correction: the original
 problem, the revised specification section, the resolution, the supporting
 evidence, and the remaining risk. **§15 remains the R1–R12 disposition
@@ -616,12 +627,12 @@ is exactly why the legacy force path is refused against a packaged skill
 
 The **package root** is the directory that the canonical paths are relative to
 (§5.4). There are exactly **two** accepted archive layouts, and the root is
-derived from the archive's own top-level shape:
+derived from the **entrypoint** — the entrypoint's own directory *is* the root.
 
 | | the **flat** layout | the **wrapped** layout |
 |---|---|---|
-| shape | `SKILL.md`, `references/…` at the archive's top level | everything under one top-level directory: `pkg/SKILL.md`, `pkg/references/…` |
-| package root | the **archive root** | the **single top-level directory** |
+| shape | `SKILL.md`, `references/…`, `scripts/…` at the archive's top level | everything under one wrapper directory: `pkg/SKILL.md`, `pkg/references/…`, `pkg/scripts/…` |
+| package root | the **archive root** | the **single wrapper directory** |
 | what is stripped | **nothing** | that one directory segment, from every path |
 | produced by | **MPM's own export writer** (§5.6) | a third-party archive, or the operator's own `.skill` |
 
@@ -629,9 +640,19 @@ The operator's archive is in the wrapped form — `system-prompt-writer/` holds
 `SKILL.md` and the two reference files — so the root is that directory and the
 entrypoint is `system-prompt-writer/SKILL.md` within the archive, `SKILL.md`
 within the package. **MPM's own export is in the flat form** (§5.6): it
-writes the canonical paths, so `SKILL.md` and `references/…` sit at the
-archive's top level. Both are accepted, and the derivation below is what
+writes the canonical paths, so `SKILL.md` and every content directory sit at
+the archive's top level. Both are accepted, and the derivation below is what
 makes the export round trip work by construction rather than by accident.
+
+**The number of content directories is irrelevant, and saying so is
+load-bearing.** A flat package may carry `references/`, `scripts/`, `assets/`
+and any number of other directories beside its entrypoint: those are **content
+directories of that package**, not competing roots, and the derivation must
+not refuse them. What is refused is a genuinely **competing package root** —
+an archive in which more than one directory carries an entrypoint
+(§5.3.1 rule 3). A rule that counted directories would refuse the flat form
+of a perfectly ordinary package while accepting its wrapped equivalent, which
+is precisely the inconsistency this section exists to remove.
 
 #### 5.3.1 The root-normalisation rules, exactly
 
@@ -650,58 +671,78 @@ order:
 2. **Canonicalise the remaining file entries.** Every file entry's name is
    canonicalised under §5.4's rules. An entry that fails is rejected before
    the root is derived, so the derivation never sees an unsafe path.
-3. **Classify the top level.** Over the file entries, a first path segment is
-   a **directory prefix** if some file entry has two or more segments and
-   begins with it; every other first segment is a **top-level file**.
-4. **Derive the root** from that classification:
+3. **Find the entrypoint.** The entrypoint is the file entry whose **base
+   name** is exactly `SKILL.md`. The match is exact, so `skill.md` is a
+   different file and does not qualify.
+   * **No such entry** → the import fails with `entrypoint_not_found` and
+     lists the candidate Markdown files found, so the author can point at the
+     right one instead of guessing.
+   * **More than one such entry** → the archive carries **competing package
+     roots**, and it is refused with **`ambiguous_package_root`**. Each
+     candidate is a plausible root — `a/SKILL.md` beside `b/SKILL.md`, a
+     nested `a/b/SKILL.md` beside its own parent's, or a root-level
+     `SKILL.md` beside a nested one — and no rule says which tree is the
+     package. (Two entries with the *same* canonical path are a different
+     refusal — `duplicate_path`, §7 threat 6 — and are rejected before this
+     rule is reached.)
+   * **Exactly one** → it is the entrypoint.
+4. **Derive the root from the entrypoint.** The package root is the **parent
+   directory of the entrypoint**:
+   * an entrypoint at `SKILL.md` has no directory component, so the root is
+     the **archive root** — the **flat** layout;
+   * an entrypoint at `pkg/SKILL.md` has the parent `pkg`, so the root is
+     **that wrapper** — the **wrapped** layout.
 
-   | top-level shape | package root | canonical paths |
-   |---|---|---|
-   | no directory prefix — every file entry has exactly one segment | the archive root | the entry names, unchanged |
-   | exactly **one** directory prefix and **no** top-level file | that directory | the first segment is stripped from every path |
-   | exactly **one** directory prefix **and** at least one top-level file | the archive root | the entry names, unchanged — **this is MPM's own export layout** |
-   | **two or more** directory prefixes | — | rejected as **`ambiguous_package_root`** |
-
-5. **Stripping is by whole segment.** The root segment is removed only when it
-   is *equal* to a path's first segment. A path whose first segment merely
-   shares a prefix with the root — `pkg-extra/x.md` against a root of `pkg` —
-   is **not** stripped.
-6. **The derivation is order-independent** and uses the complete entry set, so
+   **Nothing else is consulted.** In particular the *number of directories* in
+   the archive is **not** an input to the derivation. A flat package with
+   `references/`, `scripts/` and `assets/` beside its entrypoint is one
+   package with three content directories; a wrapped package with the same
+   three directories under its wrapper is the same package. Counting
+   directories would refuse the first and accept the second, which is
+   incoherent — the two must be the same package to MPM.
+5. **Every file entry must lie under the root.** A file entry that does not
+   begin with the root segment is **outside the package** and is rejected with
+   **`path_outside_root`**. The rule is a no-op in the flat layout, where the
+   root is the archive root and every entry lies under it by construction; in
+   the wrapped layout it is what makes the wrapper a *wrapper* rather than one
+   directory among several. Nothing is dropped silently.
+6. **Stripping is by whole segment, and the root is not stored.** The root
+   segment is removed only when it is *equal* to a path's first segment. A
+   path whose first segment merely shares a prefix with the root —
+   `pkg-extra/x.md` against a root of `pkg` — is **not** stripped; it is
+   outside the root and is refused by rule 5. The root itself is not a file
+   row and not part of any canonical path; it survives only in `raw_path`
+   (§5.4), so the original archive layout stays auditable.
+7. **The derivation is order-independent.** It uses the complete entry set, so
    two archives carrying the same entries in a different order derive the same
    root and the same canonical paths.
-7. **The root is not stored.** It is not a file row, and it is not part of any
-   canonical path. It survives only in `raw_path` (§5.4), so the original
-   archive layout stays auditable.
 
 **The derivation is hash-neutral, and that is the property the round trip
 rests on.** The same package imported from a flat archive and from a wrapped
 archive yields the **same canonical paths, the same file rows and the same
-`package_hash`**; only `raw_path` differs. So `export → import → export`
-reproduces the same `package_hash` whichever layout the import arrived in, and
-a third-party wrapped archive and MPM's own flat export are the same package
-to MPM. The operator's `system-prompt-writer/` archive and the export MPM
-writes from it have the same canonical paths — which is why T03, T04 and T07
-can all assert the same hash.
+`package_hash`**; only `raw_path` differs. That holds for a package with
+**any number of content directories**, because the root is derived from the
+entrypoint alone and the content directories are carried along unchanged. So
+`export → import → export` reproduces the same `package_hash` whichever layout
+the import arrived in, and a third-party wrapped archive and MPM's own flat
+export are the same package to MPM. The operator's `system-prompt-writer/`
+archive and the export MPM writes from it have the same canonical paths —
+which is why T03, T04 and T07 can all assert the same hash.
 
-**Multiple roots are rejected.** An archive with two or more top-level
-directories is refused with `ambiguous_package_root` (decision **O9**,
-§12.2): no rule says which of them is the package, and guessing would import
-the wrong tree. The refusal is about the *root*, not about the entrypoint —
-an archive with two `SKILL.md` files is refused for the same reason.
+**Competing roots are rejected; content directories are not.** The refusal is
+about the **entrypoint**, not about the number of directories. An archive with
+two `SKILL.md` files is refused with `ambiguous_package_root` (§5.3.1 rule 3),
+because each is a plausible root and no rule says which tree is the package.
+An archive with one `SKILL.md` and any number of sibling content directories
+is **not** refused — those directories are part of the package.
 
 **The operator may name the root explicitly.** `--entrypoint <path>` names the
-entrypoint; the package root becomes that path's **parent directory** (the
-archive root if `<path>` has no directory component), and every other file
-entry must lie under it — an entry outside it is rejected with
-`path_outside_root`. The choice is recorded in the manifest. This is the
-escape hatch for an archive that is neither flat nor wrapped, and it cannot be
-used to smuggle in a second tree: an entry outside the named root is still
-refused.
-
-**If no `SKILL.md` exists at the root**, the import fails with
-`entrypoint_not_found` and lists the candidate Markdown files found, so the
-author can point at the right one instead of guessing. An archive with no file
-entries at all fails the same way.
+entrypoint; the package root becomes that path's **parent directory** by rule
+4, exactly as the default does, and every other file entry must lie under it
+by rule 5. The choice is recorded in the manifest. It is the escape hatch for
+an archive whose entrypoint is not called `SKILL.md` — and it cannot be used
+to smuggle in a second tree: an entry outside the named root is still refused
+with `path_outside_root`.
 
 **The directory import path has no ambiguity to resolve.** The operator names
 the root when they name the directory, so §5.3.1 governs the ZIP path only;
@@ -820,11 +861,12 @@ timestamp. Two exports of the same package are byte-identical, and
 export → import → export reproduces the same `package_hash`.
 
 **The export's archive is in the flat layout.** The canonical paths sit at the
-archive's top level, so the archive has one directory prefix (`references`)
-and one top-level file (`SKILL.md`) — §5.3.1's third row. The importer
-derives the archive root as the package root and strips nothing, so the
-archive this writer produces is **accepted by construction** rather than by
-coincidence. That is the property the round trip rests on, and it is why the
+archive's top level, so the archive's entrypoint — `SKILL.md` — is at the
+archive's top level, and §5.3.1's rule 4 makes the archive root the package
+root. The importer therefore accepts the archive this writer produces **by
+construction**, *whatever content directories the package carries*: the flat
+layout permits any number of sibling paths and sibling directories beside the
+entrypoint. That is the property the round trip rests on, and it is why the
 export writer and the importer's root rule must be specified against each
 other rather than independently.
 
@@ -1849,7 +1891,7 @@ made the atomicity claim in threat 17 unimplementable as staged.
 | **P2** | Path canonicalisation, collision detection, NFC normalisation, the manifest type, canonical JSON, `package_hash` — pure functions | — | Unit tests for every rejection rule in §7, threats 1, 4, 6, 7, 8; the canonical path is the identity and `raw_path` is display-only (§5.4) |
 | **P3** | **The write primitives and the guards.** The tx-aware skill writer (a thin extraction from `SaveSkillWithInvocation` that writes the projection through `saveMemoryRow` via `txNode`), the **package-immutability guard** on the legacy force path, and the **skills exemption** from `PruneOlderThan` | P1 | The guard refuses a `save --force` against a packaged skill with `package_immutable` and writes nothing; `mpm prune --older-than` does not remove a skill that owns a package **and does not remove an ordinary skill either** — the exclusion is blanket (T41); the projection can be written inside a caller's transaction (**R1**, **R2**, **R7**, **C-2**). **The exemption's form must be confirmed by the operator first (**O17**) |
 | **P4** | **Directory import**: path rules, limits enforced *during* the walk, symlinked-directory refusal, root confinement, per-file scanning with the **fail-closed** scanner check, the derived projection with the pre-release effective version, the single-transaction write, idempotence — **and the export loss marker** (§6.3) | P1, P2, P3 | The operator's package imported from an extracted directory produces the §2.5 hashes and the expected projection; a rejected file leaves nothing behind; an unreadable toxic-phrase file refuses the import with `scanner_unavailable` and writes nothing; `mpm export --collection skills` names every package it cannot carry (**R3**, **R10**, **R11**) |
-| **P5** | **ZIP import**: the **root derivation** (§5.3.1 — the flat and wrapped layouts, and the `ambiguous_package_root` refusal), entry-type rejection (best-effort), path rejection, byte caps, ratio caps, CRC verification by full read | P1, P2, P3, P4 | The operator's `.skill` imports with the same `package_hash` as the directory import; **both accepted layouts produce the same hash**, and a multi-root archive is refused (**T48**); the malicious fixture set is rejected with the right reason codes; **the FAT-creator archive is accepted, its directory entry is skipped, and no byte reaches the filesystem** (**R5**, **C-3**) |
+| **P5** | **ZIP import**: the **root derivation** (§5.3.1 — the entrypoint-anchored flat and wrapped layouts, the `ambiguous_package_root` refusal for competing roots, and the `path_outside_root` refusal), entry-type rejection (best-effort), path rejection, byte caps, ratio caps, CRC verification by full read | P1, P2, P3, P4 | The operator's `.skill` imports with the same `package_hash` as the directory import; **both accepted layouts produce the same hash for a multi-directory package**, and a competing-root archive is refused (**T48**); the malicious fixture set is rejected with the right reason codes; **the FAT-creator archive is accepted, its directory entry is skipped, and no byte reaches the filesystem** (**R5**, **C-3**) |
 | **P6** | **The read API**: `files`, `read_file`, bounded reads with the defined `next_offset` **and its terminal case**, hash verification, the non-optional provenance object | P1, P2 | A reference read returns the exact bytes; a corrupted stored file is refused with `content_hash_mismatch`; the `read` response for a packaged skill carries `entrypoint_sha256` and `scanned`; `next_offset` names a line and never repeats or skips one; an over-long first line is reported as `line_too_large` and is **not** a resumable truncation (**R6**, **C-4**) |
 | **P7** | **The export writer**: deterministic ZIP output, the round trip, export of a legacy single-document skill as a one-file package, and the **full skills export** that emits one `.skill` archive per package (§6.3) | P1, P2, P4, P5 | `package_hash` is stable across export → import; two exports of one package are byte-identical; `mpm export --collection skills` now carries every package and no longer needs the loss marker |
 | **P8** | **The CLI and MCP surfaces**: the CLI subcommands, the read-only `mpm_skills` action extension (`files`, `read_file`, `verify`), the registry description, the schema-guard pins | P4, P5, P6, P7 | The documentation gate is green; the existing `save` / `read` / `list` pins still pass; the new actions are pinned by new guards; **no agent-facing action accepts a filesystem path** (**R4**) |
@@ -1988,7 +2030,7 @@ measurement quoted rather than asserted.
 
 | correction | what was measured | where |
 |---|---|---|
-| **C-1** | The reference package's canonical paths are `SKILL.md`, `references/templates.md`, `references/principles.md`. Their distinct top-level components are **2** (`SKILL.md` and `references`) — so the export's own output does **not** share one top-level directory, and the first revision's rule rejected it. The operator's archive (`system-prompt-writer/…`) is the wrapped form and strips to the same three canonical paths, so the two layouts are hash-equivalent. | §5.3.1, §5.6, §16 C-1 |
+| **C-1** | The reference package's canonical paths are `SKILL.md`, `references/templates.md`, `references/principles.md`. Their distinct top-level components are **2** (`SKILL.md` and `references`) — so the export's own output does **not** share one top-level directory, and the first revision's rule rejected it. The operator's archive (`system-prompt-writer/…`) is the wrapped form and strips to the same three canonical paths, so the two layouts are hash-equivalent. **Measured against the first draft of this revision's own rule:** a flat package with three content directories (`SKILL.md`, `references/`, `scripts/`, `assets/`) was refused with `ambiguous_package_root` while its wrapped equivalent imported cleanly — so the rule rejected the flat form of an ordinary package and broke the hash-equivalence it claimed. The corrected, entrypoint-anchored rule accepts both. | §5.3, §5.3.1, §5.6, §16 C-1 and §16.1 |
 | **C-2** | `PruneOlderThan` is `DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL AND <DirectiveExclusionClause>` — **no `collection` filter** (`internal/core/web_db.go:1781-1792`). The exclusion the design specifies is therefore a **statement-level** clause, and it excludes **every** skill row, not only the packaged ones. | §6.4, §12.2 **O17**, §16 C-2 |
 | **C-3** | The same archive under a Unix creator byte and under a FAT creator byte (the central-directory creator byte rewritten): `pkg/link.md`, `pkg/fifo` and `pkg/dev` become `type=---------- regular=true` under FAT — they **pass** the type check. `pkg/sub/` remains `type=d--------- dir=true` under FAT. Two further variants isolate the signals: with the MS-DOS directory attribute **cleared** and the trailing `/` kept, `pkg/sub/` is still `type=d--------- dir=true`; with the attribute **set** on a name with no trailing slash, `pkg/nodir` is `type=d--------- dir=true`. Go's source: `archive/zip/struct.go:317-328` applies `mode \|= fs.ModeDir` for a trailing `/` **after** the creator switch, and `msdosModeToFileMode` (`:348-358`) reads only the MS-DOS attribute byte. | §7.1, §16 C-3 |
 | **C-4** | §8.6's two bullets, taken together, define `(lines: [], truncated: true, next_offset: offset)` for a first line larger than the byte cap, on every call, with the section's own resume rule (`offset = next_offset`) recommending the loop. The byte cap applies *after* the line range is selected, so it cannot select a different range. | §8.6, §16 C-4 |
@@ -2031,7 +2073,7 @@ begins.
 | **O4** | Cross-workspace sharing: extend the shared database, or use the archive as the transport? | The archive. No shared-schema change in the first cut | Extending the shared database means adding the three tables to the shared schema, a migration on every shared database, and deciding whether the shared copy is a reference or a copy. |
 | **O5** | Should package files be searchable through FTS? | No. FTS stays on the entrypoint only | Yes makes `mpm skill search` find a phrase buried in a reference, but every reference file becomes an indexed memory row — the Option A problem (§4.1). |
 | **O6** | Are the size caps right — 512 files, 32 MiB total, 4 MiB per file, 256 KiB entrypoint? | Adopt as defaults; make them constants | Larger caps slow `ListSkills`, which parses every skill row's full content. |
-| **O9** | Package layouts: a single root directory, or files at the archive's top level? | Accept exactly one — the **flat** layout (the canonical paths at the archive's top level) **or** the **wrapped** layout (one top-level directory holding everything). Multiple roots are rejected with `ambiguous_package_root`. **This must be answered before P2/P5** | Accepting multiple roots needs a rule for which file is the entrypoint, which is guesswork. **The flat layout is not optional**: it is the form MPM's own export writer produces (§5.6), so refusing it would refuse MPM's own archives and break the round trip (T07, T11) and the archive-as-transport that **O4** nominates. §5.3.1 specifies the derivation. |
+| **O9** | Package layouts: a single root directory, or files at the archive's top level? | Accept exactly one — the **flat** layout (the canonical paths at the archive's top level, with `SKILL.md` at the top level) **or** the **wrapped** layout (one wrapper directory holding everything, including the entrypoint). The root is derived from the **entrypoint's parent directory** (§5.3.1), so a flat package may carry **any number** of content directories; only **competing package roots** — more than one `SKILL.md` — are rejected with `ambiguous_package_root`. **This must be answered before P2/P5** | Accepting multiple roots needs a rule for which file is the entrypoint, which is guesswork. **The flat layout is not optional**: it is the form MPM's own export writer produces (§5.6), so refusing it would refuse MPM's own archives and break the round trip (T07, T11) and the archive-as-transport that **O4** nominates. §5.3.1 specifies the derivation. |
 | **O10** | The operator's package has no `when_to_use`. MPM's validator emits `missing_when_to_use` as a **warning**, so the import succeeds with a warning. Should a package import require it? | Warn, do not block — but the operator should decide, because requiring it would reject the reference package | Requiring it would enforce discovery quality, at the cost of rejecting legitimate third-party packages that use a prose description instead |
 | **O14** | Should a *later* stage add an agent-facing import, and if so, confined to what root and with what consent gate? | **Defer.** If it is ever added, confine it to an operator-configured import root and reuse the `confirm=true` gate that `promote_to_global` already uses, rather than inventing a new convention | Adding it sooner re-opens the **R4** finding on the agent-facing surface. Nothing in stages P1–P9 depends on this answer. |
 | **O15** | Where does the full skills export put its per-package `.skill` archives (§6.3, stage P7)? | A sibling directory named for the export, one archive per package, named `<name>-<version>.skill` | A single flat archive would need a multi-package container format, which is a new format with its own identity and import rules — larger than the correction requires. |
@@ -2103,7 +2145,7 @@ repository contradicts, so each has a row.
 | **T45** | **The walk's limits are enforced in flight** | A directory holding more than 512 files is refused **during** the walk — the walk stops at the 513th entry rather than enumerating the tree — and the total-byte cap is checked as bytes are read | P4 | **R12**, §7 threat 11 |
 | **T46** | **The walk refuses to leave the import root** | A symlinked directory inside the import root is **not descended into**, and a symlink pointing outside the resolved root is refused; the refusal is `symlinked_directory` or `path_escapes_root` | P4 | **R12**, §7 threat 19 |
 | **T47** | **The bounded read's `next_offset`** | `next_offset` names a **line** index; resuming from it returns the next unread line with no gap and no repeat; a line cut by the byte cap is not partially returned; and every **non-terminal** response advances the offset (`next_offset > offset`) | P6 | O-b, §8.6 |
-| **T48** | **Both accepted package layouts** | The same package imported from a **flat** archive (MPM's own export — `SKILL.md`, `references/…` at the top level) and from a **wrapped** archive (`pkg/SKILL.md`, `pkg/references/…`) produces the **same canonical paths, the same file rows and the same `package_hash`**; only `raw_path` differs. An archive with **two** top-level directories is rejected with `ambiguous_package_root`. The wrapped root is stripped **by whole segment**, so `pkg-extra/x.md` is not stripped against a root of `pkg` | P5 | **C-1**, §5.3.1 |
+| **T48** | **Both accepted package layouts** | The same package imported from a **flat** archive and from a **wrapped** archive produces the **same canonical paths, the same file rows and the same `package_hash`** — only `raw_path` differs. The fixture is a **multi-directory** package — `SKILL.md`, `references/templates.md`, `scripts/run.sh`, `assets/logo.png` — so the assertion covers a flat package carrying **several content directories**, together with its wrapped equivalent `pkg/…`: **both import successfully**, and the two canonical path sets are **identical** (four paths: `SKILL.md`, `assets/logo.png`, `references/templates.md`, `scripts/run.sh`). An archive with **two** `SKILL.md` files is refused with `ambiguous_package_root`; a tree outside the root is refused with `path_outside_root`; the wrapped root is stripped **by whole segment** (`pkg-extra/x.md` is not stripped against a root of `pkg`) | P5 | **C-1**, §5.3.1 |
 | **T49** | **The bounded read's terminal case** | A file whose first line alone exceeds the byte cap returns **zero** lines, `truncated: true`, `next_offset` equal to the requested `offset`, and the reason code **`line_too_large`**. The caller must report that the file cannot be served at this cap and **must not resume** — and the test asserts that resuming would return the same empty response, so the refusal is the only way out. No response ever carries `truncated: true` with `next_offset == offset` and a different reason | P6 | **C-4**, §8.6 |
 | **T50** | **The package tables are local-only** | With a shared database attached, the local schema has `skill_packages`, `skill_package_files` and `skill_package_blobs`, and the shared schema has **none** of them: `shared.sqlite_master` names no `skill_packages`, no `skill_package_files` and no `skill_package_blobs`. The test also asserts that none of the three appears in `BaseTables` — the slice `attachShared` propagates — and that the shared schema's table set is identical to the set a database without packages would have | P1 | **C-5**, §6, §5.9 |
 
@@ -2236,13 +2278,83 @@ with §15, the evidence column cites a measurement, not an assertion.
 
 | # | original problem | revised section | resolution | supporting evidence | remaining risk |
 |---|---|---|---|---|---|
-| **C-1** | §5.3's normative rule — *"An archive whose entries do not all share one top-level directory is rejected as `ambiguous_package_root`"* — rejected exactly what §5.6 mandates the export writer to produce. The canonical paths are `SKILL.md`, `references/templates.md`, `references/principles.md`; their top-level components are `SKILL.md` and `references`, so they do **not** share one top-level directory. T07, T11 and §6.3's P7 contract all failed, and O4's archive-as-transport had no valid archive to transport. §5.3 also cited **O9**, which says the opposite. | §5.3 (rewritten), §5.3.1 (new), §5.4, §5.6, §12.2 **O9**, §13 T07, T11, **T48**, §10 P5, §7.1 rule 2 | **Two layouts are accepted, and the root derivation is specified exactly.** The **flat** layout — the canonical paths at the archive's top level — is the form **MPM's own export writer produces** (§5.6), and the **wrapped** layout — one top-level directory holding everything — is the conventional third-party form. §5.3.1 gives the derivation: skip directory entries **first** — before canonicalisation, because a directory entry's name is not a canonical path — then canonicalise the file entries, classify the top level into *directory prefixes* and *top-level files*, and derive the root from a four-row table; two or more directory prefixes are rejected with `ambiguous_package_root`. Stripping is by whole segment; the derivation is order-independent; the root is not stored. The derivation is **hash-neutral** — the same package from either layout yields the same canonical paths, the same file rows and the same `package_hash`, with only `raw_path` differing — so T03, T04 and T07 assert the same hash. | The reference package's canonical paths are `SKILL.md`, `references/templates.md`, `references/principles.md`; distinct top-level components = 2 (`SKILL.md`, `references`), so the old rule rejected the export's own output. The operator's archive (`system-prompt-writer/…`) is the wrapped form and strips to the same three canonical paths. §5.3.1's four rows are exhaustive over the two classifications, and the third row is precisely the export's shape. | **O9 remains open** and must be answered before P2/P5 — but the flat layout is not really optional, because it is MPM's own output format; refusing it would refuse MPM's own archives. A third layout (a wrapped root plus a stray top-level file) is handled by the flat rule and lands the entrypoint at `pkg/SKILL.md`, which is `entrypoint_not_found` with a candidate list, or an explicit `--entrypoint`. The derivation is new code in P5, so a mistake in it fails T48 rather than corrupting data. |
+| **C-1** | §5.3's normative rule — *"An archive whose entries do not all share one top-level directory is rejected as `ambiguous_package_root`"* — rejected exactly what §5.6 mandates the export writer to produce. The canonical paths are `SKILL.md`, `references/templates.md`, `references/principles.md`; their top-level components are `SKILL.md` and `references`, so they do **not** share one top-level directory. T07, T11 and §6.3's P7 contract all failed, and O4's archive-as-transport had no valid archive to transport. §5.3 also cited **O9**, which says the opposite. | §5.3 (rewritten), §5.3.1 (new), §5.4, §5.6, §12.2 **O9**, §13 T07, T11, **T48**, §10 P5, §7.1, §16.1 | **Two layouts are accepted, and the root derivation is specified exactly.** The **flat** layout — the canonical paths at the archive's top level — is the form **MPM's own export writer produces** (§5.6), and the **wrapped** layout — one top-level directory holding everything — is the conventional third-party form. §5.3.1 gives the derivation: skip directory entries **first** — before canonicalisation, because a directory entry's name is not a canonical path — then canonicalise the file entries, find the **entrypoint** (the unique file entry whose base name is `SKILL.md`), and take the package root to be the **entrypoint's parent directory**. A root-level `SKILL.md` therefore makes the archive root the package root and permits **any number** of content directories; a wrapped package is recognised because all its file entries share the one wrapper that contains the entrypoint. Only **competing package roots** — more than one `SKILL.md` — are rejected with `ambiguous_package_root`; a tree outside the root is `path_outside_root`. Stripping is by whole segment; the derivation is order-independent; the root is not stored. The derivation is **hash-neutral** — the same package from either layout yields the same canonical paths, the same file rows and the same `package_hash`, with only `raw_path` differing — so T03, T04 and T07 assert the same hash. | The reference package's canonical paths are `SKILL.md`, `references/templates.md`, `references/principles.md`; distinct top-level components = 2 (`SKILL.md`, `references`), so the old rule rejected the export's own output. The operator's archive (`system-prompt-writer/…`) is the wrapped form and strips to the same three canonical paths. §5.3.1's rules are exhaustive over the entrypoint's position, and the root follows from it alone. | **O9 remains open** and must be answered before P2/P5 — but the flat layout is not really optional, because it is MPM's own output format; refusing it would refuse MPM's own archives. The derivation is new code in P5, so a mistake in it fails T48 rather than corrupting data. **The first draft of this revision got the derivation wrong** — it counted directories instead of anchoring on the entrypoint, and therefore refused a flat package with more than one content directory. §16.2 records that correction. |
 | **C-2** | T41 expected `mpm prune --older-than 1s` to *"still remove an ordinary, non-packaged skill of the same age"*, while §6.4 and **O13** specify a **blanket** `collection = 'skills'` exclusion. Under the specified implementation the ordinary skill is **also** not removed, so T41 would fail — and it fails in the direction that matters: an implementer writing to satisfy T41 has to build the per-row check inside a bulk delete that §6.4 explicitly rejects as "larger and racy". | §6.4, §6 matrix, §12.1 **O13**, §12.2 **O17** (new), §13 T41, §10 P3, §15 R7 row | **The blanket form is kept as the specification, T41 is corrected to match it, and the operator's choice is made explicit.** T41 now asserts **both** halves: the packaged skill survives **and** an ordinary skill of the same age is not removed. §6.4 states the blast radius in a block quote — *after P3, `mpm prune --older-than` can no longer remove **any** skill, packaged or not* — and §6's matrix row carries it. **O13** is re-scoped to settle the **safety invariant** (a prune must never destroy package bytes) and points the **mechanism** at a new open decision, **O17**, which records the recommendation (blanket), the package-aware alternative and its two costs (a per-row check inside a bulk delete leaves a race; a larger change to a statement with one exclusion clause), and states that it must be answered **before P3**. | `PruneOlderThan` is `DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL AND <DirectiveExclusionClause>` — no `collection` filter (`internal/core/web_db.go:1781-1792`) — so adding `collection <> 'skills'` excludes **every** skill row, not only packaged ones. The exclusion is a statement-level clause, not a per-row predicate, which is what makes the blast radius total. | **The operator's approval of the blast radius is outstanding, and this revision does not invent it.** A behaviour change for every existing skill — one that stops working silently — is exactly the kind of compatibility change that needs an explicit answer, so it is carried as an open decision (**O17**) rather than as a settled row. If the operator chooses the package-aware form, **one clause of T41 changes** and nothing else in the document moves; §13.1 says so. |
 | **C-3** | §7.1's measured FAT block said a directory entry is `type=---------- regular=true → treated as a regular file`, and the paragraph beneath said a directory entry *"is not detected as a directory either, so it falls through to the canonical path rules"* and is *"rejected as a non-canonical path"*. Both are wrong about Go: `FileHeader.Mode()` forces `fs.ModeDir` from a trailing `/` in the entry **name**, independently of the creator byte. An implementer following the paragraph would write the FAT rule as "a trailing-slash entry is rejected as non-canonical", and **T35 would fail** — T35 expects the FAT archive to be **accepted**. | §7.1 (rewritten), §7 threat 3, §11.1 R5 row, §15 R5 row, §13 **T35**, §13.2 fixture strategy | **The FAT block is corrected and the paragraph is replaced with the accurate mechanism.** Under a FAT creator byte the symlink, the FIFO and the device still degrade to `0666` regular and pass the type check — that is the substance of R5 and it stands. A **directory** entry is still detected and **skipped**, because the trailing `/` in its name identifies it. §7.1 now carries the Go source and the measured isolation of the two signals. The FAT case is therefore **safer** than the first revision claimed, not worse. T35 now asserts all three halves: the import did not fail on the entry type, the directory entry was **not stored**, and no file was created anywhere. | Measured on the same archive, creator byte rewritten from Unix to FAT: `pkg/link.md`, `pkg/fifo` and `pkg/dev` become `type=---------- regular=true`; `pkg/sub/` remains `type=d--------- dir=true`. Two further variants isolate the signals: with the MS-DOS directory attribute **cleared** and the trailing `/` kept, `pkg/sub/` is still `type=d--------- dir=true`; with the attribute **set** on a name with no trailing slash, `pkg/nodir` is `type=d--------- dir=true`. Go's source: `archive/zip/struct.go:317-328` applies `mode |= fs.ModeDir` for a trailing `/` **after** the creator switch, and `msdosModeToFileMode` (`:348-358`) reads only the MS-DOS attribute byte. | None material. The correction makes the FAT case *stronger* than the document claimed, and T35 now pins the behaviour that was previously wrong. The residue is that the type check remains unavailable for the symlink/FIFO/device entries under a FAT creator byte — which is R5's standing limit, and is why Rule 2 is the boundary, not the type check. |
 | **C-4** | §8.6's `next_offset` bullets defined, individually reasonably, an infinite loop: `next_offset` is always *"the index of the first line that was not returned"*, and a file whose first line alone exceeds the cap returns *"zero lines, `truncated: true`, and `next_offset` equal to the original `offset`"*. Zero lines with an unchanged `next_offset` means the caller — which the same section tells to resume with `offset = next_offset` — gets the same empty response forever. | §8.6 (rewritten), §13 T47, **T49** (new) | **The terminal case is stated explicitly, in three parts.** The server **marks** it (`line_too_large`, alongside `truncated: true` and `next_offset == offset`); the caller **does not resume** and reports that the file cannot be served at this cap; and the server **does not produce it for any other reason** — `truncated: true` with `next_offset == offset` and no `line_too_large` is a contract violation, because every other truncation returns at least one line. The **progress guarantee** follows: every non-terminal response satisfies `next_offset > offset`, so a caller that resumes always advances. | Both bullets are in §8.6 as written; with `offset = next_offset = 0` and a first line larger than the cap, the response is `(lines: [], truncated: true, next_offset: 0)` on every call. The byte cap applies *after* the line range is selected (§8.6), so the cap cannot select a different range — which is why the only escape is to raise `max_bytes` to the 1 MiB hard cap. | Raising `max_bytes` works only if the line fits under 1 MiB; a file with a single line larger than that is unreadable through this API at any cap. That is stated rather than hidden, and the reason code names it. `line_too_large` is a new reason code in the `read_file` response, and it is the only place the bounded-read contract adds one. |
 | **C-5** | §6's migration mechanics said the three tables are *"applied at boot alongside the existing table groups, following the `reference_docs` precedent"*, while §5.9 promised the shared database is not extended. `attachShared` applies **every** `CREATE TABLE` in `BaseTables` to the shared schema, so an implementer who reads "the existing table groups" as `BaseTables` creates `shared.skill_packages`, `shared.skill_package_files` and `shared.skill_package_blobs` in **every** shared database — the precise thing §5.9 says does not happen. It lands in **P1**, the first stage. | §6 (migration mechanics rewritten), §5.9, §9 notes, §10 P1, §13 **T50** (new) | **One local-only path is named exactly.** The three statements and the index go in a **new `SkillPackageTables` slice** in `internal/core/schema.go`, applied at boot by the same function that applies `ReferenceTables` and `WorkTables` and **outside** the `attachShared` loops — a sibling of `ReferenceTables`, **not** a member of `BaseTables`. §5.9's promise is kept and now points at §6; §9's notes carry the constraint; P1's acceptance names it; **T50** proves the shared schema is unaffected. | `attachShared` rewrites every `CREATE TABLE` in `BaseTables` to `shared.<name>` (`internal/core/db.go:2132-2143`) and does the same for that slice's `CREATE INDEX` statements (`:2158-2167`). `reference_docs` (`internal/core/schema.go:953`) and `reference_chunks` (`:1002`) are in **`ReferenceTables`** (`schema.go:949-1047`), not `BaseTables` (`schema.go:38-936`); the repository says so at `internal/core/db.go:2318`. Measured at runtime with a shared database attached: the shared schema has 35 tables, `reference_docs` and `reference_chunks` are **absent** from it, `memories` and `sessions` are present, and `skill_packages` is absent. | The cited precedent was already local-only — the defect was **ambiguity**, not a wrong precedent, and this correction removes it by naming the slice. The new slice is one more thing for P1 to add to the schema sources, and `TestCanonicalSchemaSync` requires every table in the schema sources to be on `CanonicalMPMSchema`, so the registration is required either way. T50 asserts the shared schema's table set is identical to a package-free database's, so a later refactor that moves the tables into `BaseTables` fails the test rather than silently reaching every shared database. |
 
-### 16.1 What this revision did not do
+### 16.1 A further correction to C-1: the root derivation must be anchored on the entrypoint
+
+**The first draft of this revision's C-1 fix was wrong, and it was wrong in
+the direction that matters.** The rule it wrote classified the archive's top
+level into *directory prefixes* and *top-level files*, and rejected an archive
+with **two or more** directory prefixes as `ambiguous_package_root`.
+
+**That rule refuses a valid flat package.** A package carrying `SKILL.md`,
+`references/templates.md`, `scripts/run.sh` and `assets/logo.png` has **three**
+directory prefixes, so it was refused — while the *wrapped* equivalent of the
+same package (`pkg/…`) imported cleanly. The consequence was threefold, and
+each part was a contradiction of this document's own text:
+
+* it **contradicted §5.6**, whose export writer produces exactly that shape —
+  the canonical paths at the archive's top level — so a package with more than
+  one content directory could be exported by MPM and not re-imported by MPM;
+* it **contradicted the hash-neutrality claim** in §5.3.1 itself: the two
+  layouts were only equivalent for packages with a single content directory,
+  which is a property no reader would have guessed and no test would have
+  caught;
+* it **counted content directories as competing roots**, which is the
+  category error the correction was supposed to remove. Two content
+  directories are not two roots; they are one package's contents.
+
+**Measured against the draft rule:**
+
+```
+OLD rule, flat    -> []  reason="ambiguous_package_root"
+OLD rule, wrapped -> [SKILL.md assets/logo.png references/templates.md scripts/run.sh]
+```
+
+**The correction: the root is derived from the entrypoint, and from nothing
+else.** The package root is the **parent directory of the entrypoint**:
+
+* a **root-level `SKILL.md`** makes the **archive root** the package root, so
+  the flat layout permits **arbitrary canonical sibling paths and content
+  directories** — any number of them;
+* a **wrapped** package is recognised because **all** its file entries share
+  **one wrapper** and that wrapper **contains the entrypoint**;
+* **genuinely competing package roots** — more than one `SKILL.md`, in
+  different directories — are refused with `ambiguous_package_root`;
+* a tree **outside** the derived root is refused with `path_outside_root`,
+  never dropped silently.
+
+**Measured against the corrected rule:**
+
+```
+flat    -> [SKILL.md assets/logo.png references/templates.md scripts/run.sh]
+wrapped -> [SKILL.md assets/logo.png references/templates.md scripts/run.sh]
+a/SKILL.md + b/SKILL.md              -> []  reason="ambiguous_package_root"
+a/SKILL.md + a/b/SKILL.md            -> []  reason="ambiguous_package_root"
+SKILL.md + a/SKILL.md                -> []  reason="ambiguous_package_root"
+pkg/... + other/y.md                 -> []  reason="path_outside_root"
+pkg/readme.md                        -> []  reason="entrypoint_not_found"
+```
+
+**T48 is extended to pin it.** Its fixture is now a **multi-directory**
+package — `SKILL.md`, `references/templates.md`, `scripts/run.sh`,
+`assets/logo.png` — together with its wrapped equivalent, and it asserts that
+**both import successfully**, that the two canonical path sets are
+**identical**, and therefore that the two `package_hash` values are identical.
+The competing-root and outside-root refusals are asserted in the same row.
+
+**What this changes beyond C-1.** §5.6's claim that the export's archive is
+*"accepted by construction"* is now true **for any package**, not only for one
+with a single content directory — and it is true for a reason that does not
+depend on the package's shape. §12.2's **O9** row is re-worded to say so, and
+§10's **P5** row names the entrypoint-anchored derivation. The R-corrections,
+the accepted foundation and the other four dispositions are untouched.
+
+### 16.2 What this revision did not do
 
 * **It did not begin P1.** No implementation of any kind. The stages in §10
   remain proposals.
