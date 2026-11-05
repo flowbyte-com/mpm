@@ -1029,13 +1029,24 @@ BaseTables — Phase 1"*. Measured at runtime — a `DatabaseManager` with a
 shared database attached, listing `shared.sqlite_master`:
 
 ```
-C5: the SHARED schema has 35 tables
+C5: the SHARED schema has 36 tables
+C5:   of which SQLite's own bookkeeping table sqlite_sequence accounts for 1
+C5:   => 35 tables MPM created
 C5: reference_docs         in the shared schema: false
 C5: reference_chunks       in the shared schema: false
 C5: memories               in the shared schema: true
 C5: sessions               in the shared schema: true
 C5: skill_packages         in the shared schema: false
 ```
+
+**The count is qualified, because the figure depends on the query.**
+`shared.sqlite_master` names **36** tables, of which **35** are MPM's own and
+one is `sqlite_sequence` — SQLite's internal AUTOINCREMENT bookkeeping table,
+which is present and holds **0** rows. The two figures are stable across
+fresh setups. Neither count is the point; the point is that **none** of the
+three package tables is among them, and that **T50's assertion is relative**
+— *"the shared schema's table set is identical to the set a database without
+packages would have"* — so it does not depend on an absolute number at all.
 
 So the precedent is not *"put it in `BaseTables`"* — it is **"put it in a
 slice `attachShared` does not touch"**, and that is the rule P1 follows. The
@@ -1955,14 +1966,35 @@ Unix attributes carries — and the same entries become:
 link -rw-rw-rw-  type=----------  regular=true   → passes the type check
 fifo -rw-rw-rw-  type=----------  regular=true   → passes the type check
 dev  -rw-rw-rw-  type=----------  regular=true   → passes the type check
-dir  -rw-rw-rw-  type=----------  regular=true   → passes the type check
+dir  drwxrwxrwx  type=d---------  regular=false  dir=true   → detected as a directory, and SKIPPED
 ```
 
+**The directory entry is the exception, and it is the exception that matters.**
 `FileHeader.Mode()` interprets the external attributes **only** when the
-creator byte says Unix. This is the measurement behind **R5** and §7.1, and it
-is the reason the entry-type check is stated as best-effort and the "no byte
-reaches the filesystem" rule (Rule 2, §4.4) is stated as the actual
-boundary.
+creator byte says Unix, so the symlink, the FIFO and the device degrade to
+`0666` regular and **pass** the type check. But `Mode()` then applies one
+rule **unconditionally**, whatever the creator byte:
+
+```go
+if len(h.Name) > 0 && h.Name[len(h.Name)-1] == '/' {
+        mode |= fs.ModeDir
+}
+```
+
+so a **directory** entry is identified by its **name** and stays a directory
+under **both** creator bytes — it is detected, **skipped**, and **never stored
+as an ordinary file**. §7.1 carries the same measurement together with both
+isolating variants (the trailing slash alone, and the MS-DOS directory
+attribute alone, each sufficient on its own); this block is that measurement
+stated once.
+
+This is the measurement behind **R5** and §7.1, and it is the reason the
+entry-type check is stated as best-effort — it is unavailable for the
+symlink, the FIFO and the device under a FAT creator byte — and the reason
+the "no byte reaches the filesystem" rule (Rule 2, §4.4) is stated as the
+actual boundary. The directory entry's survival makes the FAT case **safer**
+than the first revision claimed, not weaker, and §7.1 warns the implementer
+not to write the FAT rule the first revision implied.
 
 **A lying size header is caught, but only at end-of-stream.** A declared size
 of 10 bytes against a 200 000-byte payload yields `zip: not a valid zip file`
@@ -2034,7 +2066,7 @@ measurement quoted rather than asserted.
 | **C-2** | `PruneOlderThan` is `DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL AND <DirectiveExclusionClause>` — **no `collection` filter** (`internal/core/web_db.go:1781-1792`). The exclusion the design specifies is therefore a **statement-level** clause, and it excludes **every** skill row, not only the packaged ones. | §6.4, §12.2 **O17**, §16 C-2 |
 | **C-3** | The same archive under a Unix creator byte and under a FAT creator byte (the central-directory creator byte rewritten): `pkg/link.md`, `pkg/fifo` and `pkg/dev` become `type=---------- regular=true` under FAT — they **pass** the type check. `pkg/sub/` remains `type=d--------- dir=true` under FAT. Two further variants isolate the signals: with the MS-DOS directory attribute **cleared** and the trailing `/` kept, `pkg/sub/` is still `type=d--------- dir=true`; with the attribute **set** on a name with no trailing slash, `pkg/nodir` is `type=d--------- dir=true`. Go's source: `archive/zip/struct.go:317-328` applies `mode \|= fs.ModeDir` for a trailing `/` **after** the creator switch, and `msdosModeToFileMode` (`:348-358`) reads only the MS-DOS attribute byte. | §7.1, §16 C-3 |
 | **C-4** | §8.6's two bullets, taken together, define `(lines: [], truncated: true, next_offset: offset)` for a first line larger than the byte cap, on every call, with the section's own resume rule (`offset = next_offset`) recommending the loop. The byte cap applies *after* the line range is selected, so it cannot select a different range. | §8.6, §16 C-4 |
-| **C-5** | A `DatabaseManager` with a shared database attached, listing `shared.sqlite_master`: the shared schema has **35** tables; `reference_docs` and `reference_chunks` are **absent** from it, while `memories` and `sessions` are present. `reference_docs` (`internal/core/schema.go:953`) and `reference_chunks` (`:1002`) are in **`ReferenceTables`** (`:949-1047`), not `BaseTables` (`:38-936`); `attachShared` iterates `BaseTables` only (`internal/core/db.go:2132-2143`, `:2158-2167`), and the repository says so at `internal/core/db.go:2318`. | §6, §5.9, §16 C-5 |
+| **C-5** | A `DatabaseManager` with a shared database attached, listing `shared.sqlite_master`: the shared schema has **36** tables — **35** of them MPM's own, the 36th being SQLite's internal `sqlite_sequence` (present, 0 rows) — and `reference_docs` and `reference_chunks` are **absent** from it, while `memories` and `sessions` are present. `reference_docs` (`internal/core/schema.go:953`) and `reference_chunks` (`:1002`) are in **`ReferenceTables`** (`:949-1047`), not `BaseTables` (`:38-936`); `attachShared` iterates `BaseTables` only (`internal/core/db.go:2132-2143`, `:2158-2167`), and the repository says so at `internal/core/db.go:2318`. | §6, §5.9, §16 C-5 |
 
 ---
 
@@ -2145,15 +2177,19 @@ repository contradicts, so each has a row.
 | **T45** | **The walk's limits are enforced in flight** | A directory holding more than 512 files is refused **during** the walk — the walk stops at the 513th entry rather than enumerating the tree — and the total-byte cap is checked as bytes are read | P4 | **R12**, §7 threat 11 |
 | **T46** | **The walk refuses to leave the import root** | A symlinked directory inside the import root is **not descended into**, and a symlink pointing outside the resolved root is refused; the refusal is `symlinked_directory` or `path_escapes_root` | P4 | **R12**, §7 threat 19 |
 | **T47** | **The bounded read's `next_offset`** | `next_offset` names a **line** index; resuming from it returns the next unread line with no gap and no repeat; a line cut by the byte cap is not partially returned; and every **non-terminal** response advances the offset (`next_offset > offset`) | P6 | O-b, §8.6 |
-| **T48** | **Both accepted package layouts** | The same package imported from a **flat** archive and from a **wrapped** archive produces the **same canonical paths, the same file rows and the same `package_hash`** — only `raw_path` differs. The fixture is a **multi-directory** package — `SKILL.md`, `references/templates.md`, `scripts/run.sh`, `assets/logo.png` — so the assertion covers a flat package carrying **several content directories**, together with its wrapped equivalent `pkg/…`: **both import successfully**, and the two canonical path sets are **identical** (four paths: `SKILL.md`, `assets/logo.png`, `references/templates.md`, `scripts/run.sh`). An archive with **two** `SKILL.md` files is refused with `ambiguous_package_root`; a tree outside the root is refused with `path_outside_root`; the wrapped root is stripped **by whole segment** (`pkg-extra/x.md` is not stripped against a root of `pkg`) | P5 | **C-1**, §5.3.1 |
+| **T48** | **Both accepted package layouts** | The same package imported from a **flat** archive and from a **wrapped** archive produces the **same canonical paths, the same file rows and the same `package_hash`** — only `raw_path` differs. The fixture is a **multi-directory** package — `SKILL.md`, `references/templates.md`, `scripts/run.sh`, `assets/logo.png` — so the assertion covers a flat package carrying **several content directories**, together with its wrapped equivalent `pkg/…`: **both import successfully — with `--allow-binary`**, because `assets/logo.png` is a **binary asset** (§7.3) and the recommended default under **O3** is to reject binary assets unless the operator opts in. The row therefore **names the opt-in explicitly**, so its success does not depend on how **O3** is answered. The two canonical path sets are **identical** (four paths: `SKILL.md`, `assets/logo.png`, `references/templates.md`, `scripts/run.sh`). An archive with **two** `SKILL.md` files is refused with `ambiguous_package_root`; a tree outside the root is refused with `path_outside_root`; the wrapped root is stripped **by whole segment** (`pkg-extra/x.md` is not stripped against a root of `pkg`) | P5 | **C-1**, §5.3.1 |
 | **T49** | **The bounded read's terminal case** | A file whose first line alone exceeds the byte cap returns **zero** lines, `truncated: true`, `next_offset` equal to the requested `offset`, and the reason code **`line_too_large`**. The caller must report that the file cannot be served at this cap and **must not resume** — and the test asserts that resuming would return the same empty response, so the refusal is the only way out. No response ever carries `truncated: true` with `next_offset == offset` and a different reason | P6 | **C-4**, §8.6 |
 | **T50** | **The package tables are local-only** | With a shared database attached, the local schema has `skill_packages`, `skill_package_files` and `skill_package_blobs`, and the shared schema has **none** of them: `shared.sqlite_master` names no `skill_packages`, no `skill_package_files` and no `skill_package_blobs`. The test also asserts that none of the three appears in `BaseTables` — the slice `attachShared` propagates — and that the shared schema's table set is identical to the set a database without packages would have | P1 | **C-5**, §6, §5.9 |
 
-**One row is pinned to an open decision.** T41 asserts the **blanket** form of
-the prune exemption, because that is the form §6.4 specifies. If the operator
-answers **O17** (§12.2) with the package-aware form, T41's second clause
-changes and no other row moves. The row is written against the specification
-as it stands, and the specification as it stands says which clause to change.
+**Two rows name an open decision, and neither decides it.** T41 asserts the
+**blanket** form of the prune exemption, because that is the form §6.4
+specifies. If the operator answers **O17** (§12.2) with the package-aware
+form, T41's second clause changes and no other row moves. T48's fixture
+carries a **binary asset** (`assets/logo.png`), so the row names the
+**`--allow-binary`** opt-in explicitly: the import it asserts succeeds
+**because the operator opted in**, not because **O3** (§12.2) was answered one
+way or the other. Both rows are written against the specification as it
+stands, and neither depends on an unanswered decision.
 
 ### 13.2 Fixture strategy
 
@@ -2282,7 +2318,7 @@ with §15, the evidence column cites a measurement, not an assertion.
 | **C-2** | T41 expected `mpm prune --older-than 1s` to *"still remove an ordinary, non-packaged skill of the same age"*, while §6.4 and **O13** specify a **blanket** `collection = 'skills'` exclusion. Under the specified implementation the ordinary skill is **also** not removed, so T41 would fail — and it fails in the direction that matters: an implementer writing to satisfy T41 has to build the per-row check inside a bulk delete that §6.4 explicitly rejects as "larger and racy". | §6.4, §6 matrix, §12.1 **O13**, §12.2 **O17** (new), §13 T41, §10 P3, §15 R7 row | **The blanket form is kept as the specification, T41 is corrected to match it, and the operator's choice is made explicit.** T41 now asserts **both** halves: the packaged skill survives **and** an ordinary skill of the same age is not removed. §6.4 states the blast radius in a block quote — *after P3, `mpm prune --older-than` can no longer remove **any** skill, packaged or not* — and §6's matrix row carries it. **O13** is re-scoped to settle the **safety invariant** (a prune must never destroy package bytes) and points the **mechanism** at a new open decision, **O17**, which records the recommendation (blanket), the package-aware alternative and its two costs (a per-row check inside a bulk delete leaves a race; a larger change to a statement with one exclusion clause), and states that it must be answered **before P3**. | `PruneOlderThan` is `DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL AND <DirectiveExclusionClause>` — no `collection` filter (`internal/core/web_db.go:1781-1792`) — so adding `collection <> 'skills'` excludes **every** skill row, not only packaged ones. The exclusion is a statement-level clause, not a per-row predicate, which is what makes the blast radius total. | **The operator's approval of the blast radius is outstanding, and this revision does not invent it.** A behaviour change for every existing skill — one that stops working silently — is exactly the kind of compatibility change that needs an explicit answer, so it is carried as an open decision (**O17**) rather than as a settled row. If the operator chooses the package-aware form, **one clause of T41 changes** and nothing else in the document moves; §13.1 says so. |
 | **C-3** | §7.1's measured FAT block said a directory entry is `type=---------- regular=true → treated as a regular file`, and the paragraph beneath said a directory entry *"is not detected as a directory either, so it falls through to the canonical path rules"* and is *"rejected as a non-canonical path"*. Both are wrong about Go: `FileHeader.Mode()` forces `fs.ModeDir` from a trailing `/` in the entry **name**, independently of the creator byte. An implementer following the paragraph would write the FAT rule as "a trailing-slash entry is rejected as non-canonical", and **T35 would fail** — T35 expects the FAT archive to be **accepted**. | §7.1 (rewritten), §7 threat 3, §11.1 R5 row, §15 R5 row, §13 **T35**, §13.2 fixture strategy | **The FAT block is corrected and the paragraph is replaced with the accurate mechanism.** Under a FAT creator byte the symlink, the FIFO and the device still degrade to `0666` regular and pass the type check — that is the substance of R5 and it stands. A **directory** entry is still detected and **skipped**, because the trailing `/` in its name identifies it. §7.1 now carries the Go source and the measured isolation of the two signals. The FAT case is therefore **safer** than the first revision claimed, not worse. T35 now asserts all three halves: the import did not fail on the entry type, the directory entry was **not stored**, and no file was created anywhere. | Measured on the same archive, creator byte rewritten from Unix to FAT: `pkg/link.md`, `pkg/fifo` and `pkg/dev` become `type=---------- regular=true`; `pkg/sub/` remains `type=d--------- dir=true`. Two further variants isolate the signals: with the MS-DOS directory attribute **cleared** and the trailing `/` kept, `pkg/sub/` is still `type=d--------- dir=true`; with the attribute **set** on a name with no trailing slash, `pkg/nodir` is `type=d--------- dir=true`. Go's source: `archive/zip/struct.go:317-328` applies `mode |= fs.ModeDir` for a trailing `/` **after** the creator switch, and `msdosModeToFileMode` (`:348-358`) reads only the MS-DOS attribute byte. | None material. The correction makes the FAT case *stronger* than the document claimed, and T35 now pins the behaviour that was previously wrong. The residue is that the type check remains unavailable for the symlink/FIFO/device entries under a FAT creator byte — which is R5's standing limit, and is why Rule 2 is the boundary, not the type check. |
 | **C-4** | §8.6's `next_offset` bullets defined, individually reasonably, an infinite loop: `next_offset` is always *"the index of the first line that was not returned"*, and a file whose first line alone exceeds the cap returns *"zero lines, `truncated: true`, and `next_offset` equal to the original `offset`"*. Zero lines with an unchanged `next_offset` means the caller — which the same section tells to resume with `offset = next_offset` — gets the same empty response forever. | §8.6 (rewritten), §13 T47, **T49** (new) | **The terminal case is stated explicitly, in three parts.** The server **marks** it (`line_too_large`, alongside `truncated: true` and `next_offset == offset`); the caller **does not resume** and reports that the file cannot be served at this cap; and the server **does not produce it for any other reason** — `truncated: true` with `next_offset == offset` and no `line_too_large` is a contract violation, because every other truncation returns at least one line. The **progress guarantee** follows: every non-terminal response satisfies `next_offset > offset`, so a caller that resumes always advances. | Both bullets are in §8.6 as written; with `offset = next_offset = 0` and a first line larger than the cap, the response is `(lines: [], truncated: true, next_offset: 0)` on every call. The byte cap applies *after* the line range is selected (§8.6), so the cap cannot select a different range — which is why the only escape is to raise `max_bytes` to the 1 MiB hard cap. | Raising `max_bytes` works only if the line fits under 1 MiB; a file with a single line larger than that is unreadable through this API at any cap. That is stated rather than hidden, and the reason code names it. `line_too_large` is a new reason code in the `read_file` response, and it is the only place the bounded-read contract adds one. |
-| **C-5** | §6's migration mechanics said the three tables are *"applied at boot alongside the existing table groups, following the `reference_docs` precedent"*, while §5.9 promised the shared database is not extended. `attachShared` applies **every** `CREATE TABLE` in `BaseTables` to the shared schema, so an implementer who reads "the existing table groups" as `BaseTables` creates `shared.skill_packages`, `shared.skill_package_files` and `shared.skill_package_blobs` in **every** shared database — the precise thing §5.9 says does not happen. It lands in **P1**, the first stage. | §6 (migration mechanics rewritten), §5.9, §9 notes, §10 P1, §13 **T50** (new) | **One local-only path is named exactly.** The three statements and the index go in a **new `SkillPackageTables` slice** in `internal/core/schema.go`, applied at boot by the same function that applies `ReferenceTables` and `WorkTables` and **outside** the `attachShared` loops — a sibling of `ReferenceTables`, **not** a member of `BaseTables`. §5.9's promise is kept and now points at §6; §9's notes carry the constraint; P1's acceptance names it; **T50** proves the shared schema is unaffected. | `attachShared` rewrites every `CREATE TABLE` in `BaseTables` to `shared.<name>` (`internal/core/db.go:2132-2143`) and does the same for that slice's `CREATE INDEX` statements (`:2158-2167`). `reference_docs` (`internal/core/schema.go:953`) and `reference_chunks` (`:1002`) are in **`ReferenceTables`** (`schema.go:949-1047`), not `BaseTables` (`schema.go:38-936`); the repository says so at `internal/core/db.go:2318`. Measured at runtime with a shared database attached: the shared schema has 35 tables, `reference_docs` and `reference_chunks` are **absent** from it, `memories` and `sessions` are present, and `skill_packages` is absent. | The cited precedent was already local-only — the defect was **ambiguity**, not a wrong precedent, and this correction removes it by naming the slice. The new slice is one more thing for P1 to add to the schema sources, and `TestCanonicalSchemaSync` requires every table in the schema sources to be on `CanonicalMPMSchema`, so the registration is required either way. T50 asserts the shared schema's table set is identical to a package-free database's, so a later refactor that moves the tables into `BaseTables` fails the test rather than silently reaching every shared database. |
+| **C-5** | §6's migration mechanics said the three tables are *"applied at boot alongside the existing table groups, following the `reference_docs` precedent"*, while §5.9 promised the shared database is not extended. `attachShared` applies **every** `CREATE TABLE` in `BaseTables` to the shared schema, so an implementer who reads "the existing table groups" as `BaseTables` creates `shared.skill_packages`, `shared.skill_package_files` and `shared.skill_package_blobs` in **every** shared database — the precise thing §5.9 says does not happen. It lands in **P1**, the first stage. | §6 (migration mechanics rewritten), §5.9, §9 notes, §10 P1, §13 **T50** (new) | **One local-only path is named exactly.** The three statements and the index go in a **new `SkillPackageTables` slice** in `internal/core/schema.go`, applied at boot by the same function that applies `ReferenceTables` and `WorkTables` and **outside** the `attachShared` loops — a sibling of `ReferenceTables`, **not** a member of `BaseTables`. §5.9's promise is kept and now points at §6; §9's notes carry the constraint; P1's acceptance names it; **T50** proves the shared schema is unaffected. | `attachShared` rewrites every `CREATE TABLE` in `BaseTables` to `shared.<name>` (`internal/core/db.go:2132-2143`) and does the same for that slice's `CREATE INDEX` statements (`:2158-2167`). `reference_docs` (`internal/core/schema.go:953`) and `reference_chunks` (`:1002`) are in **`ReferenceTables`** (`schema.go:949-1047`), not `BaseTables` (`schema.go:38-936`); the repository says so at `internal/core/db.go:2318`. Measured at runtime with a shared database attached: the shared schema has **36** tables — **35** of them MPM's own, the 36th being SQLite's internal `sqlite_sequence` — `reference_docs` and `reference_chunks` are **absent** from it, `memories` and `sessions` are present, and `skill_packages` is absent. | The cited precedent was already local-only — the defect was **ambiguity**, not a wrong precedent, and this correction removes it by naming the slice. The new slice is one more thing for P1 to add to the schema sources, and `TestCanonicalSchemaSync` requires every table in the schema sources to be on `CanonicalMPMSchema`, so the registration is required either way. T50 asserts the shared schema's table set is identical to a package-free database's, so a later refactor that moves the tables into `BaseTables` fails the test rather than silently reaching every shared database. |
 
 ### 16.1 A further correction to C-1: the root derivation must be anchored on the entrypoint
 
@@ -2346,6 +2382,9 @@ package — `SKILL.md`, `references/templates.md`, `scripts/run.sh`,
 **both import successfully**, that the two canonical path sets are
 **identical**, and therefore that the two `package_hash` values are identical.
 The competing-root and outside-root refusals are asserted in the same row.
+The fixture carries a **binary asset**, so the row names the
+**`--allow-binary`** opt-in explicitly — the import succeeds *because the
+operator opted in*, not because **O3** was answered one way or the other.
 
 **What this changes beyond C-1.** §5.6's claim that the export's archive is
 *"accepted by construction"* is now true **for any package**, not only for one
