@@ -899,7 +899,7 @@ func (dm *DatabaseManager) gatherOverdueWakes() []OverdueWake {
 	}
 	rows, err := dm.db.Query(`
 		SELECT id, target_time, reason,
-		       COALESCE(json_extract(metadata, '$.kind'), '') AS kind,
+		       `+WakeKindExpr+` AS kind,
 		       CAST(strftime('%s','now') AS INTEGER) - target_time AS overdue_secs
 		FROM scheduled_wakes
 		WHERE fired = 0

@@ -667,6 +667,16 @@ func (s *Scheduler) hasHandler(kind string) bool {
 // deadline is the soonest moment the dispatcher could possibly
 // claim. Returns time.Time{} (zero) when nothing is pending.
 //
+// The filter is core.WakeNotificationKindFilter, which reads the kind
+// through an always-valid-JSON extraction: json_extract() RAISES on
+// malformed JSON, so an unguarded call would abort this query on a
+// single corrupt metadata row — and this query's error is logged and
+// swallowed by scheduleNextDeadline, which then falls back to the
+// plain interval. One malformed row would therefore cost the
+// scheduler its deadline-driven wake-up for as long as the row
+// survives. The always-valid form reads a malformed document as
+// untagged (i.e. as a notification) and raises on nothing.
+//
 // `now` is currently unused by the SQL but kept in the signature so
 // future implementations can substitute server-side clock if the
 // database clock drifts.
@@ -676,13 +686,7 @@ func (s *Scheduler) computeEarliestDeadline(ctx context.Context, now time.Time) 
 		SELECT MIN(t) FROM (
 			SELECT target_time AS t FROM scheduled_wakes
 			WHERE fired = 0
-			  AND (
-			    metadata IS NULL
-			    OR metadata = ''
-			    OR json_extract(metadata, '$.kind') IS NULL
-			    OR json_extract(metadata, '$.kind') = ''
-			    OR json_extract(metadata, '$.kind') = 'notification'
-			  )
+			  AND `+core.WakeNotificationKindFilter+`
 			UNION ALL
 			SELECT next_run_at AS t FROM scheduled_tasks WHERE status = 'active'
 		)

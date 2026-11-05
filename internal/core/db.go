@@ -709,7 +709,7 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 	}{
 		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND ` + DirectiveExclusionClause},
 		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > strftime('%s','now')) AND json_extract(metadata, '$.status') = 'pending'`},
-		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND (metadata IS NULL OR metadata = '' OR json_extract(metadata, '$.kind') IS NULL OR json_extract(metadata, '$.kind') = '' OR json_extract(metadata, '$.kind') IN ('notification','cascade'))`},
+		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND ` + WakeNotificationAndCascadeKindFilter},
 		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
 	}
 	now := time.Now().Unix()
@@ -852,7 +852,7 @@ func (dm *DatabaseManager) HealthCheckReadOnly() (ReadOnlyHealthCheck, error) {
 	}{
 		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND ` + DirectiveExclusionClause},
 		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > strftime('%s','now')) AND json_extract(metadata, '$.status') = 'pending'`},
-		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND (metadata IS NULL OR metadata = '' OR json_extract(metadata, '$.kind') IS NULL OR json_extract(metadata, '$.kind') = '' OR json_extract(metadata, '$.kind') IN ('notification','cascade'))`},
+		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND ` + WakeNotificationAndCascadeKindFilter},
 		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
 	}
 	now := time.Now().Unix()

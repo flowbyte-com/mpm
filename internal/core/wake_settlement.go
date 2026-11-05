@@ -81,6 +81,15 @@ const WakeSettlementRetryBudget = 5
 //
 // The write is a single statement, so it is atomic by itself: it either
 // lands whole or not at all. There is no COMMIT to be ambiguous about.
+//
+// MALFORMED METADATA. The metadata write goes through
+// WakeMetadataJSON, which hands the JSON functions a document they can
+// always parse. json_set() RAISES on malformed JSON, so the previous
+// COALESCE(metadata,'{}') form could not settle a wake whose metadata
+// was corrupt: the settlement failed, the wake stayed fired=0, and its
+// handler ran AGAIN on the next tick — forever. The guard makes a
+// corrupt document settle as the empty object, which is the same
+// treatment a NULL or empty metadata already received.
 func MarkWakeFired(db *sql.DB, wakeID string, lastError string) error {
 	if db == nil {
 		return nil
@@ -95,14 +104,14 @@ func MarkWakeFired(db *sql.DB, wakeID string, lastError string) error {
 		out = execTracked(db, `
 			UPDATE scheduled_wakes
 			SET fired = 1, fired_at = ?,
-			  metadata = json_set(COALESCE(metadata,'{}'), '$.last_error', NULL)
+			  metadata = json_set(`+WakeMetadataJSON+`, '$.last_error', NULL)
 			WHERE id = ?`,
 			WakeSettlementRetryBudget, nil, now, wakeID)
 	} else {
 		out = execTracked(db, `
 			UPDATE scheduled_wakes
 			SET fired = 1, fired_at = ?,
-			  metadata = json_set(COALESCE(metadata,'{}'), '$.last_error', ?)
+			  metadata = json_set(`+WakeMetadataJSON+`, '$.last_error', ?)
 			WHERE id = ?`,
 			WakeSettlementRetryBudget, nil, now, lastError, wakeID)
 	}

@@ -653,7 +653,7 @@ func (s *DoctorService) cronPendingCount() (int, error) {
 	var n int
 	if err := s.dm.SQLDB().QueryRow(`
 		SELECT COUNT(*) FROM scheduled_wakes
-		WHERE fired = 0 AND json_extract(metadata, '$.kind') = 'cron'
+		WHERE fired = 0 AND `+mpminternal.WakeCronKindFilter+`
 	`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("cron pending count: %w", err)
 	}
@@ -674,7 +674,7 @@ func (s *DoctorService) cronEligibleBacklog(nowUnix int64) (int, error) {
 		SELECT COUNT(*) FROM scheduled_wakes
 		WHERE fired = 0
 		  AND target_time < ?
-		  AND json_extract(metadata, '$.kind') = 'cron'
+		  AND `+mpminternal.WakeCronKindFilter+`
 	`, cutoff).Scan(&n); err != nil {
 		return 0, fmt.Errorf("cron eligible backlog: %w", err)
 	}

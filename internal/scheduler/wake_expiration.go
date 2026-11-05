@@ -66,6 +66,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	core "github.com/flowbyte-com/mpm-core"
 )
 
 // NotificationRetentionWindow is the grace period before a
@@ -114,16 +116,23 @@ func SweepOverdueNotificationWakes(ctx context.Context, db *sql.DB, now time.Tim
 	//    also a candidate. An explicit system kind (e.g. snapshot)
 	//    is NOT a candidate — those are dispatched eagerly and
 	//    self-mark fired.
+	//
+	//    The filter is core.WakeNotificationKindFilter, which reads
+	//    the kind through an always-valid-JSON extraction.
+	//    json_extract() RAISES on malformed JSON, so an unguarded
+	//    call aborts the whole candidate SELECT on a single corrupt
+	//    metadata row — and a corrupt row would then block the
+	//    retention of EVERY healthy overdue row behind it, forever.
+	//    The always-valid form reads a malformed document as
+	//    untagged (i.e. as a notification) and raises on nothing. It
+	//    also carries no dependence on SQL evaluation order, which an
+	//    OR-chain of json_extract() calls would.
 	candidateQuery := `
 		SELECT id, metadata
 		FROM scheduled_wakes
 		WHERE fired = 0
 		  AND target_time < ?
-		  AND (
-		    json_extract(metadata, '$.kind') IS NULL
-		    OR json_extract(metadata, '$.kind') = ''
-		    OR json_extract(metadata, '$.kind') = 'notification'
-		  )
+		  AND ` + core.WakeNotificationKindFilter + `
 		ORDER BY target_time ASC
 		LIMIT ?
 	`
@@ -175,15 +184,26 @@ func SweepOverdueNotificationWakes(ctx context.Context, db *sql.DB, now time.Tim
 
 		// Build the new metadata: take the existing JSON object
 		// (or {} if absent), set the audit keys, write back as a
-		// JSON string. We use COALESCE to handle the
-		// metadata IS NULL case (a wake created via raw INSERT
-		// without metadata).
+		// JSON string.
+		//
+		// The always-valid guard is what keeps the write safe:
+		// json_set() RAISES on malformed JSON, so without the guard
+		// the retirement of a single corrupt row would abort the
+		// whole sweep transaction — and the sweep's own read-back
+		// assertion could never be satisfied for that row, because
+		// the audit note could not be written onto it. The guard is
+		// order-independent — json_valid() never raises, so the
+		// CASE always selects either the original document or the
+		// literal '{}', both of which json_set() can parse. A NULL
+		// or empty metadata was already normalised to '{}' by the
+		// previous COALESCE form; a corrupt one is now normalised
+		// the same way.
 		updateQuery := `
 			UPDATE scheduled_wakes
 			SET fired = 1,
 			    fired_at = ?,
 			    metadata = json_set(
-			      COALESCE(metadata, '{}'),
+			      ` + core.WakeMetadataJSON + `,
 			      '$.' || ? || '.reason', ?,
 			      '$.' || ? || '.at', ?,
 			      '$.' || ? || '.target_time', (
@@ -413,7 +433,7 @@ func cronRetentionProbeBacklog(ctx context.Context, db *sql.DB, cutoffUnix int64
 		  SELECT 1 FROM scheduled_wakes
 		  WHERE fired = 0
 		    AND target_time < ?
-		    AND json_extract(metadata, '$.kind') = 'cron'
+		    AND `+core.WakeCronKindFilter+`
 		  LIMIT ?
 		)
 	`, cutoffUnix, CronRetentionCatchUpThreshold+1).Scan(&n)
@@ -453,7 +473,7 @@ func SweepOverdueCronWakes(ctx context.Context, db *sql.DB, now time.Time, maxRo
 		FROM scheduled_wakes
 		WHERE fired = 0
 		  AND target_time < ?
-		  AND json_extract(metadata, '$.kind') = 'cron'
+		  AND ` + core.WakeCronKindFilter + `
 		ORDER BY target_time ASC
 		LIMIT ?
 	`
@@ -502,7 +522,7 @@ func SweepOverdueCronWakes(ctx context.Context, db *sql.DB, now time.Time, maxRo
 			SET fired = 1,
 			    fired_at = ?,
 			    metadata = json_set(
-			      COALESCE(metadata, '{}'),
+			      ` + core.WakeMetadataJSON + `,
 			      '$.' || ? || '.reason', ?,
 			      '$.' || ? || '.at', ?,
 			      '$.' || ? || '.target_time', (
