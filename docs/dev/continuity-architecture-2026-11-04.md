@@ -5,19 +5,27 @@
 **Status:** architecture and acceptance specification. **No production schema migration, no
 implementation, no merge.**
 
-**Revision note (2026-11-05, third pass).** This revision remediates the **final independent delta
+**Revision note (2026-11-05, fourth pass).** This revision records the **operator's decision on
+OD3** — the **minimal audit-enabled** deletion model, **β-lite**, on the existing α schema (§12.5) —
+and discharges the conditionality the previous revision stated. The **Stage 1 DDL is unchanged**:
+the decision adds **no fifth table, no owner column and no additional schema machinery**, and the
+§4.1 DDL block is byte-identical to the revision C independently approved (sha256
+`d0b3d7dd6bb797b7…`). Stage 1's DDL is now **final and unconditional**; Stage 1 may proceed through
+its normal implementation and review, and **no merge or deployment happens without approval**.
+
+The revision immediately before it remediated the **final independent delta
 review** of this document ([comment 6656558202](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6656558202),
 verdict *APPROVED* — *"The Stage 1 architecture is technically ready"*), which verified all eight
 of its priorities against the tree and the SQL and raised **two** non-blocking documentation
 findings (F1–F2): §2.3's claim that a `memory` reference admits a lesson id, and AT2's rationale for
-comparing by name. Both are corrected here (§12.4). The revision immediately before it remediated the
+comparing by name. Both are corrected here (§12.4). **Before that**, the third pass remediated the
 **second** independent correctness review ([comment 6655135875](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6655135875),
 verdict *ACCEPT WITH REQUIRED CORRECTIONS*), which verified the first review's sixteen corrections
 (A1–A16) against the tree and the SQL and raised **six** further defects (D1–D6).
 
 The **architecture is unchanged**: permanent project identities, a name/alias resolution domain,
 independent threads, bounded reference-backed checkpoints, and per-thread optimistic concurrency are
-all preserved. What changed is the *specification*:
+all preserved. What changed is the *specification* — across the four passes:
 
 - **D1 — one required DDL correction.** The checkpoint's `supersedes` pointer was a single-column
   foreign key, so a cross-thread *and* a cross-project supersession were both representable and
@@ -30,18 +38,26 @@ all preserved. What changed is the *specification*:
 - **D7–D12 — the review's optional refinements are taken too**, because each removes a real
   ambiguity and none changes the architecture (§12.3).
 - **The evidential apparatus was strengthened.** The §4.1 DDL is executed against a disposable
-  SQLite database (**84 assertions, 0 failures**), the substrate's **real** inline pointer parser
+  SQLite database (**97 assertions, 0 failures**), the substrate's **real** inline pointer parser
   is run over **every** `mpm://` URI this document contains, and the citation audit now runs
   **against the declared base** with a declaration-anchored criterion (§14).
-
 - **F1–F2 — the final review's two documentation findings.** A `memory` reference admits a
   **decision** or a **theory** id, not a lesson id: a lesson is a `lessons_base` row, and
   `GetMemory` reads `memories`. And AT2 still compares **by name**, but for the honest reason —
   row order is not part of the schema, so an order-sensitive comparison is fragile even though it
   happens to pass today (§14.2 E28).
 
+- **OD3 — resolved by the operator.** The deletion model is the **minimal audit-enabled** one:
+  an explicit project-id confirmation; a soft delete that preserves the project identity, the
+  historical names, the threads and the checkpoints; and the deletion initiator and timestamp
+  recorded in `projects.deleted_by`, `projects.deleted_at` and a `system_audit_log` row.
+  Authentication roles, permissions and ownership enforcement are **deferred**; **recorded caller
+  attribution is not verified identity**; the workspace stays an **explicit single-operator trust
+  domain** (§2.7, §9, §12.5).
+
 The first review's corrections (A1–A16) are preserved unchanged; §12.1 is their disposition table,
-§12.2 is D1–D6's, §12.3 is D7–D12's, §12.4 is F1–F2's, and §13 is P1–P6.
+§12.2 is D1–D6's, §12.3 is D7–D12's, §12.4 is F1–F2's, §12.5 is the operator's OD3 decision, and
+§13 is P1–P6.
 
 ---
 
@@ -515,26 +531,51 @@ open — *"the name is free again"* and *"the tombstone reports the name"* canno
 single name key, and the original DDL silently chose one of them by deleting the record. Here both
 hold, because the live-name uniqueness is a **partial** index over live rows only (§4.1).
 
-**Deletion requires an explicit confirmation token, and the token is a typo guard — not
-authorization.** `mpm_continuity delete --project cpj-x --confirm cpj-x`. The confirmation is the
-project id itself, so the operator cannot delete a project they did not name.
+**The deletion policy is decided (OD3, resolved by the operator — see §9).** The model is the
+**minimal audit-enabled** one: **β-lite**, built on the α schema.
+
+**1. Explicit project-ID confirmation.** `mpm_continuity delete --project cpj-x --confirm cpj-x`.
+The confirmation token is the project id itself, so a caller cannot delete a project it did not
+name — a typo or a wrong-id paste is refused.
+
+**2. Soft deletion preserves everything.** The delete writes `projects.deleted_at` and
+`projects.deleted_by`, withdraws the project's `project_names` rows (`withdrawn_at`), and **retains
+the project row, every historical name, every thread and every checkpoint**. Nothing is hard
+deleted, and the hard path stays refused by the schema (§2.7, AT18).
+
+**3. The initiator and the timestamp are recorded.** Three writes, and **no schema change**:
+
+- `projects.deleted_at` — the timestamp of the deletion, on the row itself;
+- `projects.deleted_by` — the recorded caller attribution, using the vocabulary the checkpoint row
+  already carries (`mpm_session_id`, `framework_name`, `framework_session_id`, `actor_kind`);
+- a `system_audit_log` row — the substrate's own audit log
+  (`internal/core/schema.go:1238-1268`), which already carries `mpm_session_id`, `framework_name`,
+  `framework_session_id`, `invocation_id` and `event_code`. The row's `level` is drawn from the
+  table's own five-value vocabulary (`internal/core/schema.go:1240`) and its `event_code` is the
+  bounded ASCII identifier the column's contract requires (`internal/core/schema.go:1264-1268`).
+  **No fifth table is introduced.**
+
+**Recorded caller attribution is NOT verified identity — and the document says so everywhere it
+matters.** `deleted_by` records *who the substrate believed was calling*: the MPM session id, the
+host framework and its session id, and whether the caller was an agent, a human or unknown. It does
+**not** establish that a human authorized the deletion, because the substrate has **no identity
+primitive**: `actor_kind` distinguishes agent/human/unknown, not *who*. A `deleted_by` value is
+therefore **attribution**, and the delete response and the audit row must present it as attribution.
+Any claim that a specific human approved a deletion would be false, and no interface may imply one.
+
+**What is deliberately deferred.** Authentication roles, permissions and ownership enforcement are
+**deferred to a later operator decision**, and nothing in Stage 1 or Stage 2 depends on them. The
+reason is structural, not incidental: the substrate has no identity primitive to build them on, and
+building one would require an owner column and possibly a fifth table — which this decision
+explicitly refuses. `projects` therefore has **no owner column**, and the workspace remains an
+**explicit single-operator trust domain**.
 
 **What the confirmation does NOT do.** It is not an authorization mechanism, and this document does
 not claim it is one. `projects` has no owner, `resolve` hands out the id and the name of every live
-project, and therefore **any agent in the workspace can delete any project**. The workspace is a
-single-operator trust domain, and that is a recorded risk (§9 OD3), not a safeguard. The mitigation
-is **auditability, not authorization**:
-
-- `projects.created_by` and `projects.deleted_by` record the writer identity, using the vocabulary
-  the checkpoint row already carries (`mpm_session_id`, `framework_name`, `model_name`,
-  `actor_kind`);
-- the soft delete writes a `system_audit_log` row — the substrate's own audit log
-  (`internal/core/schema.go:1238-1268`), which already carries `mpm_session_id`, `framework_name`,
-  `framework_session_id`, `invocation_id` and `event_code`. **No fifth table is introduced.**
-
-A real actor/authorization model is *not* proposed, because the substrate has no identity primitive
-to build it on: `actor_kind` distinguishes agent/human/unknown, not *who*. Adding one is a separate
-decision, and the operator's answer is required before the delete action is written (§9, OD3).
+project, and therefore **any agent in the workspace can delete any project**. That is a **recorded
+risk**, accepted by the operator's decision, not a safeguard. The mitigation is **auditability, not
+authorization**: after the fact, one can establish *which session, framework and agent kind*
+performed the deletion and *when* — and nothing more.
 
 ### 2.8 Optimistic concurrency
 
@@ -1371,7 +1412,7 @@ split did not, and that contradiction is resolved here.
 | **Regression tests** | AT1–AT8 (§8) |
 | **Compatibility** | old binaries ignore the new tables; the schema is forward-only; a hard delete of a project with children is refused |
 | **Rollback** | binary rollback is safe; schema rollback is forbidden |
-| **Stop condition** | stop if any existing row changes, if the restore allow-list is not updated, if any Continuity table appears in the `shared` schema, if `git diff --stat` touches a file outside the four listed, **or if the operator answers OD3 with (β)** — the explicit actor/authorization option — because (β) would need an owner column and possibly a fifth table, and this Stage 1's DDL would then have to be re-issued (§9, OD3; §12.2, D6) |
+| **Stop condition** | stop if any existing row changes, if the restore allow-list is not updated, if any Continuity table appears in the `shared` schema, if `git diff --stat` touches a file outside the four listed, **or if the Stage 1 DDL changes at all** — the operator's OD3 decision (β-lite, §9) is built on the **existing** α schema and adds **no fifth table, no owner column and no additional schema machinery**, so any schema change here would have to be re-issued and re-reviewed |
 | **Gate** | AT1–AT8 green; `mpm-lint --gate` PASS; `make docs-check` OK |
 
 ### Stage 2 — the model and the tool
@@ -1385,7 +1426,7 @@ split did not, and that contradiction is resolved here.
 | **Regression tests** | AT9–AT24 (§8) |
 | **Compatibility** | the tool is new; nothing existing changes behaviour |
 | **Rollback** | fully revertible — no existing surface is touched |
-| **Stop condition** | stop if any action can create a duplicate project, if a write can land without a revision check, if a checkpoint can be written under a project other than its thread's, or if a project can be deleted without recording the actor |
+| **Stop condition** | stop if any action can create a duplicate project, if a write can land without a revision check, if a checkpoint can be written under a project other than its thread's, **if a project can be deleted without the explicit project-id confirmation**, **if a project can be deleted without all three records being written** — `projects.deleted_at`, `projects.deleted_by` and a `system_audit_log` row — or **if a surface presents the recorded caller attribution as a verified identity** (§2.7, §9 OD3) |
 | **Gate** | AT9–AT24 green; the existing tool-registry and namespace-contract tests green |
 
 ### Stage 3 — the CLI facade and the pointers
@@ -1469,7 +1510,7 @@ undone. AT6 asserts the table list, the index list and the row set, not merely "
 | **AT15** | **Checkpoint budget** | a checkpoint at the limit, then one over it — and one that exceeds the **byte** cap while still inside the count limits | the limit one is accepted; the over one is **rejected** with the section and the limit named, and the rejection says **which limit fired** (bytes, not count); nothing is committed; a malformed `facts` document is **refused by the schema's `CHECK (json_valid(facts))`** |
 | **AT16** | **Reference resolution and dangling refs** | a checkpoint whose refs point at a memory, a **decision**, a theory, a lesson and a work item; then shred the memory | every ref resolves with a bounded summary and a pointer **whose kind matches the reference kind** (`mpm://decision/…` for a decision); after the shred, the memory ref is reported `missing` and the checkpoint is still readable |
 | **AT17** | **Rename and alias** | rename a project; then resolve by the old name, the new name, and a stale alias; then attempt a rename onto another project's live name and another project's live alias | the old name, the new name and the alias all resolve to the same project id; the old canonical name appears as an alias; **exactly one live canonical name** exists at every point; a rename onto a live name is **refused**, naming the holder; the demote-then-promote order leaves no gap (a concurrent resolve sees the old alias or the new canonical, never neither) |
-| **AT18** | **Deletion semantics** | delete a project with `--confirm`; then create a project with the same name; then attempt a hard `DELETE` | the tombstone exists **and names itself** — the withdrawn name rows are retained and report the tombstone's id, actor and time; the old names no longer resolve; the new project gets a **new** id and the response mentions the tombstone; the old threads and checkpoints are retained and reachable only by id; the hard `DELETE` is **refused** by the schema and every row survives; `projects.deleted_by` records the actor |
+| **AT18** | **Deletion semantics** | delete a project with `--confirm <project-id>`; then attempt a delete with the **wrong** confirmation; then create a project with the same name; then attempt a hard `DELETE` | the tombstone exists **and names itself** — the withdrawn name rows are retained and report the tombstone's id, actor and time; the old names no longer resolve; the new project gets a **new** id and the response mentions the tombstone; the old threads and checkpoints are retained and reachable only by id; the hard `DELETE` is **refused** by the schema and every row survives. **The deletion contract (OD3):** a delete **without** the explicit project-id confirmation is **refused**; `projects.deleted_at` carries the timestamp, `projects.deleted_by` carries the **recorded caller attribution**, and **exactly one** `system_audit_log` row is written — so all three records are asserted, not just one. And the recorded attribution is reported **as attribution**: the response and the audit row name the session, the framework and the agent kind, and **never** claim that a verified human identity authorized the deletion |
 | **AT19** | **Containment is refused by the schema** | **five** hostile writes: a checkpoint naming another project; a thread pointer naming another thread's checkpoint; a pointer naming a nonexistent checkpoint; a thread supersession naming another project's thread; **a checkpoint supersession naming another thread's checkpoint** | **all five are refused** with a foreign-key violation; the row counts are unchanged after each; the same-project and same-thread equivalents succeed — and the *fourth* hostile write is the supersession's own counterpart: a checkpoint superseding another checkpoint of the **same** thread succeeds |
 | **AT20** | **Staleness is visible** | write a checkpoint; then read it back after the session that wrote it has ended | `resume` reports `checkpoint_age_seconds`, `checkpoint_revision`, `thread_revision` and `session_ended_after_checkpoint` with the session's `ended_state`; the values are correct against the fixture's clock |
 | **AT21** | **Crash without a session-end event** | write a checkpoint; kill the process; then resolve and resume in a fresh manager | the checkpoint is current and complete; **no handoff exists**; the resume returns the same bytes as before the crash; `session_ended_after_checkpoint` is `false` |
@@ -1494,7 +1535,7 @@ undone. AT6 asserts the table list, the index list and the row set, not merely "
 |---|---|---|---|---|
 | **OD1** | Where does the **session→project binding** live? (the draft's R3, re-scoped) | A **DB-backed binding written by an explicit action**, read by the Stage 4 source. `active.json` stays out (its write is not atomic — `os.WriteFile`, not the tmp+rename swap). The cost is **one more table**, and it is **not** part of the four-table Stage 1 — it is a separate, later table. | **open** | **The operator's requirement, not merely Stage 4.** As specified, a project is reachable by name and by explicit call, and by nothing else — §3.7 says so plainly |
 | **OD2** | Is an unbounded, invisible **loss window** acceptable? (the draft's R2, re-scoped) | **No writer** — an automatic writer must read the session transcript, and a transcript is the one thing that must not become durable state. But `resume` **must** report `checkpoint_age` and whether a session ended after the checkpoint. **The limitations of the retained handoff history are explicit:** `session_handoffs` has a **90-day TTL** (`PruneHandoffs(90)`), so the session-end signal disappears after 90 days; and a session killed without running `EndSessionV2` leaves **no handoff row at all**, so the absence of a handoff is **not** proof of continuity. The signal is best-effort and the brief's age is the durable half | **open** | The **crash-recovery claim** — the *visibility* of the loss, not its absence. Does **not** block Stage 1 |
-| **OD3** | **Who may delete a project, and is it recorded?** | **The minimum viable single-operator contract, plus auditability.** Compare: (α) `--confirm <project-id>` as a naming check — the review is right that this is **not** authorization: `projects` has no owner, `resolve` hands out every live project's id and name, so any agent in the workspace can delete any project; (β) an explicit actor/authorization mechanism — the substrate has **no identity primitive** to build it on (`actor_kind` distinguishes agent/human/unknown, not *who*), so (β) is new machinery, not a correction. **Recommended:** (α) with `projects.created_by` / `deleted_by` and a `system_audit_log` row — the writer identity and the audit, **no fifth table** — and the workspace declared a **single-operator trust domain** with the residual risk stated rather than implied | **open — needs the operator's acknowledgement** | **Stage 2's delete action, and — conditionally — Stage 1's DDL.** Under the recommended (α), the Stage 1 *columns* are unaffected: `created_by` and `deleted_by` are already in the `projects` table and the audit row goes to the existing `system_audit_log`, so Stage 1's DDL needs no change. Under (β) they are **not** unaffected — an actor model needs an owner column and possibly a fifth table, so **Stage 1's DDL would change** and the §4.1 block, AT1, AT2 and the restore allow-list would all have to be re-issued. The claim is therefore *conditional on the operator's answer*, and this is the one outstanding decision that touches Stage 1 |
+| **OD3** | **Who may delete a project, and is it recorded?** | **RESOLVED BY THE OPERATOR (2026-11-05) — the minimal audit-enabled model, "β-lite", on the α schema.** The options as reviewed: (α) `--confirm <project-id>` as a naming check plus `created_by` / `deleted_by` and a `system_audit_log` row — **no fifth table** — with the workspace declared a **single-operator trust domain** and the residual risk stated rather than implied; (β) an explicit actor/authorization mechanism — the substrate has **no identity primitive** to build it on (`actor_kind` distinguishes agent/human/unknown, not *who*), so (β) is new machinery, not a correction, and it would need an owner column and possibly a fifth table. **The operator adopts β-lite**: α's confirmation, recording and audit, **with authentication roles, permissions and ownership enforcement deferred** to a later decision. Consequences, all now fixed: (i) the **confirmation is an explicit project id** (`--confirm <project-id>`); (ii) the delete is a **soft delete that preserves** the project identity, the historical names, the threads and the checkpoints; (iii) the **initiator and the timestamp are recorded** in `projects.deleted_by`, `projects.deleted_at` and a `system_audit_log` row; (iv) **recorded caller attribution is explicitly not verified identity**, and every surface that shows `deleted_by` must present it as attribution; (v) **no fifth table, no owner column, no additional schema machinery** — the independently approved Stage 1 DDL is **unchanged**; (vi) the **single-operator trust domain is explicit and preserved** | **resolved — by the operator's decision, 2026-11-05** | **Nothing.** Stage 2's delete action is unblocked, and Stage 1's DDL is **final and unchanged**: `created_by` and `deleted_by` are already in the `projects` table and the audit row goes to the existing `system_audit_log`, so no column, table or allow-list entry moves. Stage 1 may proceed through its normal implementation and review (§7, §11) |
 | **OD4** | Which **slice** holds the four tables? | **Resolved by this revision: none of the schema slices.** The DDL is owned by the **migration** (§6.2), which is neither `BaseTables` (propagated to the shared schema) nor `WorkTables` (the dual-definition `work_events` shape Stage A declined). One code path, local only, with AT7 as the guard | **resolved** | — |
 | **OD5** | Is a **`decision` reference pointerable**? | **Yes — add `mpm://decision/<id>` as a third pointer kind**, with the substrate's own `mpm://theory/` shape: `GetMemory` plus a `collection == 'decisions'` assertion. **Compatibility implications:** `mpm_resolve` gains a kind (the five existing kinds are unchanged); a decision becomes reachable under **two** URIs — `mpm://memory/<id>` already resolves it today, because `GetMemory` selects by id without a collection filter, and a theory already has this same duality — so the new kind adds a **typed** address, not a new address space; the resolver can now *reject* an id that is not a decision. The alternative — dropping `decision` from the checkpoint reference vocabulary — would cost the `facts` section its ability to distinguish a decision from a memory, and §2.3's whole point is that the sections are typed | **open — recommended; does not block Stage 1** | Stage 3's pointer surface. Stage 1 is unaffected either way |
 | **OD6** | Is case-insensitive uniqueness enforced in **storage** or only in the API? | **Storage.** `COLLATE NOCASE` on `project_names.name` and on `continuity_threads.focus`, plus partial unique indexes over the live rows (§4.1). The API check stays as the friendly first line | **resolved** | — |
@@ -1516,6 +1557,14 @@ the same thing. The numbers are unchanged, so `R4` is the draft's `D4`.
 | **R10** | Should a project be able to hold a **repository binding**? | **Deferred**, and the deferral carries its real prerequisite: MPM has **no repository identity primitive** (§1.3). "Add a repository binding" is not a small addition; it means first building an explicit, operator-supplied repository key. When cross-workspace identity comes, the shared database's role is a **name→id directory only** — never the storage for threads or checkpoints (§13, P3) | open | nothing |
 
 ### 9.3 Decisions this revision closes
+
+**OD3 is closed by the operator's decision** (2026-11-05) as the **minimal audit-enabled model,
+"β-lite"**, on the α schema: an explicit project-id confirmation, a soft delete that preserves the
+project identity, the historical names, the threads and the checkpoints, and the deletion initiator
+and timestamp recorded in `projects.deleted_by`, `projects.deleted_at` and a `system_audit_log`
+row. Authentication roles, permissions and ownership enforcement are **deferred**; recorded caller
+attribution is **not** verified identity; there is **no fifth table and no owner column**; and the
+independently approved Stage 1 DDL is unchanged. The full text is in §2.7 and §12.5.
 
 The draft's **R1** (workspace- vs cross-workspace-scoped) is closed as **workspace-scoped** and is
 now enforced structurally: the four tables exist only in the local schema (§6.2, AT7), so a
@@ -1557,7 +1606,10 @@ Recorded explicitly, because the failure mode of a design like this is feature c
 8. **Not cross-workspace.** A project lives in one workspace's database (R1/OD4). The shared schema
    is the cross-workspace **broadcast** store, and it holds no project identity (§6.2).
 9. **Not an authorization system.** The deletion confirmation is a typo guard. The workspace is a
-   single-operator trust domain (§2.7, §9 OD3).
+   single-operator trust domain. **Authentication roles, permissions and ownership enforcement are
+   deferred by the operator's OD3 decision** (β-lite) — *deferred*, not forgotten: the substrate has no
+   identity primitive to build them on, and the decision explicitly refuses an owner column and a
+   fifth table (§2.7, §9, §12.5).
 
 ---
 
@@ -1572,17 +1624,19 @@ corrected, and that the second review's optional refinements (D7–D12) have bee
 independent delta review** has since been carried out and **APPROVED** the Stage 1 architecture
 ([comment 6656558202](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6656558202): *"The
 Stage 1 architecture is technically ready"*), raising two non-blocking documentation findings, which
-are corrected here (§12.4, F1–F2). The approval covers the **architecture**, not the operator's
-open decision: Stage 1 is not thereby authorised for implementation, and remains subject to the
-operator's answer on OD3 (§9) (§12, §13, §14).
+are corrected here (§12.4, F1–F2). The approval covered the **architecture**; the operator has
+since answered OD3 (§9, §12.5), so Stage 1's DDL is final and unchanged. **Stage 1 may proceed
+through its normal implementation and review** — and **no merge or deployment happens without
+approval** (§7, §12, §13, §14).
 
-**The one conditional.** Stage 1's DDL is final **if the operator accepts OD3's recommended option
-(α)** — the delete confirmation as a naming check plus `created_by` / `deleted_by` and a
-`system_audit_log` row, with no fifth table. Under (α) the Stage 1 columns are already right.
-Under (β), the explicit actor/authorization option, Stage 1 would need an owner column and possibly
-a fifth table, and §4.1, AT1, AT2 and the restore allow-list would all have to be re-issued. The
-document does **not** assume the operator's answer; it states the dependency, and Stage 1's stop
-condition names it (§7, §9 OD3, §12.2 D6).
+**OD3 is resolved; no conditional remains on Stage 1.** The operator has adopted the **minimal
+audit-enabled** model — **β-lite** — on the existing α schema: an **explicit project-id
+confirmation**; a **soft delete that preserves** the project identity, the historical names, the
+threads and the checkpoints; and the deletion **initiator and timestamp recorded** in
+`projects.deleted_by`, `projects.deleted_at` and a `system_audit_log` row. Authentication roles,
+permissions and ownership enforcement are **deferred**; **recorded caller attribution is not
+verified identity**; there is **no fifth table and no owner column**; and the independently
+approved Stage 1 DDL is **unchanged** (§2.7, §9, §12.5).
 
 The design satisfies the product contract with **four new tables, one new tool, one CLI facade,
 three new pointer kinds, and no change to any existing reader, writer, predicate or public
@@ -1655,7 +1709,7 @@ the two vocabularies cannot be confused.
 | **D3** | **[low]** §3.2's worked example violated the revision's own id rule — its four pointers carried underscore ids (`d_91…`, `l_04…`, `m_55…`, `w_12…`) that the substrate's own parser rejects, and the ellipsis character is not in the pointer charset either | §3 in full, §4.1's id note, §14.2 | every example id in the document is now a **real id shape**: the three Continuity ids are their prefix plus the 16 lowercase hex characters `core.GenerateID()` returns, and the four artifact ids are the substrate's own 16 bare hex. The DDL's id comments were changed from "32 lowercase hex" to **"16 lowercase hex"** to match, so the DDL and the examples now describe one scheme. §3 also states what is stored versus what is returned (see D8) | §14.2 E24–E27: the probe **transcribes the substrate's real inline `parsePointerURI`** (`internal/core/tools/handlers.go:7827-7864`) and runs it over **every `mpm://` URI in the document**; the four literal pointers all parse, the one pointer shown as rejected really is rejected, and every literal id matches the generated-id shape it claims | none for the examples. The **real** lesson is that a hand-written example can drift from the rule it illustrates, so the check is now mechanical rather than editorial: a pointer that does not parse fails the probe |
 | **D4** | **[low]** The citation audit's headline numbers did not hold for the pointer surface — four load-bearing citations were stale, and §14.4's narrative "corrected" one of them **in the wrong direction** | §1.4, §4.4, §14.1, §14.4 | the four are corrected, in `internal/core/tools/handlers.go` and `internal/core/tools/registry_list.go`: the kind check → **line 7562**; the theory branch → **lines 7660–7668**; the inline id-charset copy → **lines 7857–7862**; the `mpm_resolve` registry description → **lines 759–762**. The stale values are written as bare line numbers so that none of them is a copyable `path:line` citation §14.4's narrative is rewritten to state the **root cause** — the previous revision's audit ran against a tree **20 commits behind** the declared base, so it validated the citations against the wrong files | §14.4's audits now run **against the declared base `f8d4b95a`**, not against whatever tree happens to be checked out, and the instruments were strengthened: a **declaration-anchored** audit (50 / 50 citations point at the symbol's *declaration*, not merely at a line containing it) and a **generic drift screen** over every citation | the root cause was a *process* defect, not a clerical one: an audit that runs against an arbitrary checkout validates nothing. The audits now take the base as a parameter and refuse to run against a tree that is not it |
 | **D5** | **[low]** §2.2 over-claimed AT8 — it said the four table names are "enumerated by name in AT1 and AT8", but AT8 said only "a dump containing the four new tables" | §2.2, §8 (AT8) | AT8 now **names all four** — `projects`, `project_names`, `continuity_threads`, `continuity_checkpoints` — in its mechanism *and* in its assertion, and it additionally asserts that the allow-list grows by **exactly four** and that `RuntimeCanonicalSchema` contains **none** of the four. §2.2's claim is now true of AT8 and says so explicitly | the claim is checkable against the matrix rather than against the prose | none |
-| **D6** | **[low]** OD3's "the Stage 1 *columns* are unaffected by the answer" was **conditional** — it holds only under the recommended (α); option (β) would need an owner column and possibly a fifth table, so Stage 1's DDL would change | §9 (OD3), §12.1 (A13), §7 (Stage 1's stop condition) | the claim now reads **"under the recommended (α) … unaffected"**, and OD3's *Blocks* column says that (β) would change **Stage 1's DDL** and require §4.1, AT1, AT2 and the restore allow-list to be re-issued. Stage 1's stop condition now names it: if the operator chooses (β), Stage 1 is **not** ready to implement until the schema is re-issued | the operator's answer is still **not assumed**; the document states the dependency rather than resolving it | **the one outstanding decision that touches Stage 1.** It does not block Stage 1 *if* (α) is accepted; it does block it if (β) is chosen. No operator decision is invented here |
+| **D6** | **[low]** OD3's "the Stage 1 *columns* are unaffected by the answer" was **conditional** — it holds only under the recommended (α); option (β) would need an owner column and possibly a fifth table, so Stage 1's DDL would change | §9 (OD3), §12.1 (A13), §7 (Stage 1's stop condition), **§12.5** | the claim now reads **"under the recommended (α) … unaffected"**, and OD3's *Blocks* column says that (β) would change **Stage 1's DDL** and require §4.1, AT1, AT2 and the restore allow-list to be re-issued. Stage 1's stop condition named it: if the operator chose (β), Stage 1 would **not** have been ready to implement until the schema was re-issued. **The operator has since answered: β-lite (§12.5)** — which is neither (α) nor (β), and which changes **no column, table or allow-list entry**, so the condition is discharged and Stage 1's DDL is final | at the time of writing, the operator's answer was still **not assumed**; the document stated the dependency rather than resolving it | **the one outstanding decision that touched Stage 1.** It did not block Stage 1 *if* (α) was accepted; it would have blocked it if (β) was chosen. **No operator decision was invented at that point** |
 
 ### 12.3 The revision-2 review's optional refinements (D7–D12)
 
@@ -1697,6 +1751,32 @@ first review's findings are A1–A16 and the second's are D1–D12 (§9.2).
 Neither finding changed the schema, an acceptance requirement, an implementation stage or an operator
 decision. Both errors were in the **safe direction** — they over-stated a surface rather than
 understating it — and neither touched the containment guarantees.
+
+### 12.5 The operator's OD3 decision — the minimal audit-enabled model
+
+**OD3 is resolved by the operator** (2026-11-05) as **β-lite**: the minimal audit-enabled deletion
+model, built on the **existing** α schema. This subsection records what the operator decided, where
+each part of it now lives, and what it explicitly does *not* decide. It is the authoritative
+statement of the deletion contract; §2.7 is its operational form and AT18 is its test.
+
+| Requirement | Where it is specified | How it is checked |
+|---|---|---|
+| **1. Explicit project-ID confirmation for deletion** | §2.7, §4.3 (the CLI facade: `mpm continuity delete <project> --confirm <project>`), AT18 | AT18 asserts that a delete **without** the explicit project-id confirmation is **refused**. The confirmation token is the project id itself, so a wrong id cannot delete the named project |
+| **2. Soft deletion preserves identity, names, threads and checkpoints** | §2.7's entity table, §4.1's `ON DELETE RESTRICT` notes, AT18 | §14.2 **E29**: after the soft delete the project row, every name row, every thread row and every checkpoint row still exist, the withdrawn name row keeps its name, kind and project id, and the hard `DELETE` is still refused by the foreign keys |
+| **3. The initiator and the timestamp are recorded** | §2.7, AT18 | **all three** records are asserted: `projects.deleted_at` (the timestamp), `projects.deleted_by` (the recorded caller attribution) and **exactly one** `system_audit_log` row. The audit row goes to the substrate's **existing** table (`internal/core/schema.go:1238-1268`); its `level` is drawn from that table's own five-value vocabulary (`internal/core/schema.go:1240`) and its `event_code` is the bounded ASCII identifier the column's contract requires (`internal/core/schema.go:1264-1268`) |
+| **4. Authentication roles, permissions and ownership enforcement are deferred** | §9 (OD3), §10 (non-goal 9), §2.7 | a **non-goal**, recorded rather than assumed: the substrate has **no identity primitive** to build an authorization model on (`actor_kind` distinguishes agent/human/unknown, not *who*), and the decision refuses the owner column and the fifth table that one would need |
+| **5. Recorded caller attribution is distinguished from verified identity** | §2.7, AT18, §7 (Stage 2's stop condition) | §2.7 states the distinction in the contract itself; AT18 asserts that the response and the audit row name the session, the framework and the agent kind and **never** claim a verified human identity; Stage 2's stop condition stops the implementation if a surface presents attribution as identity |
+| **6. No fifth table, no owner column, no additional schema machinery** | §4.1 (unchanged), §7 (Stage 1's stop condition) | the §4.1 DDL block is **byte-identical** to the independently approved revision — the `projects` table already carries `created_by`, `deleted_at` and `deleted_by`, and the audit row goes to the substrate's existing `system_audit_log`. Stage 1's stop condition now stops on **any** DDL change |
+| **7. The single-operator trust domain is explicit and preserved** | §2.7, §9 (OD3), §10 (non-goal 9), §4.1's DDL comment | stated as a **trust domain**, not a safeguard: `projects` has no owner, `resolve` hands out every live project's id and name, and therefore **any agent in the workspace can delete any project**. That is an accepted, recorded risk — the mitigation is auditability, not authorization |
+
+**What the decision does not change.** The Stage 1 DDL, the seven foreign keys, the acceptance
+matrix's *requirements* other than AT18's added assertions, the implementation stages' structure,
+the other open decisions (OD1, OD2, OD5, R4, R6–R10), and the restore allow-list. The §4.1 DDL
+block's sha256 is unchanged from the revision C approved.
+
+**What it enables.** Stage 1's DDL is **final and unconditional**. Stage 1 may proceed through its
+normal implementation and review, and Stage 2's delete action is unblocked. **No merge or
+deployment happens without approval.**
 
 ---
 
@@ -1839,8 +1919,9 @@ reproducible from this document: the DDL is in §4.1 and the cases are listed he
 | **E26** | **every example id's shape** (D3) | each literal pointer's id is either `prefix + 16 lowercase hex` (the Continuity ids) or the substrate's own **16 bare hex** (the artifact ids) — and the document contains **no** pointer with an unjustified underscore id |
 | **E27** | **the `SET NULL` alternative, measured** (D1) | SQLite applies `ON DELETE SET NULL` to **every** column of the child key, so on the composite FK it tries to null the `NOT NULL` `thread_id` and refuses the delete with `NOT NULL constraint failed: ck.thread_id` — a misleading error for the right refusal. `RESTRICT` refuses the same delete with `FOREIGN KEY constraint failed` |
 | **E28** | **the ordered `sqlite_master` list** (AT2, D11) | **first**: an object created after the others lands **last** in the ordered list, and the pre-existing objects keep their relative order — so the four tables the migration creates (inside the fatal migration transaction, which opens after every base DDL slice — `internal/core/db.go:3048-3056`) land last in **both** the fresh and the migrated path, and the two ordered lists are **identical today**. **second**: recreating a table and its indexes with **byte-identical** sql leaves the object set and every object's sql unchanged while the **ordered** list changes — so an order-sensitive comparison fails on an identical schema, and a compare-**by-name** comparison still passes |
+| **E29** | **the soft-delete contract** (OD3, resolved by the operator) | after the soft delete — `projects.deleted_at`, `projects.deleted_by` and the withdrawal of the project's names, with **no** `DELETE` issued — the **project row survives** and carries both records; **every historical name row is retained** and a withdrawn name keeps its name, its kind and its project id, so the tombstone names itself; the withdrawn names are no longer live and the name is free again for a successor, with the tombstone's history surviving beside it; **the threads and the checkpoints survive**; the **hard `DELETE` is still refused** by the foreign keys; and `deleted_by` holds whatever attribution the caller supplied — it is a **record, not a claim** |
 
-**84 assertions, 0 failures.**
+**97 assertions, 0 failures.**
 
 **The probe reads the specification.** It does not carry its own copy of the DDL: it extracts the
 §4.1 `sql` block from this file and executes that text, then asserts that the extracted statements
@@ -1890,7 +1971,7 @@ apart silently — a change to §4.1 that breaks an invariant breaks the probe o
 
 ### 14.4 The citation audit
 
-This document makes **145 file-and-line citations** into the substrate's source. A drifted line
+This document makes **152 file-and-line citations** into the substrate's source. A drifted line
 number would make a claim look verified when it is not, so the citations are audited mechanically
 rather than by eye — and, since the revision-2 review, against the **declared base** rather than
 against whatever tree happens to be checked out.
@@ -1905,13 +1986,13 @@ parameter and every audit below refuses to run against a tree that is not it.
 
 | Audit | Criterion | Result |
 |---|---|---|
-| **Resolution** | the cited file exists, and the cited line range is inside it and non-blank | **145 / 145** |
-| **Content** | the cited window contains the symbol or literal the sentence claims | **56 / 56** |
-| **Declaration-anchored** | the cited window contains the symbol's **declaration** — the `var X =`, `func X(`, `CREATE TABLE X` form — and not merely a later mention of it | **62 / 62** |
+| **Resolution** | the cited file exists, and the cited line range is inside it and non-blank | **152 / 152** |
+| **Content** | the cited window contains the symbol or literal the sentence claims | **58 / 58** |
+| **Declaration-anchored** | the cited window contains the symbol's **declaration** — the `var X =`, `func X(`, `CREATE TABLE X` form — and not merely a later mention of it | **64 / 64** |
 | **Generic drift screen** | over **every** citation: a symbol the sentence talks about exists in the cited file but **not at the cited lines** | **no unexplained drift** (see the residual class below) |
 | **§ cross-references** | no `§n.m` points at a heading that does not exist | **47 / 47** |
 | **Internal agreement** | the stage gates agree with the acceptance matrix, every A1–A16, D1–D6, F1–F2 and P1–P6 is dispositioned, every OD/R row states its status and what it blocks, and no superseded claim survives | **180 / 180** |
-| **The DDL probe** | §14.2 — the DDL executed verbatim, plus the pointer parser run over every URI in the document, plus the ordered-`sqlite_master` measurement behind AT2 | **84 / 84** |
+| **The DDL probe** | §14.2 — the DDL executed verbatim, plus the pointer parser run over every URI in the document, plus the ordered-`sqlite_master` measurement behind AT2 and the soft-delete measurement behind OD3 | **97 / 97** |
 
 **The four citations the revision-2 review found stale, and their corrected values.**
 
@@ -1935,17 +2016,21 @@ hidden.** The screen flags a citation when a symbol the sentence mentions exists
 but not at the cited lines. That rule is sound for a sentence that cites one file and whose subject
 *is* a symbol, but a sentence whose subject is a **tool** rather than a symbol — or one that cites
 several files — can be flagged when the identifier belongs to a different citation in the same
-sentence. **Seven** such cases remain, and each was inspected by hand: the `session_id` axis row
+sentence. **Nine** such cases remain, and each was inspected by hand: the `session_id` axis row
 (cited to `getOrMakeSessionID`, the per-process id generator), the pointer-convention row (cited to
 the kind check; `mpm_resolve` is the tool's name, not the cited symbol), the
 `epistemology_tools.go` row (cited to the `"decisions"` collection; `GetMemory` belongs to the
 *other* citation in the same sentence), T2's row (cited to the `ON CONFLICT(id) DO NOTHING`
 insert; `WithTx` is the row's subject), §2.3's `GetLesson` citation (cited to the `lessons_base`
 read; `GetMemory` is a **call** at `internal/core/db.go:4619` and is declared in
-`internal/core/web_db.go:258`, which is the *other* citation in the same sentence), and the two
+`internal/core/web_db.go:258`, which is the *other* citation in the same sentence), the two
 `internal/core/db.go:3048-3056` citations (cited to the ordering-dependency statement;
-`sqlite_master` occurs elsewhere in `db.go` for unrelated reasons).
-**All seven citations are correct.** The declaration-anchored audit is the rigorous instrument; the
+`sqlite_master` occurs elsewhere in `db.go` for unrelated reasons), and the audit-log's
+`internal/core/schema.go:1240` citation (cited to the `level` CHECK vocabulary; `event_code` is
+supported by the **sibling** citation on the next line of the same sentence,
+`internal/core/schema.go:1264-1268` — the screen is line-scoped, so it cannot see it), and **this
+paragraph itself**, which reproduces the eighth case's two citations while describing it.
+**All nine citations are correct.** The declaration-anchored audit is the rigorous instrument; the
 screen is a sweep that finds candidates, not a verdict.
 
 **How a reviewer can reproduce all of it.** The DDL probe is self-contained: it reads the DDL out
