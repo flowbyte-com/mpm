@@ -64,11 +64,49 @@
 // delivery_state"). Dropping the index first does permit the rewrite —
 // which is exactly why the index must not be dropped.
 //
-// Idempotent via the scheduled_wakes_delivery_state_v1 sentinel, and
-// convergent: each column is probed with columnExists first, so a
-// partially-migrated database (a crash between the ALTERs and the
-// sentinel) converges on the next open instead of failing on a
-// duplicate column.
+// SELF-HEALING SHAPE
+// ------------------
+//
+// The five columns AND the index are ENSURED on every open, not only on
+// the first. The sentinel records that the migration ran; it is not a
+// licence to stop repairing.
+//
+// The reason is the index. In Stage A it has no reader: its predicate
+// is `delivery_state IS NOT NULL`, and every row is NULL, so the partial
+// index matches ZERO rows and does nothing except enforce the
+// forward-only rule. That makes it the single most droppable object in
+// the schema — "clean up unused indexes" is precisely the tidy-up a
+// reviewer of a storage-only stage would propose. A sentinel-guarded
+// migration would never notice the loss, and the schema's one enforced
+// invariant would be silently and permanently gone.
+//
+// So the order is: shape first, sentinel last. The columns are probed
+// one by one (columnExists) and added if missing, the index is created
+// if absent, and only then is the sentinel considered. A database
+// interrupted between the ALTERs and the sentinel converges on the next
+// open instead of failing on a duplicate column; a database whose index
+// was dropped gets it back; and a database whose axis was dropped
+// entirely (index first, then the column — the only order in which the
+// column can go) gets the whole axis back, NULL-defaulted and
+// unread at this stage, so restoring the shape is lossless.
+//
+// Two limits, stated rather than hidden:
+//
+//   - The repair restores the SHAPE, not the values. The columns are
+//     NULL-defaulted and nothing reads or writes them yet, so no data
+//     can be lost by a restore. A later stage that writes the axis
+//     must revisit this: after that, a dropped column would carry
+//     data, and restoring it would be lossy.
+//   - `CREATE INDEX IF NOT EXISTS` cannot detect a same-named index
+//     with a DIFFERENT definition; SQLite leaves it alone. Detecting
+//     that would mean reading sqlite_master and comparing the SQL. The
+//     only way to get one is an external hand-edit, so the repair
+//     covers the dropped-index case, which is the realistic one.
+//
+// Every failure here is returned, and the caller runs this inside the
+// FATAL migration transaction: a failure rolls the whole migration back
+// and NewDatabaseManager returns an error. Nothing here is best-effort
+// and nothing here is swallowed.
 package internal
 
 import (
@@ -76,6 +114,29 @@ import (
 	"fmt"
 	"time"
 )
+
+// m1SentinelID is the schema_migrations sentinel M1 records. It marks
+// "this migration ran"; it is not a licence to stop repairing the
+// shape.
+const m1SentinelID = "scheduled_wakes_delivery_state_v1"
+
+// m1IndexName is the partial index M1 creates. It is the sole
+// enforcement of the forward-only rule, so the migration recreates it
+// on every open.
+const m1IndexName = "idx_sw_delivery_claim"
+
+// deliveryStateIndexDDL is the exact DDL of the partial index.
+//
+// It is a constant, not an inline literal, so that the migration and
+// the tests create the index from ONE definition. That matters for
+// more than tidiness: SQLite stores the statement text it was given in
+// sqlite_master, so two paths that spell the index differently produce
+// two databases whose schemas differ in TEXT while being identical in
+// substance. A schema-equivalence assertion is only meaningful if
+// both sides were built from the same text.
+const deliveryStateIndexDDL = `CREATE INDEX IF NOT EXISTS idx_sw_delivery_claim
+	 ON scheduled_wakes(delivery_state, lease_expires_at)
+	 WHERE delivery_state IS NOT NULL`
 
 // deliveryStateColumns are the five columns M1 adds to scheduled_wakes,
 // in the order they are added. The order is the column order of a
@@ -107,24 +168,57 @@ var deliveryStateColumns = []struct {
 
 // MigrateScheduledWakesDeliveryState adds the delivery-state axis to
 // scheduled_wakes: five nullable columns, one partial index, one
-// sentinel. Idempotent via sentinel; convergent via column probes.
+// sentinel.
+//
+// The SHAPE (the columns and the index) is ensured on every open; the
+// sentinel is recorded once. Both are idempotent by construction, so
+// the order of the two is a matter of what must never be lost: the
+// sentinel is written LAST, because it is the "this migration ran"
+// record and must not exist for a migration that did not finish, and
+// the shape is ensured FIRST, because the index is the only thing
+// enforcing the forward-only rule and a dropped index must be repaired
+// even on a database whose sentinel is already present.
+//
+// Every error is returned. The caller runs this inside the FATAL
+// migration transaction, so a failure rolls the whole migration back
+// and NewDatabaseManager returns an error.
 func MigrateScheduledWakesDeliveryState(tx *sql.Tx) error {
+	if err := ensureDeliveryStateColumns(tx); err != nil {
+		return err
+	}
+	if err := ensureDeliveryStateIndex(tx); err != nil {
+		return err
+	}
+
+	// The sentinel goes LAST: it is the "this migration ran" record,
+	// and it must not be written for a migration that did not finish.
 	var applied int
-	err := tx.QueryRow(
+	if err := tx.QueryRow(
 		`SELECT COUNT(*) FROM schema_migrations WHERE id = ?`,
-		"scheduled_wakes_delivery_state_v1",
-	).Scan(&applied)
-	if err != nil {
-		return fmt.Errorf("check scheduled_wakes_delivery_state_v1 sentinel: %w", err)
+		m1SentinelID,
+	).Scan(&applied); err != nil {
+		return fmt.Errorf("check %s sentinel: %w", m1SentinelID, err)
 	}
 	if applied > 0 {
 		return nil
 	}
+	if _, err := tx.Exec(
+		`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`,
+		m1SentinelID, time.Now().Unix(),
+	); err != nil {
+		return fmt.Errorf("record %s sentinel: %w", m1SentinelID, err)
+	}
+	return nil
+}
 
-	// The five columns, each probed first: a database interrupted
-	// between the ALTERs and the sentinel (a crash, a rolled-back
-	// transaction) must converge on the next open rather than fail on
-	// a duplicate column.
+// ensureDeliveryStateColumns adds the five axis columns if they are not
+// already present.
+//
+// Each column is probed first, so a database interrupted between the
+// ALTERs and the sentinel converges on the next open rather than
+// failing on a duplicate column. The same probe is what repairs a
+// database whose axis was dropped out from under a migrated schema.
+func ensureDeliveryStateColumns(tx *sql.Tx) error {
 	for _, col := range deliveryStateColumns {
 		exists, err := columnExists(tx, "scheduled_wakes", col.name)
 		if err != nil {
@@ -143,30 +237,28 @@ func MigrateScheduledWakesDeliveryState(tx *sql.Tx) error {
 			return fmt.Errorf("add %s column: %w", col.name, err)
 		}
 	}
+	return nil
+}
 
-	// The reclaim predicate is `delivery_state = 'claimed' AND
-	// lease_expires_at < ?`. The partial index makes it a range scan
-	// over a set that is EMPTY at migration time (no backfill), so
-	// creating it is instant regardless of table size.
-	//
-	// It is also what makes the schema forward-only: while this
-	// index exists, SQLite refuses `ALTER TABLE scheduled_wakes DROP
-	// COLUMN delivery_state`.
-	if _, err := tx.Exec(
-		`CREATE INDEX IF NOT EXISTS idx_sw_delivery_claim
-		 ON scheduled_wakes(delivery_state, lease_expires_at)
-		 WHERE delivery_state IS NOT NULL`,
-	); err != nil {
-		return fmt.Errorf("create idx_sw_delivery_claim: %w", err)
-	}
-
-	// The sentinel goes LAST: it is the "this migration ran" record,
-	// and it must not be written for a migration that did not finish.
-	if _, err := tx.Exec(
-		`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`,
-		"scheduled_wakes_delivery_state_v1", time.Now().Unix(),
-	); err != nil {
-		return fmt.Errorf("record scheduled_wakes_delivery_state_v1 sentinel: %w", err)
+// ensureDeliveryStateIndex creates the partial index if it is absent.
+//
+// The reclaim predicate is `delivery_state = 'claimed' AND
+// lease_expires_at < ?`. The partial index makes it a range scan over
+// a set that is EMPTY at migration time (no backfill), so creating it
+// is instant regardless of table size.
+//
+// It is also what makes the schema forward-only: while this index
+// exists, SQLite refuses `ALTER TABLE scheduled_wakes DROP COLUMN
+// delivery_state`.
+//
+// This runs on EVERY open, not only on the first. The index has no
+// reader in Stage A — it matches zero rows and exists purely to
+// enforce the forward-only rule — which makes it the object in this
+// schema most likely to be "cleaned up" by someone who believes it is
+// unused. A sentinel-guarded migration would never notice the loss.
+func ensureDeliveryStateIndex(tx *sql.Tx) error {
+	if _, err := tx.Exec(deliveryStateIndexDDL); err != nil {
+		return fmt.Errorf("create %s: %w", m1IndexName, err)
 	}
 	return nil
 }

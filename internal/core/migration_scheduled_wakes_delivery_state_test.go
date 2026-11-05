@@ -38,11 +38,10 @@ import (
 	"time"
 )
 
-// m1Sentinel is the schema_migrations sentinel M1 records.
-const m1Sentinel = "scheduled_wakes_delivery_state_v1"
-
-// m1Index is the partial index M1 creates.
-const m1Index = "idx_sw_delivery_claim"
+// The sentinel id and the index name come from the production code
+// (m1SentinelID, m1IndexName) rather than from literals here, so a
+// rename in the migration cannot leave the tests asserting on a name
+// the product does not use.
 
 // --- helpers ---------------------------------------------------------------
 
@@ -290,8 +289,8 @@ func preM1Fixture(t *testing.T) (root string, dbPath string) {
 	db := rawOpen(t, dbPath)
 	// The index first: SQLite refuses to drop a column that an index
 	// references, so the index has to go before the columns do.
-	if _, err := db.Exec(`DROP INDEX IF EXISTS ` + m1Index); err != nil {
-		t.Fatalf("drop %s: %v", m1Index, err)
+	if _, err := db.Exec(`DROP INDEX IF EXISTS ` + m1IndexName); err != nil {
+		t.Fatalf("drop %s: %v", m1IndexName, err)
 	}
 	// Each column is dropped only if it is there. The fixture must not
 	// presuppose that the migration under test has already run: the
@@ -312,7 +311,7 @@ func preM1Fixture(t *testing.T) (root string, dbPath string) {
 			t.Fatalf("drop column %s: %v", c.name, err)
 		}
 	}
-	if _, err := db.Exec(`DELETE FROM schema_migrations WHERE id = ?`, m1Sentinel); err != nil {
+	if _, err := db.Exec(`DELETE FROM schema_migrations WHERE id = ?`, m1SentinelID); err != nil {
 		t.Fatalf("delete the M1 sentinel: %v", err)
 	}
 	insertRepresentativeRows(t, db)
@@ -346,7 +345,7 @@ func TestDeliveryStateMigration_AT1_ExistingDatabaseMigration(t *testing.T) {
 			t.Fatalf("the fixture is not pre-M1: %s already exists", c.name)
 		}
 	}
-	if n := sentinelCount(t, rawOpen(t, dbPath), m1Sentinel); n != 0 {
+	if n := sentinelCount(t, rawOpen(t, dbPath), m1SentinelID); n != 0 {
 		t.Fatalf("the fixture is not pre-M1: the sentinel count is %d, want 0", n)
 	}
 
@@ -364,11 +363,11 @@ func TestDeliveryStateMigration_AT1_ExistingDatabaseMigration(t *testing.T) {
 	if !reflect.DeepEqual(post, want) {
 		t.Fatalf("the migrated column set is wrong:\n got  %v\n want %v", post, want)
 	}
-	if n := sentinelCount(t, db, m1Sentinel); n != 1 {
+	if n := sentinelCount(t, db, m1SentinelID); n != 1 {
 		t.Fatalf("the sentinel count is %d, want exactly 1", n)
 	}
-	if !containsString(scheduledWakesIndexes(t, db), m1Index) {
-		t.Fatalf("%s must exist after the migration", m1Index)
+	if !containsString(scheduledWakesIndexes(t, db), m1IndexName) {
+		t.Fatalf("%s must exist after the migration", m1IndexName)
 	}
 }
 
@@ -393,11 +392,11 @@ func TestDeliveryStateMigration_AT2_FreshDatabaseEquivalence(t *testing.T) {
 	if !reflect.DeepEqual(fresh, migrated) {
 		t.Fatalf("a fresh database and a migrated one must have identical schemas:\n fresh    %v\n migrated %v", fresh, migrated)
 	}
-	if n := sentinelCount(t, db, m1Sentinel); n != 1 {
+	if n := sentinelCount(t, db, m1SentinelID); n != 1 {
 		t.Fatalf("the sentinel count is %d, want exactly 1", n)
 	}
-	if !containsString(scheduledWakesIndexes(t, db), m1Index) {
-		t.Fatalf("%s must exist on a fresh database too", m1Index)
+	if !containsString(scheduledWakesIndexes(t, db), m1IndexName) {
+		t.Fatalf("%s must exist on a fresh database too", m1IndexName)
 	}
 }
 
@@ -531,7 +530,7 @@ func TestDeliveryStateMigration_AT5_IdempotentMigration(t *testing.T) {
 			columns:  cols,
 			indexes:  scheduledWakesIndexes(t, db),
 			rows:     m1RowSnapshot(t, db, cols),
-			sentinel: sentinelCount(t, db, m1Sentinel),
+			sentinel: sentinelCount(t, db, m1SentinelID),
 		}
 	}
 
@@ -589,7 +588,7 @@ func TestDeliveryStateMigration_AT6_FailedMigrationRollsBack(t *testing.T) {
 	// The injection.
 	if _, err := rawOpen(t, dbPath).Exec(`CREATE TRIGGER block_m1_sentinel
 		BEFORE INSERT ON schema_migrations
-		WHEN NEW.id = '` + m1Sentinel + `'
+		WHEN NEW.id = '` + m1SentinelID + `'
 		BEGIN SELECT RAISE(ABORT, 'injected M1 failure'); END`); err != nil {
 		t.Fatalf("install the failure injection: %v", err)
 	}
@@ -606,11 +605,11 @@ func TestDeliveryStateMigration_AT6_FailedMigrationRollsBack(t *testing.T) {
 	if !reflect.DeepEqual(after, pre) {
 		t.Fatalf("the failed migration changed the column set:\n before %v\n after  %v", pre, after)
 	}
-	if n := sentinelCount(t, db, m1Sentinel); n != 0 {
+	if n := sentinelCount(t, db, m1SentinelID); n != 0 {
 		t.Fatalf("the failed migration recorded the sentinel %d times, want 0", n)
 	}
-	if containsString(scheduledWakesIndexes(t, db), m1Index) {
-		t.Fatalf("the failed migration left %s behind", m1Index)
+	if containsString(scheduledWakesIndexes(t, db), m1IndexName) {
+		t.Fatalf("the failed migration left %s behind", m1IndexName)
 	}
 	rows := m1RowSnapshot(t, db, pre)
 	if !reflect.DeepEqual(before, rows) {
@@ -684,8 +683,8 @@ func TestDeliveryStateMigration_TheIndexIsForwardOnly(t *testing.T) {
 	// The refusal must come from the INDEX, not from the column simply
 	// being absent: "no such column: delivery_state" on its own would
 	// be the wrong reason and would pass for the wrong cause.
-	if !strings.Contains(dropErr.Error(), m1Index) {
-		t.Fatalf("the refusal must name %s, got: %v", m1Index, dropErr)
+	if !strings.Contains(dropErr.Error(), m1IndexName) {
+		t.Fatalf("the refusal must name %s, got: %v", m1IndexName, dropErr)
 	}
 	t.Logf("the refusal is: %v", dropErr)
 }
@@ -711,17 +710,472 @@ func TestDeliveryStateMigration_TheIndexSurvivesTheDumpValidator(t *testing.T) {
 	// `sqlite3 .dump` would emit it.
 	var indexSQL string
 	if err := rawOpen(t, dbPath).QueryRow(
-		`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`, m1Index,
+		`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?`, m1IndexName,
 	).Scan(&indexSQL); err != nil {
 		t.Fatalf("read the index SQL: %v", err)
 	}
 	if indexSQL == "" {
-		t.Fatalf("%s must exist", m1Index)
+		t.Fatalf("%s must exist", m1IndexName)
 	}
 	t.Logf("the index's SQL: %s", indexSQL)
 
 	validator := NewCanonicalDumpValidator()
 	if _, err := validator.Prepare(indexSQL + ";"); err != nil {
-		t.Fatalf("the restore validator must accept a dump carrying %s: %v", m1Index, err)
+		t.Fatalf("the restore validator must accept a dump carrying %s: %v", m1IndexName, err)
+	}
+}
+
+// --- helpers for the repair and recovery assertions ------------------------
+
+// m1ColumnDefs renders every column of scheduled_wakes as a canonical
+// definition string: name, declared type, NOT NULL, default and
+// primary-key position, in column order.
+//
+// The names alone are not enough: a column that exists with the WRONG
+// type is a different schema, and the migration's probe is by name. A
+// definition snapshot makes "the column is there" and "the column is
+// the column the contract specifies" two different assertions.
+func m1ColumnDefs(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT name, type, "notnull", dflt_value, pk
+		FROM pragma_table_info('scheduled_wakes') ORDER BY cid`)
+	if err != nil {
+		t.Fatalf("read scheduled_wakes definitions: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name, typ string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		def := "<none>"
+		if dflt.Valid {
+			def = dflt.String
+		}
+		out = append(out, fmt.Sprintf("%s %s notnull=%d default=%s pk=%d", name, typ, notnull, def, pk))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// m1SchemaSnapshot renders the schema of scheduled_wakes and the
+// delivery-state index as a canonical, comparable slice.
+//
+// It reads sqlite_master, so it captures the schema TEXT — the
+// CREATE TABLE as SQLite rewrote it after the ALTERs, and the CREATE
+// INDEX — not merely the names. Two databases that converged by
+// different routes must produce the same text, which is a stronger
+// statement than "both have the same tables".
+func m1SchemaSnapshot(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT type, name, sql FROM sqlite_master
+		WHERE (type = 'table' AND name = 'scheduled_wakes')
+		   OR (type = 'index' AND name = ?)
+		ORDER BY type, name`, m1IndexName)
+	if err != nil {
+		t.Fatalf("read the schema snapshot: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var typ, name, sqlText string
+		if err := rows.Scan(&typ, &name, &sqlText); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, typ+" "+name+": "+sqlText)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// m1ReferenceSchema returns the schema a correctly migrated database
+// has: the pre-M1 fixture, opened once by the new binary.
+//
+// It is the reference the repair and recovery paths are compared
+// against, so "the repaired database looks like a migrated one" is an
+// assertion about two independently produced databases rather than a
+// restatement of what the repair just did.
+func m1ReferenceSchema(t *testing.T) []string {
+	t.Helper()
+	root, dbPath := preM1Fixture(t)
+	dm, err := NewDatabaseManager(root)
+	if err != nil {
+		t.Fatalf("the reference database must open: %v", err)
+	}
+	dm.Close()
+	return m1SchemaSnapshot(t, rawOpen(t, dbPath))
+}
+
+// m1AssertAxisIsComplete asserts the post-migration contract: the five
+// columns are present with their specified definitions, the index is
+// present, and the sentinel is recorded exactly once.
+//
+// The column definitions are compared against the PRODUCTION list
+// (deliveryStateColumns), so the expectation cannot drift from the
+// migration.
+func m1AssertAxisIsComplete(t *testing.T, db *sql.DB) {
+	t.Helper()
+	defs := m1ColumnDefs(t, db)
+	byName := map[string]string{}
+	for _, d := range defs {
+		byName[strings.SplitN(d, " ", 2)[0]] = d
+	}
+	for _, col := range deliveryStateColumns {
+		got, ok := byName[col.name]
+		if !ok {
+			t.Fatalf("the column %s is missing: %v", col.name, defs)
+		}
+		want := fmt.Sprintf("%s %s notnull=0 default=<none> pk=0", col.name, col.decl)
+		if got != want {
+			t.Fatalf("the column %s has the wrong definition:\n got  %s\n want %s", col.name, got, want)
+		}
+	}
+	if !containsString(scheduledWakesIndexes(t, db), m1IndexName) {
+		t.Fatalf("%s must exist", m1IndexName)
+	}
+	if n := sentinelCount(t, db, m1SentinelID); n != 1 {
+		t.Fatalf("the sentinel count is %d, want exactly 1", n)
+	}
+}
+
+// --- R1: the index is self-healing ------------------------------------------
+
+// TestDeliveryStateMigration_TheIndexIsRecreatedWhenAbsent is the
+// regression test for R1: the index must be restored even when the
+// sentinel is already present.
+//
+// The scenario is the one the review measured. The index has no reader
+// in Stage A — its predicate is `delivery_state IS NOT NULL` and every
+// row is NULL — so it matches zero rows and exists purely to enforce
+// the forward-only rule. That makes it the most droppable object in
+// the schema, and a sentinel-guarded migration never noticed the loss.
+//
+// The sequence is: migrate, drop the index by hand, reopen, and assert
+// that the index is back and that `DROP COLUMN delivery_state` is
+// refused again.
+func TestDeliveryStateMigration_TheIndexIsRecreatedWhenAbsent(t *testing.T) {
+	root, dbPath := preM1Fixture(t)
+
+	// 1. Migrate.
+	dm, err := NewDatabaseManager(root)
+	if err != nil {
+		t.Fatalf("the open must succeed: %v", err)
+	}
+	dm.Close()
+	if !containsString(scheduledWakesIndexes(t, rawOpen(t, dbPath)), m1IndexName) {
+		t.Fatalf("%s must exist after the migration", m1IndexName)
+	}
+
+	// 2. Drop the index, leaving the sentinel in place.
+	if _, err := rawOpen(t, dbPath).Exec(`DROP INDEX ` + m1IndexName); err != nil {
+		t.Fatalf("drop %s: %v", m1IndexName, err)
+	}
+	if containsString(scheduledWakesIndexes(t, rawOpen(t, dbPath)), m1IndexName) {
+		t.Fatalf("the fixture is wrong: %s still exists", m1IndexName)
+	}
+	if n := sentinelCount(t, rawOpen(t, dbPath), m1SentinelID); n != 1 {
+		t.Fatalf("the sentinel count is %d, want 1 — the scenario needs the sentinel in place", n)
+	}
+
+	// 3. Reopen. The index must be back.
+	dm, err = NewDatabaseManager(root)
+	if err != nil {
+		t.Fatalf("the reopen must succeed: %v", err)
+	}
+	dm.Close()
+	db := rawOpen(t, dbPath)
+	if !containsString(scheduledWakesIndexes(t, db), m1IndexName) {
+		t.Fatalf("%s must be recreated on the next open", m1IndexName)
+	}
+
+	// 4. And the forward-only rule must be back with it.
+	_, dropErr := rawOpen(t, dbPath).Exec(`ALTER TABLE scheduled_wakes DROP COLUMN delivery_state`)
+	if dropErr == nil {
+		t.Fatal("dropping delivery_state must be refused while the partial index exists")
+	}
+	if !strings.Contains(dropErr.Error(), m1IndexName) {
+		t.Fatalf("the refusal must name %s, got: %v", m1IndexName, dropErr)
+	}
+	t.Logf("the index was restored and the refusal is: %v", dropErr)
+}
+
+// TestDeliveryStateMigration_TheAxisIsRestoredWhenDropped extends R1 to
+// the full loss: the index is dropped AND the column it protects is
+// dropped, which is the only order in which the column can go.
+//
+// The repair has to restore the column too, because the index cannot
+// be recreated without it — a `CREATE INDEX` over a missing column
+// fails, so an index-only repair would leave the database unopenable.
+//
+// The restored column is NULL-defaulted and nothing reads or writes the
+// axis yet, so restoring the shape loses no data. The row set must be
+// byte-identical across the repair.
+func TestDeliveryStateMigration_TheAxisIsRestoredWhenDropped(t *testing.T) {
+	root, dbPath := preM1Fixture(t)
+
+	dm, err := NewDatabaseManager(root)
+	if err != nil {
+		t.Fatalf("the open must succeed: %v", err)
+	}
+	dm.Close()
+
+	before := m1RowSnapshot(t, rawOpen(t, dbPath), scheduledWakesColumns(t, rawOpen(t, dbPath)))
+
+	// Drop the index, then the column it was protecting.
+	if _, err := rawOpen(t, dbPath).Exec(`DROP INDEX ` + m1IndexName); err != nil {
+		t.Fatalf("drop %s: %v", m1IndexName, err)
+	}
+	if _, err := rawOpen(t, dbPath).Exec(`ALTER TABLE scheduled_wakes DROP COLUMN delivery_state`); err != nil {
+		t.Fatalf("drop the column: %v", err)
+	}
+	damaged := scheduledWakesColumns(t, rawOpen(t, dbPath))
+	if containsString(damaged, "delivery_state") {
+		t.Fatalf("the fixture is wrong: delivery_state still exists")
+	}
+
+	// Reopen: the axis must come back.
+	dm, err = NewDatabaseManager(root)
+	if err != nil {
+		t.Fatalf("the reopen must succeed: %v", err)
+	}
+	dm.Close()
+
+	db := rawOpen(t, dbPath)
+	m1AssertAxisIsComplete(t, db)
+	if !containsString(scheduledWakesColumns(t, db), "delivery_state") {
+		t.Fatalf("delivery_state must be restored: %v", scheduledWakesColumns(t, db))
+	}
+
+	// The rows must be untouched by the repair.
+	after := m1RowSnapshot(t, db, scheduledWakesColumns(t, db))
+	for id, want := range before {
+		// The five new columns are appended by the repair, so the
+		// before-snapshot's columns are a prefix of the after-row.
+		if !strings.HasPrefix(after[id], want) {
+			t.Fatalf("the repair changed the existing columns of row %q:\n before %q\n after  %q", id, want, after[id])
+		}
+	}
+
+	// And the forward-only rule must be enforced again.
+	if _, err := rawOpen(t, dbPath).Exec(`ALTER TABLE scheduled_wakes DROP COLUMN delivery_state`); err == nil {
+		t.Fatal("dropping delivery_state must be refused while the partial index exists")
+	}
+}
+
+// TestDeliveryStateMigration_AFailingIndexCreationIsNotSwallowed asserts
+// that a failure to create the index is a FATAL one.
+//
+// The index is created inside the fatal migration transaction, so an
+// error there rolls the whole migration back and NewDatabaseManager
+// returns an error. If the repair were best-effort — a warning, a
+// swallowed error — a database whose index could not be created would
+// open silently with the forward-only rule unenforced, which is
+// exactly the silent failure the fatal transaction exists to prevent.
+//
+// The injection is an object that occupies the index's name: SQLite
+// refuses to create an index whose name is already taken by a table,
+// so `CREATE INDEX IF NOT EXISTS` fails with a name clash.
+func TestDeliveryStateMigration_AFailingIndexCreationIsNotSwallowed(t *testing.T) {
+	root, dbPath := preM1Fixture(t)
+
+	dm, err := NewDatabaseManager(root)
+	if err != nil {
+		t.Fatalf("the open must succeed: %v", err)
+	}
+	dm.Close()
+
+	// Drop the index and put a table in its place.
+	if _, err := rawOpen(t, dbPath).Exec(`DROP INDEX ` + m1IndexName); err != nil {
+		t.Fatalf("drop %s: %v", m1IndexName, err)
+	}
+	if _, err := rawOpen(t, dbPath).Exec(`CREATE TABLE ` + m1IndexName + ` (blocking TEXT)`); err != nil {
+		t.Fatalf("install the conflicting object: %v", err)
+	}
+
+	// The open must FAIL, and the error must name the index.
+	dm, err = NewDatabaseManager(root)
+	if err == nil {
+		dm.Close()
+		t.Fatal("the open must surface the index-creation failure")
+	}
+	if !strings.Contains(err.Error(), m1IndexName) {
+		t.Fatalf("the error must name %s, got: %v", m1IndexName, err)
+	}
+	t.Logf("the injected index failure surfaced as: %v", err)
+
+	// The failed open must not have left the database broken: removing
+	// the cause and opening again must succeed, with the axis complete.
+	if _, err := rawOpen(t, dbPath).Exec(`DROP TABLE ` + m1IndexName); err != nil {
+		t.Fatalf("remove the conflicting object: %v", err)
+	}
+	dm, err = NewDatabaseManager(root)
+	if err != nil {
+		t.Fatalf("the open must succeed once the cause is removed: %v", err)
+	}
+	dm.Close()
+	m1AssertAxisIsComplete(t, rawOpen(t, dbPath))
+}
+
+// --- R2: convergence and recovery -------------------------------------------
+
+// TestDeliveryStateMigration_ConvergesOnAPartiallyMigratedDatabase
+// covers the first of the two paths a real interruption takes: a crash
+// between the ALTERs and the sentinel.
+//
+// The fixture is a database carrying a SUBSET of the five columns and
+// no sentinel — the state a process killed between the third and
+// fourth ALTER leaves behind. The migration must converge on it: all
+// five columns with their specified definitions, the index, the
+// sentinel recorded exactly once, the original rows byte-identical, and
+// a schema identical to a correctly migrated database's.
+//
+// The last assertion is the one that matters. A migration that
+// converged on a *different* schema would still have five columns and
+// would still pass a column-count check.
+func TestDeliveryStateMigration_ConvergesOnAPartiallyMigratedDatabase(t *testing.T) {
+	root, dbPath := preM1Fixture(t)
+
+	// Apply the first two ALTERs and the index by hand, and leave the
+	// sentinel absent — the interrupted state.
+	partial := deliveryStateColumns[:2]
+	db := rawOpen(t, dbPath)
+	for _, col := range partial {
+		if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE scheduled_wakes ADD COLUMN %s %s`, col.name, col.decl)); err != nil {
+			t.Fatalf("apply the partial migration: %v", err)
+		}
+	}
+	if _, err := db.Exec(deliveryStateIndexDDL); err != nil {
+		t.Fatalf("apply the partial index: %v", err)
+	}
+	if n := sentinelCount(t, rawOpen(t, dbPath), m1SentinelID); n != 0 {
+		t.Fatalf("the sentinel count is %d, want 0 — the scenario needs it absent", n)
+	}
+	damaged := scheduledWakesColumns(t, rawOpen(t, dbPath))
+	if len(damaged) == 0 || !containsString(damaged, "delivery_state") || !containsString(damaged, "lease_expires_at") {
+		t.Fatalf("the fixture is wrong: %v", damaged)
+	}
+	if containsString(damaged, "claimed_by") {
+		t.Fatalf("the fixture is wrong: claimed_by already exists: %v", damaged)
+	}
+	t.Logf("the partially-migrated database has columns %v", damaged)
+
+	before := m1RowSnapshot(t, rawOpen(t, dbPath), scheduledWakesColumns(t, rawOpen(t, dbPath)))
+
+	// Open: the migration must converge.
+	dm, err := NewDatabaseManager(root)
+	if err != nil {
+		t.Fatalf("the open must succeed on a partially-migrated database: %v", err)
+	}
+	dm.Close()
+
+	converged := rawOpen(t, dbPath)
+	m1AssertAxisIsComplete(t, converged)
+
+	// The rows must be byte-identical, and the pre-existing columns
+	// must be a prefix of the post-migration columns.
+	after := m1RowSnapshot(t, converged, scheduledWakesColumns(t, converged))
+	if len(before) != len(after) {
+		t.Fatalf("the row count changed: %d -> %d", len(before), len(after))
+	}
+	for id, want := range before {
+		if !strings.HasPrefix(after[id], want) {
+			t.Fatalf("the convergence changed the existing columns of row %q:\n before %q\n after  %q", id, want, after[id])
+		}
+	}
+
+	// The converged schema must be identical to a correctly migrated
+	// database's — not merely equivalent in column count.
+	reference := m1ReferenceSchema(t)
+	got := m1SchemaSnapshot(t, converged)
+	if !reflect.DeepEqual(got, reference) {
+		t.Fatalf("the converged schema differs from a migrated database's:\n got  %v\n want %v", got, reference)
+	}
+}
+
+// TestDeliveryStateMigration_RecoversAfterAFailedMigration is the
+// natural completion of AT6.
+//
+// AT6 proves the failure is ATOMIC — the failed migration leaves
+// nothing behind. The missing half is that the system RECOVERS: once
+// the cause is removed, the next open must complete the migration and
+// leave a complete, correct axis.
+//
+// The sequence is: inject the failure exactly as AT6 does, assert the
+// open fails and the state is unchanged, remove the cause, open again,
+// and assert the axis is complete, the rows are untouched, and the
+// schema is identical to a correctly migrated database's.
+func TestDeliveryStateMigration_RecoversAfterAFailedMigration(t *testing.T) {
+	root, dbPath := preM1Fixture(t)
+
+	before := m1RowSnapshot(t, rawOpen(t, dbPath), scheduledWakesColumns(t, rawOpen(t, dbPath)))
+
+	// The injection: a trigger that aborts the sentinel write.
+	if _, err := rawOpen(t, dbPath).Exec(`CREATE TRIGGER block_m1_sentinel
+		BEFORE INSERT ON schema_migrations
+		WHEN NEW.id = '` + m1SentinelID + `'
+		BEGIN SELECT RAISE(ABORT, 'injected M1 failure'); END`); err != nil {
+		t.Fatalf("install the failure injection: %v", err)
+	}
+
+	// The open must fail.
+	dm, err := NewDatabaseManager(root)
+	if err == nil {
+		dm.Close()
+		t.Fatal("the open must surface the injected migration failure")
+	}
+	t.Logf("the injected failure surfaced as: %v", err)
+
+	// And the failed migration must have left nothing behind.
+	damaged := rawOpen(t, dbPath)
+	if containsString(scheduledWakesColumns(t, damaged), "delivery_state") {
+		t.Fatalf("the failed migration left a column behind: %v", scheduledWakesColumns(t, damaged))
+	}
+	if containsString(scheduledWakesIndexes(t, damaged), m1IndexName) {
+		t.Fatalf("the failed migration left %s behind", m1IndexName)
+	}
+	if n := sentinelCount(t, damaged, m1SentinelID); n != 0 {
+		t.Fatalf("the failed migration recorded the sentinel %d times, want 0", n)
+	}
+
+	// Remove the cause.
+	if _, err := rawOpen(t, dbPath).Exec(`DROP TRIGGER block_m1_sentinel`); err != nil {
+		t.Fatalf("remove the failure injection: %v", err)
+	}
+
+	// The next open must complete the migration.
+	dm, err = NewDatabaseManager(root)
+	if err != nil {
+		t.Fatalf("the open must succeed once the cause is removed: %v", err)
+	}
+	dm.Close()
+
+	recovered := rawOpen(t, dbPath)
+	m1AssertAxisIsComplete(t, recovered)
+
+	// The rows must be byte-identical across the failed attempt and the
+	// successful one.
+	after := m1RowSnapshot(t, recovered, scheduledWakesColumns(t, recovered))
+	if len(before) != len(after) {
+		t.Fatalf("the row count changed: %d -> %d", len(before), len(after))
+	}
+	for id, want := range before {
+		if !strings.HasPrefix(after[id], want) {
+			t.Fatalf("the recovery changed the existing columns of row %q:\n before %q\n after  %q", id, want, after[id])
+		}
+	}
+
+	// And the recovered schema must be identical to a correctly
+	// migrated database's.
+	reference := m1ReferenceSchema(t)
+	got := m1SchemaSnapshot(t, recovered)
+	if !reflect.DeepEqual(got, reference) {
+		t.Fatalf("the recovered schema differs from a migrated database's:\n got  %v\n want %v", got, reference)
 	}
 }
