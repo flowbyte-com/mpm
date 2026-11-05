@@ -188,6 +188,23 @@ var CanonicalMPMSchema = []string{
 	"shared.bcast_event_wakes",
 	"shared.bcast_sessions",
 	"shared.contradiction_log",
+	// skill_package_* — the multi-file Skill Package storage (local-only
+	// slice `SkillPackageTables` in internal/core/schema.go). MPM creates
+	// them, so a dump declaring them is legitimate and they belong in the
+	// restore allow-list — the same reason every other schema-declared
+	// table is here.
+	//
+	// They are LOCAL-ONLY: none of the three is ever created in a shared
+	// database, because they are not in BaseTables and attachShared
+	// propagates only BaseTables. See TestSkillPackageTablesAreLocalOnly.
+	//
+	// Registering them here is also what makes a binary rollback fail
+	// closed: an OLD binary's allow-list does not name them, so it refuses
+	// a new-binary dump. That refusal is deliberate and loud — the
+	// allow-list is not weakened to hide it.
+	"skill_package_blobs",
+	"skill_package_files",
+	"skill_packages",
 	"synth_runs",
 	"system_audit_log",
 	"system_config",

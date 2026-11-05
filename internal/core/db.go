@@ -2954,6 +2954,29 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		}
 	}
 
+	// Skill Package storage — LOCAL-ONLY.
+	//
+	// This slice is deliberately NOT part of BaseTables: attachShared
+	// rewrites every `CREATE TABLE` in BaseTables to `shared.<name>` and
+	// runs it against the attached shared database, so a package table
+	// declared there would be created as `shared.skill_packages` in EVERY
+	// shared database. Package bytes live in the local substrate; the
+	// `.skill` archive is the transport, not the shared schema.
+	//
+	// The tables are created empty and stay empty: this is storage only.
+	// No reader, writer, importer or exporter for them exists yet — the
+	// import/export paths are later stages of the approved Skill Packages
+	// design (PR #222, §10).
+	//
+	// The slice is applied here, alongside ReferenceTables and WorkTables,
+	// and outside the attachShared loops. The invariant is pinned by
+	// TestSkillPackageTablesAreLocalOnly.
+	for _, sqlQuery := range SkillPackageTables {
+		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
+			return fmt.Errorf("failed to execute skill package schema: %w\nSQL: %s", err, sqlQuery)
+		}
+	}
+
 	for _, sqlQuery := range ReferenceIndexes {
 		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
 			return fmt.Errorf("failed to execute reference index: %w\nSQL: %s", err, sqlQuery)
