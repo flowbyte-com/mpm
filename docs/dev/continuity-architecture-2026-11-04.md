@@ -5,8 +5,13 @@
 **Status:** architecture and acceptance specification. **No production schema migration, no
 implementation, no merge.**
 
-**Revision note (2026-11-05, second pass).** This revision remediates the **second** independent
-correctness review of this document ([comment 6655135875](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6655135875),
+**Revision note (2026-11-05, third pass).** This revision remediates the **final independent delta
+review** of this document ([comment 6656558202](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6656558202),
+verdict *APPROVED* — *"The Stage 1 architecture is technically ready"*), which verified all eight
+of its priorities against the tree and the SQL and raised **two** non-blocking documentation
+findings (F1–F2): §2.3's claim that a `memory` reference admits a lesson id, and AT2's rationale for
+comparing by name. Both are corrected here (§12.4). The revision immediately before it remediated the
+**second** independent correctness review ([comment 6655135875](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6655135875),
 verdict *ACCEPT WITH REQUIRED CORRECTIONS*), which verified the first review's sixteen corrections
 (A1–A16) against the tree and the SQL and raised **six** further defects (D1–D6).
 
@@ -25,12 +30,18 @@ all preserved. What changed is the *specification*:
 - **D7–D12 — the review's optional refinements are taken too**, because each removes a real
   ambiguity and none changes the architecture (§12.3).
 - **The evidential apparatus was strengthened.** The §4.1 DDL is executed against a disposable
-  SQLite database (**77 assertions, 0 failures**), the substrate's **real** inline pointer parser
+  SQLite database (**84 assertions, 0 failures**), the substrate's **real** inline pointer parser
   is run over **every** `mpm://` URI this document contains, and the citation audit now runs
   **against the declared base** with a declaration-anchored criterion (§14).
 
+- **F1–F2 — the final review's two documentation findings.** A `memory` reference admits a
+  **decision** or a **theory** id, not a lesson id: a lesson is a `lessons_base` row, and
+  `GetMemory` reads `memories`. And AT2 still compares **by name**, but for the honest reason —
+  row order is not part of the schema, so an order-sensitive comparison is fragile even though it
+  happens to pass today (§14.2 E28).
+
 The first review's corrections (A1–A16) are preserved unchanged; §12.1 is their disposition table,
-§12.2 is D1–D6's, §12.3 is D7–D12's, and §13 is P1–P6.
+§12.2 is D1–D6's, §12.3 is D7–D12's, §12.4 is F1–F2's, and §13 is P1–P6.
 
 ---
 
@@ -281,11 +292,16 @@ way a reference can be mis-resolved is a `kind` that lies about the artifact it 
 asserts the collection before materialising: a reference of kind `decision` whose id is a
 `memories` row with `collection='memories'` is reported as **`kind_mismatch`**, not resolved as a
 decision. The same assertion exists for `theory`. A `memory` reference names the general
-`memories` collection and therefore admits a decision, a theory or a lesson id — that direction is
+`memories` collection and therefore admits a **decision** or a **theory** id — that direction is
 inherited from the substrate's own untyped `mpm://memory/` and is **bounded and reported**: the
 resolved artifact's own collection is returned alongside it, so a caller sees that it received a
-decision when it asked for a memory. The typed kinds are the precise ones, and they are the ones
-the `facts` section should prefer for decisions.
+decision when it asked for a memory. **A lesson is not in that set.** A lesson is a
+`lessons_base` row, not a `memories` row: `GetLesson` reads `FROM lessons_base`
+(`internal/core/db.go:5966-5972`) and `GetMemory` reads `FROM memories`
+(`internal/core/web_db.go:258`), so `mpm://memory/` does **not** resolve a lesson id, and a lesson
+reference that named one would fail to resolve rather than resolve untyped. A lesson has its own
+kind — `mpm://lesson/<id>` — and its own read path, `GetLesson`. The typed kinds are the precise
+ones, and they are the ones the `facts` section should prefer for decisions.
 
 **References, not duplicated contents.** A checkpoint never copies a memory's text or a work item's
 content. It points at ids; the read path materialises them through the existing per-kind read paths
@@ -1423,7 +1439,7 @@ correct state transition; that is the defect class this matrix exists to catch.
 | # | Scenario | Mechanism | Assertion |
 |---|---|---|---|
 | **AT1** | **Existing database migration** | a disposable file-backed WAL DB on the pre-Continuity schema, populated with representative rows, then opened by the new binary | the **four** tables — `projects`, `project_names`, `continuity_threads`, `continuity_checkpoints` — and their indexes exist, **by name**; the sentinel count is 1 |
-| **AT2** | **Fresh database creation** | a new DB through the same path | the schema is **identical** to AT1's — compared as the **full `sqlite_master.sql` text** of every table and index, **grouped by name, not by row order**. The fresh path creates the base tables first and the migration's four last, while the migrated path already has the base tables, so the *ordered* `sqlite_master` list differs even when the schemas are identical — an ordered comparison would fail a correct implementation. A table-list comparison would not catch a column or index drift, which is why the full `sql` text is compared |
+| **AT2** | **Fresh database creation** | a new DB through the same path | the schema is **identical** to AT1's — compared as the **full `sqlite_master.sql` text** of every table and index, **grouped by name, not by row order**. The comparison is grouped by name because **row order is not part of the schema**: the same objects can legitimately be created in a different order for reasons outside the Continuity migration — a migration that recreates a table, an index rebuilt in place, a `CREATE TABLE IF NOT EXISTS` ordering difference between a fresh init and an upgrade — so an order-sensitive comparison is **fragile even though it happens to pass today**. Today the two ordered lists are in fact **identical**: the fatal migration transaction opens *after* every base DDL slice — the substrate states that ordering dependency in its own terms at `internal/core/db.go:3048-3056` — so the Continuity tables land last in **both** paths. §14.2 E28 measures both halves of that. A table-list comparison would not catch a column or index drift, which is why the full `sql` text is compared |
 | **AT3** | **Whole-row preservation** | snapshot every pre-existing row of every pre-existing table before and after, as whole-row strings | **byte-identical** — the whole row set, not a sample |
 | **AT4** | **Zero fabricated state** | — | no existing table gains a row; no existing row gains a column value; `project_names` starts **empty**; `projects` starts empty |
 | **AT5** | **Idempotent migration** | run the migration twice, then a third time | the table list, the index list and the sentinel count are unchanged by runs 2 and 3 |
@@ -1547,13 +1563,18 @@ Recorded explicitly, because the failure mode of a design like this is feature c
 
 ## 11. Recommendation
 
-**READY FOR INDEPENDENT APPROVAL OF STAGE 1** — the additive schema.
+**STAGE 1 ARCHITECTURE INDEPENDENTLY APPROVED** — the additive schema.
 
-This is *not* an approval. It is a statement that the specification's guarantees now agree with the
-actual SQL, the actual codebase and the actual test plan, that the **sixteen** confirmed defects of
-the first review (A1–A16) and the **six** of the second (D1–D6) have been corrected, and that the
-second review's optional refinements (D7–D12) have been taken. Stage 1 remains subject to the
-second independent review's **delta re-review** (§12, §13, §14).
+This is *not* an authorisation to implement. It is a statement that the specification's guarantees
+now agree with the actual SQL, the actual codebase and the actual test plan, that the **sixteen**
+confirmed defects of the first review (A1–A16) and the **six** of the second (D1–D6) have been
+corrected, and that the second review's optional refinements (D7–D12) have been taken. The **final
+independent delta review** has since been carried out and **APPROVED** the Stage 1 architecture
+([comment 6656558202](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6656558202): *"The
+Stage 1 architecture is technically ready"*), raising two non-blocking documentation findings, which
+are corrected here (§12.4, F1–F2). The approval covers the **architecture**, not the operator's
+open decision: Stage 1 is not thereby authorised for implementation, and remains subject to the
+operator's answer on OD3 (§9) (§12, §13, §14).
 
 **The one conditional.** Stage 1's DDL is final **if the operator accepts OD3's recommended option
 (α)** — the delete confirmation as a naming check plus `created_by` / `deleted_by` and a
@@ -1648,7 +1669,7 @@ alters the architecture. The DDL-affecting one (D7) is called out separately.
 | **D8** | The **stored reference shape** was unspecified — which is where the residual type confusion lives: whether the pointer is stored or derived was never stated, and a `memory` reference naming a decision's id resolves and presents a decision as a memory | **yes** | §2.3 now states the stored shape exactly: `{kind, id, note?}`, with the `pointer` **derived, never stored**. §4.2's `checkpoint` write parameters carry the same contract. `resume` **asserts the reference kind against the artifact's collection** and reports a mismatch as `kind_mismatch`; the one direction that stays open (a `memory` reference naming a decision) is **bounded and reported** — the resolved artifact's own collection is returned alongside it. §3.2 shows what is stored versus what is returned, and the `state` entry's `summary`/`status`/`verification` are read **live from the work row**, not copied into the checkpoint |
 | **D9** | The **checkpoint id-generation strategy** was unspecified, while T2 borrowed the `evidence` pattern's `ON CONFLICT(id) DO NOTHING` rationale — which only bites for a *content-derived* id | **yes** | §5's T2 now states that the id is the substrate's own `core.GenerateID()` — 16 lowercase hex, **not** content-derived — so the `ON CONFLICT` clause is a **belt-and-braces safety net that in practice never fires**, and the restart-safety actually comes from the transaction rollback. The clause is kept because it is free and because a future content-derived id would need it |
 | **D10** | The `stale` block's **join column** was unnamed and its **multi-handoff rule** was ambiguous — `session_handoffs.session_id` is the legacy UNIQUE column, and `mpm_session_id` is not unique, so "the session that wrote the checkpoint" can match several handoffs | **yes** | §4.2 now names the join column (`mpm_session_id`, the canonical identity — `handoffColumnMPMSession`, `internal/core/handoff.go:420`; the legacy `session_id` is optional correlation metadata) and the selection rule: **the same one the substrate already uses** for its own previous-handoff lookup — `ORDER BY ended_at DESC, rowid DESC LIMIT 1` (`internal/core/handoff.go:468-469`) — so `session_end_state` names exactly one row, deterministically |
-| **D11** | **AT2** should compare by **name**, not by row order — the fresh path creates the base tables first and the migration's four last, so the *ordered* `sqlite_master` list differs even when the schemas are identical | **yes** | §8's AT2 now says "**grouped by name, not by row order**", and explains why: an ordered comparison would fail a correct implementation |
+| **D11** | **AT2** should compare by **name**, not by row order | **yes — with a corrected rationale** | §8's AT2 now says "**grouped by name, not by row order**", and explains why: row order is not part of the schema, so an order-sensitive comparison is **fragile even though it happens to pass today**. The original rationale — that the fresh path creates the base tables first and the migration's four last, so the *ordered* `sqlite_master` list differs — was **wrong**: the fatal migration transaction opens after every base DDL slice, so the Continuity tables land last in **both** paths and the two ordered lists are identical today (§14.2 E28). The requirement is unchanged; only the rationale is corrected |
 | **D12** | §2.7 should say that the foreign-key guarantee is **DSN-borne** — `SqliteWriteDSN` carries `_foreign_keys=1`, and `InitSchema` deliberately does not enable them itself | **yes** | §2.7 now says so, and records the consequence: a connection opened without that DSN parameter would not enforce the containment guarantees, because SQLite defaults foreign keys **off** — which is why the acceptance matrix must open its databases the way production does |
 
 **One is deliberately not taken.** The review's §4 observation — that a `memory` reference can name a
@@ -1658,6 +1679,24 @@ is fixed, the pointer is derived, and the typed kinds assert their collection. T
 not closed by this document, because closing it would mean narrowing the substrate's existing
 `mpm://memory/` semantics — a change to an existing public contract, which is out of scope here and is
 recorded in §9 as a decision rather than made silently.
+
+### 12.4 The final delta review — two documentation findings
+
+The final independent delta review ([comment 6656558202](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6656558202))
+**APPROVED** the Stage 1 architecture: *"The Stage 1 architecture is technically ready."* It
+verified all eight of its priorities against the tree and the SQL rather than against this document's
+disposition tables, and raised **two** remaining findings — both low severity, both documentation-only,
+and neither blocking Stage 1. Both are corrected here. The **F** prefix is the final review's; the
+first review's findings are A1–A16 and the second's are D1–D12 (§9.2).
+
+| # | Finding | Corrected location | Resolution and evidence |
+|---|---|---|---|
+| **F1** | **[low]** §2.3 stated that a `memory` reference "admits a decision, a theory or a **lesson** id". A lesson is **not** a `memories` row, so `mpm://memory/` does not resolve one, and `GetMemory` cannot retrieve a row from `lessons_base` | §2.3 | the claim is corrected: a `memory` reference admits a **decision** or a **theory** id. The paragraph now says explicitly that a lesson is a `lessons_base` row, that `GetLesson` reads `FROM lessons_base` (`internal/core/db.go:5966-5972`) while `GetMemory` reads `FROM memories` (`internal/core/web_db.go:258`), that a lesson reference naming one would fail to resolve rather than resolve untyped, and that a lesson has its own kind (`mpm://lesson/<id>`) and its own read path. **The accurate decision/theory behaviour is unchanged.** Measured on a hermetic database: a lesson id has **0** rows in `memories` and **1** in `lessons_base`; `GetMemory(<lesson-id>)` → *memory not found*; `GetLesson(<lesson-id>)` → OK; `GetMemory(<decision-id>)` → OK, `collection="decisions"`; `GetMemory(<theory-id>)` → OK, `collection="theories"` |
+| **F2** | **[low]** AT2's **rationale** for comparing by name was wrong: it said the fresh path creates the base tables first and the migration's four last, "so the *ordered* `sqlite_master` list differs even when the schemas are identical" | §8 (AT2), §12.3 (D11's row) | the **requirement is unchanged** — the schema is still compared as the full `sqlite_master.sql` text of every table and index, **grouped by name** — and only the rationale is corrected: row order is not part of the schema, so the same objects can legitimately be created in a different order for reasons outside the Continuity migration (a migration that recreates a table, an index rebuilt in place, a `CREATE TABLE IF NOT EXISTS` ordering difference between a fresh init and an upgrade), and an order-sensitive comparison is therefore **fragile even though it happens to pass today**. The original assertion is corrected too: the fatal migration transaction opens *after* every base DDL slice (`internal/core/db.go:3048-3056`), so the Continuity tables land last in **both** paths and the two ordered lists are **identical** today. §14.2 E28 measures both halves: an object created after the others lands **last** in the ordered list, and recreating a table with **byte-identical** sql leaves the schema identical while the **ordered** list changes — so an order-sensitive comparison fails on an identical schema, and a compare-by-name comparison still passes |
+
+Neither finding changed the schema, an acceptance requirement, an implementation stage or an operator
+decision. Both errors were in the **safe direction** — they over-stated a surface rather than
+understating it — and neither touched the containment guarantees.
 
 ---
 
@@ -1799,8 +1838,9 @@ reproducible from this document: the DDL is in §4.1 and the cases are listed he
 | **E25** | **every `mpm://` pointer in the document** (D3) | the probe transcribes the substrate's **real** inline `parsePointerURI` (`internal/core/tools/handlers.go:7827-7864`) and runs it over every URI the document contains: the **four literal pointers all parse**, and the one pointer the document shows as rejected **really is rejected** |
 | **E26** | **every example id's shape** (D3) | each literal pointer's id is either `prefix + 16 lowercase hex` (the Continuity ids) or the substrate's own **16 bare hex** (the artifact ids) — and the document contains **no** pointer with an unjustified underscore id |
 | **E27** | **the `SET NULL` alternative, measured** (D1) | SQLite applies `ON DELETE SET NULL` to **every** column of the child key, so on the composite FK it tries to null the `NOT NULL` `thread_id` and refuses the delete with `NOT NULL constraint failed: ck.thread_id` — a misleading error for the right refusal. `RESTRICT` refuses the same delete with `FOREIGN KEY constraint failed` |
+| **E28** | **the ordered `sqlite_master` list** (AT2, D11) | **first**: an object created after the others lands **last** in the ordered list, and the pre-existing objects keep their relative order — so the four tables the migration creates (inside the fatal migration transaction, which opens after every base DDL slice — `internal/core/db.go:3048-3056`) land last in **both** the fresh and the migrated path, and the two ordered lists are **identical today**. **second**: recreating a table and its indexes with **byte-identical** sql leaves the object set and every object's sql unchanged while the **ordered** list changes — so an order-sensitive comparison fails on an identical schema, and a compare-**by-name** comparison still passes |
 
-**77 assertions, 0 failures.**
+**84 assertions, 0 failures.**
 
 **The probe reads the specification.** It does not carry its own copy of the DDL: it extracts the
 §4.1 `sql` block from this file and executes that text, then asserts that the extracted statements
@@ -1850,7 +1890,7 @@ apart silently — a change to §4.1 that breaks an invariant breaks the probe o
 
 ### 14.4 The citation audit
 
-This document makes **135 file-and-line citations** into the substrate's source. A drifted line
+This document makes **145 file-and-line citations** into the substrate's source. A drifted line
 number would make a claim look verified when it is not, so the citations are audited mechanically
 rather than by eye — and, since the revision-2 review, against the **declared base** rather than
 against whatever tree happens to be checked out.
@@ -1865,13 +1905,13 @@ parameter and every audit below refuses to run against a tree that is not it.
 
 | Audit | Criterion | Result |
 |---|---|---|
-| **Resolution** | the cited file exists, and the cited line range is inside it and non-blank | **135 / 135** |
-| **Content** | the cited window contains the symbol or literal the sentence claims | **52 / 52** |
-| **Declaration-anchored** | the cited window contains the symbol's **declaration** — the `var X =`, `func X(`, `CREATE TABLE X` form — and not merely a later mention of it | **59 / 59** |
+| **Resolution** | the cited file exists, and the cited line range is inside it and non-blank | **145 / 145** |
+| **Content** | the cited window contains the symbol or literal the sentence claims | **56 / 56** |
+| **Declaration-anchored** | the cited window contains the symbol's **declaration** — the `var X =`, `func X(`, `CREATE TABLE X` form — and not merely a later mention of it | **62 / 62** |
 | **Generic drift screen** | over **every** citation: a symbol the sentence talks about exists in the cited file but **not at the cited lines** | **no unexplained drift** (see the residual class below) |
-| **§ cross-references** | no `§n.m` points at a heading that does not exist | **46 / 46** |
-| **Internal agreement** | the stage gates agree with the acceptance matrix, every A1–A16, D1–D6 and P1–P6 is dispositioned, every OD/R row states its status and what it blocks, and no superseded claim survives | **167 / 167** |
-| **The DDL probe** | §14.2 — the DDL executed verbatim, plus the pointer parser run over every URI in the document | **77 / 77** |
+| **§ cross-references** | no `§n.m` points at a heading that does not exist | **47 / 47** |
+| **Internal agreement** | the stage gates agree with the acceptance matrix, every A1–A16, D1–D6, F1–F2 and P1–P6 is dispositioned, every OD/R row states its status and what it blocks, and no superseded claim survives | **180 / 180** |
+| **The DDL probe** | §14.2 — the DDL executed verbatim, plus the pointer parser run over every URI in the document, plus the ordered-`sqlite_master` measurement behind AT2 | **84 / 84** |
 
 **The four citations the revision-2 review found stale, and their corrected values.**
 
@@ -1895,14 +1935,18 @@ hidden.** The screen flags a citation when a symbol the sentence mentions exists
 but not at the cited lines. That rule is sound for a sentence that cites one file and whose subject
 *is* a symbol, but a sentence whose subject is a **tool** rather than a symbol — or one that cites
 several files — can be flagged when the identifier belongs to a different citation in the same
-sentence. **Four** such cases remain, and each was inspected by hand: the `session_id` axis row
+sentence. **Seven** such cases remain, and each was inspected by hand: the `session_id` axis row
 (cited to `getOrMakeSessionID`, the per-process id generator), the pointer-convention row (cited to
 the kind check; `mpm_resolve` is the tool's name, not the cited symbol), the
 `epistemology_tools.go` row (cited to the `"decisions"` collection; `GetMemory` belongs to the
-*other* citation in the same sentence), and T2's row (cited to the `ON CONFLICT(id) DO NOTHING`
-insert; `WithTx` is the row's subject). **All four citations are correct.** The
-declaration-anchored audit is the rigorous instrument; the screen is a sweep that finds candidates,
-not a verdict.
+*other* citation in the same sentence), T2's row (cited to the `ON CONFLICT(id) DO NOTHING`
+insert; `WithTx` is the row's subject), §2.3's `GetLesson` citation (cited to the `lessons_base`
+read; `GetMemory` is a **call** at `internal/core/db.go:4619` and is declared in
+`internal/core/web_db.go:258`, which is the *other* citation in the same sentence), and the two
+`internal/core/db.go:3048-3056` citations (cited to the ordering-dependency statement;
+`sqlite_master` occurs elsewhere in `db.go` for unrelated reasons).
+**All seven citations are correct.** The declaration-anchored audit is the rigorous instrument; the
+screen is a sweep that finds candidates, not a verdict.
 
 **How a reviewer can reproduce all of it.** The DDL probe is self-contained: it reads the DDL out
 of §4.1 of this file, executes it against a disposable SQLite database, and runs the substrate's
