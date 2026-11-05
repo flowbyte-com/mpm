@@ -5,15 +5,32 @@
 **Status:** architecture and acceptance specification. **No production schema migration, no
 implementation, no merge.**
 
-**Revision note (2026-11-05).** This revision remediates the independent correctness review of this
-document ([comment 6652203614](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6652203614),
-verdict *ACCEPT WITH REQUIRED CORRECTIONS*). The **architecture is unchanged**: permanent project
-identities, a name/alias resolution domain, independent threads, bounded reference-backed
-checkpoints, and per-thread optimistic concurrency are all preserved. What changed is the
-*specification*: sixteen confirmed defects (A1–A16) are corrected, six architectural preferences
-(P1–P6) are recorded as recommendations, and the document's claims are now checked against the
-actual SQL — the §4.1 DDL was executed against a disposable SQLite database and every negative case
-is asserted, not assumed (§14). §12 is the A1–A16 disposition table; §13 is P1–P6.
+**Revision note (2026-11-05, second pass).** This revision remediates the **second** independent
+correctness review of this document ([comment 6655135875](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6655135875),
+verdict *ACCEPT WITH REQUIRED CORRECTIONS*), which verified the first review's sixteen corrections
+(A1–A16) against the tree and the SQL and raised **six** further defects (D1–D6).
+
+The **architecture is unchanged**: permanent project identities, a name/alias resolution domain,
+independent threads, bounded reference-backed checkpoints, and per-thread optimistic concurrency are
+all preserved. What changed is the *specification*:
+
+- **D1 — one required DDL correction.** The checkpoint's `supersedes` pointer was a single-column
+  foreign key, so a cross-thread *and* a cross-project supersession were both representable and
+  T13's stated containment did not cover it. It is now a **composite** foreign key on
+  `(supersedes, thread_id)`, closing both cases, using the unique index the `last_checkpoint_id`
+  foreign key already needed (§4.1).
+- **D2–D6 — five documentation corrections.** The foreign-key counts; the §3 example lifecycle's
+  invalid pointer ids; four stale citations and the audit's root cause; AT8's coverage; and OD3's
+  conditionality.
+- **D7–D12 — the review's optional refinements are taken too**, because each removes a real
+  ambiguity and none changes the architecture (§12.3).
+- **The evidential apparatus was strengthened.** The §4.1 DDL is executed against a disposable
+  SQLite database (**77 assertions, 0 failures**), the substrate's **real** inline pointer parser
+  is run over **every** `mpm://` URI this document contains, and the citation audit now runs
+  **against the declared base** with a declaration-anchored criterion (§14).
+
+The first review's corrections (A1–A16) are preserved unchanged; §12.1 is their disposition table,
+§12.2 is D1–D6's, §12.3 is D7–D12's, and §13 is P1–P6.
 
 ---
 
@@ -134,12 +151,12 @@ Continuity inherits that rule. **The current directory is never a resolution inp
 
 | Seam | Shape | Use in this design |
 |---|---|---|
-| **The `mpm://` pointer convention** | `mpm://memory/<id>`, `mpm://work/<id>`, `mpm://lesson/<id>`, `mpm://theory/<id>`, `mpm://blob/<id>`; resolved by `mpm_resolve` (`internal/core/tools/handlers.go:7490`) | add `mpm://project/<id>`, `mpm://thread/<id>` and `mpm://decision/<id>` (§4.4) |
-| **The pointer id charset** | `^[a-z0-9-]+$` — lowercase alphanumerics **and hyphens only**, no underscore (`internal/pointer/pointer.go:17`; the inline copy in `internal/core/tools/handlers.go:7751-7762`) | the Continuity id prefixes are `cpj-`, `ct-`, `ck-` (§4.1) — they fit unchanged |
+| **The `mpm://` pointer convention** | `mpm://memory/<id>`, `mpm://work/<id>`, `mpm://lesson/<id>`, `mpm://theory/<id>`, `mpm://blob/<id>`; resolved by `mpm_resolve` (`internal/core/tools/handlers.go:7562`) | add `mpm://project/<id>`, `mpm://thread/<id>` and `mpm://decision/<id>` (§4.4) |
+| **The pointer id charset** | `^[a-z0-9-]+$` — lowercase alphanumerics **and hyphens only**, no underscore (`internal/pointer/pointer.go:17`; the inline copy in `internal/core/tools/handlers.go:7857-7862`) | the Continuity id prefixes are `cpj-`, `ct-`, `ck-` (§4.1) — they fit unchanged |
 | **The polymorphic reference idiom** | `(artifact_id, artifact_type)` with the closed vocabulary `memory\|theory\|decision\|lesson\|work` — `evidence.artifact_type` (`internal/core/schema.go:355`) | reuse it verbatim for checkpoint references (§2.3) |
 | **The provenance vocabulary** | `ProvenanceArtifactTypes` = `memory, theory, lesson, decision, handoff, directive, work` (`internal/core/schema.go:23-26`), enforced by a CHECK on `artifact_provenance` | **not** extended in v1 (§4.5) |
 | **`active.json`** | `ActiveState` — persona, modes, `mpm_session_id` | **not** extended in v1 (§4.6) |
-| **The tool registry** | one slice, `mpm_<noun>` names, `action` + `params`, `oneOf` per action; both `mpm call` and the MCP server iterate it (`internal/core/tools/registry_list.go:5-22`) | one new entry, `mpm_continuity` |
+| **The tool registry** | one slice, `mpm_<noun>` names, `action` + `params`, `oneOf` per action; both `mpm call` and the MCP server iterate it (`internal/core/tools/registry_list.go:5-23`) | one new entry, `mpm_continuity` |
 | **The CLI facade pattern** | `mpm work item <sub>` is "a thin discoverable facade over `mpm call mpm_work`" (`cmd/mpm/handlers_work.go:78-84`) | `mpm continuity <sub>` |
 | **The transaction layer** | `WithTx` (restart on a stale snapshot, rollback on error), `execTracked` (budget 5) | every write |
 | **The CAS idiom** | `WHERE id = ? AND <state> = ?` — wake resolution, lesson promotion, handoff read marker | the thread's `revision` column (§2.8) |
@@ -203,7 +220,8 @@ continuity_checkpoints— the bounded, structured, append-only resume brief
 **Four tables, three entities.** `project_names` is not an entity; it is the *resolution domain* for
 one entity, the project. The count is **four**, and it is load-bearing: `CanonicalMPMSchema` is the
 restore allow-list (§6.3), so a table missing from it makes `mpm restore-db` reject a dump of a
-database Continuity touched. The four names are enumerated by name in AT1 and AT8.
+database Continuity touched. The four names are enumerated by name in AT1 and AT8 — and AT8 now names them
+too, so the claim is checkable against the matrix rather than against the prose.
 
 Four tables is the minimum: a project without names cannot be resolved; a thread without a project
 has no owner; a checkpoint without a thread has no home. A fifth table for checkpoint references
@@ -242,15 +260,41 @@ The `decision` row is the reason the mapping is stated rather than assumed: **a 
 `internal/core/epistemology_tools.go:501`). `GetMemory` selects by id and does **not** filter by
 collection (`internal/core/web_db.go:258`), so `mpm://memory/<decision-id>` happens to resolve the
 decision today — but untyped. The substrate's own precedent is `mpm://theory/`
-(`internal/core/tools/handlers.go:7588-7596`), which resolves a `memories` row through
+(`internal/core/tools/handlers.go:7660-7668`), which resolves a `memories` row through
 `GetMemory` **and asserts its collection**. `mpm://decision/` is that same shape, and it is what
 makes the reference vocabulary and the pointer vocabulary the same set (§4.4, §9 OD5).
 
+**The stored reference shape is exactly three fields.** A reference is stored as:
+
+```jsonc
+{"kind": "memory | theory | decision | lesson | work", "id": "<artifact id>", "note": "<optional, ≤256 bytes>"}
+```
+
+**The `pointer` is derived, never stored.** The read path computes `mpm://<kind>/<id>` from the
+two stored fields. A stored pointer could disagree with its reference kind — a `decision` reference
+carrying `mpm://memory/<id>` would resolve and present a decision as a memory, silently — and a
+derived pointer cannot. This is why §3.2's response shows a `pointer` on every reference while the
+checkpoint *row* holds only `kind`, `id` and `note`.
+
+**The read path asserts the kind against the artifact.** Because the pointer is derived, the only
+way a reference can be mis-resolved is a `kind` that lies about the artifact it names. So `resume`
+asserts the collection before materialising: a reference of kind `decision` whose id is a
+`memories` row with `collection='memories'` is reported as **`kind_mismatch`**, not resolved as a
+decision. The same assertion exists for `theory`. A `memory` reference names the general
+`memories` collection and therefore admits a decision, a theory or a lesson id — that direction is
+inherited from the substrate's own untyped `mpm://memory/` and is **bounded and reported**: the
+resolved artifact's own collection is returned alongside it, so a caller sees that it received a
+decision when it asked for a memory. The typed kinds are the precise ones, and they are the ones
+the `facts` section should prefer for decisions.
+
 **References, not duplicated contents.** A checkpoint never copies a memory's text or a work item's
 content. It points at ids; the read path materialises them through the existing per-kind read paths
-and returns bounded summaries plus `mpm://` pointers. A `note` on a reference is permitted but is a
-**bounded annotation** ("why this is here"), not a copy — it cannot exceed 256 bytes and cannot
-restate the artifact's content.
+and returns bounded summaries plus the derived `mpm://` pointers. A work item's `status`,
+`verification` and `summary` in the `state` section are read **live from the work row at resume
+time**, not copied into the checkpoint — so a work item that has since been reopened is reported
+with its current state, not the state as it was when the brief was written. A `note` on a reference
+is permitted but is a **bounded annotation** ("why this is here"), not a copy — it cannot exceed 256
+bytes and cannot restate the artifact's content.
 
 **One orientation line.** A pure list of ids is not resumable, so a checkpoint carries a `headline`
 of at most 200 bytes: one line saying where things stand. That is the only free-form prose in the
@@ -326,7 +370,7 @@ threads cannot differ only by case. The branch is retained in the implementation
 assertion and AT11 asserts that it is unreachable — an unreachable branch is a branch that is never
 tested, so it is tested.
 
-**Why `focus` is optional.** A thread without a focus is selectable by id and title only (§9, D7).
+**Why `focus` is optional.** A thread without a focus is selectable by id and title only (§9, R7).
 The partial unique index excludes `focus IS NULL`, so any number of focus-less threads may coexist.
 
 ### 2.5 Project matching — explicit and conservative
@@ -433,6 +477,15 @@ substrate enforces foreign keys structurally — `SqliteWriteDSN` puts `_foreign
 every pooled connection enforces them (`internal/core/db.go:98-155`) — so this is a storage
 guarantee, not a convention. A soft delete never issues a `DELETE` at all.
 
+**The guarantee is DSN-borne, and a reader should know that.** `InitSchema` deliberately does **not**
+issue a `PRAGMA foreign_keys = ON` itself (`internal/core/db.go:2914-2921`); the enforcement comes
+from the `_foreign_keys=1` in the **production open paths' DSN** (`internal/core/db.go:98-155`). A
+connection opened some other way — a bare `sql.Open` without that DSN parameter — would not enforce
+the containment guarantees above, because SQLite defaults foreign keys **off**. This is the
+substrate's documented reason for preferring the DSN over a `PRAGMA`, and it is the reason the
+acceptance matrix must open its databases the way production does rather than with a bare handle
+(AT1, AT7).
+
 **The tombstone names itself.** A withdrawn `project_names` row keeps its name, its kind and its
 project id, and the project row keeps `deleted_at` and `deleted_by`. So "the tombstone for
 AgentShell" is a query, not a guess: the create path reports the withdrawn rows and the tombstone
@@ -460,7 +513,7 @@ is **auditability, not authorization**:
   the checkpoint row already carries (`mpm_session_id`, `framework_name`, `model_name`,
   `actor_kind`);
 - the soft delete writes a `system_audit_log` row — the substrate's own audit log
-  (`internal/core/schema.go:1238`), which already carries `mpm_session_id`, `framework_name`,
+  (`internal/core/schema.go:1238-1268`), which already carries `mpm_session_id`, `framework_name`,
   `framework_session_id`, `invocation_id` and `event_code`. **No fifth table is introduced.**
 
 A real actor/authorization model is *not* proposed, because the substrate has no identity primitive
@@ -536,19 +589,25 @@ superseded → (terminal)
 The scenario: a user says *"Let's work on the form builder in AgentShell."* Two agents are live.
 Agent **A** wants the form builder; agent **B** is on the API surface.
 
+**Every id in this section is a real id shape.** The three Continuity ids are their prefix followed
+by the 16 lowercase hex characters `core.GenerateID()` returns; the four artifact ids are the
+substrate's own 16 bare hex. Every one of them parses with the substrate's pointer parser
+(`^[a-z0-9-]+$`, `internal/pointer/pointer.go:17`) — §14.2's probe runs the **real** inline parser
+over every pointer this document contains and fails if one does not parse.
+
 ### 3.1 The project already exists
 
 ```jsonc
 // the project stub
-{"id":"cpj-3f9a…","created_at":1767225600,"updated_at":1767225600,"deleted_at":null,"created_by":"mpm-cli"}
+{"id":"cpj-3f9a4c7b8d9e0f12","created_at":1767225600,"updated_at":1767225600,"deleted_at":null,"created_by":"mpm-cli"}
 // the resolution domain
-{"name":"AgentShell","project_id":"cpj-3f9a…","kind":"canonical","withdrawn_at":null}
-{"name":"the form builder repo","project_id":"cpj-3f9a…","kind":"alias","withdrawn_at":null}
+{"name":"AgentShell","project_id":"cpj-3f9a4c7b8d9e0f12","kind":"canonical","withdrawn_at":null}
+{"name":"the form builder repo","project_id":"cpj-3f9a4c7b8d9e0f12","kind":"alias","withdrawn_at":null}
 ```
 
-There is one canonical name and one alias. All names resolve to `cpj-3f9a…`. The project has no
-repository binding, no directory binding, and no ambient state — it is found by name alone, from any
-directory, in any session, under any model.
+There is one canonical name and one alias. All names resolve to `cpj-3f9a4c7b8d9e0f12`. The project
+has no repository binding, no directory binding, and no ambient state — it is found by name alone,
+from any directory, in any session, under any model.
 
 Note what is **not** here: there is no `agentshell` alias. `AgentShell` resolves `agentshell`
 already, because the column is `COLLATE NOCASE` — and a case-variant alias would be unreachable
@@ -560,10 +619,10 @@ already, because the column is `COLLATE NOCASE` — and a case-variant alias wou
 // mpm_continuity resolve --name AgentShell
 {
   "success": true,
-  "project": {"id":"cpj-3f9a…","name":"AgentShell","aliases":["the form builder repo"]},
+  "project": {"id":"cpj-3f9a4c7b8d9e0f12","name":"AgentShell","aliases":["the form builder repo"]},
   "threads": [
-    {"id":"ct-a1…","title":"Form builder rework","focus":"form-builder","state":"active","revision":7,"updated_at":1767300000},
-    {"id":"ct-b1…","title":"Public API surface","focus":"api","state":"active","revision":3,"updated_at":1767290000}
+    {"id":"ct-a1c4e7d903b2f5a8","title":"Form builder rework","focus":"form-builder","state":"active","revision":7,"updated_at":1767300000},
+    {"id":"ct-b1c4e7d903b2f5a8","title":"Public API surface","focus":"api","state":"active","revision":3,"updated_at":1767290000}
   ],
   "resolved_by": "exact name match"
 }
@@ -573,26 +632,26 @@ Both threads are active. An unqualified `resume` would be **ambiguous** — two 
 Agent A's user named the form builder, so Agent A selects by focus:
 
 ```jsonc
-// mpm_continuity resume --project cpj-3f9a… --focus form-builder
+// mpm_continuity resume --project cpj-3f9a4c7b8d9e0f12 --focus form-builder
 {
   "success": true,
-  "project": {"id":"cpj-3f9a…","name":"AgentShell"},
-  "thread":  {"id":"ct-a1…","title":"Form builder rework","focus":"form-builder","state":"active","revision":7},
+  "project": {"id":"cpj-3f9a4c7b8d9e0f12","name":"AgentShell"},
+  "thread":  {"id":"ct-a1c4e7d903b2f5a8","title":"Form builder rework","focus":"form-builder","state":"active","revision":7},
   "checkpoint": {
-    "id":"ck-77…","created_at":1767300000,"revision":7,"supersedes":"ck-76…",
+    "id":"ck-77a0b3c6d9e2f4a7","created_at":1767300000,"revision":7,"supersedes":"ck-76a0b3c6d9e2f4a7",
     "headline":"Validation lives in form.ts; the submit path is still on the old action shape.",
     "facts": [
-      {"kind":"decision","id":"d_91…","pointer":"mpm://decision/d_91…","note":"Submit stays a plain form POST"},
-      {"kind":"lesson","id":"l_04…","pointer":"mpm://lesson/l_04…","note":"Do not move validation into the reducer"}
+      {"kind":"decision","id":"d91f4c0a7b3e5682","pointer":"mpm://decision/d91f4c0a7b3e5682","note":"Submit stays a plain form POST"},
+      {"kind":"lesson","id":"04b7e9d2c6f13a58","pointer":"mpm://lesson/04b7e9d2c6f13a58","note":"Do not move validation into the reducer"}
     ],
     "hypotheses": [
-      {"kind":"theory","id":"m_55…","pointer":"mpm://theory/m_55…","note":"A schema-first validator will cover the 3 open field cases"}
+      {"kind":"theory","id":"55e8a1c4d7b20963","pointer":"mpm://theory/55e8a1c4d7b20963","note":"A schema-first validator will cover the 3 open field cases"}
     ],
     "state": [
-      {"kind":"work","id":"w_12…","pointer":"mpm://work/w_12…","summary":"Port the validator","status":"open","verification":"unverified"}
+      {"kind":"work","id":"12c6f9b3a4d7e058","pointer":"mpm://work/12c6f9b3a4d7e058","summary":"Port the validator","status":"open","verification":"unverified"}
     ],
     "next_actions": [
-      {"text":"Add the three missing field cases to the validator","ref":{"kind":"work","id":"w_12…"}}
+      {"text":"Add the three missing field cases to the validator","ref":{"kind":"work","id":"12c6f9b3a4d7e058"}}
     ]
   },
   "next_action": "Add the three missing field cases to the validator",
@@ -607,10 +666,18 @@ Agent A's user named the form builder, so Agent A selects by focus:
 }
 ```
 
+**What is stored and what is returned.** The checkpoint row stores each reference as
+`{kind, id, note?}` and **nothing else** — the `pointer` in this response is *derived* by the read
+path from `kind` and `id`, never stored, so a stored pointer can never disagree with its reference
+kind (§2.3). The `summary`, `status` and `verification` on the `state` entry are **read live from
+the work row at resume time**; they are not copied into the checkpoint. A work item that has since
+been reopened or verified is reported with its *current* state, not the state as it was when the
+brief was written.
+
 The checkpoint carries **pointers**, not copies, and each pointer kind matches its reference kind
-(§2.3). The agent follows `mpm://work/w_12…` when it needs the full work item, and
-`mpm://theory/m_55…` when it wants the hypothesis. The facts and the hypothesis point at artifacts
-that carry their own evidence; the checkpoint does not duplicate their contents.
+(§2.3). The agent follows `mpm://work/12c6f9b3a4d7e058` when it needs the full work item, and
+`mpm://theory/55e8a1c4d7b20963` when it wants the hypothesis. The facts and the hypothesis point at
+artifacts that carry their own evidence; the checkpoint does not duplicate their contents.
 
 **The `stale` block is what makes an old brief visibly old.** `checkpoint_age_seconds` is the age of
 the brief; `session_ended_after_checkpoint` says whether a session that wrote it ended afterwards.
@@ -620,38 +687,40 @@ rather than silently trusting a stale brief (§9, OD2; the limitations are state
 ### 3.3 Agent A writes a new checkpoint
 
 ```jsonc
-// mpm_continuity checkpoint --project cpj-3f9a… --thread ct-a1… --expected-revision 7
+// mpm_continuity checkpoint --project cpj-3f9a4c7b8d9e0f12 --thread ct-a1c4e7d903b2f5a8 --expected-revision 7
 {
   "success": true,
-  "thread": {"id":"ct-a1…","revision":8},
-  "checkpoint": {"id":"ck-78…","revision":7,"supersedes":"ck-77…"}
+  "thread": {"id":"ct-a1c4e7d903b2f5a8","revision":8},
+  "checkpoint": {"id":"ck-78a0b3c6d9e2f4a7","revision":7,"supersedes":"ck-77a0b3c6d9e2f4a7"}
 }
 ```
 
-The checkpoint is inserted and the thread's pointer is advanced **in one transaction**. `ck-78…`
-supersedes `ck-77…`; `ck-77…` is retained. Nothing is overwritten destructively. Note that the
-checkpoint's `revision` is **7** — the pre-increment value it was written against — while the
-thread's is now 8 (§2.8).
+The checkpoint is inserted and the thread's pointer is advanced **in one transaction**.
+`ck-78a0b3c6d9e2f4a7` supersedes `ck-77a0b3c6d9e2f4a7` — a checkpoint of the **same thread**, which
+the composite foreign key requires (§4.1, D1) — and `ck-77a0b3c6d9e2f4a7` is retained. Nothing is
+overwritten destructively. Note that the checkpoint's `revision` is **7** — the pre-increment value
+it was written against — while the thread's is now 8 (§2.8).
 
 ### 3.4 Agent B, on its own thread, is unaffected
 
-Agent B writes to `ct-b1…` with `--expected-revision 3`. The CAS is **per thread**, so the two agents
-never contend. Agent B's write lands and `ct-b1…` moves to revision 4.
+Agent B writes to `ct-b1c4e7d903b2f5a8` with `--expected-revision 3`. The CAS is **per thread**, so
+the two agents never contend. Agent B's write lands and `ct-b1c4e7d903b2f5a8` moves to revision 4.
 
 ### 3.5 The stale-writer case — both agents on the same thread
 
-Suppose Agent B had been pointed at `ct-a1…` as well (say, a user said "and you handle the API
-*in that thread*"). Both read revision 7. Agent A writes first → revision 8. Agent B's write:
+Suppose Agent B had been pointed at `ct-a1c4e7d903b2f5a8` as well (say, a user said "and you handle
+the API *in that thread*"). Both read revision 7. Agent A writes first → revision 8. Agent B's
+write:
 
 ```jsonc
-// mpm_continuity checkpoint --project cpj-3f9a… --thread ct-a1… --expected-revision 7
+// mpm_continuity checkpoint --project cpj-3f9a4c7b8d9e0f12 --thread ct-a1c4e7d903b2f5a8 --expected-revision 7
 {
   "success": false,
   "error": "stale_thread",
-  "detail": "thread ct-a1… is at revision 8, not 7 — another writer committed since you read it",
+  "detail": "thread ct-a1c4e7d903b2f5a8 is at revision 8, not 7 — another writer committed since you read it",
   "current_revision": 8,
-  "current_checkpoint_id": "ck-78…",
-  "hint": "re-read with `mpm_continuity resume --thread ct-a1…`, merge your change onto ck-78…, and write with --expected-revision 8"
+  "current_checkpoint_id": "ck-78a0b3c6d9e2f4a7",
+  "hint": "re-read with `mpm_continuity resume --thread ct-a1c4e7d903b2f5a8`, merge your change onto ck-78a0b3c6d9e2f4a7, and write with --expected-revision 8"
 }
 ```
 
@@ -663,16 +732,16 @@ one `WHERE` clause.
 
 ### 3.6 A crash, with no session-end event
 
-Agent A's process dies right after writing `ck-78…`. There is no handoff — the process never
-reached session end, and `EndSessionV2` never ran.
+Agent A's process dies right after writing `ck-78a0b3c6d9e2f4a7`. There is no handoff — the process
+never reached session end, and `EndSessionV2` never ran.
 
-The next agent to pick up AgentShell runs `mpm_continuity resume --project cpj-3f9a… --focus
-form-builder` and gets `ck-78…` — the last committed checkpoint. **The committed brief was not
-lost**, because the checkpoint was committed by an explicit write rather than by a session-end
-event.
+The next agent to pick up AgentShell runs `mpm_continuity resume --project cpj-3f9a4c7b8d9e0f12
+--focus form-builder` and gets `ck-78a0b3c6d9e2f4a7` — the last committed checkpoint. **The committed
+brief was not lost**, because the checkpoint was committed by an explicit write rather than by a
+session-end event.
 
 Had the crash happened *during* the write, the transaction rolls back and the thread still points at
-`ck-77…` — the previous good checkpoint (§5, T1).
+`ck-77a0b3c6d9e2f4a7` — the previous good checkpoint (§5, T1).
 
 **What this case does not claim.** The work Agent A did between its last checkpoint and the crash was
 not captured, and no mechanism in this design captures it. The `stale` block makes the *age* of the
@@ -686,9 +755,9 @@ brief visible; it does not recover the lost window. See §9, OD2.
 A fresh agent, in a new session, under a different model, in a different directory:
 
 1. `mpm_continuity resolve --name AgentShell` → the project id, its aliases, and its threads.
-2. `mpm_continuity resume --project cpj-3f9a… --focus form-builder` → the thread, the checkpoint,
-   the resolved references, the next action, and the staleness block.
-3. `mpm_resolve --uri mpm://work/w_12…` → the full work item, if it is needed.
+2. `mpm_continuity resume --project cpj-3f9a4c7b8d9e0f12 --focus form-builder` → the thread, the
+   checkpoint, the resolved references, the next action, and the staleness block.
+3. `mpm_resolve --uri mpm://work/12c6f9b3a4d7e058` → the full work item, if it is needed.
 
 Three calls, ~1.2 KB of checkpoint, no transcript, no board, no progress metric, no assignment.
 
@@ -705,10 +774,13 @@ This is a real gap in the operator's requirement and it is not closed by this do
 ### 4.1 DDL
 
 **This DDL was executed against a disposable SQLite database (3.46.1) with foreign keys enabled.
-Every negative case below — the case-variant name, the case-variant focus, the cross-project
-checkpoint, the invalid and cross-thread pointer, the cross-project supersession, the hard delete,
-the second canonical name, the malformed JSON, the oversized headline — was observed to be **refused**
-by the database, and the positive cases were observed to land. The probe and its output are in §14.**
+Every negative case below was observed to be **refused** by the database, and every positive case was
+observed to land. The negative set is: the case-variant name, the case-variant focus, the
+cross-project checkpoint, the invalid and cross-thread `last_checkpoint_id`, the cross-project thread
+supersession, the **cross-thread and cross-project `supersedes`**, the hard delete of a project with
+children, the second canonical name, the malformed JSON, the non-array JSON, and the oversized
+headline. The probe reads this block out of this document, so it cannot drift from it, and its
+output is in §14.2.**
 
 ```sql
 -- ── projects ────────────────────────────────────────────────────────────
@@ -720,7 +792,7 @@ by the database, and the positive cases were observed to land. The probe and its
 -- the workspace is a single-operator trust domain and there is no
 -- authorization model in this design (§2.7, §9 OD3).
 CREATE TABLE IF NOT EXISTS projects (
-    id          TEXT PRIMARY KEY,                    -- 'cpj-' || 32 lowercase hex
+    id          TEXT PRIMARY KEY,                    -- 'cpj-' || 16 lowercase hex
     created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     updated_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     created_by  TEXT,
@@ -772,7 +844,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_project_names_one_canonical
 --   * (last_checkpoint_id, id) -> the resume pointer may only name a
 --     checkpoint of THIS thread, and it must exist.
 CREATE TABLE IF NOT EXISTS continuity_threads (
-    id                  TEXT PRIMARY KEY,            -- 'ct-' || 32 lowercase hex
+    id                  TEXT PRIMARY KEY,            -- 'ct-' || 16 lowercase hex
     project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
     title               TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) <= 200),
     focus               TEXT COLLATE NOCASE,         -- normalised slug, unique per project
@@ -811,17 +883,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_continuity_threads_id_project
 -- foreign key is what keeps the denormalisation honest: a checkpoint
 -- cannot name a project other than its thread's. The separate
 -- projects(id) reference is the second line of defence.
+--
+-- The two composite foreign keys here are the other half of the
+-- containment boundary:
+--   * (thread_id, project_id) -> the checkpoint belongs to its thread's
+--     project, and therefore to that project;
+--   * (supersedes, thread_id) -> a checkpoint may only supersede
+--     another checkpoint of ITS OWN thread.
 CREATE TABLE IF NOT EXISTS continuity_checkpoints (
-    id                   TEXT PRIMARY KEY,           -- 'ck-' || 32 lowercase hex
+    id                   TEXT PRIMARY KEY,           -- 'ck-' || 16 lowercase hex
     thread_id            TEXT NOT NULL,
     project_id           TEXT NOT NULL,
     revision             INTEGER NOT NULL,          -- the PRE-increment thread revision observed
     headline             TEXT CHECK (length(CAST(headline AS BLOB)) <= 200),
-    facts                JSON NOT NULL DEFAULT '[]' CHECK (json_valid(facts)),
-    hypotheses           JSON NOT NULL DEFAULT '[]' CHECK (json_valid(hypotheses)),
-    state                JSON NOT NULL DEFAULT '[]' CHECK (json_valid(state)),
-    next_actions         JSON NOT NULL DEFAULT '[]' CHECK (json_valid(next_actions)),
-    supersedes           TEXT REFERENCES continuity_checkpoints(id) ON DELETE SET NULL,
+    facts                JSON NOT NULL DEFAULT '[]'
+                         CHECK (json_valid(facts) AND json_type(facts) = 'array'),
+    hypotheses           JSON NOT NULL DEFAULT '[]'
+                         CHECK (json_valid(hypotheses) AND json_type(hypotheses) = 'array'),
+    state                JSON NOT NULL DEFAULT '[]'
+                         CHECK (json_valid(state) AND json_type(state) = 'array'),
+    next_actions         JSON NOT NULL DEFAULT '[]'
+                         CHECK (json_valid(next_actions) AND json_type(next_actions) = 'array'),
+    supersedes           TEXT,                        -- a checkpoint of THIS thread
     created_at           INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     -- The writer's identity, on the row rather than in artifact_provenance
     -- (see §4.5 for why).
@@ -832,11 +915,14 @@ CREATE TABLE IF NOT EXISTS continuity_checkpoints (
     model_name           TEXT,
     FOREIGN KEY (thread_id, project_id)
         REFERENCES continuity_threads(id, project_id) ON DELETE RESTRICT,
+    FOREIGN KEY (supersedes, thread_id)
+        REFERENCES continuity_checkpoints(id, thread_id) ON DELETE RESTRICT,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT
 );
 CREATE INDEX IF NOT EXISTS idx_continuity_checkpoints_thread
     ON continuity_checkpoints(thread_id, created_at DESC);
--- The parent key for continuity_threads' (last_checkpoint_id, id) FK.
+-- The parent key for continuity_threads' (last_checkpoint_id, id) FK
+-- AND for this table's own (supersedes, thread_id) FK.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_continuity_checkpoints_id_thread
     ON continuity_checkpoints(id, thread_id);
 ```
@@ -845,16 +931,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_continuity_checkpoints_id_thread
 
 - **The id prefixes use a hyphen, not an underscore.** The substrate's pointer id charset is
   `^[a-z0-9-]+$` (`internal/pointer/pointer.go:17`); `cpj_…` would be **rejected** by
-  `parsePointerURI` and by `pointer.Parse`. `cpj-`/`ct-`/`ck-` fit unchanged, and
-  `core.GenerateID()` (`internal/core/db.go:5283`) already returns 16 bare hex characters, so there
-  is no house convention to break. The pointer package is **not** modified (§12, A2; §14).
-- **`JSON` does not validate.** SQLite's declared `JSON` type has no affinity-based validation: the
-  literal string `'not json at all'` stores happily in a `JSON NOT NULL` column. The
-  `CHECK (json_valid(...))` constraints make the documented JSON shape structural (§13, P4).
+  `parsePointerURI` and by `pointer.Parse`. `cpj-`/`ct-`/`ck-` fit unchanged. The pointer package
+  is **not** modified (§12, A2; §14).
+- **The ids are the substrate's own, prefixed.** Each Continuity id is one of the three prefixes
+  followed by the 16 lowercase hex characters `core.GenerateID()` returns
+  (`internal/core/db.go:5283`) — `cpj-3f9a4c7b8d9e0f12`, `ct-…`, `ck-…`. Reusing the house
+  generator means there is exactly one id scheme in the tree, the artifact ids and the Continuity
+  ids have the same shape, and nothing has to be invented (§14.3).
+- **`JSON` does not validate, and its declared type has NUMERIC affinity.** SQLite's declared `JSON`
+  type is not a real type: it carries NUMERIC affinity, so the literal string `'42'` is silently
+  coerced to the *integer* 42, `'1.5'` to the *real* 1.5, while `'[]'`, `'{}'`, `'"str"'` and
+  `'null'` stay TEXT. `CHECK (json_valid(...))` alone therefore accepts a bare scalar, and it
+  accepts an object where the code layer expects an array. The four columns carry
+  `CHECK (json_valid(x) AND json_type(x) = 'array')` instead, which makes the documented array
+  shape **structural**: `'{}'`, `'42'`, `'1.5'` and `'"str"'` are all refused, and only a JSON
+  array is stored (§13, P4; §14.2 E17).
 - **`length(CAST(x AS BLOB))` is a byte count.** `length()` on TEXT counts characters, not bytes; the
   documented budgets are in bytes.
-- **The `supersedes` reference keeps `ON DELETE SET NULL`.** It is an intra-family pointer to an
-  append-only row, so a `SET NULL` cannot destroy history — it only clears a pointer.
+- **`supersedes` is a COMPOSITE foreign key, and it is `ON DELETE RESTRICT`.**
+  `FOREIGN KEY (supersedes, thread_id) REFERENCES continuity_checkpoints(id, thread_id)` closes both
+  the cross-thread and the cross-project case, because the referenced checkpoint must carry the
+  *same* `thread_id` — and therefore the same project. The parent key is
+  `idx_continuity_checkpoints_id_thread`, which the `last_checkpoint_id` FK already needed.
+  `ON DELETE SET NULL` is **not** usable here: SQLite applies `SET NULL` to *every* column of the
+  child key, so it would try to null the `NOT NULL` `thread_id` and the delete would be refused with
+  a misleading `NOT NULL constraint failed` rather than a foreign-key error. `RESTRICT` refuses the
+  same delete with the correct error — and refusing it is the right behaviour anyway, because the
+  checkpoint ledger is append-only (§2.7): a superseded brief is history and is not deleted.
+- **Seven foreign-key clauses in total: four composite, three single-column.** The composite four
+  are `(superseded_by, project_id)`, `(last_checkpoint_id, id)`, `(thread_id, project_id)` and
+  `(supersedes, thread_id)`; the single-column three are `project_names.project_id`,
+  `continuity_threads.project_id` and `continuity_checkpoints.project_id`. §5's T13 and §11's
+  summary enumerate the same four (§12, D2).
 - **The four tables are created by the migration, not by the base DDL** — see §6.2. The consequence
   is that a reader of `internal/core/schema.go` will not see them, and that is deliberate: it keeps
   the DDL out of `BaseTables`, and `BaseTables` is what `attachShared` propagates into the
@@ -873,7 +981,7 @@ already uses for twelve actions (`internal/core/tools/registry_list.go:791-983`)
 | `alias` | write | `project`, `add` \| `remove` | the project's names |
 | `delete` | write | `project`, `confirm` | the tombstone |
 | `thread` | read+write | `project`, `op` ∈ `open` \| `list` \| `select` \| `close` \| `supersede`, plus `thread`, `title`, `focus`, `state`, `expected_revision` | the thread(s) |
-| `checkpoint` | write | `project`, `thread`, `expected_revision`, `headline`, `facts`, `hypotheses`, `state`, `next_actions` | the new checkpoint and the thread's new revision |
+| `checkpoint` | write | `project`, `thread`, `expected_revision`, `headline`, and the four sections `facts`, `hypotheses`, `state`, `next_actions` — each section an array of **references**, each reference exactly `{kind, id, note?}` (§2.3) | the new checkpoint and the thread's new revision |
 | `resume` | read | `project`, and one of `thread` \| `focus` \| `title` | the thread, the materialised checkpoint, the next action, **and the `stale` block** |
 
 **The `thread` action's five ops, and the two meanings of `focus`.** `op='list'` returns the
@@ -908,7 +1016,28 @@ sanctioned).
 | `session_ended_after_checkpoint` | whether the session that wrote the checkpoint has a `session_handoffs` row with `ended_at > checkpoint.created_at` |
 | `session_end_state` | that row's `ended_state` (`clean`/`crashed`/`interrupted`/`force_end` — the closed vocabulary of `internal/core/schema.go:1322-1323`), or `null` |
 
-The implementation and the limits of the session-end signal are in §9, OD2.
+**The join column is `mpm_session_id`, and the selection rule is "the latest one".** The
+`session_handoffs` table's `session_id` column is the **legacy UNIQUE** one
+(`internal/core/schema.go:1321`); it is optional correlation metadata, and it is *not* what identifies an MPM
+session. The canonical identity lives in the `mpm_session_id` column, which was added by a migration
+(`internal/core/migration_session_handoffs_mpm_session_id.go:128`) and which the substrate's own
+handoff lookup uses (`handoffColumnMPMSession = "mpm_session_id"`,
+`internal/core/handoff.go:420`).
+
+**`mpm_session_id` is not unique**, so one session can have several handoffs: *"mpm_session_id is NEVER
+unique, so multiple handoffs from the same lifecycle all share the same value"*
+(`internal/core/handoff.go:157-158`). The selection rule is therefore **the same one the substrate
+already uses** for its own previous-handoff lookup — `ORDER BY ended_at DESC, rowid DESC LIMIT 1`.
+The substrate states that tie-breaker in the comment above its own query
+(`internal/core/handoff.go:378`) and implements it in the query itself
+(`internal/core/handoff.go:468-469`). So `session_end_state` names **one** row: the most recently
+ended handoff of the writing session. The `rowid` tiebreak makes the choice deterministic when two
+handoffs share an `ended_at` — which is why the substrate's own comment says *"multiple handoffs
+inserted in the same second need a secondary sort"*. A checkpoint row carries the writing session's
+`mpm_session_id`, so the join is exact.
+
+**The implementation and the limits of the session-end signal are in §9, OD2** — in particular the
+90-day TTL and the "no handoff row at all" case.
 
 **`resume` labels the headline as the writer's assertion.** The headline is the one free-form field
 in the structure, and it is the only place speculation can enter. The response presents it as the
@@ -970,14 +1099,14 @@ storage gives, surfaced with a human-readable pointer to the winner.
 
 **The id charset is not widened.** The existing parser accepts `^[a-z0-9-]+$`
 (`internal/pointer/pointer.go:17`), and the inline copy in
-`internal/core/tools/handlers.go:7751-7762` enforces the same set character by character. The
+`internal/core/tools/handlers.go:7857-7862` enforces the same set character by character. The
 Continuity prefixes therefore use a **hyphen**: `cpj-`, `ct-`, `ck-`. `internal/pointer/pointer.go`
 and `parsePointerURI` are **not modified** — the change surface gains a row for the *id shape*, not
 for the pointer grammar (§6.4).
 
 **The `decision` kind follows the `theory` precedent exactly.** `mpm://theory/<id>` resolves a
 `memories` row through `GetMemory` and then asserts `collection == 'theories'`
-(`internal/core/tools/handlers.go:7588-7596`). `mpm://decision/<id>` is the same shape with
+(`internal/core/tools/handlers.go:7660-7668`). `mpm://decision/<id>` is the same shape with
 `collection == 'decisions'`. A decision is *already* reachable through `mpm://memory/<id>` — and so
 is a theory — because `GetMemory` selects by id alone
 (`internal/core/web_db.go:258`); the typed kind adds the assertion, so the resolver can say *"this
@@ -985,8 +1114,8 @@ id is not a decision"* instead of returning it unlabelled. The compatibility con
 in §9, OD5.
 
 **The surfaces that must change together** — the resolver's kind check
-(`internal/core/tools/handlers.go:7490`), the tool description
-(`internal/core/tools/registry_list.go:755-758`), and the pointer package's own
+(`internal/core/tools/handlers.go:7562`), the tool description
+(`internal/core/tools/registry_list.go:759-762`), and the pointer package's own
 `internal/pointer/resolve.go` — are listed in §6.4. `mpm_help` picks the registry entry up
 automatically: `cmd/mpm/call.go:550` iterates `tools.Registry`, and
 `cmd/mpm/call_help_test.go:74` pins that.
@@ -1007,7 +1136,7 @@ and `model_name` directly. The checkpoint table is new, so those columns are fre
 not appear in `artifact_provenance`-driven lineage queries, and `evidence.artifact_type` is not
 widened either — a checkpoint cannot carry its own evidence rows. Its "evidence-backed" quality
 comes from the artifacts it *references*, each of which carries its own evidence. Making checkpoints
-first-class provenance artifacts is an operator decision (§9, D6).
+first-class provenance artifacts is an operator decision (§9, R6).
 
 ### 4.6 What is deliberately *not* extended
 
@@ -1033,7 +1162,7 @@ first-class provenance artifacts is an operator decision (§9, D6).
 | # | Threat | Mechanism | Outcome |
 |---|---|---|---|
 | **T1** | Crash between the checkpoint INSERT and the thread pointer UPDATE | both in one `WithTx`; the callback's error or the process's death rolls the transaction back | the thread still points at the previous checkpoint; no orphan |
-| **T2** | `WithTx` restarts the transaction on a stale snapshot | the checkpoint id is generated **once, before** the callback, and the insert is `ON CONFLICT(id) DO NOTHING` — the substrate's `evidence` pattern (`internal/core/evidence_store.go:92-105`) | the restart re-inserts the *same* id; no duplicate checkpoint, and **no id is burned** |
+| **T2** | `WithTx` restarts the transaction on a stale snapshot | the checkpoint id is generated **once, before** the callback, and the insert is `ON CONFLICT(id) DO NOTHING` | the restart re-inserts the *same* id; no duplicate checkpoint, and **no id is burned**. The id is the substrate's own `core.GenerateID()` — 16 lowercase hex, **not** content-derived — so the `ON CONFLICT` clause is a **belt-and-braces safety net that in practice never fires**: it is the `evidence` pattern's clause (`internal/core/evidence_store.go:92-105`), and `evidence`'s id *is* identity-derived, which is why the clause matters there. Here the restart-safety actually comes from the **transaction rollback**, which is sufficient. The clause is kept because it is free and because a future content-derived id would need it (§14.3) |
 | **T3** | Two agents write checkpoints to one thread concurrently | `WHERE id = ? AND revision = ?`; exactly one gets `RowsAffected == 1` | the loser is told `stale_thread` with the current revision; nothing is written |
 | **T4** | Two agents create a project with the same name concurrently | the partial UNIQUE index on live `project_names.name` (NOCASE) | exactly one INSERT lands; the other gets a UNIQUE violation, which the tool turns into "a project named X already exists: cpj-…" |
 | **T5** | Two agents open a thread for the same focus concurrently | the partial UNIQUE index on `(project_id, focus)` (NOCASE) | one thread; the other gets "a thread with focus X already exists (ct-…)" |
@@ -1044,7 +1173,7 @@ first-class provenance artifacts is an operator decision (§9, D6).
 | **T10** | A checkpoint's payload exceeds the budget | the write path validates the byte cap and the section counts and **rejects** the write; the byte cap is the primary gate | an oversized brief is never committed; the error names the section and the limit, and says whether bytes or count fired |
 | **T11** | An agent writes a checkpoint with a stale `expected_revision` after its own earlier write | the CAS | refused — the agent must re-read. This is deliberate: silently accepting a write whose basis has moved is how a checkpoint loses meaning |
 | **T12** | Two workspaces hold projects with the same name | projects are workspace-scoped (the database is the scope) | they are independent projects; there is no cross-workspace resolution. See §9, D1 |
-| **T13** | **A checkpoint or a pointer crosses a project boundary** | the composite foreign keys: `(thread_id, project_id)` ties a checkpoint to its thread's project, `(last_checkpoint_id, id)` ties the resume pointer to its own thread, `(superseded_by, project_id)` ties a supersession to the same project | **refused by the schema** — the insert or update fails with a foreign-key violation. "Project" is a containment boundary in the *storage*, not only in the code |
+| **T13** | **A checkpoint or a pointer crosses a project boundary** | the **four** composite foreign keys: `(thread_id, project_id)` ties a checkpoint to its thread's project, `(last_checkpoint_id, id)` ties the resume pointer to its own thread, `(superseded_by, project_id)` ties a thread supersession to the same project, and `(supersedes, thread_id)` ties a checkpoint supersession to its own thread | **refused by the schema** — the insert or update fails with a foreign-key violation. "Project" is a containment boundary in the *storage*, not only in the code. This row was **incomplete** in the previous revision, which listed three; the fourth is D1 |
 | **T14** | **Two agents rename A→B and B→A at the same time** | the live-name partial unique index: a name is bound to one project for as long as it is live, so neither target is free | both renames are **refused**, each naming the holder. The alias graph cannot form a cycle; there is no deadlock, because SQLite serialises write transactions and the demote-then-promote order is fixed within each transaction (§2.6) |
 | **T15** | **A hard delete is attempted on a project with children** | every reference is `ON DELETE RESTRICT` and foreign keys are enforced structurally on every pooled connection | the `DELETE` is refused and the ledger survives. The soft-delete path never issues a `DELETE` |
 
@@ -1093,7 +1222,7 @@ The Continuity DDL lives in **one** place: the migration file
 `internal/core/migration_continuity_project_model.go` (new). It is **not** in `BaseTables`, and
 **not** in `WorkTables` or any other schema slice.
 
-**Why not `BaseTables` — the shared-schema hazard.** `attachShared` (`internal/core/db.go:2094`)
+**Why not `BaseTables` — the shared-schema hazard.** `attachShared` (`internal/core/db.go:2094-2175`)
 ATTACHes the configured shared database as the `shared` schema and then runs **`BaseTables` against
 it**, twice:
 
@@ -1109,7 +1238,7 @@ for _, ddl := range BaseTables {
 
 So a `BaseTables` entry is not a local table — it is a table in the **cross-workspace broadcast
 store**, with its foreign keys rewritten along with it. The shared schema exists for global memories
-and rules, not for user identity; §9 D1 says so, and non-goal 8 says a project lives in one
+and rules, not for user identity; §9 R1 says so, and non-goal 8 says a project lives in one
 workspace's database. Putting the Continuity DDL in `BaseTables` would put a project-identity table
 — and a project-identity table whose `ON DELETE CASCADE` would have made it destructible — into the
 store whose entire purpose is cross-workspace broadcast.
@@ -1164,7 +1293,7 @@ rejected.
 `projects`, `project_names`, `continuity_threads`, `continuity_checkpoints`.
 
 `RuntimeCanonicalSchema` is **not** changed. The reason is mechanical, not stylistic:
-`TestCanonicalSchemaSync` (`internal/core/sql_dump_canonical_schema_test.go:22`) scans every
+`TestCanonicalSchemaSync` (`internal/core/sql_dump_canonical_schema_test.go:22-62`) scans every
 non-test `*.go` file in `internal/core` for `CREATE TABLE` statements and requires an **exact
 two-way match** with `CanonicalMPMSchema` — every table found in source must be listed, and every
 listed table must be found in source. The Continuity DDL is a `CREATE TABLE` in Go source (the
@@ -1226,7 +1355,7 @@ split did not, and that contradiction is resolved here.
 | **Regression tests** | AT1–AT8 (§8) |
 | **Compatibility** | old binaries ignore the new tables; the schema is forward-only; a hard delete of a project with children is refused |
 | **Rollback** | binary rollback is safe; schema rollback is forbidden |
-| **Stop condition** | stop if any existing row changes, if the restore allow-list is not updated, if any Continuity table appears in the `shared` schema, or if `git diff --stat` touches a file outside the four listed |
+| **Stop condition** | stop if any existing row changes, if the restore allow-list is not updated, if any Continuity table appears in the `shared` schema, if `git diff --stat` touches a file outside the four listed, **or if the operator answers OD3 with (β)** — the explicit actor/authorization option — because (β) would need an owner column and possibly a fifth table, and this Stage 1's DDL would then have to be re-issued (§9, OD3; §12.2, D6) |
 | **Gate** | AT1–AT8 green; `mpm-lint --gate` PASS; `make docs-check` OK |
 
 ### Stage 2 — the model and the tool
@@ -1294,13 +1423,13 @@ correct state transition; that is the defect class this matrix exists to catch.
 | # | Scenario | Mechanism | Assertion |
 |---|---|---|---|
 | **AT1** | **Existing database migration** | a disposable file-backed WAL DB on the pre-Continuity schema, populated with representative rows, then opened by the new binary | the **four** tables — `projects`, `project_names`, `continuity_threads`, `continuity_checkpoints` — and their indexes exist, **by name**; the sentinel count is 1 |
-| **AT2** | **Fresh database creation** | a new DB through the same path | the schema is **identical** to AT1's — compared as the **full `sqlite_master.sql` text** of every table and index, not as a table list. A table-list comparison would not catch a column or index drift |
+| **AT2** | **Fresh database creation** | a new DB through the same path | the schema is **identical** to AT1's — compared as the **full `sqlite_master.sql` text** of every table and index, **grouped by name, not by row order**. The fresh path creates the base tables first and the migration's four last, while the migrated path already has the base tables, so the *ordered* `sqlite_master` list differs even when the schemas are identical — an ordered comparison would fail a correct implementation. A table-list comparison would not catch a column or index drift, which is why the full `sql` text is compared |
 | **AT3** | **Whole-row preservation** | snapshot every pre-existing row of every pre-existing table before and after, as whole-row strings | **byte-identical** — the whole row set, not a sample |
 | **AT4** | **Zero fabricated state** | — | no existing table gains a row; no existing row gains a column value; `project_names` starts **empty**; `projects` starts empty |
 | **AT5** | **Idempotent migration** | run the migration twice, then a third time | the table list, the index list and the sentinel count are unchanged by runs 2 and 3 |
 | **AT6** | **Failed-migration rollback** | **a trigger that aborts the migration's sentinel write** — `CREATE TRIGGER block_continuity_sentinel BEFORE INSERT ON schema_migrations WHEN NEW.id = 'continuity_project_model_v1' BEGIN SELECT RAISE(ABORT, 'injected failure'); END` — installed on a disposable DB, then opened by the new binary | the migration returns an error; `NewDatabaseManager` surfaces it; the **table list is unchanged** (all four DDL statements had already succeeded and must be undone); the **index list is unchanged**; **no sentinel**; the pre-existing row set is byte-identical |
 | **AT7** | **The four tables are local only** | a hermetic `NewTestSharedDM` — a local database plus an ATTACHed shared database, both in a temp dir | the four names are present in `main.sqlite_master` with a count of 4, and the count of those names in **`shared.sqlite_master` is 0**; no `shared.projects` table exists |
-| **AT8** | **Restore allow-list** | a dump containing the four new tables | `mpm restore-db` **accepts** it; `CanonicalMPMSchema` contains exactly four new entries and `RuntimeCanonicalSchema` contains none; `TestCanonicalSchemaSync` and `TestRuntimeCanonicalSchemaHasNoPhantomEntries` are green |
+| **AT8** | **Restore allow-list** | a dump containing the four new tables — `projects`, `project_names`, `continuity_threads`, `continuity_checkpoints` — named explicitly | `mpm restore-db` **accepts** it; `CanonicalMPMSchema` contains **exactly** the four new entries `projects`, `project_names`, `continuity_threads`, `continuity_checkpoints` and **no** others; `RuntimeCanonicalSchema` contains **none** of the four; `TestCanonicalSchemaSync` and `TestRuntimeCanonicalSchemaHasNoPhantomEntries` are green; and the allow-list's size grows by exactly four, so the "four tables" count is observable rather than asserted |
 
 **Note on AT6's mechanism.** The original draft specified "a trigger that aborts the third
 `CREATE TABLE`". **That mechanism does not exist**: SQLite has no DDL trigger, and it refuses
@@ -1325,7 +1454,7 @@ undone. AT6 asserts the table list, the index list and the row set, not merely "
 | **AT16** | **Reference resolution and dangling refs** | a checkpoint whose refs point at a memory, a **decision**, a theory, a lesson and a work item; then shred the memory | every ref resolves with a bounded summary and a pointer **whose kind matches the reference kind** (`mpm://decision/…` for a decision); after the shred, the memory ref is reported `missing` and the checkpoint is still readable |
 | **AT17** | **Rename and alias** | rename a project; then resolve by the old name, the new name, and a stale alias; then attempt a rename onto another project's live name and another project's live alias | the old name, the new name and the alias all resolve to the same project id; the old canonical name appears as an alias; **exactly one live canonical name** exists at every point; a rename onto a live name is **refused**, naming the holder; the demote-then-promote order leaves no gap (a concurrent resolve sees the old alias or the new canonical, never neither) |
 | **AT18** | **Deletion semantics** | delete a project with `--confirm`; then create a project with the same name; then attempt a hard `DELETE` | the tombstone exists **and names itself** — the withdrawn name rows are retained and report the tombstone's id, actor and time; the old names no longer resolve; the new project gets a **new** id and the response mentions the tombstone; the old threads and checkpoints are retained and reachable only by id; the hard `DELETE` is **refused** by the schema and every row survives; `projects.deleted_by` records the actor |
-| **AT19** | **Cross-project containment is refused by the schema** | four hostile writes: a checkpoint naming another project; a thread pointer naming another thread's checkpoint; a pointer naming a nonexistent checkpoint; a supersession naming another project's thread | **all four are refused** with a foreign-key violation; the row counts are unchanged after each; the same-project and same-thread equivalents succeed |
+| **AT19** | **Containment is refused by the schema** | **five** hostile writes: a checkpoint naming another project; a thread pointer naming another thread's checkpoint; a pointer naming a nonexistent checkpoint; a thread supersession naming another project's thread; **a checkpoint supersession naming another thread's checkpoint** | **all five are refused** with a foreign-key violation; the row counts are unchanged after each; the same-project and same-thread equivalents succeed — and the *fourth* hostile write is the supersession's own counterpart: a checkpoint superseding another checkpoint of the **same** thread succeeds |
 | **AT20** | **Staleness is visible** | write a checkpoint; then read it back after the session that wrote it has ended | `resume` reports `checkpoint_age_seconds`, `checkpoint_revision`, `thread_revision` and `session_ended_after_checkpoint` with the session's `ended_state`; the values are correct against the fixture's clock |
 | **AT21** | **Crash without a session-end event** | write a checkpoint; kill the process; then resolve and resume in a fresh manager | the checkpoint is current and complete; **no handoff exists**; the resume returns the same bytes as before the crash; `session_ended_after_checkpoint` is `false` |
 | **AT22** | **Cross-session, cross-agent, cross-model** | write a checkpoint from session 1 with framework F and model M; read it from session 2 with framework G and model N | the checkpoint is byte-identical; the writer's identity is on the row and is **not** part of the brief's content |
@@ -1347,37 +1476,42 @@ undone. AT6 asserts the table list, the index list and the row set, not merely "
 
 | # | Decision | Recommendation | Status | Blocks |
 |---|---|---|---|---|
-| **OD1** | Where does the **session→project binding** live? (the draft's D3, re-scoped) | A **DB-backed binding written by an explicit action**, read by the Stage 4 source. `active.json` stays out (its write is not atomic — `os.WriteFile`, not the tmp+rename swap). The cost is **one more table**, and it is **not** part of the four-table Stage 1 — it is a separate, later table. | **open** | **The operator's requirement, not merely Stage 4.** As specified, a project is reachable by name and by explicit call, and by nothing else — §3.7 says so plainly |
-| **OD2** | Is an unbounded, invisible **loss window** acceptable? (the draft's D2, re-scoped) | **No writer** — an automatic writer must read the session transcript, and a transcript is the one thing that must not become durable state. But `resume` **must** report `checkpoint_age` and whether a session ended after the checkpoint. **The limitations of the retained handoff history are explicit:** `session_handoffs` has a **90-day TTL** (`PruneHandoffs(90)`), so the session-end signal disappears after 90 days; and a session killed without running `EndSessionV2` leaves **no handoff row at all**, so the absence of a handoff is **not** proof of continuity. The signal is best-effort and the brief's age is the durable half | **open** | The **crash-recovery claim** — the *visibility* of the loss, not its absence. Does **not** block Stage 1 |
-| **OD3** | **Who may delete a project, and is it recorded?** | **The minimum viable single-operator contract, plus auditability.** Compare: (α) `--confirm <project-id>` as a naming check — the review is right that this is **not** authorization: `projects` has no owner, `resolve` hands out every live project's id and name, so any agent in the workspace can delete any project; (β) an explicit actor/authorization mechanism — the substrate has **no identity primitive** to build it on (`actor_kind` distinguishes agent/human/unknown, not *who*), so (β) is new machinery, not a correction. **Recommended:** (α) with `projects.created_by` / `deleted_by` and a `system_audit_log` row — the writer identity and the audit, **no fifth table** — and the workspace declared a **single-operator trust domain** with the residual risk stated rather than implied | **open — needs the operator's acknowledgement** | **Stage 2's delete action.** The Stage 1 *columns* are unaffected by the answer. Does **not** block Stage 1 |
+| **OD1** | Where does the **session→project binding** live? (the draft's R3, re-scoped) | A **DB-backed binding written by an explicit action**, read by the Stage 4 source. `active.json` stays out (its write is not atomic — `os.WriteFile`, not the tmp+rename swap). The cost is **one more table**, and it is **not** part of the four-table Stage 1 — it is a separate, later table. | **open** | **The operator's requirement, not merely Stage 4.** As specified, a project is reachable by name and by explicit call, and by nothing else — §3.7 says so plainly |
+| **OD2** | Is an unbounded, invisible **loss window** acceptable? (the draft's R2, re-scoped) | **No writer** — an automatic writer must read the session transcript, and a transcript is the one thing that must not become durable state. But `resume` **must** report `checkpoint_age` and whether a session ended after the checkpoint. **The limitations of the retained handoff history are explicit:** `session_handoffs` has a **90-day TTL** (`PruneHandoffs(90)`), so the session-end signal disappears after 90 days; and a session killed without running `EndSessionV2` leaves **no handoff row at all**, so the absence of a handoff is **not** proof of continuity. The signal is best-effort and the brief's age is the durable half | **open** | The **crash-recovery claim** — the *visibility* of the loss, not its absence. Does **not** block Stage 1 |
+| **OD3** | **Who may delete a project, and is it recorded?** | **The minimum viable single-operator contract, plus auditability.** Compare: (α) `--confirm <project-id>` as a naming check — the review is right that this is **not** authorization: `projects` has no owner, `resolve` hands out every live project's id and name, so any agent in the workspace can delete any project; (β) an explicit actor/authorization mechanism — the substrate has **no identity primitive** to build it on (`actor_kind` distinguishes agent/human/unknown, not *who*), so (β) is new machinery, not a correction. **Recommended:** (α) with `projects.created_by` / `deleted_by` and a `system_audit_log` row — the writer identity and the audit, **no fifth table** — and the workspace declared a **single-operator trust domain** with the residual risk stated rather than implied | **open — needs the operator's acknowledgement** | **Stage 2's delete action, and — conditionally — Stage 1's DDL.** Under the recommended (α), the Stage 1 *columns* are unaffected: `created_by` and `deleted_by` are already in the `projects` table and the audit row goes to the existing `system_audit_log`, so Stage 1's DDL needs no change. Under (β) they are **not** unaffected — an actor model needs an owner column and possibly a fifth table, so **Stage 1's DDL would change** and the §4.1 block, AT1, AT2 and the restore allow-list would all have to be re-issued. The claim is therefore *conditional on the operator's answer*, and this is the one outstanding decision that touches Stage 1 |
 | **OD4** | Which **slice** holds the four tables? | **Resolved by this revision: none of the schema slices.** The DDL is owned by the **migration** (§6.2), which is neither `BaseTables` (propagated to the shared schema) nor `WorkTables` (the dual-definition `work_events` shape Stage A declined). One code path, local only, with AT7 as the guard | **resolved** | — |
 | **OD5** | Is a **`decision` reference pointerable**? | **Yes — add `mpm://decision/<id>` as a third pointer kind**, with the substrate's own `mpm://theory/` shape: `GetMemory` plus a `collection == 'decisions'` assertion. **Compatibility implications:** `mpm_resolve` gains a kind (the five existing kinds are unchanged); a decision becomes reachable under **two** URIs — `mpm://memory/<id>` already resolves it today, because `GetMemory` selects by id without a collection filter, and a theory already has this same duality — so the new kind adds a **typed** address, not a new address space; the resolver can now *reject* an id that is not a decision. The alternative — dropping `decision` from the checkpoint reference vocabulary — would cost the `facts` section its ability to distinguish a decision from a memory, and §2.3's whole point is that the sections are typed | **open — recommended; does not block Stage 1** | Stage 3's pointer surface. Stage 1 is unaffected either way |
 | **OD6** | Is case-insensitive uniqueness enforced in **storage** or only in the API? | **Storage.** `COLLATE NOCASE` on `project_names.name` and on `continuity_threads.focus`, plus partial unique indexes over the live rows (§4.1). The API check stays as the friendly first line | **resolved** | — |
 
 ### 9.2 The remaining open decisions
 
+These are the original draft's open decisions, numbered **R1–R10**. The **R** prefix is
+deliberate: the revision-2 review's findings use **D1–D12**, and keeping the two
+vocabularies apart is what stops a reviewer's `D2` and a draft's `D2` from being read as
+the same thing. The numbers are unchanged, so `R4` is the draft's `D4`.
+
 | # | Decision | Recommendation | Status | Blocks |
 |---|---|---|---|---|
-| **D4** | How long are **checkpoints** retained? | The project survives indefinitely; the checkpoint ledger grows. Recommend keeping the current checkpoint plus the last N superseded ones per thread, and pruning the rest. | open | nothing yet — a pruning stage, if any, comes after the model |
-| **D6** | Should a **checkpoint be a first-class provenance artifact**? | **Deferred.** It requires rebuilding `artifact_provenance`, and the checkpoint row already carries the writer's identity. | open | nothing |
-| **D7** | Should the **`focus` slug** be mandatory on a thread? | **Optional in v1.** A thread without a focus is selectable by id and title only. The partial unique index excludes `focus IS NULL`, so focus-less threads may coexist. | open | nothing |
-| **D8** | Should the **CLI facade** be `mpm continuity` or `mpm project`? | `mpm continuity`, because the tool covers both the project identity and the thread/checkpoint family. | open | Stage 3's naming |
-| **D9** | Should `mpm_continuity` appear on the **MCP compact surface**? | **No in v1.** The compact surface is deliberately minimal (`read_wake_context`, `write_handoff`, …). | open | nothing |
-| **D10** | Should a project be able to hold a **repository binding**? | **Deferred**, and the deferral carries its real prerequisite: MPM has **no repository identity primitive** (§1.3). "Add a repository binding" is not a small addition; it means first building an explicit, operator-supplied repository key. When cross-workspace identity comes, the shared database's role is a **name→id directory only** — never the storage for threads or checkpoints (§13, P3) | open | nothing |
+| **R4** | How long are **checkpoints** retained? | The project survives indefinitely; the checkpoint ledger grows. Recommend keeping the current checkpoint plus the last N superseded ones per thread, and pruning the rest. | open | nothing yet — a pruning stage, if any, comes after the model |
+| **R6** | Should a **checkpoint be a first-class provenance artifact**? | **Deferred.** It requires rebuilding `artifact_provenance`, and the checkpoint row already carries the writer's identity. | open | nothing |
+| **R7** | Should the **`focus` slug** be mandatory on a thread? | **Optional in v1.** A thread without a focus is selectable by id and title only. The partial unique index excludes `focus IS NULL`, so focus-less threads may coexist. | open | nothing |
+| **R8** | Should the **CLI facade** be `mpm continuity` or `mpm project`? | `mpm continuity`, because the tool covers both the project identity and the thread/checkpoint family. | open | Stage 3's naming |
+| **R9** | Should `mpm_continuity` appear on the **MCP compact surface**? | **No in v1.** The compact surface is deliberately minimal (`read_wake_context`, `write_handoff`, …). | open | nothing |
+| **R10** | Should a project be able to hold a **repository binding**? | **Deferred**, and the deferral carries its real prerequisite: MPM has **no repository identity primitive** (§1.3). "Add a repository binding" is not a small addition; it means first building an explicit, operator-supplied repository key. When cross-workspace identity comes, the shared database's role is a **name→id directory only** — never the storage for threads or checkpoints (§13, P3) | open | nothing |
 
 ### 9.3 Decisions this revision closes
 
-The draft's **D1** (workspace- vs cross-workspace-scoped) is closed as **workspace-scoped** and is
+The draft's **R1** (workspace- vs cross-workspace-scoped) is closed as **workspace-scoped** and is
 now enforced structurally: the four tables exist only in the local schema (§6.2, AT7), so a
 cross-workspace project is not merely unresolvable — it does not exist in the shared store.
 
-The draft's **D2** (explicit-only checkpoints) is closed as **explicit-only**, with the visibility
+The draft's **R2** (explicit-only checkpoints) is closed as **explicit-only**, with the visibility
 condition of **OD2** attached.
 
-The draft's **D3** (session→project binding) is **re-scoped to OD1** and is explicitly *not* part
+The draft's **R3** (session→project binding) is **re-scoped to OD1** and is explicitly *not* part
 of the four-table Stage 1.
 
-The draft's **D5** (whether the case-insensitive match tier is wanted) is closed as **yes, in
+The draft's **R5** (whether the case-insensitive match tier is wanted) is closed as **yes, in
 storage** — **OD6**.
 
 ---
@@ -1404,7 +1538,7 @@ Recorded explicitly, because the failure mode of a design like this is feature c
    either.
 7. **Not automatic.** Nothing is written without an explicit call. No fold, no background writer, no
    implicit checkpoint on session end.
-8. **Not cross-workspace.** A project lives in one workspace's database (D1/OD4). The shared schema
+8. **Not cross-workspace.** A project lives in one workspace's database (R1/OD4). The shared schema
    is the cross-workspace **broadcast** store, and it holds no project identity (§6.2).
 9. **Not an authorization system.** The deletion confirmation is a typo guard. The workspace is a
    single-operator trust domain (§2.7, §9 OD3).
@@ -1416,8 +1550,18 @@ Recorded explicitly, because the failure mode of a design like this is feature c
 **READY FOR INDEPENDENT APPROVAL OF STAGE 1** — the additive schema.
 
 This is *not* an approval. It is a statement that the specification's guarantees now agree with the
-actual SQL, the actual codebase and the actual test plan, and that the sixteen confirmed defects
-have been corrected. Stage 1 remains subject to the second independent review (§12, §13, §14).
+actual SQL, the actual codebase and the actual test plan, that the **sixteen** confirmed defects of
+the first review (A1–A16) and the **six** of the second (D1–D6) have been corrected, and that the
+second review's optional refinements (D7–D12) have been taken. Stage 1 remains subject to the
+second independent review's **delta re-review** (§12, §13, §14).
+
+**The one conditional.** Stage 1's DDL is final **if the operator accepts OD3's recommended option
+(α)** — the delete confirmation as a naming check plus `created_by` / `deleted_by` and a
+`system_audit_log` row, with no fifth table. Under (α) the Stage 1 columns are already right.
+Under (β), the explicit actor/authorization option, Stage 1 would need an owner column and possibly
+a fifth table, and §4.1, AT1, AT2 and the restore allow-list would all have to be re-issued. The
+document does **not** assume the operator's answer; it states the dependency, and Stage 1's stop
+condition names it (§7, §9 OD3, §12.2 D6).
 
 The design satisfies the product contract with **four new tables, one new tool, one CLI facade,
 three new pointer kinds, and no change to any existing reader, writer, predicate or public
@@ -1437,7 +1581,7 @@ The load-bearing decisions, and the evidence for each:
 | **`artifact_provenance` not widened** | widening a CHECK requires a table rebuild; the benefit is telemetry the checkpoint row already carries (§4.5) |
 | **A project is not a work item** | `works` is purged and has a task lifecycle; the two vocabularies must not be conflated (§2.1) |
 | **One DDL definition, owned by the migration** | the same shape the delivery-state Stage A chose and recorded (§6.1); it also keeps the four tables out of the shared schema (§6.2) |
-| **Containment enforced by the schema, not by convention** | four composite foreign keys make a cross-project checkpoint, pointer or supersession *unrepresentable* (§4.1, T13) |
+| **Containment enforced by the schema, not by convention** | **four** composite foreign keys — `(thread_id, project_id)`, `(last_checkpoint_id, id)`, `(superseded_by, project_id)`, `(supersedes, thread_id)` — make a cross-project checkpoint, a cross-thread or cross-project pointer, and a cross-project supersession *unrepresentable* (§4.1, T13, D1) |
 
 **What this design does not claim.** It does not claim that a checkpoint is *true*. A checkpoint
 records what an agent asserted, bounded and pointed at durable artifacts; its integrity rests on
@@ -1450,14 +1594,16 @@ and by explicit call, and by nothing else.
 
 ---
 
-## 12. The A1–A16 disposition
+## 12. The review dispositions — A1–A16 and D1–D6
 
-Every finding of the independent review, and where this revision answers it.
+### 12.1 A1–A16 — the first independent review
+
+Every finding of the [first independent review](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6652203614) (verdict *ACCEPT WITH REQUIRED CORRECTIONS*; sixteen confirmed defects A1–A16), and where this revision answers it. The second review verified all sixteen against the tree and the SQL rather than against this table, and found **fifteen resolved and verified** and one — **A13** — resolved in principle but inadequately specified; A13's remaining conditionality is now stated in **OD3** (§12.2, D6).
 
 | # | Finding | Corrected location | Resolution | Verification evidence | Remaining risk |
 |---|---|---|---|---|---|
 | **A1** | The table count is wrong — it is **four**, not three | §2.2, §6.1, §6.3, §6.4, §7 Stage 1, §8 AT1/AT8, §11 | "three" → "four" in all nine places. The document now says **four tables, three entities**: `project_names` is the resolution *domain*, not an entity. AT1 and AT8 enumerate the four names by name | the review's own reproduction: the restore validator accepts none of the four today. AT8 is the gate | the count is load-bearing for the allow-list, not for the model — a future fifth table (OD1's binding) is deliberately *outside* Stage 1 |
-| **A2** | The `cpj_`/`ct_`/`ck_` prefixes are **rejected by the pointer parser** | §1.4, §3.1–§3.3, §4.1, §4.4, §6.4 | the ids use a **hyphen**: `cpj-`, `ct-`, `ck-`. The pointer package is **not** modified; the id charset is **not** widened | the review's citation of `internal/pointer/pointer.go:17` and `internal/core/tools/handlers.go:7751-7762` was re-checked; §14 asserts the charset against the substrate's own regex — `cpj-…` matches, `cpj_…` does not, and `core.GenerateID()`'s 16 bare hex matches | none. The ids are new, so nothing observes the old shape |
+| **A2** | The `cpj_`/`ct_`/`ck_` prefixes are **rejected by the pointer parser** | §1.4, §3.1–§3.3, §4.1, §4.4, §6.4 | the ids use a **hyphen**: `cpj-`, `ct-`, `ck-`. The pointer package is **not** modified; the id charset is **not** widened | the review's citation of `internal/pointer/pointer.go:17` and `internal/core/tools/handlers.go:7857-7862` was re-checked; §14 asserts the charset against the substrate's own regex — `cpj-…` matches, `cpj_…` does not, and `core.GenerateID()`'s 16 bare hex matches | none. The ids are new, so nothing observes the old shape |
 | **A3** | `project_names.name` is case-sensitive, so "no silent duplicate" is not a database guarantee | §2.5, §4.1 | `name TEXT NOT NULL COLLATE NOCASE` plus a **partial unique index over live rows**. The case-insensitive tier and the exact tier collapse into one index lookup, and the **ambiguous branch becomes unreachable** — which is now asserted rather than assumed | §14: the case-variant INSERT is refused with a UNIQUE violation, the stored name keeps its case, and a case-insensitive lookup finds exactly one row | none for the storage. The *API* still checks first, so a friendly message precedes the constraint |
 | **A4** | The `focus` unique index has the same hole | §2.4, §4.1 | `focus TEXT COLLATE NOCASE` — the **column** carries the collation, so the uniqueness index and every resolution query are case-insensitive without a per-query `COLLATE` clause | §14: the case-variant focus is refused; the case-insensitive lookup finds exactly one live thread | the column-level collation also makes `focus = 'X'` case-insensitive **everywhere**, including in queries an implementer writes later. That is the intent |
 | **A5** | `ON DELETE CASCADE` contradicts §2.7 and non-goal 6, and it really deletes the ledger | §2.7, §4.1, §5 (T8, T15), §10 | `ON DELETE RESTRICT` on all four ownership references. The soft-delete path never issues a `DELETE`, so the destructive path is **refused by the schema**, not merely discouraged | §14: `DELETE FROM projects` raises a foreign-key violation and names/threads/checkpoints all survive | the schema is now physically forward-only: a legitimate purge (Stage 5) must be written explicitly, and it will have to choose its own mechanism |
@@ -1470,8 +1616,48 @@ Every finding of the independent review, and where this revision answers it.
 | **A12** | Putting the DDL in `internal/core/schema.go` replicates project identity into the **shared database** | §1.4, §4.1, §4.6, §6.2, §8 (AT7), §10 | the DDL is owned by the **migration**, not by any schema slice. `attachShared` propagates only `BaseTables` (`internal/core/db.go:2132` and `:2160`), so a migration-owned table never reaches the shared schema. **AT7** opens a hermetic `NewTestSharedDM` and asserts the four names are present in `main` and absent from `shared` | the review's reproduction: appending the DDL to `BaseTables` created all four tables in the shared schema, with `shared.project_names → shared.projects ON DELETE CASCADE`. The `attachShared` loops were re-read at `internal/core/db.go:2094-2175` | a future author who adds the tables to `BaseTables` for convenience would silently reintroduce it. AT7 is the standing guard, and it is a Stage 1 gate |
 | **A13** | `--confirm <project-id>` is a naming check, not authorization | §2.7, §9 (OD3), §10 (non-goal 9) | the document now says plainly that the confirmation is a **typo guard** and **not** authorization, and that **any agent in the workspace can delete any project**. The mitigation is auditability: `projects.created_by` / `deleted_by`, plus a `system_audit_log` row — **no fifth table**. The two options are compared in OD3 and **the operator's acknowledgement is required** | the review's finding — `projects` has no owner column and `resolve` hands out every live project's id and name — was re-checked and is accurate | **the residual risk is real and is stated, not mitigated**: the workspace is a single-operator trust domain. A real actor/authorization model needs an identity primitive MPM does not have |
 | **A14** | §6.1 and §6.2 contradict the precedent they invoke | §6.1, §6.2 | the document adopts **Stage A's shape**: the base DDL is deliberately not changed, the four tables are created by the migration, and a fresh database gets them through **the same code path**. There is **one** DDL definition, so there is no drift to guard against — and AT2 compares the **full `sqlite_master.sql` text**, not a table list | the review's citation of PR #225's unresolved issue #3 was re-read and is accurate: *"adding these to the base DDL would create a second definition of them and a drift risk"* | none. The cost is that a reader of `internal/core/schema.go` will not see the tables — which is the trade Stage A made and documented |
-| **A15** | A `decision` reference has no pointer | §1.4, §2.3, §4.4, §9 (OD5), §8 (AT16, AT26) | **add `mpm://decision/<id>` as a third pointer kind**, with the substrate's own `mpm://theory/` shape (`GetMemory` + a `collection == 'decisions'` assertion). The reference vocabulary and the pointer vocabulary are now the same set | **one correction to the review's finding:** a decision is a `memories` row with `collection='decisions'` (`internal/core/citation.go:121`, `internal/core/epistemology_tools.go:501`), and `GetMemory` selects by id without a collection filter (`internal/core/web_db.go:258`) — so `mpm://memory/<decision-id>` **does** resolve the decision today. The defect is therefore not "the pointer cannot be followed" but "the pointer kind does not carry the reference kind, so the resolver cannot assert it". The `theory` branch (`internal/core/tools/handlers.go:7588-7596`) is the precedent | a decision is now reachable under two URIs (`mpm://memory/…` and `mpm://decision/…`) — exactly as a theory already is. The new kind adds a **typed** address, not a new address space. Stated in OD5 |
-| **A16** | The change surface omits `docs/SPEC.md`, and the allow-list instruction is wrong about which list | §1.4, §6.1, §6.3, §6.4, §8 (AT8) | `CanonicalMPMSchema` gains **four** entries; `RuntimeCanonicalSchema` is **unchanged**. `docs/SPEC.md` is added to the change surface, and the document states why the `Docs-Impact: none` trailer is not available here | `TestCanonicalSchemaSync` (`internal/core/sql_dump_canonical_schema_test.go:22`) scans every non-test `*.go` in `internal/core` and requires an **exact two-way match** with `CanonicalMPMSchema`; the Continuity DDL is a `CREATE TABLE` in Go source, so the four names are found by the scanner and must be listed. The `docs_check` dependency pairing (`scripts/docs_check/exemptions.py:291-303`) was re-read | none |
+| **A15** | A `decision` reference has no pointer | §1.4, §2.3, §4.4, §9 (OD5), §8 (AT16, AT26) | **add `mpm://decision/<id>` as a third pointer kind**, with the substrate's own `mpm://theory/` shape (`GetMemory` + a `collection == 'decisions'` assertion). The reference vocabulary and the pointer vocabulary are now the same set | **one correction to the review's finding:** a decision is a `memories` row with `collection='decisions'` (`internal/core/citation.go:121`, `internal/core/epistemology_tools.go:501`), and `GetMemory` selects by id without a collection filter (`internal/core/web_db.go:258`) — so `mpm://memory/<decision-id>` **does** resolve the decision today. The defect is therefore not "the pointer cannot be followed" but "the pointer kind does not carry the reference kind, so the resolver cannot assert it". The `theory` branch (`internal/core/tools/handlers.go:7660-7668`) is the precedent | a decision is now reachable under two URIs (`mpm://memory/…` and `mpm://decision/…`) — exactly as a theory already is. The new kind adds a **typed** address, not a new address space. Stated in OD5 |
+| **A16** | The change surface omits `docs/SPEC.md`, and the allow-list instruction is wrong about which list | §1.4, §6.1, §6.3, §6.4, §8 (AT8) | `CanonicalMPMSchema` gains **four** entries; `RuntimeCanonicalSchema` is **unchanged**. `docs/SPEC.md` is added to the change surface, and the document states why the `Docs-Impact: none` trailer is not available here | `TestCanonicalSchemaSync` (`internal/core/sql_dump_canonical_schema_test.go:22-62`) scans every non-test `*.go` in `internal/core` and requires an **exact two-way match** with `CanonicalMPMSchema`; the Continuity DDL is a `CREATE TABLE` in Go source, so the four names are found by the scanner and must be listed. The `docs_check` dependency pairing (`scripts/docs_check/exemptions.py:291-303`) was re-read | none |
+
+### 12.2 D1–D6 — the revision-2 independent review
+
+The second independent review ([comment 6655135875](https://github.com/flowbyte-com/mpm/pull/224#issuecomment-6655135875),
+verdict *ACCEPT WITH REQUIRED CORRECTIONS*) verified A1–A16 as **15 resolved and verified, 1 (A13) resolved
+in principle but inadequately specified**, and raised six remaining defects. All six are corrected
+here. The **D** prefix is the review's; the original draft's open decisions are **R1–R10** (§9.2), so
+the two vocabularies cannot be confused.
+
+| # | Finding | Corrected location | Resolution | Verification evidence | Remaining risk |
+|---|---|---|---|---|---|
+| **D1** | **[medium · required]** The checkpoint's `supersedes` pointer had no thread or project containment — it was a single-column FK, so a cross-thread *and* a cross-project supersession were both representable, and T13's stated mechanism did not cover it | §4.1 (the DDL and its notes), §5 (T13), §8 (AT19), §3.3, §11 | `supersedes` is now a **composite** foreign key: `FOREIGN KEY (supersedes, thread_id) REFERENCES continuity_checkpoints(id, thread_id) ON DELETE RESTRICT`. The referenced unique key `idx_continuity_checkpoints_id_thread ON continuity_checkpoints(id, thread_id)` already existed — it was the parent key the `last_checkpoint_id` FK needed — so **no new index is required**. The composite closes the cross-thread case *and* the cross-project case, because the referenced checkpoint must carry the same `thread_id` and therefore the same project | §14.2 E18–E23: the same-thread supersession is accepted; the cross-thread, cross-project and nonexistent-id supersessions are all **refused** with a foreign-key violation; an `UPDATE` that repoints `supersedes` across threads is refused; no row survives a refused write; the parent index exists and is over `(id, thread_id)` | `ON DELETE SET NULL` is unusable on a composite FK — SQLite applies the action to **every** column of the child key, so it would try to null the `NOT NULL` `thread_id` and refuse the delete with a misleading `NOT NULL constraint failed`. `RESTRICT` refuses the same delete with the correct error, and refusing it is right: the checkpoint ledger is append-only (§2.7). The cost is that a superseded brief can no longer be deleted at all — which is what "append-only" means, and it is now enforced by the schema rather than only by policy |
+| **D2** | **[low]** §11 miscounted the composite foreign keys — it said "four", the schema declared three composite plus four single-column, and T13 enumerated only the three | §4.1's notes, §5 (T13), §11 | the counts are now stated once and consistently: **seven foreign-key clauses — four composite, three single-column**. The composite four are `(superseded_by, project_id)`, `(last_checkpoint_id, id)`, `(thread_id, project_id)` and `(supersedes, thread_id)`; the single-column three are `project_names.project_id`, `continuity_threads.project_id` and `continuity_checkpoints.project_id`. T13 enumerates all four, and §11's row now names them | the count is read off the DDL itself; §14.2's probe executes the DDL and the FK behaviour is asserted case by case | none. Note the coincidence worth stating plainly: §11's "four" was *right for the wrong reason* — it counted the four single-column clauses' partners rather than the composite ones. After D1 there really are four composite clauses, and the claim they support is now true |
+| **D3** | **[low]** §3.2's worked example violated the revision's own id rule — its four pointers carried underscore ids (`d_91…`, `l_04…`, `m_55…`, `w_12…`) that the substrate's own parser rejects, and the ellipsis character is not in the pointer charset either | §3 in full, §4.1's id note, §14.2 | every example id in the document is now a **real id shape**: the three Continuity ids are their prefix plus the 16 lowercase hex characters `core.GenerateID()` returns, and the four artifact ids are the substrate's own 16 bare hex. The DDL's id comments were changed from "32 lowercase hex" to **"16 lowercase hex"** to match, so the DDL and the examples now describe one scheme. §3 also states what is stored versus what is returned (see D8) | §14.2 E24–E27: the probe **transcribes the substrate's real inline `parsePointerURI`** (`internal/core/tools/handlers.go:7827-7864`) and runs it over **every `mpm://` URI in the document**; the four literal pointers all parse, the one pointer shown as rejected really is rejected, and every literal id matches the generated-id shape it claims | none for the examples. The **real** lesson is that a hand-written example can drift from the rule it illustrates, so the check is now mechanical rather than editorial: a pointer that does not parse fails the probe |
+| **D4** | **[low]** The citation audit's headline numbers did not hold for the pointer surface — four load-bearing citations were stale, and §14.4's narrative "corrected" one of them **in the wrong direction** | §1.4, §4.4, §14.1, §14.4 | the four are corrected, in `internal/core/tools/handlers.go` and `internal/core/tools/registry_list.go`: the kind check → **line 7562**; the theory branch → **lines 7660–7668**; the inline id-charset copy → **lines 7857–7862**; the `mpm_resolve` registry description → **lines 759–762**. The stale values are written as bare line numbers so that none of them is a copyable `path:line` citation §14.4's narrative is rewritten to state the **root cause** — the previous revision's audit ran against a tree **20 commits behind** the declared base, so it validated the citations against the wrong files | §14.4's audits now run **against the declared base `f8d4b95a`**, not against whatever tree happens to be checked out, and the instruments were strengthened: a **declaration-anchored** audit (50 / 50 citations point at the symbol's *declaration*, not merely at a line containing it) and a **generic drift screen** over every citation | the root cause was a *process* defect, not a clerical one: an audit that runs against an arbitrary checkout validates nothing. The audits now take the base as a parameter and refuse to run against a tree that is not it |
+| **D5** | **[low]** §2.2 over-claimed AT8 — it said the four table names are "enumerated by name in AT1 and AT8", but AT8 said only "a dump containing the four new tables" | §2.2, §8 (AT8) | AT8 now **names all four** — `projects`, `project_names`, `continuity_threads`, `continuity_checkpoints` — in its mechanism *and* in its assertion, and it additionally asserts that the allow-list grows by **exactly four** and that `RuntimeCanonicalSchema` contains **none** of the four. §2.2's claim is now true of AT8 and says so explicitly | the claim is checkable against the matrix rather than against the prose | none |
+| **D6** | **[low]** OD3's "the Stage 1 *columns* are unaffected by the answer" was **conditional** — it holds only under the recommended (α); option (β) would need an owner column and possibly a fifth table, so Stage 1's DDL would change | §9 (OD3), §12.1 (A13), §7 (Stage 1's stop condition) | the claim now reads **"under the recommended (α) … unaffected"**, and OD3's *Blocks* column says that (β) would change **Stage 1's DDL** and require §4.1, AT1, AT2 and the restore allow-list to be re-issued. Stage 1's stop condition now names it: if the operator chooses (β), Stage 1 is **not** ready to implement until the schema is re-issued | the operator's answer is still **not assumed**; the document states the dependency rather than resolving it | **the one outstanding decision that touches Stage 1.** It does not block Stage 1 *if* (α) is accepted; it does block it if (β) is chosen. No operator decision is invented here |
+
+### 12.3 The revision-2 review's optional refinements (D7–D12)
+
+The review recorded six refinements as **optional, not required for Stage 1**. They are taken here
+because each is a one-line specification change that removes a real ambiguity, and none of them
+alters the architecture. The DDL-affecting one (D7) is called out separately.
+
+| # | Refinement | Taken? | Where |
+|---|---|---|---|
+| **D7** | The `JSON` columns have **NUMERIC affinity**, and `json_valid` does not mean "array" — `'42'` is silently coerced to the integer 42 and `'1.5'` to the real 1.5 | **yes — a DDL change** | §4.1: the four columns now carry `CHECK (json_valid(x) AND json_type(x) = 'array'))`. §14.2 E17: `'{}'`, `'42'`, `'1.5'`, `'"str"'` and `'null'` are all **refused** on every one of the four columns; an array is stored as TEXT and is never coerced |
+| **D8** | The **stored reference shape** was unspecified — which is where the residual type confusion lives: whether the pointer is stored or derived was never stated, and a `memory` reference naming a decision's id resolves and presents a decision as a memory | **yes** | §2.3 now states the stored shape exactly: `{kind, id, note?}`, with the `pointer` **derived, never stored**. §4.2's `checkpoint` write parameters carry the same contract. `resume` **asserts the reference kind against the artifact's collection** and reports a mismatch as `kind_mismatch`; the one direction that stays open (a `memory` reference naming a decision) is **bounded and reported** — the resolved artifact's own collection is returned alongside it. §3.2 shows what is stored versus what is returned, and the `state` entry's `summary`/`status`/`verification` are read **live from the work row**, not copied into the checkpoint |
+| **D9** | The **checkpoint id-generation strategy** was unspecified, while T2 borrowed the `evidence` pattern's `ON CONFLICT(id) DO NOTHING` rationale — which only bites for a *content-derived* id | **yes** | §5's T2 now states that the id is the substrate's own `core.GenerateID()` — 16 lowercase hex, **not** content-derived — so the `ON CONFLICT` clause is a **belt-and-braces safety net that in practice never fires**, and the restart-safety actually comes from the transaction rollback. The clause is kept because it is free and because a future content-derived id would need it |
+| **D10** | The `stale` block's **join column** was unnamed and its **multi-handoff rule** was ambiguous — `session_handoffs.session_id` is the legacy UNIQUE column, and `mpm_session_id` is not unique, so "the session that wrote the checkpoint" can match several handoffs | **yes** | §4.2 now names the join column (`mpm_session_id`, the canonical identity — `handoffColumnMPMSession`, `internal/core/handoff.go:420`; the legacy `session_id` is optional correlation metadata) and the selection rule: **the same one the substrate already uses** for its own previous-handoff lookup — `ORDER BY ended_at DESC, rowid DESC LIMIT 1` (`internal/core/handoff.go:468-469`) — so `session_end_state` names exactly one row, deterministically |
+| **D11** | **AT2** should compare by **name**, not by row order — the fresh path creates the base tables first and the migration's four last, so the *ordered* `sqlite_master` list differs even when the schemas are identical | **yes** | §8's AT2 now says "**grouped by name, not by row order**", and explains why: an ordered comparison would fail a correct implementation |
+| **D12** | §2.7 should say that the foreign-key guarantee is **DSN-borne** — `SqliteWriteDSN` carries `_foreign_keys=1`, and `InitSchema` deliberately does not enable them itself | **yes** | §2.7 now says so, and records the consequence: a connection opened without that DSN parameter would not enforce the containment guarantees, because SQLite defaults foreign keys **off** — which is why the acceptance matrix must open its databases the way production does |
+
+**One is deliberately not taken.** The review's §4 observation — that a `memory` reference can name a
+decision's id and resolve untyped — is **partly** a specification gap and partly an inherited
+property of the substrate's own `mpm://memory/`. D8 closes the specification half: the stored shape
+is fixed, the pointer is derived, and the typed kinds assert their collection. The inherited half is
+not closed by this document, because closing it would mean narrowing the substrate's existing
+`mpm://memory/` semantics — a change to an existing public contract, which is out of scope here and is
+recorded in §9 as a decision rather than made silently.
 
 ---
 
@@ -1537,7 +1723,7 @@ not a materialisation limit. The budget table in §2.3 now cites only the two ma
 numbers.
 
 **P6 — Two small things worth adding to the tool surface.** `mpm_resolve`'s registry description
-(`internal/core/tools/registry_list.go:755-758`) enumerates the pointer kinds and must be edited
+(`internal/core/tools/registry_list.go:759-762`) enumerates the pointer kinds and must be edited
 alongside the resolver — §6.4 now gives that file a row that covers the description edit, not just
 the new registry entry. And §6.1's claim that `mpm_help` picks the tool up automatically is true
 and is now backed by the citations: `cmd/mpm/call.go:550` iterates `tools.Registry`, and
@@ -1557,8 +1743,8 @@ All citations re-checked at `main` @ `f8d4b95aefe60a0880409a8905ce2c4d92d22c00`.
 | §1.2 — handoff 90-day TTL; scratchpad 24 h; works' lifecycle | `internal/core/gc_tools.go:117` (`PruneHandoffs(90)`), `internal/core/schema.go:1444` (`ephemeral_scratchpad`), `internal/core/work.go:53-63` ✓ |
 | §1.3 — `lifecycle_events.project_id` is the only `project_id` column; "never fabricated" | `internal/core/schema.go:883` (the table), `:914` (the column), `internal/core/lifecycle_events.go:500` ✓ |
 | §1.3 — no repository scoping anywhere; the git-evidence rule | `internal/core/db.go:7181-7234` ✓ (verbatim, including *"unavailable, not inferred"*) |
-| §1.4 — the five pointer kinds | `internal/core/tools/handlers.go:7490`, `internal/core/tools/registry_list.go:755-758` ✓ |
-| §1.4 — the pointer id charset is `^[a-z0-9-]+$` | `internal/pointer/pointer.go:17`; the inline copy at `internal/core/tools/handlers.go:7751-7762` ✓ |
+| §1.4 — the five pointer kinds | `internal/core/tools/handlers.go:7562`, `internal/core/tools/registry_list.go:759-762` ✓ |
+| §1.4 — the pointer id charset is `^[a-z0-9-]+$` | `internal/pointer/pointer.go:17`; the inline copy at `internal/core/tools/handlers.go:7857-7862` ✓ |
 | §1.4 — the polymorphic reference vocabulary | `internal/core/schema.go:355` — `memory\|theory\|decision\|lesson\|work` ✓ |
 | §1.4 — `ProvenanceArtifactTypes`, seven values, CHECK-enforced | `internal/core/schema.go:23-26` ✓ |
 | §1.4 — the restore allow-lists | `internal/core/sql_dump_validator.go:141` (`CanonicalMPMSchema`), `:231` (`RuntimeCanonicalSchema`) ✓ |
@@ -1566,7 +1752,7 @@ All citations re-checked at `main` @ `f8d4b95aefe60a0880409a8905ce2c4d92d22c00`.
 | §1.4 — the materialisation budgets | `internal/core/contextual_materialization.go:102-107` (6000 / 800) ✓ |
 | §2.3 — **a decision is a `memories` row with `collection='decisions'`** | `internal/core/citation.go:121`, `internal/core/epistemology_tools.go:501` ✓ |
 | §2.3 — `GetMemory` does **not** filter by collection | `internal/core/web_db.go:258` ✓ |
-| §4.4 — the `mpm://theory/` precedent | `internal/core/tools/handlers.go:7588-7596` ✓ |
+| §4.4 — the `mpm://theory/` precedent | `internal/core/tools/handlers.go:7660-7668` ✓ |
 | §2.8 — no version-based CAS anywhere | searched: no `WHERE … version =` write exists; `memory_revisions.version` (`internal/core/schema.go:255`) is a ledger counter ✓ |
 | §4.1 — `core.GenerateID()` returns 16 bare hex characters | `internal/core/db.go:5283` ✓ |
 | §4.1 — the substrate's DDL slices | `internal/core/schema.go`: `BaseTables:38`, `ReferenceTables:949`, `WorkTables:1050`, `ReferenceIndexes:1160`, `CommonIndexes:1172` ✓ |
@@ -1602,8 +1788,19 @@ reproducible from this document: the DDL is in §4.1 and the cases are listed he
 | E14 | the A→B / B→A rename swap | **both refused** — `UNIQUE constraint failed: project_names.name`; a rename onto another project's live *alias* is refused too. The alias graph cannot form a cycle |
 | E15 | the id charset | `cpj-…`, `ct-…`, `ck-…` all match `^[a-z0-9-]+$`; `cpj_…`, `ct_…`, `ck_…` do **not**; the substrate's own 16-hex `GenerateID()` output matches |
 | E16 | the §4.1 DDL text itself | the probe **extracts** the DDL from §4.1 of this document and executes that text, so the claim "the DDL was executed verbatim" is checkable rather than asserted; the extracted statements are compared against an independently authored reference copy and must match |
+| **E17** | **the JSON columns hold arrays, not coerced scalars** (D7) | on **each** of `facts`, `hypotheses`, `state`, `next_actions`: `{}`, `42`, `1.5`, `"str"` and `null` are all **refused** with `CHECK constraint failed`; an array is stored as **TEXT**; `[1,2]` stays TEXT — the NUMERIC affinity cannot coerce an array |
+| **E18** | **a same-thread supersession** (D1) | **accepted** — `(ck-3, ct-1, cpj-a, supersedes ck-1)` lands, and the stored `thread_id` and `supersedes` are what was written |
+| **E19** | **a cross-thread supersession** (D1) | **refused** — `FOREIGN KEY constraint failed` |
+| **E20** | **a cross-project supersession** (D1) | **refused** — `FOREIGN KEY constraint failed` |
+| **E21** | **a supersession of a nonexistent checkpoint** (D1) | **refused** — `FOREIGN KEY constraint failed` |
+| **E22** | **an `UPDATE` that repoints `supersedes` across threads** (D1) | **refused** — the containment holds on the update path, not only on the insert path |
+| **E23** | **the append-only ledger** (D1) | deleting a **superseded** checkpoint is **refused** (`FOREIGN KEY constraint failed`); a checkpoint that supersedes nothing **is** deletable; and no row survives any refused supersession |
+| **E24** | **the referenced unique key** (D1) | `idx_continuity_checkpoints_id_thread` exists and its columns are exactly `(id, thread_id)` — the composite parent key the `supersedes` FK needs |
+| **E25** | **every `mpm://` pointer in the document** (D3) | the probe transcribes the substrate's **real** inline `parsePointerURI` (`internal/core/tools/handlers.go:7827-7864`) and runs it over every URI the document contains: the **four literal pointers all parse**, and the one pointer the document shows as rejected **really is rejected** |
+| **E26** | **every example id's shape** (D3) | each literal pointer's id is either `prefix + 16 lowercase hex` (the Continuity ids) or the substrate's own **16 bare hex** (the artifact ids) — and the document contains **no** pointer with an unjustified underscore id |
+| **E27** | **the `SET NULL` alternative, measured** (D1) | SQLite applies `ON DELETE SET NULL` to **every** column of the child key, so on the composite FK it tries to null the `NOT NULL` `thread_id` and refuses the delete with `NOT NULL constraint failed: ck.thread_id` — a misleading error for the right refusal. `RESTRICT` refuses the same delete with `FOREIGN KEY constraint failed` |
 
-**34 assertions, 0 failures.**
+**77 assertions, 0 failures.**
 
 **The probe reads the specification.** It does not carry its own copy of the DDL: it extracts the
 §4.1 `sql` block from this file and executes that text, then asserts that the extracted statements
@@ -1632,7 +1829,7 @@ apart silently — a change to §4.1 that breaks an invariant breaks the probe o
 | What is the continuity unit today? | **The session** — `mpm_session_id` + `session_handoffs` + `work_events` | §1.1, §1.2 |
 | What is the durable-commitment mechanism? | `works` + `work_events`, event-sourced, `UNIQUE(work_id, event_index)` | §1.2 |
 | What is the polymorphic reference idiom? | `(artifact_id, artifact_type)` with `memory\|theory\|decision\|lesson\|work` | `internal/core/schema.go:355` |
-| What is the pointer vocabulary? | five kinds — `blob`, `work`, `memory`, `lesson`, `theory` — and their id charset | `internal/core/tools/handlers.go:7490`; `internal/pointer/pointer.go:17` |
+| What is the pointer vocabulary? | five kinds — `blob`, `work`, `memory`, `lesson`, `theory` — and their id charset | `internal/core/tools/handlers.go:7562`; `internal/pointer/pointer.go:17` |
 | **Where does a decision live?** | **a `memories` row with `collection='decisions'`** — so it is already reachable via `mpm://memory/<id>` | `internal/core/citation.go:121`; `internal/core/web_db.go:258` |
 | What is the provenance vocabulary? | `ProvenanceArtifactTypes` — 7 values, CHECK-enforced, widening needs a table rebuild | `internal/core/schema.go:23-26` |
 | What is the CAS idiom? | state-column predicates; **no version-based CAS** | §2.8 |
@@ -1640,35 +1837,77 @@ apart silently — a change to §4.1 that breaks an invariant breaks the probe o
 | What is the restart-safe insert idiom? | an identity-derived id plus `ON CONFLICT(id) DO NOTHING` | `internal/core/evidence_store.go:92-105` |
 | What are the projection budgets? | 6000-byte detail budget, 800-byte per-item cap | `internal/core/contextual_materialization.go:102-107` |
 | **Where is the 20-item ceiling?** | **`SelectionHardMaxItems = 20`** — a *selection* limit, not a materialisation limit | `internal/core/contextual_selection.go:46` |
-| Where does the tool surface live? | one `Registry` slice; `mpm_<noun>`; `action` + `params`; `oneOf` per action | `internal/core/tools/registry_list.go:5-22` |
-| What must a new table be added to? | `CanonicalMPMSchema` — the restore security allow-list; `RuntimeCanonicalSchema` is for tables *not* declared in Go source | `internal/core/sql_dump_validator.go:141`; `internal/core/sql_dump_canonical_schema_test.go:22` |
-| **Which slice does `attachShared` propagate?** | **`BaseTables`** — twice, for tables and indexes. A migration-owned table never reaches the shared schema | `internal/core/db.go:2132`, `:2160` |
+| Where does the tool surface live? | one `Registry` slice; `mpm_<noun>`; `action` + `params`; `oneOf` per action | `internal/core/tools/registry_list.go:5-23` |
+| What must a new table be added to? | `CanonicalMPMSchema` — the restore security allow-list; `RuntimeCanonicalSchema` is for tables *not* declared in Go source | `internal/core/sql_dump_validator.go:141`; `internal/core/sql_dump_canonical_schema_test.go:22-62` |
+| **Which slice does `attachShared` propagate?** | **`BaseTables`** — twice, for tables and indexes. A migration-owned table never reaches the shared schema | `internal/core/db.go:2094` (the function), `:2132` (the CREATE TABLE loop), `:2160` (the CREATE INDEX loop) |
 | Is the current directory ever a resolution input? | **No** — and the substrate has a documented rule against it | `internal/core/db.go:7181-7234` |
 | How does the substrate inject a migration failure? | a trigger that aborts the **sentinel write**, which is *after* the DDL — a strictly stronger rollback | [PR #225](https://github.com/flowbyte-com/mpm/pull/225), unresolved issue #1 |
+| §4.2/D10 — the handoff join column is `mpm_session_id`, and it is **not** unique | `handoffColumnMPMSession = "mpm_session_id"`; *"mpm_session_id is NEVER unique, so multiple handoffs from the same lifecycle all share the same value"*; the substrate's own selection is `ORDER BY ended_at DESC, rowid DESC LIMIT 1` | `internal/core/handoff.go:420`, `:157-158`, `:468-469` ✓ |
+| §4.2/D10 — the legacy `session_id` column is the **UNIQUE** one | `session_id TEXT UNIQUE` in the `session_handoffs` table; the `mpm_session_id` column was added by a later migration | `internal/core/schema.go:1321`; `internal/core/migration_session_handoffs_mpm_session_id.go:128` ✓ |
+| §5/D9 — the checkpoint id is the substrate's own 16-hex `GenerateID()`, not content-derived | `func GenerateID()` → `hex.EncodeToString(hash[:])[:16]` | `internal/core/db.go:5283-5291` ✓ |
+| §2.7/D12 — foreign keys are DSN-borne, and `InitSchema` does not enable them itself | `_foreign_keys=1` in the production DSN; `InitSchema` deliberately omits the `PRAGMA` | `internal/core/db.go:98-155`, `:2914-2921` ✓ |
+| §4.4/D1 — SQLite applies `ON DELETE SET NULL` to **every** column of a composite child key | measured: on the composite FK it tries to null the `NOT NULL` `thread_id` and refuses the delete with `NOT NULL constraint failed`, whereas `RESTRICT` refuses it with `FOREIGN KEY constraint failed` | §14.2 E27 ✓ |
 
 ### 14.4 The citation audit
 
-This document makes **119 file-and-line citations** into the substrate's source. A drifted line
-number would make a claim look verified when it is not, so the citations were audited mechanically
-rather than by eye:
+This document makes **135 file-and-line citations** into the substrate's source. A drifted line
+number would make a claim look verified when it is not, so the citations are audited mechanically
+rather than by eye — and, since the revision-2 review, against the **declared base** rather than
+against whatever tree happens to be checked out.
 
-| Audit | Result |
-|---|---|
-| **Every citation resolves** — the file exists at that path and the cited line range is inside it and non-blank | **119 / 119** |
-| **Every load-bearing citation is verified by content** — the cited window actually contains the symbol or literal the sentence claims | **41 / 41** |
-| **Every § cross-reference resolves** — no `§n.m` points at a heading that does not exist | **35 / 35** |
-| **The document's internal agreement** — the stage gates agree with the acceptance matrix, every A1–A16 and P1–P6 is dispositioned, every OD/D row states its status and what it blocks, and no superseded claim survives: not the old table count, not a proposed `CASCADE`, not an underscore id | **145 / 145** |
-| **The DDL probe** — §14.2 | **34 / 34** |
+**The root cause of the previous revision's four stale citations, stated plainly.** The previous
+audit ran against a working tree that was **20 commits behind `main`** — an ancestor of the declared
+base `f8d4b95a`, not the base itself. Every citation therefore resolved and every load-bearing
+window was checked, but against **the wrong files**: the pointer-parser surfaces had moved by 72 to
+106 lines between that tree and the base. The audit was not weak; it was aimed at the wrong target.
+An audit that runs against an arbitrary checkout validates nothing, so the base is now an explicit
+parameter and every audit below refuses to run against a tree that is not it.
 
-The content audit caught two citation errors that eyeballing had missed, and both are corrected:
-the `mpm_resolve` registry description is at `internal/core/tools/registry_list.go:755-758` (not
-`759-762`), and the `session_handoffs` `ended_at` / `ended_state` columns are at
-`internal/core/schema.go:1322-1323` (the table opens at `:1319`). The audit also caught the §3
-example lifecycle still using the draft's underscore ids after §4.1 had changed them to the
-hyphen form — a contradiction a reader of §3 alone would have seen.
+| Audit | Criterion | Result |
+|---|---|---|
+| **Resolution** | the cited file exists, and the cited line range is inside it and non-blank | **135 / 135** |
+| **Content** | the cited window contains the symbol or literal the sentence claims | **52 / 52** |
+| **Declaration-anchored** | the cited window contains the symbol's **declaration** — the `var X =`, `func X(`, `CREATE TABLE X` form — and not merely a later mention of it | **59 / 59** |
+| **Generic drift screen** | over **every** citation: a symbol the sentence talks about exists in the cited file but **not at the cited lines** | **no unexplained drift** (see the residual class below) |
+| **§ cross-references** | no `§n.m` points at a heading that does not exist | **46 / 46** |
+| **Internal agreement** | the stage gates agree with the acceptance matrix, every A1–A16, D1–D6 and P1–P6 is dispositioned, every OD/R row states its status and what it blocks, and no superseded claim survives | **167 / 167** |
+| **The DDL probe** | §14.2 — the DDL executed verbatim, plus the pointer parser run over every URI in the document | **77 / 77** |
 
-**How a reviewer can reproduce all of it.** The DDL probe is self-contained and reads the DDL out
-of §4.1 of this file. The citation and consistency audits are three scripts over this file and the
-repository tree; they are disposable and are not part of the repository, because a documentation
-commit that adds a checker for its own prose is a different kind of change than the one this
-revision is.
+**The four citations the revision-2 review found stale, and their corrected values.**
+
+| the claim | the file | the previous revision cited | the correct location at `f8d4b95a` |
+|---|---|---|---|
+| the five pointer kinds (the kind check) | `internal/core/tools/handlers.go` | line 7490 | **line 7562** |
+| the `mpm://theory/` precedent (the collection assertion) | `internal/core/tools/handlers.go` | lines 7588–7596 | **lines 7660–7668** |
+| the inline id-charset copy | `internal/core/tools/handlers.go` | lines 7751–7762 | **lines 7857–7862** |
+| the `mpm_resolve` registry description | `internal/core/tools/registry_list.go` | lines 755–758 | **lines 759–762** |
+
+The stale values are written as bare line numbers on purpose: a stale citation in a copyable
+`path:line` form is exactly the defect this table is about, so none of them is written in one.
+
+The previous revision's §14.4 narrative reported the last of these as "corrected **to** lines
+759–762 (not 759–762)" — it had moved the citation *in the wrong direction*, which is what a check
+against the wrong tree produces. The corrected narrative is above, and the claim it makes is the one
+the instruments support.
+
+**The generic drift screen has one residual false-positive class, and it is named rather than
+hidden.** The screen flags a citation when a symbol the sentence mentions exists in the cited file
+but not at the cited lines. That rule is sound for a sentence that cites one file and whose subject
+*is* a symbol, but a sentence whose subject is a **tool** rather than a symbol — or one that cites
+several files — can be flagged when the identifier belongs to a different citation in the same
+sentence. **Four** such cases remain, and each was inspected by hand: the `session_id` axis row
+(cited to `getOrMakeSessionID`, the per-process id generator), the pointer-convention row (cited to
+the kind check; `mpm_resolve` is the tool's name, not the cited symbol), the
+`epistemology_tools.go` row (cited to the `"decisions"` collection; `GetMemory` belongs to the
+*other* citation in the same sentence), and T2's row (cited to the `ON CONFLICT(id) DO NOTHING`
+insert; `WithTx` is the row's subject). **All four citations are correct.** The
+declaration-anchored audit is the rigorous instrument; the screen is a sweep that finds candidates,
+not a verdict.
+
+**How a reviewer can reproduce all of it.** The DDL probe is self-contained: it reads the DDL out
+of §4.1 of this file, executes it against a disposable SQLite database, and runs the substrate's
+**real** inline pointer parser over every `mpm://` URI the document contains — so "the DDL was
+executed verbatim" and "every pointer in this document parses" are both checkable rather than
+asserted. The citation and consistency audits are disposable scripts over this file and a checkout
+**at the declared base**; they are not part of the repository, because a documentation commit that
+adds a checker for its own prose is a different kind of change than the one this revision is.
