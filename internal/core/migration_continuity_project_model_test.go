@@ -57,7 +57,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -425,119 +424,68 @@ func continuityDeclaredTables(t *testing.T) []string {
 	return names
 }
 
-// continuityRepoRoot returns the repository root, or "" when it cannot
-// be found.
+// continuityAllowListInvariants checks the HISTORY-INDEPENDENT invariant
+// of AT8.
 //
-// It is deliberately NON-FATAL, unlike the package's findRepoRoot:
-// internal/core is its own Go module, so it can be consumed — and its
-// tests run — without the repository root's Makefile. The allow-list
-// delta measurement is a bonus measurement; it must not turn a
-// missing checkout into a test failure.
-func continuityRepoRoot() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return ""
+// It takes only the final state — the table names the approved DDL
+// declares, the canonical restore allow-list, and the runtime
+// allow-list — and nothing else. In particular it does NOT read the
+// commit graph.
+//
+// That is the whole point. A test whose result depends on repository
+// history rather than on the code can turn a correct tree red: a
+// commit split, a post-merge build where HEAD equals the base branch,
+// or a checkout without history are all ordinary events, not defects,
+// and none of them may change whether this schema is correct.
+//
+// The invariant is:
+//
+//   - every table the approved DDL declares appears EXACTLY ONCE in the
+//     canonical allow-list;
+//   - none of them appears in the runtime allow-list.
+//
+// "Exactly once" rather than "at least once": a duplicated entry is not
+// a different allow-list, it is a mistake, and the canonical list is a
+// security surface.
+//
+// The invariant deliberately says NOTHING about the size of the
+// canonical list. The list is shared — an independent feature adding
+// its own tables to it changes the total without changing anything
+// about this change — so a size assertion would fail on a correct
+// merge. What the list's contents are is enforced history-free in both
+// directions by TestCanonicalSchemaSync: every CREATE TABLE in this
+// package must be on the canonical list, and every name on the
+// canonical list must have a table behind it.
+func continuityAllowListInvariants(declared, canonical, runtime []string) []string {
+	var violations []string
+	for _, name := range declared {
+		switch n := continuityCount(canonical, name); {
+		case n == 0:
+			violations = append(violations, fmt.Sprintf(
+				"%q is declared by the Continuity DDL but is absent from CanonicalMPMSchema — "+
+					"a dump declaring it would be rejected by mpm restore-db", name))
+		case n > 1:
+			violations = append(violations, fmt.Sprintf(
+				"%q appears %d times in CanonicalMPMSchema, want exactly once", name, n))
+		}
+		if continuityCount(runtime, name) > 0 {
+			violations = append(violations, fmt.Sprintf(
+				"%q is in RuntimeCanonicalSchema. It has its CREATE TABLE in source, so it "+
+					"belongs in the canonical list the source-scan guard checks.", name))
+		}
 	}
-	for i := 0; i < 8; i++ {
-		// A .git directory means this is a checkout of the repository.
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return dir
-		}
-		// The root Makefile is the other marker of the repository root.
-		if _, err := os.Stat(filepath.Join(dir, "Makefile")); err == nil {
-			if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-				return dir
-			}
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return ""
+	return violations
 }
 
-// continuityAllowListDelta measures the names THIS CHANGE added to
-// CanonicalMPMSchema.
-//
-// It diffs the allow-list across the commit that introduced this
-// change's migration file — so it measures the change, not the
-// repository. That distinction is the whole point: the allow-list is
-// shared, and another branch adding its own tables to it (C's Skill
-// Packages P1 adds three) changes the total without changing anything
-// about this change. A pinned absolute total would then be a merge
-// hazard — a test that fails on a correct merge.
-//
-// It needs the git history. When the history is unavailable (a tarball
-// checkout, a shallow clone without the introducing commit) the
-// measurement reports "not taken" rather than guessing.
-func continuityAllowListDelta(t *testing.T) (added []string, measured bool) {
-	t.Helper()
-	root := continuityRepoRoot()
-	if root == "" {
-		return nil, false
-	}
-	const validatorRel = "internal/core/sql_dump_validator.go"
-	const migrationRel = "internal/core/migration_continuity_project_model.go"
-
-	// The commit that introduced this change's migration file.
-	out, err := exec.Command("git", "-C", root, "log", "--diff-filter=A",
-		"--format=%H", "-1", "--", migrationRel).Output()
-	if err != nil {
-		return nil, false
-	}
-	commit := strings.TrimSpace(string(out))
-	if commit == "" {
-		return nil, false
-	}
-
-	// The allow-list before and after that commit.
-	beforeSrc, err := exec.Command("git", "-C", root, "show",
-		commit+"^:"+validatorRel).Output()
-	if err != nil {
-		return nil, false
-	}
-	afterSrc, err := exec.Command("git", "-C", root, "show",
-		commit+":"+validatorRel).Output()
-	if err != nil {
-		return nil, false
-	}
-
-	before := continuityParseAllowList(string(beforeSrc))
-	after := continuityParseAllowList(string(afterSrc))
-	for name := range after {
-		if !before[name] {
-			added = append(added, name)
+// continuityCount returns how many times name appears in list.
+func continuityCount(list []string, name string) int {
+	n := 0
+	for _, s := range list {
+		if s == name {
+			n++
 		}
 	}
-	return added, true
-}
-
-// continuityParseAllowList extracts the names of the
-// CanonicalMPMSchema list from a copy of sql_dump_validator.go.
-func continuityParseAllowList(src string) map[string]bool {
-	out := map[string]bool{}
-	start := strings.Index(src, "var CanonicalMPMSchema = []string{")
-	if start < 0 {
-		return out
-	}
-	rest := src[start:]
-	end := strings.Index(rest, "\n}")
-	if end < 0 {
-		return out
-	}
-	for _, line := range strings.Split(rest[:end], "\n") {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "\"") {
-			continue
-		}
-		name := strings.TrimSuffix(strings.TrimPrefix(trimmed, "\""), "\",")
-		if name != "" {
-			out[name] = true
-		}
-	}
-	return out
+	return n
 }
 
 // continuityDiffSnapshots reports the tables whose rows changed between two
@@ -1486,62 +1434,46 @@ func TestContinuityAT8RestoreAllowList(t *testing.T) {
 			"  A dump of a legitimate MPM database must be restorable.", err)
 	}
 
-	// CanonicalMPMSchema contains the four new entries.
-	for _, table := range continuityTables {
-		if !continuityContains(CanonicalMPMSchema, table) {
-			t.Errorf("%q is missing from CanonicalMPMSchema — a dump declaring it would be rejected", table)
-		}
-	}
-
-	// The DDL declares exactly four tables. This is what makes "four"
-	// OBSERVABLE rather than asserted: the count comes from the
-	// migration's own DDL, which TestContinuityProjectModelDDLIsByteIdentical
-	// pins to the approved §4.1.
-	declared := continuityDeclaredTables(t)
-	if len(declared) != len(continuityTables) {
-		t.Errorf("the Continuity DDL declares %d table(s) (%v), want exactly %d",
-			len(declared), declared, len(continuityTables))
-	}
-	for _, name := range declared {
-		if !continuityContains(CanonicalMPMSchema, name) {
-			t.Errorf("the DDL declares %q but the allow-list does not name it", name)
-		}
-	}
-
-	// The allow-list grew by exactly four BECAUSE OF THIS CHANGE.
+	// The approved DDL declares exactly the four expected tables.
 	//
-	// Measured ACROSS THE COMMIT THAT INTRODUCED THIS CHANGE, not as
-	// an absolute total. The allow-list is shared: another branch
-	// adding its own tables to it (C's Skill Packages P1 adds three)
-	// changes the total without changing anything about this change,
-	// so a pinned total would be a merge hazard — a test that fails on
-	// a correct merge. What AT8 wants is observable is that THIS
-	// change moved the allow-list by four names, and that is exactly
-	// what this measures.
-	added, measured := continuityAllowListDelta(t)
-	if !measured {
-		t.Logf("the allow-list delta was NOT measured: the git history needed to attribute " +
-			"it to this change is unavailable (a tarball checkout, or a clone without the " +
-			"introducing commit). The DDL-derived assertions above still hold.")
-	} else {
-		sort.Strings(added)
-		want := append([]string(nil), continuityTables...)
-		sort.Strings(want)
-		if len(added) != len(continuityTables) || !continuitySameSet(added, want) {
-			t.Errorf("this change added %v to CanonicalMPMSchema, want exactly %v",
-				added, want)
-		} else {
-			t.Logf("this change added exactly %d names to CanonicalMPMSchema: %v",
-				len(added), added)
-		}
+	// This is what makes "four" OBSERVABLE rather than asserted: the
+	// count and the names come from the migration's own DDL, which
+	// TestContinuityProjectModelDDLIsByteIdentical pins to the
+	// approved §4.1 by hash.
+	declared := continuityDeclaredTables(t)
+	if !continuitySameStrings(declared, continuityTables) {
+		t.Errorf("the Continuity DDL declares %v, want exactly %v",
+			declared, continuityTables)
 	}
 
-	// RuntimeCanonicalSchema contains none of the four.
-	for _, table := range continuityTables {
-		if continuityContains(RuntimeCanonicalSchema, table) {
-			t.Errorf("%q is in RuntimeCanonicalSchema. These four have their CREATE TABLE in "+
-				"source, so they belong in the canonical list the source-scan guard checks.", table)
-		}
+	// The allow-list invariant — HISTORY-INDEPENDENT.
+	//
+	// continuityAllowListInvariants reads ONLY the final state: the
+	// names the approved DDL declares, the canonical allow-list and
+	// the runtime allow-list. It does not read the commit graph, so
+	// its result cannot change when the work is split across commits,
+	// when the branch is merged into main, when the checkout has no
+	// history, or when another feature adds its own tables to the
+	// shared allow-list.
+	//
+	// It deliberately does NOT assert an absolute allow-list size.
+	// The canonical list is shared: an independent feature adding its
+	// own tables to it changes the total without changing anything
+	// about this change, so a pinned total would be a merge hazard —
+	// a test that fails on a correct merge.
+	//
+	// What the allow-list's CONTENTS are is enforced history-free in
+	// both directions by TestCanonicalSchemaSync: every CREATE TABLE
+	// in this package must be on the canonical list, and every name
+	// on the canonical list must have a table behind it. What remains
+	// for AT8 is the pair the guards cannot express: the four tables
+	// the approved DDL declares must be on the canonical list exactly
+	// once each, and none of them may be on the runtime list.
+	if violations := continuityAllowListInvariants(
+		declared, CanonicalMPMSchema, RuntimeCanonicalSchema,
+	); len(violations) != 0 {
+		t.Errorf("the restore allow-list does not satisfy the Continuity invariant:\n  %s",
+			strings.Join(violations, "\n  "))
 	}
 
 	// Negative control: the allow-list is still load-bearing. Removing
@@ -1557,6 +1489,179 @@ func TestContinuityAT8RestoreAllowList(t *testing.T) {
 	if err := NewDumpValidator(trimmed).Validate(dump.String()); err == nil {
 		t.Fatal("the dump was still accepted after `projects` was removed from the allow-list. " +
 			"The allow-list is not load-bearing, so the acceptance above proves nothing.")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AT8's invariant, across repository shapes
+// ---------------------------------------------------------------------------
+
+// TestContinuityAllowListInvariantIsHistoryIndependent proves that the
+// allow-list invariant depends on the CODE, not on the commit graph.
+//
+// The scenarios below are the repository shapes a correct change
+// passes through. They differ in history and in the size of the shared
+// allow-list; they do not differ in the schema, and none of them may
+// change the verdict.
+//
+//   - the work split across commits (the migration file added before
+//     the allow-list registration, or the other way round);
+//   - the branch merged into main, including the case where HEAD IS
+//     the base branch — the state a build of the merged result sees;
+//   - a source archive or a shallow checkout, with no usable history;
+//   - the combined tree with an independent feature (Skill Packages
+//     P1), where the allow-list grows by three more tables.
+//
+// The first four have the SAME final state, and that is the point: the
+// invariant reads only the final state, so its verdict is identical in
+// all of them. The last one has a larger allow-list and must also
+// pass — an independent feature changing the total must not cause a
+// false failure.
+//
+// The negative rows are the counterweight: the invariant must still
+// REJECT a genuinely missing, duplicated or misfiled entry. An
+// invariant that cannot fail is not an invariant.
+func TestContinuityAllowListInvariantIsHistoryIndependent(t *testing.T) {
+	declared := continuityDeclaredTables(t)
+	if !continuitySameStrings(declared, continuityTables) {
+		t.Fatalf("the Continuity DDL declares %v, want exactly %v", declared, continuityTables)
+	}
+
+	// The real allow-list satisfies the invariant.
+	baseline := continuityAllowListInvariants(declared, CanonicalMPMSchema, RuntimeCanonicalSchema)
+	if len(baseline) != 0 {
+		t.Fatalf("the real allow-list violates the Continuity invariant:\n  %s",
+			strings.Join(baseline, "\n  "))
+	}
+
+	// An independent feature's three tables (Skill Packages P1, PR
+	// #228). Used here only as a synthetic "another feature changed
+	// the shared allow-list" — the invariant must not notice.
+	independent := []string{"skill_packages", "skill_package_files", "skill_package_blobs"}
+	combined := append(append([]string(nil), CanonicalMPMSchema...), independent...)
+
+	withoutProjects := make([]string, 0, len(CanonicalMPMSchema))
+	for _, name := range CanonicalMPMSchema {
+		if name != "projects" {
+			withoutProjects = append(withoutProjects, name)
+		}
+	}
+	duplicatedProjects := append(append([]string(nil), CanonicalMPMSchema...), "projects")
+	runtimeWithProjects := append(append([]string(nil), RuntimeCanonicalSchema...), "projects")
+
+	scenarios := []struct {
+		name      string
+		canonical []string
+		runtime   []string
+		want      int
+	}{
+		{
+			name:      "the feature branch, as it stands",
+			canonical: CanonicalMPMSchema,
+			runtime:   RuntimeCanonicalSchema,
+			want:      0,
+		},
+		{
+			name:      "the work split across commits: the migration file added before the allow-list registration",
+			canonical: CanonicalMPMSchema,
+			runtime:   RuntimeCanonicalSchema,
+			want:      0,
+		},
+		{
+			name:      "merged into main: HEAD is the base branch",
+			canonical: CanonicalMPMSchema,
+			runtime:   RuntimeCanonicalSchema,
+			want:      0,
+		},
+		{
+			name:      "a source archive or shallow checkout: no usable history",
+			canonical: CanonicalMPMSchema,
+			runtime:   RuntimeCanonicalSchema,
+			want:      0,
+		},
+		{
+			name:      "combined with an independent feature: the allow-list grows by three more tables",
+			canonical: combined,
+			runtime:   RuntimeCanonicalSchema,
+			want:      0,
+		},
+		{
+			name:      "NEGATIVE: a required allow-list name is missing",
+			canonical: withoutProjects,
+			runtime:   RuntimeCanonicalSchema,
+			want:      1,
+		},
+		{
+			name:      "NEGATIVE: a required allow-list name is duplicated",
+			canonical: duplicatedProjects,
+			runtime:   RuntimeCanonicalSchema,
+			want:      1,
+		},
+		{
+			name:      "NEGATIVE: a required name is on the runtime allow-list instead",
+			canonical: CanonicalMPMSchema,
+			runtime:   runtimeWithProjects,
+			want:      1,
+		},
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			violations := continuityAllowListInvariants(declared, sc.canonical, sc.runtime)
+			if len(violations) != sc.want {
+				t.Fatalf("the invariant reported %d violation(s), want %d:\n  %s",
+					len(violations), sc.want, strings.Join(violations, "\n  "))
+			}
+		})
+	}
+
+	// The four history shapes have the same final state, so they must
+	// have the same verdict — and the same as the real allow-list.
+	for _, sc := range scenarios[:4] {
+		violations := continuityAllowListInvariants(declared, sc.canonical, sc.runtime)
+		if len(violations) != len(baseline) {
+			t.Errorf("the scenario %q produced %d violation(s) but the real allow-list produced %d — "+
+				"the invariant must depend on the final state only",
+				sc.name, len(violations), len(baseline))
+		}
+	}
+
+	// And the independent feature's three tables must not change the
+	// verdict either.
+	combinedViolations := continuityAllowListInvariants(declared, combined, RuntimeCanonicalSchema)
+	if len(combinedViolations) != len(baseline) {
+		t.Errorf("adding an independent feature's tables changed the verdict: %d violation(s) -> %d",
+			len(baseline), len(combinedViolations))
+	}
+}
+
+// TestContinuityAcceptanceTestsDoNotDependOnGitHistory is the
+// structural guard behind the invariant above.
+//
+// The invariant is durable because it reads only the final state. This
+// guard makes that property structural rather than a matter of
+// discipline: if a future edit reintroduces a Git invocation into this
+// file, the acceptance tests could again acquire a dependence on the
+// commit graph, and this fails.
+//
+// A test whose result depends on repository history rather than on the
+// code is a test that can turn a correct tree red — the split-commit
+// failure this file once had is the proof. The guard is here so that
+// the failure cannot come back quietly.
+//
+// The needle is assembled at runtime so that this guard does not match
+// its own source text.
+func TestContinuityAcceptanceTestsDoNotDependOnGitHistory(t *testing.T) {
+	src, err := os.ReadFile("migration_continuity_project_model_test.go")
+	if err != nil {
+		t.Fatalf("read this file: %v", err)
+	}
+	needle := "exec" + ".Command("
+	if strings.Contains(string(src), needle) {
+		t.Fatalf("this file invokes %s. The Continuity acceptance tests must not depend on the "+
+			"commit graph: a correct tree can fail under a benign commit split, under a "+
+			"post-merge build where HEAD is the base branch, or in a checkout without history.",
+			needle)
 	}
 }
 
