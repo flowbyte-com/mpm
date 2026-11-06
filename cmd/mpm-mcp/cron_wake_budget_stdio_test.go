@@ -19,14 +19,19 @@ package main
 
 import (
 	"database/sql"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
 
 // plantCronBacklog inserts n due cron-kind wakes directly, in one
-// transaction, and returns the DB handle so the caller can inspect it.
+// statement, and returns the DB handle so the caller can inspect it.
+//
+// The rows are seeded with a recursive CTE rather than n prepared
+// statements: 10,080 round-trips cost about a second of CPU, which is
+// enough to matter on a CI runner that is already running every other
+// package's tests in parallel. The CTE does it in single-digit
+// milliseconds.
 func plantCronBacklog(t *testing.T, dbPath string, n int, age time.Duration) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite3", dbPath)
@@ -35,33 +40,22 @@ func plantCronBacklog(t *testing.T, dbPath string, n int, age time.Duration) *sq
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback()
 	now := time.Now().Add(-age).Unix()
-	stmt, err := tx.Prepare(`
+	if _, err := db.Exec(`
+		WITH RECURSIVE seq(x) AS (
+			SELECT 0 UNION ALL SELECT x + 1 FROM seq WHERE x + 1 < ?
+		)
 		INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata)
-		VALUES (?, ?, ?, 0, 'mpm-scheduler', ?)
-	`)
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-	defer stmt.Close()
-	for i := 0; i < n; i++ {
-		if _, err := stmt.Exec(
-			fmt.Sprintf("wk-stdio-budget-%06d", i),
-			now+int64(i),
-			"cron:epistemic-compaction",
-			`{"kind":"cron","source":"cron","task_id":"epistemic-compaction",`+
-				`"directive_id":"mpm-seed-epistemic-compaction"}`,
-		); err != nil {
-			t.Fatalf("insert %d: %v", i, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
+		SELECT 'wk-stdio-budget-' || substr('000000' || x, -6),
+		       ? + x,
+		       'cron:epistemic-compaction',
+		       0,
+		       'mpm-scheduler',
+		       '{"kind":"cron","source":"cron","task_id":"epistemic-compaction",' ||
+		       '"directive_id":"mpm-seed-epistemic-compaction"}'
+		FROM seq
+	`, n, now); err != nil {
+		t.Fatalf("seed %d cron wakes: %v", n, err)
 	}
 	return db
 }
