@@ -2955,7 +2955,7 @@ Companion tools: `check_wakes`, `list_wakes`. Architecture: `scheduled_wakes` ta
 
 *System-kind wakes (snapshot, critic, GC, broadcast) execute unattended via the 60s ticker — for the tasks the agent would forget.*
 
-For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; after each handler returns, the scheduler calls MarkFired (`fired=1`) which here records the system-kind terminal transition (the handler's completion is itself the terminal event — internal to the scheduler, no separate user/agent ack is needed). Notification-kind and untagged wakes pass through to the opportunistic fold unchanged. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Build via `make build` (to `.build/bin/`); promote to the install prefix with `make install` or `./install.sh`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters system kinds from the opportunistic fold so the two surfaces don't race for the same wake.
+For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; after each handler returns, the scheduler calls MarkFired (`fired=1`) which here records the system-kind terminal transition (the handler's completion is itself the terminal event — internal to the scheduler, no separate user/agent ack is needed). The agent-owned kinds — `notification` (explicitly or untagged), `cascade` and `cron` — pass through to the opportunistic fold unchanged, and the fold delivers and retires them. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Build via `make build` (to `.build/bin/`); promote to the install prefix with `make install` or `./install.sh`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters the SCHEDULER-owned kinds out of the opportunistic fold so the two surfaces don't race for the same wake.
 
 **Wake ownership.** A wake kind has exactly one owner, and the fold only ever retires what it owns.
 
@@ -2963,6 +2963,8 @@ For system-level actions that must run unattended regardless of user presence (p
 * The **scheduler** owns every other kind — `snapshot`, `critic_audit`, `gc`, `broadcast`, `cascade_summary`, `drill`, and any kind a future binary introduces. The scheduler runs them through a registered handler and retires them after the handler returns. Registering a handler for an agent-owned kind is refused, because the fold would retire the wake before the handler could run it.
 
 The agent's list is an allowlist, so the default is deny: an unknown kind is not the agent's. The practical consequence for the public surface is that `mpm_wakes check` with `kinds=["*"]` surfaces every AGENT-OWNED pending wake and no scheduler-owned wake, and a `kinds` list naming a scheduler-owned kind surfaces nothing. A scheduler-owned wake that is already persisted is never reclassified, deleted or retired by an agent-facing operation.
+
+**The default fold and the wildcard fold are the same predicate.** `CheckPendingWakes`'s no-kinds branch — the one every CLI and MCP request runs — filters to the same agent-owned allowlist as `kinds=["*"]`. It used to match notification wakes only, which meant the two kinds the fold owns but the default omitted (`cascade` and `cron`) were delivered to nobody: a `cron` wake became due, was invisible on every agent surface, and was eventually retired by the cron retention sweep with its `directive_id` undelivered. The `cascade` wake had the same fate, although its producer documents "immediate delivery on next check_wakes" and `check_wakes` without a `kinds` argument uses the default branch. One predicate for "what the fold delivers" is the point of the allowlist: a kind the agent owns is delivered by the fold, and a kind the scheduler owns never is.
 
 **Arming authorisation.** Ownership is enforced in both directions. The agent-facing scheduling surface (`mpm_wakes schedule`) may arm only the kinds the agent owns — `notification` (explicitly or untagged), `cascade` and `cron`. A request naming a scheduler-owned kind (`drill`, `broadcast`, `snapshot`, `gc`, `critic_audit`, `cascade_summary`) or an unknown kind is refused and no wake row is created. The refusal names the kind and the armable set, so the caller can correct itself.
 
@@ -2977,6 +2979,10 @@ The gate is at the agent-facing boundary, not in the DB-layer producer: `Schedul
 *Recurring workflows with fail-fast directive validation — catch typos at upsert, not silent wake drops at 3 AM.*
 
 For work that should run **on a schedule** rather than once, `scheduled_tasks` is the registry of recurring agentic workflows. The `mpm-scheduler` daemon's 60s tick loop polls `scheduled_tasks WHERE status='active' AND next_run_at <= ?` and, for each due task, injects a standard `scheduled_wakes` row in the same transaction as the `next_run_at` rollover. A daemon crash between injection and rollover cannot double-fire. The injected wake surfaces to the agent on its next MCP call via the standard opportunistic fold.
+
+The injected row carries `metadata.kind=cron`, so it is an agent-owned wake, and the default fold delivers it on the agent's next call. The row also carries `metadata.directive_id` — the prime directive the agent has to consult — and the fold's `<system_wake_notification>` block renders that `directive_id` for the agent, so the agent does not need a follow-up lookup to find it.
+
+**The cron retention window is the delivery deadline.** The scheduler's cron retention sweep retires a `cron` row once `CronRetentionWindow` (one hour) has elapsed since its `target_time`. That window is how long the delivery opportunity stays open: inside it, the fold delivers the row; outside it, the row is retired as dead weight and the next tick supersedes it. The retirement is a compare-and-set on `fired=0`, so a row the fold settled in the meantime is skipped rather than overwritten, and it writes an `expired.reason=cron_1h_retention` audit note into the row's metadata, so a swept row is distinguishable from a delivered one. A cron tick is recurring — `scheduled_tasks.last_run_at` records that the task ran — so a tick whose wake was never delivered is not a lost obligation; that is why the cron window is an hour and not the notification sweep's seven days.
 
 ```
 mpm tasks upsert epistemic-compaction \
@@ -3012,7 +3018,7 @@ BEGIN;
   -- 2. INSERT wake rows (one per due task)
   INSERT INTO scheduled_wakes (id, target_time, reason, created_by, metadata)
     VALUES (?, ?, 'cron:<task_id>', 'mpm-scheduler',
-            '{"source":"cron","task_id":"<id>","directive_id":"<id>"}');
+            '{"kind":"cron","source":"cron","task_id":"<id>","directive_id":"<id>"}');
   -- 3. ROLLOVER next_run_at
   UPDATE scheduled_tasks
     SET last_run_at=?, next_run_at=?, updated_at=?
@@ -3020,7 +3026,7 @@ BEGIN;
 COMMIT;
 ```
 
-The wake injected by the cron engine has `reason='cron:<task_id>'` and `metadata={source:'cron', task_id, directive_id}`. The agent sees the wake on its next call, parses `cron:` prefix to recognize the source, reads `metadata.directive_id`, looks up the directive via `mpm_context action=read_directives`, executes. **No new wake-handling code path** — the cron engine plugs into the existing wake queue.
+The wake injected by the cron engine has `reason='cron:<task_id>'` and `metadata={kind:'cron', source:'cron', task_id, directive_id}`. The `kind` tag is what the `check_wakes` kinds taxonomy matches on (`kinds: ["cron"]`), and it is also what makes the row agent-owned, so the default opportunistic fold delivers it. The agent sees the wake on its next call, parses `cron:` prefix to recognize the source, reads `metadata.directive_id`, looks up the directive via `mpm_context action=read_directives`, executes. **No new wake-handling code path** — the cron engine plugs into the existing wake queue.
 
 **Companion schema** (for the database-design curious):
 
@@ -5035,6 +5041,8 @@ The `!hasOldConf` clause treats a brand-new confidence record as if its prior va
 > The cap throttles **delivery**, not intent creation. It never discards, suppresses, or coalesces pending intents — those live in `epistemic_cascade_outbox` and are unaffected. It only bounds how many cascade-flavoured wake rows surface to the agent in a single `check_wakes` call.
 
 Notification and cron wakes are unaffected. Nine pending cascade wakes drain over three `check_wakes` calls: 3, 3, 3.
+
+The cap applies to the default (no-`kinds`) `check_wakes` call as well as to an explicit `kinds=["cascade"]` request, because the default fold selects the agent-owned allowlist and therefore includes `cascade`. The wakes beyond the cap stay pending (`fired=0`) and are delivered by a later call.
 
 ```sql
 SELECT * FROM scheduled_wakes

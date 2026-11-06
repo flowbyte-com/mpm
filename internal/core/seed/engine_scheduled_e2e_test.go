@@ -79,12 +79,26 @@ func TestEpistemicCompactionEndToEnd(t *testing.T) {
 	require.Contains(t, wakeMetadata, `"directive_id":"mpm-seed-epistemic-compaction-policy"`,
 		"injected wake must carry the directive_id in metadata, got %q", wakeMetadata)
 
-	// 5. CheckPendingWakes returns the wake. Pass kinds=["cron"]
-	// so the surface returns cron-injected wakes. The CLI / MCP
-	// paths both use the same surface.
-	due, err := dm.CheckPendingWakes(time.Now(), []string{"cron"})
+	// 5. CheckPendingWakes returns the wake.
+	//
+	// The DEFAULT branch — the no-kinds branch every CLI and MCP
+	// request runs — returns the cron wake. It used to require
+	// kinds=["cron"], because the default branch matched only
+	// notification wakes, so a cron wake was never delivered to an
+	// agent on its next call. The explicit kinds=["cron"] path is
+	// unchanged and is pinned separately by
+	// TestCheckPendingWakes_ExplicitCronKindStillDelivers
+	// (internal/core/wake_ownership_test.go) — it cannot be exercised
+	// here because the fold RETIRES what it delivers, so a second
+	// CheckPendingWakes on the same row finds nothing.
+	due, err := dm.CheckPendingWakes(time.Now(), nil)
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(due), 1, "at least one cron wake must be due")
+	require.GreaterOrEqual(t, len(due), 1, "the default fold must return the due cron wake")
+	require.Equal(t, "cron", due[0]["metadata"].(map[string]interface{})["kind"],
+		"the default fold must return the cron wake")
+	require.Equal(t, "mpm-seed-epistemic-compaction-policy",
+		due[0]["metadata"].(map[string]interface{})["directive_id"],
+		"the default fold must return the cron wake with the directive_id the agent consults")
 
 	// 6. Render the wake notification. The rendered line must
 	// include the directive_id so the agent doesn't have to do a

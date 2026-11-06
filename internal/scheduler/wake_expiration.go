@@ -553,12 +553,55 @@ func (r *sweepRetirer) retire(ctx context.Context, id, reason string, nowUnix in
 // table grew past 2,300 rows even though the scheduler is healthy.
 //
 // What this sweep does. After CronRetentionWindow has elapsed since
-// target_time, a cron row is permanently obsolete — its corresponding
-// scheduled_tasks row already carries `last_run_at` as the audit
-// trail, and the scheduled_wakes row itself has zero informational
-// value (it records a one-shot event, not state). The sweep retires
-// the row (fired=1, fired_at=now, audit note) so it drops out of the
-// wakes_overdue doctor counter and out of any `WHERE fired=0` query.
+// target_time, a cron row is retired (fired=1, fired_at=now, audit
+// note) so it drops out of the doctor's "Pending cron wakes" line and
+// out of any `WHERE fired=0` query. It does not change the
+// `wakes_overdue` health counter, which counts notification- and
+// cascade-kind wakes only (WakeNotificationAndCascadeKindFilter);
+// the cron backlog has its own counter and its own escalation ladder
+// (cmd/mpm/service_doctor.go).
+//
+// WHY A CRON ROW CAN BE RETIRED. A cron row is a RECURRING-TICK
+// SIGNAL, not a one-shot commitment. The durable record that the task
+// ran is scheduled_tasks.last_run_at, which the injection writes in
+// the same transaction as the wake (internal/core/scheduled_tasks.go).
+// A tick whose wake is never delivered is not a lost obligation: the
+// task is recurring and the next tick fires again. That is why the
+// cron window is an hour and not the notification sweep's seven days.
+//
+// IT IS NOT "ZERO INFORMATIONAL VALUE". An earlier version of this
+// comment said the cron row "has zero informational value (it records
+// a one-shot event, not state)". That was wrong once the row became
+// the agent's delivery path: the injection writes directive_id into
+// the wake's metadata precisely so the agent can read it "at
+// wake-time without an extra lookup", and the agent's wake
+// notification renders it. The row IS the signal; the sweep retires
+// it because the SIGNAL has gone stale, not because it was empty.
+//
+// CronRetentionWindow IS THE DELIVERY DEADLINE. The cron wake is
+// agent-owned and is delivered by the opportunistic fold
+// (core.CheckPendingWakes) — the same path that delivers a
+// notification. This window is how long that delivery opportunity
+// stays open. Within it, the fold delivers the row and the row's
+// fired=1 stops the sweep from selecting it. Outside it, the row is
+// dead weight: the tick is long past, the next tick supersedes it,
+// and the row would otherwise accumulate — over weeks of uptime the
+// table grew past 2,300 rows even though the scheduler was healthy.
+//
+// The sweep cannot consume a row the agent is being handed. The
+// retirement UPDATE carries an `AND fired = 0` guard, so it is a
+// compare-and-set on the retirement flag: a row the fold settled
+// between the candidate SELECT and the UPDATE is SKIPPED, not
+// overwritten. And the retirement is never silent — it writes the
+// audit note expired.reason=cron_1h_retention into the row's
+// metadata, so an operator can tell a swept row from a delivered one.
+//
+// The window also bounds the fold's burst. A cron task on a
+// one-minute schedule produces ~60 undelivered rows per window, so a
+// returning agent receives at most one window's worth in a single
+// fold. Widening the window widens that burst, and the sweep's
+// capacity (60 rows/hour, 180 on catch-up) is calibrated against the
+// one-hour window; the two must move together.
 //
 // Diagnostic contract for `mpm doctor` / `mpm status`. The cron-wake
 // retention is intentionally visible to operators via the
@@ -637,6 +680,14 @@ func (r *sweepRetirer) retire(ctx context.Context, id, reason string, nowUnix in
 // becomes eligible for retirement. 1 hour matches the cadence
 // (60-min cleanup) with a small audit buffer so operators inspecting
 // `mpm list_wakes` immediately after a cron fire still see the row.
+//
+// It is also the cron wake's DELIVERY DEADLINE: the cron wake is
+// agent-owned and the opportunistic fold delivers it, so this window
+// is how long that delivery opportunity stays open. It is an hour
+// rather than the notification sweep's seven days because a cron tick
+// is recurring — scheduled_tasks.last_run_at records that the task
+// ran, so a missed tick is not a lost obligation. See the section
+// above for the full argument.
 const CronRetentionWindow = 1 * time.Hour
 
 // CronRetentionCadence gates the tick handler — a sweep runs at most

@@ -291,6 +291,17 @@ func BlockedWakeKindError(kind string) error {
 //     fold is their delivery path: the row carries the directive_id
 //     the agent has to consult.
 //
+// Every one of these three is delivered by the DEFAULT fold — the
+// no-kinds branch that every CLI and MCP request runs. A kind that is
+// agent-owned but delivered only by an explicit kinds=["..."] request
+// is delivered to nobody in practice: the agent does not know to ask,
+// and the retention sweep eventually retires the row. The producer
+// writes the directive_id into the cron wake's metadata precisely so
+// the agent can read it "at wake-time without an extra lookup"
+// (internal/core/scheduled_tasks.go), and FormatWakeNotification
+// renders it into the <system_wake_notification> block — an affordance
+// that is dead code unless the default fold delivers the row.
+//
 // Everything else — snapshot, critic_audit, gc, broadcast,
 // cascade_summary, drill, and any kind a future binary introduces — is
 // scheduler-owned, because the scheduler is what runs it.
@@ -1032,9 +1043,13 @@ func isValidWakeResolveReason(reason string) bool {
 //
 // Kinds filter:
 //
-//   - kinds nil/empty: backward-compatible default. Surfaces notification
-//     wakes (kind='notification' or kind absent on metadata). Cron-injected
-//     and other system-kind wakes are excluded.
+//   - kinds nil/empty: the DEFAULT delivery path — every AGENT-OWNED
+//     pending wake, whatever its kind. This is the same predicate as
+//     the "*" branch below, and it must stay the same predicate: the
+//     fold is the delivery path for every kind the agent owns, so a
+//     default that is narrower than the allowlist silently starves the
+//     kinds it omits. See AgentOwnedWakeKinds for the membership and
+//     the per-kind reason.
 //   - kinds contains "*": surface every AGENT-OWNED pending wake
 //     regardless of kind. The scheduler's kinds are NOT crossed into:
 //     a wake the scheduler owns must reach its handler, and a fold
@@ -1046,10 +1061,9 @@ func isValidWakeResolveReason(reason string) bool {
 //
 // Cascade wake cap:
 //
-//	When kinds includes "cascade" (or is "*"), cascade wakes
-//	(metadata.kind == "cascade") are limited to MaxCascadeWakePerCheck per
-//	call. Notification and cron wakes are unaffected. Uncapped cascade
-//	wakes remain pending for the next call.
+//	Cascade wakes (metadata.kind == "cascade") are limited to
+//	MaxCascadeWakePerCheck per call. Notification and cron wakes are
+//	unaffected. Uncapped cascade wakes remain pending for the next call.
 func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]map[string]interface{}, error) {
 	nowUnix := now.Unix()
 	tx, err := dm.db.Begin()
@@ -1075,11 +1089,27 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 	}
 
 	switch {
-	case includeAll:
+	case includeAll, len(kinds) == 0:
 		// Every AGENT-OWNED pending wake, whatever its kind. The
 		// scheduler's kinds are excluded here: the fold retires a wake
 		// it delivers, and a scheduler-owned wake must reach its
 		// handler instead.
+		//
+		// The default (no kinds) branch is the SAME predicate as the
+		// wildcard. They were not, and the difference was a defect:
+		// the default branch matched only notification wakes, so the
+		// two kinds the fold owns but the default omitted — cron and
+		// cascade — were never delivered. A cron wake was injected,
+		// became due, was invisible to every agent, and was retired
+		// by the cron retention sweep with its directive_id undelivered.
+		// A cascade wake was never delivered either, although its
+		// producer documents "immediate delivery on next check_wakes"
+		// and check_wakes without a kinds argument uses this branch.
+		//
+		// One predicate for "what the fold delivers" is the whole
+		// point of AgentOwnedWakeKinds: a kind the agent owns is
+		// delivered by the fold, and a kind the scheduler owns never
+		// is.
 		whereExtra = ` AND (` + wakeKindSQL(AgentOwnedWakeKinds, true) + `)`
 	case len(kinds) > 0:
 		// Only the requested kinds, and only the ones that are the
@@ -1090,9 +1120,6 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 			return []map[string]interface{}{}, nil
 		}
 		whereExtra = ` AND (` + wakeKindSQL(allowed, false) + `)`
-	default:
-		// Backward-compat default: only notification-kind wakes.
-		whereExtra = ` AND (` + wakeKindSQL([]string{"notification"}, true) + `)`
 	}
 
 	// A CORRUPT ROW IS NEVER FOLDED. The fold RETIRES what it
