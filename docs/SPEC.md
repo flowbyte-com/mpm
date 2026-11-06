@@ -66,6 +66,7 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.6 [Telemetry Sidecar (mpm-telemetry)](#66-telemetry-sidecar-mpm-telemetry)
    - 6.7 [Epistemic Compaction](#67-epistemic-compaction)
    - 6.8 [Skill Package Storage (P1 — storage only)](#68-skill-package-storage-p1--storage-only)
+   - 6.9 [Project-Scoped Continuity Storage (Stage 1 — storage only)](#69-project-scoped-continuity-storage-stage-1--storage-only)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -1493,7 +1494,7 @@ There is no explicit `mpm ops init --shared` command. Creation happens implicitl
 3. `attachShared` ensures the directory exists (`os.MkdirAll`, mode 0700), ATTACHes the file via `ATTACH DATABASE '<path>' AS shared` (creating it if absent — SQLite creates the file on first write), and runs the canonical `BaseTables` DDL (`CREATE TABLE IF NOT EXISTS`) plus `SafeMigrations` against the attached schema.
 4. After boot, `mpm ops shared status` confirms: `MPM_SHARED_DB` value, `shared_attached: true|false`, `shared.memories` row count, `is_global=1` count, file size.
 
-The shared DB uses the **same table schema** as the local DB (`memories`, `theories`, `evidence`, `directives`, etc.). Volatile host-only tables (`scheduled_wakes`, local `sessions`, transient `scratchpads`) are deliberately **excluded** from the shared schema — their lifecycle is host-local and would be wrong if cross-shared. Cross-DB queries are plain SQL: `SELECT … FROM shared.memories WHERE …`. No IPC, no separate service.
+The shared DB uses the **same table schema** as the local DB (`memories`, `theories`, `evidence`, `directives`, etc.). Volatile host-only tables (`scheduled_wakes`, local `sessions`, transient `scratchpads`) are deliberately **excluded** from the shared schema — their lifecycle is host-local and would be wrong if cross-shared. The Project-Scoped Continuity tables (`projects`, `project_names`, `continuity_threads`, `continuity_checkpoints`) are excluded for the same reason: a project's identity is durable inside one workspace, and broadcasting it would give the same project id to unrelated work — see [§6.9](#69-project-scoped-continuity-storage-stage-1--storage-only). Cross-DB queries are plain SQL: `SELECT … FROM shared.memories WHERE …`. No IPC, no separate service.
 
 #### How Agents Know to Use It
 
@@ -1933,6 +1934,54 @@ The registration also has a second, deliberate consequence, described next.
 4. The old binary's `restore-db` will still refuse a new-binary dump. Restore with the **old** binary from a backup taken **before** packages existed, or restore with the new binary.
 
 This is stated rather than designed away: making the old binary able to restore a package-bearing dump is impossible without changing the old binary, which by definition is not being changed. The incompatibility is a property of the rollback, not a defect to be papered over.
+
+### 6.9 Project-Scoped Continuity Storage (Stage 1 — storage only)
+
+MPM's substrate is organised around **artifacts** — memories, lessons, theories, evidence — and each artifact belongs to one session and one workspace. A **project** is a different grain: a durable identity that outlives every thread, every checkpoint and every session inside it. Project-Scoped Continuity adds that grain.
+
+The architecture is specified in the **Continuity architecture document** (PR #224, *"Project-Scoped Continuity"*), which is delivered in stages; **this section describes stage 1, which is storage only.**
+
+#### What stage 1 adds
+
+Four **additive** tables. No existing table, row, index or trigger is modified, and no existing reader, writer, API or scheduler behaviour changes.
+
+| table | what it holds |
+|---|---|
+| `projects` | the permanent stub: an identity that outlives every thread, every checkpoint and every session. `deleted_at IS NULL` means alive. |
+| `project_names` | the resolution domain: every key that resolves to a project, with `name` case-insensitive (`COLLATE NOCASE`). |
+| `continuity_threads` | an independent line of work inside a project; several may be active at once, each with its own `revision` for optimistic concurrency. |
+| `continuity_checkpoints` | the append-only ledger of resume briefs. A checkpoint is never edited; it is superseded by a later one, and the thread's `last_checkpoint_id` names the current one. |
+
+The DDL is authoritative in `internal/core/migration_continuity_project_model.go`, where it is a single literal transcribed byte-for-byte from the architecture document. A test pins its SHA-256, so the shipped schema cannot drift from the approved architecture without failing the build. It is deliberately **not** copied here: a second copy in prose is a second thing to keep in sync, and this document is the product contract, not the schema source.
+
+Four properties are enforced by the database itself, not by convention:
+
+- **No silent duplicate project creation.** At most one *live* holder of a name, case-insensitively; at most one *canonical* live name per project. A withdrawn name is history and does not occupy the name, so a name becomes reusable after its holder is deleted.
+- **Containment is a storage property.** `continuity_checkpoints.project_id` is denormalised from the thread, and a composite foreign key keeps the denormalisation honest: a checkpoint cannot name a project other than its thread's. Every reference is `ON DELETE RESTRICT`, so a hard delete of a project with children is refused and the ledger cannot be destroyed by a cascade.
+- **The resume pointer is sound.** A thread's `last_checkpoint_id` may only name a checkpoint of *that* thread, and a checkpoint's `supersedes` may only name a checkpoint of *its own* thread.
+- **Focus is unique while live.** One live thread per normalised focus slug per project; a superseded or deleted thread releases its focus.
+
+`created_by` / `deleted_by` carry the **writer identity**, not an owner: the workspace is a single-operator trust domain and there is no authorization model in this design.
+
+#### What stage 1 does **not** add
+
+**No reader, writer, project API, deletion operation or audit write exists for these tables.** They are created empty and stay empty. There is no CLI command, no MCP action and no agent-facing surface for projects.
+
+Session-to-project binding, automatic checkpointing and pointer resolution are later stages. The stage-1 schema exists so that the later stages have somewhere to put state, and so that the containment guarantees are established at the storage boundary before any API can rely on them.
+
+#### The tables are local-only
+
+The shared database runs "the same table schema as the local DB", but only the tables in `BaseTables` reach it: `attachShared` rewrites every `CREATE TABLE` in that slice to `shared.<name>` and runs it against the attached file. The Continuity tables are **not** in `BaseTables` — they are created by a migration, in the local schema only.
+
+**Consequence: no shared database ever receives the Continuity tables, not even empty ones.** A project's identity is durable inside *one* workspace; broadcasting it to every workspace that reads the shared store would give the same project id to unrelated work.
+
+#### The restore allow-list
+
+The four tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **accepts** a dump that contains them. Without that registration every backup taken after this change would be rejected by `mpm restore-db` — a loud, immediate failure.
+
+They are deliberately **not** on `RuntimeCanonicalSchema`: they are declared in Go source, and the source-checked half of the allow-list is the correct one.
+
+The registration has a second, deliberate consequence: an **old** binary's allow-list does not name them, so **restoring a backup taken by the new binary with an old binary fails closed** — the old binary refuses the dump. The allow-list is not weakened to hide this. Relaxing `restore-db` to skip unknown tables with a warning would trade a loud, safe refusal for a silent, partial restore — exactly the class of failure the validator exists to prevent.
 
 ---
 

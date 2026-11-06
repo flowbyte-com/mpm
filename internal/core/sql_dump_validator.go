@@ -126,15 +126,23 @@ type DumpValidator struct {
 }
 
 // CanonicalMPMSchema is the authoritative list of tables MPM creates at
-// install time (BaseTables, ReferenceTables, shared-schema tables). New
-// tables added to the schema require updating this list AND
-// internal/core/db.go (a static guard enforces this). This is the
+// install time (BaseTables, ReferenceTables, shared-schema tables, and
+// the tables a migration creates with a CREATE TABLE shipped in this
+// package). New tables added to the schema require updating this list
+// AND the schema source (a static guard enforces this). This is the
 // source-of-truth allow-list for `restore-db`'s C-2 validation —
 // every CREATE TABLE / CREATE INDEX / INSERT statement in a restore
 // dump must reference a table in this list OR RuntimeCanonicalSchema.
 //
+// The guard (TestCanonicalSchemaSync) scans every non-test
+// internal/core/*.go file for CREATE TABLE statements, so a
+// migration-owned table (e.g. the four Project-Scoped Continuity tables
+// in migration_continuity_project_model.go) belongs HERE rather than in
+// RuntimeCanonicalSchema, whose entries are the runtime-created tables
+// that have no CREATE TABLE in source.
+//
 // To regenerate after a schema change:
-//  1. Add the new table to internal/core/db.go (CREATE TABLE IF NOT EXISTS ...)
+//  1. Add the new table to the schema source (CREATE TABLE IF NOT EXISTS ...)
 //  2. Add it to CanonicalMPMSchema below
 //  3. Run `go test -run TestCanonicalSchemaSync ./internal/core/`
 //     to verify the static guard passes
@@ -148,6 +156,17 @@ var CanonicalMPMSchema = []string{
 	"capability_events",
 	"capability_invocations",
 	"confidence_history",
+	// Project-Scoped Continuity, Stage 1 (PR #224). Four tables created by
+	// the migration in internal/core/migration_continuity_project_model.go
+	// — NOT by BaseTables, which is why they are here rather than in
+	// RuntimeCanonicalSchema: RuntimeCanonicalSchema's entries are the
+	// runtime-created tables that have no CREATE TABLE in source, and
+	// these four DO have their CREATE TABLE in source, so the canonical
+	// list is the list the source-scan guard can actually check. They
+	// are local-only: attachShared never propagates them into the
+	// cross-workspace `shared` schema.
+	"continuity_checkpoints",
+	"continuity_threads",
 	"embedding_migration_log",
 	"ephemeral_scratchpad",
 	"epistemic_cascade_outbox",
@@ -174,6 +193,8 @@ var CanonicalMPMSchema = []string{
 	// legitimate.
 	"memory_reviews",
 	"memory_settling_baselines",
+	"project_names",
+	"projects",
 	"raw_memories",
 	"reference_chunks",
 	"reference_docs",

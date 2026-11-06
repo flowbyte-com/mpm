@@ -3252,6 +3252,26 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("tags JSON normalize migration failed: %w", err)
 	}
+	// Project-Scoped Continuity, Stage 1 — the additive four-table
+	// storage: projects, project_names, continuity_threads,
+	// continuity_checkpoints. The DDL and the sentinel share THIS
+	// transaction, so a failure at either rolls the whole thing back
+	// and NewDatabaseManager returns an error rather than leaving a
+	// half-migrated database.
+	//
+	// The tables are NOT in BaseTables on purpose: BaseTables is the
+	// slice attachShared propagates into the cross-workspace `shared`
+	// schema (db.go:2132, db.go:2160), and project identity must stay
+	// inside one workspace. Idempotent via the
+	// continuity_project_model_v1 sentinel.
+	//
+	// See internal/core/migration_continuity_project_model.go for the
+	// DDL's provenance (it is byte-for-byte §4.1 of the approved
+	// architecture) and for why the sentinel is written last.
+	if err := MigrateContinuityProjectModel(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("continuity project model migration failed: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
 	}
