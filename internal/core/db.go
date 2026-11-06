@@ -605,8 +605,16 @@ func (dm *DatabaseManager) BusyRetryCount() uint64 {
 //   - page_count, freelist_count: from PRAGMA page_count / freelist_count
 //   - memories_active: count of non-deleted memories
 //   - theories_pending: count of pending theories
+//   - wakes_corrupt_metadata: count of scheduled_wakes rows whose metadata
+//     is present, non-empty and NOT a parseable JSON document. Such a row
+//     is owned by NO partition (issue #178, W4): it is never delivered,
+//     claimed, retired or resolved, and its original bytes are preserved
+//     because they are the only evidence of what it was. The counter is
+//     the always-available operator signal for "a row needs attention".
 //   - wakes_overdue: count of actionable unfired wakes whose target_time < now
-//     (notification, cascade, or untagged; cron-kind bookkeeping is
+//     (notification, cascade, or untagged; a corrupt row is NOT counted,
+//     because no surface will ever deliver it and the count would never
+//     fall; cron-kind bookkeeping is
 //     excluded — it is retained and boundedly swept by the cron
 //     retention sweep in internal/scheduler/wake_expiration.go)
 //   - busy_retries: lifetime SQLITE_BUSY retry counter (process-local)
@@ -709,7 +717,8 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 	}{
 		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND ` + DirectiveExclusionClause},
 		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > strftime('%s','now')) AND json_extract(metadata, '$.status') = 'pending'`},
-		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND (metadata IS NULL OR metadata = '' OR json_extract(metadata, '$.kind') IS NULL OR json_extract(metadata, '$.kind') = '' OR json_extract(metadata, '$.kind') IN ('notification','cascade'))`},
+		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND ` + WakeNotificationAndCascadeKindFilter + ` AND NOT ` + WakeMetadataIsCorrupt},
+		{"wakes_corrupt_metadata", `SELECT COUNT(*) FROM scheduled_wakes WHERE ` + WakeMetadataIsCorrupt},
 		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
 	}
 	now := time.Now().Unix()
@@ -739,7 +748,8 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 //
 // The map-shape is preserved for compatibility with the doctor
 // renderer, which reads fields by name (ok, page_count, freelist_count,
-// memories_active, theories_pending, wakes_overdue, evidence_total,
+// memories_active, theories_pending, wakes_overdue, wakes_corrupt_metadata,
+// evidence_total,
 // busy_retries, db_path, db_path_raw, shared_attached, shared_path).
 // New fields (`warnings`, `journal_mode`) are additive; existing
 // field semantics are unchanged.
@@ -852,7 +862,8 @@ func (dm *DatabaseManager) HealthCheckReadOnly() (ReadOnlyHealthCheck, error) {
 	}{
 		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND ` + DirectiveExclusionClause},
 		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > strftime('%s','now')) AND json_extract(metadata, '$.status') = 'pending'`},
-		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND (metadata IS NULL OR metadata = '' OR json_extract(metadata, '$.kind') IS NULL OR json_extract(metadata, '$.kind') = '' OR json_extract(metadata, '$.kind') IN ('notification','cascade'))`},
+		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND ` + WakeNotificationAndCascadeKindFilter + ` AND NOT ` + WakeMetadataIsCorrupt},
+		{"wakes_corrupt_metadata", `SELECT COUNT(*) FROM scheduled_wakes WHERE ` + WakeMetadataIsCorrupt},
 		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
 	}
 	now := time.Now().Unix()

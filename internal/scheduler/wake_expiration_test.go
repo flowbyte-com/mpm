@@ -58,7 +58,7 @@ func TestSweepRetainsRecentNotificationWakes(t *testing.T) {
 	// One pending (not yet due) notification — must also remain.
 	seedWake(t, s, "future", now.Add(1*time.Hour), "notification")
 
-	retired, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
+	retired, _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestSweepRetiresNotificationWakesOver7Days(t *testing.T) {
 		seedWake(t, s, c.id, c.when, "notification")
 	}
 
-	retired, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
+	retired, _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestSweepDropsRetiredWakesFromOverdueQuery(t *testing.T) {
 	seedWake(t, s, "stale-notif", now.Add(-10*24*time.Hour), "notification")
 	seedWake(t, s, "stale-system", now.Add(-30*24*time.Hour), "snapshot")
 
-	retired, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
+	retired, _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestSweepIsIdempotent(t *testing.T) {
 	}
 
 	// First pass: retire both.
-	first, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
+	first, _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
 	if err != nil {
 		t.Fatalf("first sweep: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestSweepIsIdempotent(t *testing.T) {
 	}
 
 	// Second pass: no candidates (fired=1 now), so 0 retirements.
-	second, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
+	second, _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
 	if err != nil {
 		t.Fatalf("second sweep: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestSweepHandlesUntaggedWakesAsNotifications(t *testing.T) {
 	// produces metadata = '{}' — exactly the untagged case.
 	seedWake(t, s, "untagged-stale", now.Add(-10*24*time.Hour), "")
 
-	retired, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
+	retired, _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestSweepBoundedByLimit(t *testing.T) {
 		seedWake(t, s, id, now.Add(-30*24*time.Hour), "notification")
 	}
 
-	retired, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
+	retired, _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestSweepBoundedByLimit(t *testing.T) {
 	}
 
 	// Second call drains the rest of the backlog.
-	retired2, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
+	retired2, _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
 	if err != nil {
 		t.Fatalf("second sweep: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestSweepRespectsKindBoundary(t *testing.T) {
 		seedWake(t, s, "system-"+kind, now.Add(-60*24*time.Hour), kind)
 	}
 
-	retired, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
+	retired, _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestSweepPreservesExistingMetadata(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now); err != nil {
+	if _, _, err := SweepOverdueNotificationWakes(context.Background(), s.db, now); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 

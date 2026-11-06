@@ -255,15 +255,21 @@ func TestCheckPendingWakes_ExplicitCronKindStillDelivers(t *testing.T) {
 		"a delivered cron wake is retired, as before")
 }
 
-// TestCheckPendingWakes_MalformedMetadataIsTreatedAsUntagged proves a
-// malformed row cannot break the whole fold.
+// TestCheckPendingWakes_CorruptRowIsNotDelivered proves a malformed row
+// cannot break the whole fold, and that it is not delivered either.
 //
 // json_extract RAISES on malformed JSON. A fold whose WHERE clause
 // calls it on an unguarded column turns one corrupt row into "no wake
 // is ever delivered again", because every caller swallows the query
-// error. The matcher therefore probes json_valid FIRST, exactly as
-// ResolveWake's matcher does.
-func TestCheckPendingWakes_MalformedMetadataIsTreatedAsUntagged(t *testing.T) {
+// error.
+//
+// But a corrupt row must ALSO not be delivered. Its owner cannot be
+// determined — the truncated prefix '{"kind": "snapshot"' names a
+// snapshot row — and reading it as untagged would deliver
+// scheduler-owned work to the agent AND retire it, because the fold
+// retires what it delivers. A corrupt row is owned by NO partition, so
+// the fold skips it and keeps going.
+func TestCheckPendingWakes_CorruptRowIsNotDelivered(t *testing.T) {
 	now := time.Now()
 
 	// One database per branch: a fold call RETIRES what it delivers,
@@ -271,28 +277,50 @@ func TestCheckPendingWakes_MalformedMetadataIsTreatedAsUntagged(t *testing.T) {
 	wildcardDM := NewTestDM(t)
 	defaultDM := NewTestDM(t)
 	for _, dm := range []*DatabaseManager{wildcardDM, defaultDM} {
+		// The corrupt row is the OLDER of the two, so the fold
+		// reaches it FIRST.
 		_, err := dm.SQLDB().Exec(
 			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata)
-			 VALUES ('wk-ownership-malformed', ?, 'malformed metadata', 0, 'test', '{not json')`,
+			 VALUES ('wk-ownership-corrupt', ?, 'corrupt metadata', 0, 'test', '{"kind": "snapshot"')`,
+			now.Add(-2*time.Minute).Unix(),
+		)
+		require.NoError(t, err)
+		_, err = dm.SQLDB().Exec(
+			`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata)
+			 VALUES ('wk-ownership-healthy', ?, 'healthy metadata', 0, 'test', '{"kind":"notification"}')`,
 			now.Add(-time.Minute).Unix(),
 		)
 		require.NoError(t, err)
 	}
 
-	due, err := wildcardDM.CheckPendingWakes(now, []string{"*"})
-	require.NoError(t, err, "a malformed metadata row must not break the fold")
-	require.True(t, deliveredIDs(due)["wk-ownership-malformed"],
-		"a malformed metadata row is an untagged wake and must still be delivered")
+	for _, tc := range []struct {
+		name  string
+		dm    *DatabaseManager
+		kinds []string
+	}{
+		{"wildcard", wildcardDM, []string{"*"}},
+		{"default", defaultDM, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			due, err := tc.dm.CheckPendingWakes(now, tc.kinds)
+			require.NoError(t, err, "a corrupt metadata row must not break the fold")
+			require.False(t, deliveredIDs(due)["wk-ownership-corrupt"],
+				"a corrupt row must not be delivered: its owner cannot be determined")
+			require.True(t, deliveredIDs(due)["wk-ownership-healthy"],
+				"the healthy row behind the corrupt one must still be delivered")
 
-	// The same must hold for the DEFAULT branch, which is the one the
-	// CLI and MCP fold call on every request. Pre-fix this branch
-	// called json_extract on the raw column, so one corrupt row
-	// stopped delivery for EVERY wake.
-	defaultDue, err := defaultDM.CheckPendingWakes(now, nil)
-	require.NoError(t, err,
-		"a malformed metadata row must not break the default fold branch either")
-	require.True(t, deliveredIDs(defaultDue)["wk-ownership-malformed"],
-		"a malformed metadata row is an untagged wake and must still be delivered by the default branch")
+			// The corrupt row is still PENDING and its bytes are
+			// intact: the fold did not retire it and did not
+			// rewrite it.
+			require.Equal(t, 0, ownershipWakeFired(t, tc.dm, "wk-ownership-corrupt"),
+				"a corrupt row must not be retired by the fold")
+			var meta string
+			require.NoError(t, tc.dm.SQLDB().QueryRow(
+				`SELECT metadata FROM scheduled_wakes WHERE id = 'wk-ownership-corrupt'`).Scan(&meta))
+			require.Equal(t, `{"kind": "snapshot"`, meta,
+				"the corrupt row's original bytes must be preserved")
+		})
+	}
 }
 
 // TestCheckPendingWakes_UnknownKindIsNotDeliveredToTheAgent pins the

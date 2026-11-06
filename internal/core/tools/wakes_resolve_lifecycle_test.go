@@ -16,6 +16,10 @@
 //     (e.g. "cascade_summary")                            → not_a_wake
 //     (the scheduler owns it and runs it through a registered
 //     handler; the agent may not retire it.)
+//   - Row whose metadata is not a parseable JSON document → corrupt_metadata
+//     (issue #178, W4: the row's owner cannot be determined, so the
+//     agent may not retire it. The row is not written, so its
+//     original bytes survive.)
 //
 // 2026-09-29: the non-wake discriminator is metadata.kind, NOT the
 // absence of it. Rows with `kind` absent (NULL, empty, or `{}`)
@@ -395,6 +399,61 @@ func TestWakesResolve_KindlessRowsRemainResolvable(t *testing.T) {
 				"legacy wake must be retired exactly as any other wake")
 		})
 	}
+}
+
+// TestWakesResolve_RefusesCorruptMetadata pins the W4 corruption
+// policy at the agent-facing surface.
+//
+// A row whose metadata is present, non-empty and NOT a parseable JSON
+// document has an owner that cannot be determined: the truncated
+// prefix '{"kind": "snapshot"' names a snapshot row, and it cannot be
+// read back as one. Reading it as untagged would make it an
+// agent-owned notification wake the agent may retire — which would
+// suppress a scheduler handler that never ran.
+//
+// The resolver therefore refuses it with its own status,
+// "corrupt_metadata", and leaves the row untouched: the refusal is a
+// refusal, not a repair, so the original bytes survive for the
+// operator.
+func TestWakesResolve_RefusesCorruptMetadata(t *testing.T) {
+	dm := newTestSharedDM(t)
+
+	const corruptMetadata = `{"kind": "snapshot"`
+	wakeID := "corrupt-" + internal.GenerateID()
+	now := timeNowUnixForResolve()
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO scheduled_wakes
+			(id, target_time, reason, theory_id, recurring_rule, fired, fired_at, created_by, metadata)
+		VALUES (?, ?, ?, NULL, NULL, 0, NULL, 'legacy-test', ?)
+	`, wakeID, now, "corrupt metadata wake", corruptMetadata)
+	require.NoError(t, err)
+
+	res, err := handleResolveWake(dm, defaultACForPatch(), map[string]interface{}{
+		"wake_id": wakeID,
+		"reason":  "reconciled",
+	})
+	require.NoError(t, err)
+	m, ok := res.(map[string]interface{})
+	require.True(t, ok, "handler must return a result map; got %T", res)
+
+	assert.Equal(t, false, m["success"], "a corrupt row must not resolve")
+	assert.Equal(t, "corrupt_metadata", m["status"],
+		"a corrupt row must be refused with its own status, not not_a_wake")
+	errMsg, ok := m["error"].(string)
+	require.True(t, ok, "refusal envelope must carry a string \"error\" field; got %#v", m["error"])
+	assert.Contains(t, strings.ToLower(errMsg), "corrupt",
+		"the refusal message must name the corruption")
+
+	// THE ROW IS UNTOUCHED. Not retired, and its bytes intact.
+	var fired int
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT fired FROM scheduled_wakes WHERE id = ?`, wakeID).Scan(&fired))
+	assert.Equal(t, 0, fired, "a refused corrupt row must remain unfired")
+	var meta string
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT metadata FROM scheduled_wakes WHERE id = ?`, wakeID).Scan(&meta))
+	assert.Equal(t, corruptMetadata, meta,
+		"the corrupt row's original bytes must be preserved")
 }
 
 // TestWakesResolve_RejectionEnvelopeAlwaysCarriesError pins that every

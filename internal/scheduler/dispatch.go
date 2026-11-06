@@ -32,6 +32,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	core "github.com/flowbyte-com/mpm-core"
 )
 
 // dispatchClaimNextAdHocWake atomically claims exactly one due
@@ -49,6 +51,28 @@ import (
 // This matches the existing Kind() default (untagged wakes report
 // kind = "notification") so the claim partition is precisely the
 // complement of the system-kind set.
+//
+// MALFORMED METADATA. The kind filter is
+// core.WakeNotificationKindFilter, which reads the kind through an
+// always-valid-JSON extraction. json_extract() RAISES on malformed
+// JSON, so an unguarded call would abort this statement on a single
+// corrupt metadata row and the claim would then fail for EVERY row —
+// one bad row would stall the whole notification queue. The
+// always-valid form never raises and carries no dependence on SQL
+// evaluation order, which an OR-chain of json_extract() calls would.
+//
+// A CORRUPT ROW IS NOT CLAIMED. The always-valid form reads a corrupt
+// document as UNTAGGED, and an untagged row matches the notification
+// filter — so without an explicit exclusion the claim would deliver
+// scheduler-owned work to the agent as an ordinary notification. The
+// truncated prefix '{"kind": "snapshot"' names a snapshot row; reading
+// it as untagged would retire a partition the agent does not own and
+// lose the work. The claim therefore excludes corrupt rows with
+// core.WakeMetadataIsCorrupt — the canonical predicate, so the
+// claim, the retention sweeps and the fold cannot disagree about which
+// rows belong to no partition. A corrupt row keeps its bytes and its
+// fired=0 state; it is reported by the retention sweep's diagnostic
+// and by the wakes_corrupt_metadata health counter.
 //
 // CRITICAL: this function does NOT flip fired=1. The 2026-09-23
 // release-blocker repair splits the scheduler-dispatch audit trail
@@ -85,7 +109,7 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 		UPDATE scheduled_wakes
 		SET dispatched_at = ?,
 		    metadata = json_set(
-		        CASE WHEN metadata IS NULL OR metadata = '' THEN '{}' ELSE metadata END,
+		        ` + core.WakeMetadataJSON + `,
 		        '$.dispatched_by', 'mpm-scheduler'
 		    )
 		WHERE id = (
@@ -93,13 +117,8 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 			WHERE fired = 0
 			  AND dispatched_at IS NULL
 			  AND target_time <= ?
-			  AND (
-			    metadata IS NULL
-			    OR metadata = ''
-			    OR json_extract(metadata, '$.kind') IS NULL
-			    OR json_extract(metadata, '$.kind') = ''
-			    OR json_extract(metadata, '$.kind') = 'notification'
-			  )
+			  AND `+core.WakeNotificationKindFilter+`
+			  AND NOT `+core.WakeMetadataIsCorrupt+`
 			ORDER BY target_time ASC
 			LIMIT 1
 		)
