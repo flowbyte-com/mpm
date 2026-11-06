@@ -9,10 +9,13 @@ lock contention — the same defect class as #164, in a different call shape"*
 The audit was first measured on `3a3486cf` (the green `main` when the work
 began; `653e4633` was then still `in_progress`). It was **re-measured on
 `653e4633` after that landed**, and every number in this record is the
-re-measured one: the ratchet inventory is 160 occurrences / 53 files / 147
+re-measured one: the ratchet inventory is **161** occurrences / 53 files / 148
 identities on both trees, the type-resolved census is 155 / 50 on both, and
 the reconciliation of §1.3 is identical on both. `3a3486cf` and
-`653e4633` touch disjoint files, and the class is unchanged.
+`653e4633` touch disjoint files, and the class is unchanged. (The inventory
+document's own line numbers are the ones measured at `653e4633`; an earlier
+revision of it carried `3a3486cf`'s line numbers under a header that named
+the later base.)
 
 **Issue #178 is not closed by this work.** The scheduler's duplicate-delivery
 crash window remains open by design (see
@@ -57,7 +60,7 @@ work and deliberately different from the merged ratchet:
 | receiver classification | **syntactic**: `db`/`DB` selectors, `.SQLDB()` calls, and every identifier that is not literally named `tx` | **type-resolving**: a declared type, a derived type (`.Begin()` → tx, `.Conn()` → conn, `sql.Open()` → pool), a struct field's declared type (following an embedded `*sql.DB`), or — for an interface-typed parameter — the **concrete types passed at every call site** of the enclosing function |
 | direction of error | fail-closed: it may **over**-count, never under-count | fail-closed **per call site**: a shared primitive called with a pool anywhere counts as a pool write |
 | SQL resolution | `Args[0]` for `Exec`, `Args[1]` for `ExecContext`, resolved through a literal scope | the same, plus identifier bindings resolved through the local scope |
-| write verbs | DML + DDL | DML + DDL + `PRAGMA` + `VACUUM` |
+| write verbs | DML + DDL + `PRAGMA` + `VACUUM` + `ATTACH`/`DETACH`/`REINDEX` | DML + DDL + `PRAGMA` + `VACUUM` |
 
 The scanner's receiver census over the whole tree, on the base commit:
 
@@ -69,29 +72,46 @@ pool 172   tx 213   conn 9   stmt 5   interface 0   other 0     TOTAL 399
 
 The two scanners are not supposed to agree; the ratchet over-counts by
 design. Reconciling them **identity by identity** (file + normalized SQL, as
-a multiset) gives an exact answer. Both instruments are measured with the
-**same verb list** — DML, DDL, `PRAGMA` and `VACUUM` — so that the
-comparison is like-for-like:
+a multiset) gives an exact answer.
+
+The ratchet is measured with the **verb list the guard now uses** — DML, DDL,
+`PRAGMA`, `VACUUM`, `ATTACH`, `DETACH` and `REINDEX`. The audit's
+type-resolving scanner was measured with DML, DDL, `PRAGMA` and `VACUUM`;
+the three verbs added since are **connection-scoped verbs**, and the one
+site they expose (`similarity_candidates_store.go:972`) is a `*sql.Conn`
+receiver, which the type-resolving scanner classifies as a **connection**,
+not a pool. So the scanner's count is unaffected by the extension, and the
+comparison is still like-for-like:
 
 | base commit (`653e4633`) | occurrences | files | identities |
 |---|---|---|---|
-| merged ratchet, syntactic, fail-closed | 160 | 53 | 147 |
+| merged ratchet, syntactic, fail-closed | 161 | 53 | 148 |
 | this audit's scanner, type-resolved | 155 | 50 | 142 |
-| **ratchet only** (the scanner proved them not-pool) | 5 | | |
+| **ratchet only** (the scanner proved them not-pool) | 6 | | |
 | **scanner only** (the ratchet missed them) | **0** | | |
 
-**The 5 ratchet-only sites** are the ratchet's documented over-count, and
-all five are the same shape: the receiver is a pinned `*sql.Conn`, not a
+**The 6 ratchet-only sites** are the ratchet's documented over-count, and
+all six are the same shape: the receiver is a pinned `*sql.Conn`, not a
 pool. Four are the `PRAGMA foreign_keys = OFF/ON` pair inside the two
 table-rebuild migrations (`migration_memories_affinity_rebuild.go`,
-`migration_memories_created_at_not_null.go`), and one is the
+`migration_memories_created_at_not_null.go`), one is the
 `INSERT OR IGNORE INTO shared.contradiction_log` in
-`similarity_candidates_store.go`. The ratchet is right to count them — it
-fails closed — and wrong about their *kind*.
+`similarity_candidates_store.go`, and one is the
+`ATTACH DATABASE '%s' AS shared` in the same file. The ratchet is right to
+count them — it fails closed — and wrong about their *kind*.
 
 **The scanner misses nothing the ratchet sees.** That is the property that
 makes the ratchet usable as the permanent guard: the audit instrument can
 disagree with it, but only by counting more.
+
+**What this table is not: reproducible from this PR.** The type-resolving
+scanner is not in the tree — it was a throwaway analysis tool (see §11), and
+the version that exists on the unmerged audit branch still has the three
+blind spots §1.4 describes as fixed. A reader can re-derive the **ratchet's**
+half of this table from the tree (§11 gives the command); the **scanner's**
+half they cannot. The substantive conclusion — that the scanner sees nothing
+the ratchet misses — was independently confirmed by a third scanner written
+from scratch by the reviewer of 2026-11-06 (§12.3).
 
 **The gap this exposed.** Measured with the ratchet's *pre-extension* verb
 list (DML and DDL only), the same reconciliation gave 133 occurrences for
@@ -112,6 +132,14 @@ were all one thing:
 `bareWriteVerb` stopped at the DML and DDL verbs. A bare pool `PRAGMA` or
 `VACUUM` was therefore **invisible to the guard**: a detector that cannot see
 a write shape cannot keep that shape honest. §5 closes that gap.
+
+**A second gap, found by the independent review of 2026-11-06.** The verb
+list had a second stopping point, and this one was not merely a gap — it was
+a **false claim**. The list's comment said that `REINDEX`, `ATTACH` and
+`DETACH` were deliberately not listed because "the tree contains no bare pool
+write of any of them". The tree contains exactly one, and the review
+reproduced the contradiction in one line of diff. §5.1 records the
+correction; the review's finding is §12.3's M1.
 
 ### 1.4 Blind spots in this work's own instruments, found and fixed
 
@@ -153,14 +181,16 @@ contention outlasts the busy timeout?**
 | Class | Count (base) | What the loss means |
 |---|---|---|
 | **ordinary contended write** | 71 | The user's or the agent's state is not persisted. The write is lost; the caller is told, so the loss is recoverable only by redoing the work. |
-| **startup migration / DDL** | 51 | Schema, a one-shot backfill, a seed, or a test-fixture write. Idempotent or detection-gated, so a rerun is safe. |
+| **startup migration / DDL** | 52 | Schema, a one-shot backfill, a seed, or a test-fixture write. Idempotent or detection-gated, so a rerun is safe. |
 | **transaction-owned** | 0 | A write inside a transaction is owned by the transaction layer (`WithTx` restarts a stale snapshot; `txNode.ExecTracked` owns the statement budget). **No bare pool write on the base commit is lexically inside a `WithTx` callback.** |
 | **intentionally nonblocking maintenance** | 38 | A ledger, a counter, a retention sweep, a recomputation, or a diagnostic row. Deliberately best-effort: the failure is logged and costs a re-run, not a state. |
 
-**Total: 160 occurrences across 53 files** — the base commit measured with
-the same verb list the guard now uses (`PRAGMA` and `VACUUM` included). With
-the ratchet's pre-extension list the total is 133; the 27-site difference is
-the detector gap of §1.3.
+**Total: 161 occurrences across 53 files** — the base commit measured with
+the same verb list the guard now uses (`PRAGMA`, `VACUUM` and the
+connection-scoped `ATTACH`/`DETACH`/`REINDEX` included). With the ratchet's
+pre-extension list the total is 133; the 28-site difference is the detector
+gap of §1.3: the 27 `PRAGMA`/`VACUUM` sites, plus the one connection-scoped
+`ATTACH` that the review of 2026-11-06 surfaced.
 
 ### 2.1 The mapping, mechanically
 
@@ -177,11 +207,23 @@ cannot drift apart:
 | `migration-once` | 23 | `migration` |
 | `best-effort` | 8 | `maintenance` |
 | `test-fixture` | 1 | `migration` |
+| `connection-scoped` | 1 | `migration` |
 
 The `propagated` reason answers a different question from the class: it says
 the error reaches the caller, not what the loss costs. So it splits. A GC
 ledger row and a memory's content both propagate their error; losing the
 ledger costs a re-run, and losing the content costs the content.
+
+`connection-scoped` is the newest reason, and it is the one whose CLASS
+needs the most explanation. Its single site is the
+`ATTACH DATABASE '%s' AS shared` at `similarity_candidates_store.go:972`.
+It is `migration` because it is **schema**, it is **detection-gated** (a
+`PRAGMA database_list` check on the same connection precedes it), and a
+rerun on that connection is **safe** — which is exactly what the `migration`
+class means. It is not `ordinary`, because no agent state is at stake; and
+it is not `maintenance`, because its failure is fatal to the operation
+rather than deliberately nonblocking. §5.1 says why a statement budget
+would be *wrong* for it rather than merely redundant.
 
 The 38 `maintenance` sites are, in full: the GC and compaction ledgers
 (`last_gc_at`, `compaction.last_run`), the retrieval and cluster counters,
@@ -394,17 +436,45 @@ untouchable".** It is that a statement budget would make it *wrong*:
 
 - `CREATE TRIGGER` has no `IF NOT EXISTS`, so a **retry** of the trigger
   creation fails with "trigger already exists". A retry is not a safe
-  remedy for a half-applied DDL sequence; a **transaction** is.
+  remedy for a half-applied DDL sequence.
 - The path is self-healing anyway: the next boot detects the missing
   trigger (`missing == 3` is the healthy case) and repairs it again.
 - The requirement for this slice was explicit — do not mechanically convert
   migration code — and this is migration code.
+
+**What actually makes the pool call site safe is the self-healing, not a
+transaction.** Three of the four call sites are transactional
+(`db.go:3730`, `db.go:3883` and `db.go:3947`, the last through
+`node.Tx()`), and there the transaction owns the atomicity. The fourth —
+the interrupted-migration repair path at `db.go:3917` — passes `dm.db`, the
+**pool**, and runs the four DDL statements as four separate `Exec` calls
+with **no transaction around them**. Its safety is the second bullet: the
+next boot repairs what a half-applied sequence left behind. The remedy for
+that call site, if one were wanted, is `dm.WithTx` — one line, and it would
+inherit the snapshot-restart budget the design rationale assumes. It is not
+done here, because §3.3's rule is that migration code is not mechanically
+converted, and this record does not want to claim a property the code does
+not have.
 
 So the guard classifies it, and the classification is **checked** rather
 than asserted: a shared primitive classified as migration DDL must execute
 **no DML**. If `createLessonsViewAndTriggers` ever starts writing a row,
 the classification is wrong, and the guard fails. That is assertion 4 of
 §5.2, and it is mutation 8 of §8.
+
+**What "the guard fails" means, precisely.** The check is that the
+primitive's SQL statements do not *begin* with a row-writing verb. The
+review of 2026-11-06 found that the check as written could be defeated by
+a leading SQL comment — `^\s*` matched only whitespace, so a row-writing
+statement written under an explanatory comment was invisible. That is fixed
+(§5.2): the detection now strips leading whitespace and leading SQL
+comments before matching. The match stays **anchored** at the first token
+of the statement, so the row-writing DML inside
+`CREATE TRIGGER … BEGIN DELETE FROM lessons_base … END` remains classified
+as DDL — that DML is part of the schema definition, not a row the primitive
+writes. The controls that pin this are
+`TestSharedPrimitiveDDLOnlyDetectsRowWritingPrimitive` and
+`TestSharedPrimitiveDDLOnlySeesThroughLeadingComments` (§5.3).
 
 This is the third blind spot of this work's own instruments, and the second
 one this work's own guard found: the audit's type-resolving scanner resolved
@@ -425,21 +495,94 @@ regression guard for this class, and it was already on `main` (it landed in
 adding a second guard, because a second guard would be a second thing to keep
 in step with the first.
 
-Three changes:
+Four changes:
 
-1. **`bareWriteVerb` now matches `PRAGMA` and `VACUUM`.** That closes the
-   detector gap of §1.3. The twenty-seven newly-visible sites are recorded
+1. **`bareWriteVerb` now matches `PRAGMA` and `VACUUM`** — and, since the
+   independent review of 2026-11-06, `ATTACH`, `DETACH` and `REINDEX` as
+   well (§5.1.1). The `PRAGMA`/`VACUUM` extension closed the detector gap
+   of §1.3: the twenty-seven newly-visible sites are recorded
    in the allowlist with reasons — `startup-ddl` for the connection
    configuration PRAGMAs, `migration-once` for the pinned-connection
    `PRAGMA foreign_keys` pair inside the two table rebuilds, `best-effort`
    for the checkpoint, `propagated` for the `VACUUM INTO` snapshots.
 2. **A sixth reason, `shared-primitive`**, with the semantics of §4.2.
-3. **The twenty converted sites' entries were deleted** from the allowlist,
+3. **A seventh reason, `connection-scoped`**, with the semantics below.
+4. **The twenty converted sites' entries were deleted** from the allowlist,
    which is how the ratchet is told that a write is fixed.
 
-`REINDEX`, `ATTACH` and `DETACH` were deliberately **not** added to the verb
-list: the tree contains no bare pool write of any of them, and a verb in that
-list which no site can ever match is a claim the guard cannot back.
+### 5.1.1 `ATTACH`, `DETACH` and `REINDEX` — the false claim, and the site behind it
+
+This subsection records the independent review's finding M1 (2026-11-06),
+which was correct and which the guard did not survive.
+
+The ratchet's comment said:
+
+> `REINDEX`, `ATTACH` and `DETACH` are deliberately NOT listed: the tree
+> contains no bare pool write of any of them, and a verb in this list that
+> no site can ever match is a claim the guard cannot back.
+
+**The claim was false.** `internal/core/similarity_candidates_store.go:972`
+issues `ATTACH DATABASE '%s' AS shared` through a pinned `*sql.Conn` drawn
+from the substrate's pool:
+
+```go
+conn, err := dm.db.Conn(ctx)          // similarity_candidates_store.go:246
+defer conn.Close()
+…
+stmt := fmt.Sprintf("ATTACH DATABASE '%s' AS shared", …)   // :971
+if _, err := conn.ExecContext(ctx, stmt); err != nil {      // :972
+```
+
+The write is bare — no retry budget — and the ratchet's own receiver rule
+counts it: `isPoolReceiver` treats every identifier other than `tx` as a
+pool receiver, deliberately failing closed. The site was invisible **only**
+because the verb was missing from the list. Adding it surfaces the site
+immediately.
+
+Both halves of the old rationale were wrong in opposite directions. "A verb
+that no site can ever match is a claim the guard cannot back" is true of a
+verb nothing can match — but the fix is to make the list **complete**, not
+to leave a hole and then assert the hole is empty. A verb a site *can*
+match and the list omits is a hole in the guard, and the hole is invisible
+precisely because the detector cannot see it. The list is therefore now
+about **detection capability**, not about inventory.
+
+**What exists today, exactly: one bare `ATTACH`, and no bare `DETACH` and
+no bare `REINDEX`.**
+
+**How the new site is classified — and why it is not converted.** The
+review suggested `startup-ddl`; that is not what the site is, and the
+distinction matters because the remedy follows from it.
+
+- SQLite's `ATTACH` is **per connection**, not per database. The schema it
+  attaches is visible only to the connection that attached it. That is why
+  the site runs on a **pinned** `*sql.Conn` at all, and why the surrounding
+  code checks `PRAGMA database_list` on that same connection before
+  attaching.
+- It is therefore **not** startup DDL. The attachment is not made once per
+  boot and left there; it is made per connection, on whichever connection
+  the caller pinned, and the pool is deliberately multi-connection.
+- **A pool retry budget would be wrong, not merely redundant.** The
+  substrate's budget is spent by `execTracked`, which writes through the
+  `*sql.DB` — so a retried `ATTACH` can land on a **different** pooled
+  connection than the one holding the attachment the caller is about to
+  use. A retried `ATTACH` on the **same** connection, meanwhile, fails with
+  "database shared is already in use" once the attachment is in place.
+  Neither is the behaviour the site needs. This is the rule the finding
+  names: a connection-scoped `ATTACH` must not be converted into a retrying
+  pool write.
+- The site's own guard is the `PRAGMA database_list` check that precedes
+  it on the same connection: the attachment is made only if it is missing,
+  so the operation is idempotent per connection **without** a retry.
+- The failure is reported to the caller as `ErrSharedUnavailable`, and the
+  caller treats a shared source that cannot be attached as a broken
+  installation rather than silently scanning half the corpus.
+
+So the site is allowlisted with the new reason `connection-scoped`, and the
+reason's own documentation says what the remedy for a future
+connection-scoped write is: a per-connection retry that keeps the **same**
+connection, not a pool budget. No such helper exists today, and this site
+does not need one.
 
 ### 5.2 The shared-primitive guard
 
@@ -465,12 +608,24 @@ guard over the whole runtime and asserts four things:
 4. **DDL-ONLY** — a shared primitive classified as migration DDL must
    execute **no DML**. That classification is the reason its pool path is
    allowed to pass a raw pool handle, so it is a checked property rather
-   than a comment.
+   than a comment. The check strips leading whitespace and leading SQL
+   comments (`--` to end of line, `/* … */`) before matching, and stays
+   anchored at the first token of the statement — so a row-writing
+   statement written under an explanatory comment is seen, and the
+   row-writing DML inside a `CREATE TRIGGER … BEGIN DELETE … END` stays
+   DDL.
 
-Point 3 is additionally pinned by a synthetic control
-(`TestPoolMemExecerRoutesThroughTheTrackedPolicy`), which feeds a synthetic
-adapter through the same check: the synthetic control proves the check fires
-on the SHAPE, and it keeps proving it as the tree changes.
+**Every one of the four assertions is now pinned by a synthetic control.**
+That sentence was not true of the first version of this guard, and the
+independent review of 2026-11-06 (finding M2) is what made it true — see
+§5.3.1. The controls are:
+
+| Assertion | Control |
+|---|---|
+| ADAPTER | `TestPoolMemExecerRoutesThroughTheTrackedPolicy` |
+| REACH | `TestSharedPrimitiveReachDetectsUnclassifiedPrimitive` |
+| DDL-ONLY | `TestSharedPrimitiveDDLOnlyDetectsRowWritingPrimitive` and `TestSharedPrimitiveDDLOnlySeesThroughLeadingComments` |
+| BUDGET | `TestSharedPrimitivePoolPathsCarryAStatementLevelBudget` (tree-wide; the budget assertions are structural — a zero budget is a literal, and a literal is read, not inferred) |
 
 ### 5.3 The negative controls
 
@@ -484,9 +639,57 @@ cases that fail against the old verb list and pass against the current one:
 - a shared primitive's `ex.Exec` is caught (the scanner fails closed on an
   interface-typed receiver).
 
+and — for the M1 finding — with four more:
+
+- a bare `ATTACH` is caught;
+- a bare `DETACH` is caught;
+- a bare `REINDEX` is caught;
+- a bare `ATTACH` on a **pinned connection** is caught (the receiver rule
+  fails closed on every identifier that is not `tx`).
+
+`TestBarePoolAllowlistDetectsUnapprovedAttach` pins the M1 site itself: the
+classifier must see the connection-scoped `ATTACH` shape, the shape must be
+allowlisted **only** under its reviewed file, and therefore a newly
+introduced `ATTACH` anywhere else fails the completeness guard by shape
+rather than by luck.
+
 **By mutation.** The synthetic controls prove the guard fires on the SHAPE.
 To prove it fires on THIS TREE, the tree was mutated in a disposable copy and
 the guard was run against each mutation. The results are in §8.
+
+### 5.3.1 The guard's own self-verification (finding M2)
+
+The independent review of 2026-11-06 found that this record cited a
+synthetic control — `TestPoolMemExecerRoutesThroughTheTrackedPolicy` — that
+**did not exist in the tree**, and that three of the guard's four assertions
+could be switched off with the whole suite staying green:
+
+| assertion broken | the suite |
+|---|---|
+| `routesThroughExecTracked` made to always return true | **green** |
+| the reach check made to never fire | **green** |
+| `sqlDMLPattern` made to match nothing | **green** |
+
+That is the record's own §4.3 argument turned back on the guard itself: a
+guard whose detection can be disabled without anything failing is not
+pinned. The fix was to move the detection into **pure functions over
+(rel, src)** — the idiom the bare-pool ratchet already used — so that a
+synthetic source can be fed through them and the resulting **finding**
+asserted directly. The controls are listed in §5.2's table; each one feeds
+a deliberately broken shape and requires the corresponding finding.
+
+Two further controls were added for the same reason:
+
+- `TestSQLDMLPatternSeesThroughLeadingComments` — the unit-level control
+  for the comment stripping itself, so the behaviour is pinned independently
+  of the guard that consumes it; and
+- `TestPoolMemExecerWaitsOutContention`
+  (`internal/core/bare_pool_write_contention_test.go`) — the **runtime**
+  half of the adapter's contract. The AST control says the adapter routes
+  through the tracked policy; the runtime control says the tracked policy
+  is worth routing through: the real `poolMemExecer.Exec` waits ordinary
+  contention out and lands its write, where a bare pool write of the same
+  statement loses the artifact.
 
 ---
 
@@ -546,11 +749,11 @@ uses the policy.
 ## 7. What remains
 
 After the slice, on the branch, the ratchet's inventory (which now also sees
-`PRAGMA`/`VACUUM`) is:
+`PRAGMA`/`VACUUM` and the connection-scoped `ATTACH`/`DETACH`/`REINDEX`) is:
 
 | | occurrences | files |
 |---|---|---|
-| bare pool writes, ratchet (syntactic, fail-closed) | 140 | 53 |
+| bare pool writes, ratchet (syntactic, fail-closed) | 141 | 53 |
 | bare pool writes, type-resolved | 133 | 49 |
 | of which: already budgeted on the pool path (the shared primitives) | 2 | 2 |
 
@@ -560,13 +763,16 @@ and the class histogram is:
 |---|---|---|
 | `ordinary` — un-fixed | 71 | **49** |
 | `ordinary` — budgeted on the pool path (shared primitives) | 0 | 2 |
-| `migration` | 31 | 51 |
-| `maintenance` | 31 | 38 |
+| `migration` | 52 | 52 |
+| `maintenance` | 38 | 38 |
 | `tx-owned` | 0 | 0 |
-| **total** | 133 | **140** |
+| **total** | **161** | **141** |
 
-(The growth from 133 to 140 is the `PRAGMA`/`VACUUM` gap closing: 27 sites
-the ratchet could not previously see, minus the 20 the slice converted.)
+(The ratchet's pre-extension list measured **133** at base. The 28-site
+difference between 133 and 161 is the detector gap closing: the 27
+`PRAGMA`/`VACUUM` sites of §1.3 plus the one connection-scoped `ATTACH` of
+§5.1.1 — of which 20 were converted by this slice, so the head measures
+**141**.)
 
 So **49 ordinary bare pool writes remain**, across 22 files, and they are
 concentrated in:
@@ -651,13 +857,41 @@ is not read as covering both write surfaces.
 ### 7.2 The ratchet's parameter-SQL gap
 
 The ratchet's `literalScope` binds package-level constants, local constants
-and local variables — but **not function parameters**. A bare pool write
-whose SQL is a parameter is therefore invisible to it. The one such site in
-the tree was `MemoryStore.execTracked`'s fallback (§4.1), and this slice
-fixed it. But the gap remains for the next one, and it is in the fail-open
-direction. It is recorded here rather than fixed, because fixing it means
+and local variables — but **not function parameters**, and **not range
+variables**. A bare pool write whose SQL comes from either is therefore
+invisible to it.
+
+**The parameter case.** The one such site in the tree was
+`MemoryStore.execTracked`'s fallback (§4.1), and this slice fixed it. But
+the gap remains for the next one, and it is in the fail-open direction.
+
+**The range-variable case.** `literalScope` binds `*ast.AssignStmt` and
+`*ast.ValueSpec`; a `*ast.RangeStmt` (`for _, sql := range BaseTables`) is
+neither, so the range variable is never bound and `resolveSQL` returns `""` —
+the verb regex never sees it. In this tree today that hides thirteen bare
+pool writes, all of them startup DDL:
+
+```
+internal/core/memory.go:316,323,328,335,341,393    s.DB.Exec(sql)     over BaseTables /
+                                                                 ReferenceTables /
+                                                                 ReferenceIndexes /
+                                                                 CommonIndexes /
+                                                                 WorkTables / triggers
+internal/core/db.go:3071,3424,3623,4277             dm.db.Exec(sql|t|b) over CommonIndexes /
+                                                                 revisionTriggers / trigger
+                                                                 cleanup / FTS backfill
+```
+
+Nothing agent-facing is hidden today — they are all startup DDL — but the
+shape is unguarded, and the record used to tell the next person that the gap
+was only about parameters. It is not.
+
+Both are recorded here rather than fixed, because fixing them means
 extending the ratchet's scope resolution — a change to a guard that has been
-stable since `81eb8d41`, which deserves its own record.
+stable since `81eb8d41`, which deserves its own record. The review of
+2026-11-06 that named the range-variable case (finding L1) did not treat it
+as merge-blocking for the same reason: the disclosure is what matters here,
+and the disclosure was incomplete.
 
 ---
 
@@ -679,9 +913,31 @@ and the mutation was reverted.
 | 7 | Remove a shared primitive from the guard's classification | `TestSharedPrimitivePoolPathsCarryAStatementLevelBudget` | **FAIL** — the reach check names the function and says it needs a classification |
 | 8 | Add a row-writing statement to a migration-DDL shared primitive (`createLessonsViewAndTriggers`) | `TestSharedPrimitivePoolPathsCarryAStatementLevelBudget` | **FAIL** — the DDL-only check names the function and the statement, and says the classification must change |
 
+### 8.1 The seven mutations added for the M1/M2/M3 findings
+
+The eight above are the mutations this slice documented. The independent
+review of 2026-11-06 found three guard defects and, with them, three ways to
+defeat the guard that the eight mutations did not cover. Seven further
+mutations were added; each one breaks a protection and the corresponding
+test must fail.
+
+| # | Mutation | Guard that fired | Result |
+|---|---|---|---|
+| 9 | Revert the `ATTACH`/`DETACH`/`REINDEX` verb extension | `TestBarePoolAllowlistHasNoStaleEntries` | **FAIL** — the recorded connection-scoped `ATTACH` becomes **stale**: the guard can no longer see the site's own allowlist entry, which is the same "the recorded inventory is a lie" failure as mutation 6 |
+| 10 | Introduce a **new** bare pool `ATTACH` in the tree | `TestBarePoolWriteAllowlistIsComplete` | **FAIL** — the unapproved statement is reported as a surplus, by file and statement. This is the "a newly introduced unapproved statement is detected" case |
+| 11 | Make `routesThroughExecTracked` always return true (the review's probe) | `TestPoolMemExecerRoutesThroughTheTrackedPolicy` | **FAIL** — the synthetic adapter that spends a literal budget is no longer flagged. Before the fix this mutation left the whole suite green |
+| 12 | Make the reach check never fire (the review's probe) | `TestSharedPrimitiveReachDetectsUnclassifiedPrimitive` | **FAIL** — the unclassified synthetic primitive is no longer flagged. Before the fix this mutation left the whole suite green |
+| 13 | Make `sqlDMLPattern` match nothing (the review's probe) | `TestSharedPrimitiveDDLOnlyDetectsRowWritingPrimitive`, `TestSharedPrimitiveDDLOnlySeesThroughLeadingComments`, `TestSQLDMLPatternSeesThroughLeadingComments` | **FAIL** — the row-writing synthetic primitives are no longer flagged, and the stripping is no longer pinned. Before the fix this mutation left the whole suite green |
+| 14 | Reintroduce the comment bypass — the old `^\s*` pattern and no comment stripping | `TestSharedPrimitiveDDLOnlySeesThroughLeadingComments`, `TestSQLDMLPatternSeesThroughLeadingComments` | **FAIL** — the row-writing statements behind comments are no longer seen |
+| 15 | Add a **comment-prefixed** row-writing statement to the real `createLessonsViewAndTriggers` | `TestSharedPrimitivePoolPathsCarryAStatementLevelBudget` | **FAIL** — the review's exact reproduction, which passed silently before the fix |
+
+Mutations 11–13 are the reviewer's own probes. Their **red** state was
+measured on the pre-fix head (`c13b5b70`), where each of them left the whole
+suite green; mutations 9, 10, 14 and 15 are the red-to-green proofs for M1
+and M3, measured the same way. §11.2 gives the commands.
+
 Each mutation was applied to the branch, the guard was run, and the mutation
-was reverted with `git checkout --`; the demonstration asserts that the
-revert left the tree clean.
+was reverted; the demonstration asserts that the revert left the tree clean.
 
 ---
 
@@ -885,10 +1141,13 @@ gate next knows the failure is not theirs.
   §5 for the migration plan.
 - **49 ordinary bare pool writes remain** (§7). This is the first slice of
   a multi-slice remediation, not the remediation.
-- **The parameter-SQL detector gap** remains (§7.2).
+- **The parameter-SQL and range-variable detector gaps** remain (§7.2).
 - **The zero-budget guard's blind spot on the store's write surface**
   remains (§7.1): `MemoryStore.execTracked` is invisible to it, and the
   three deliberate zero-budget sweep sites it hides are named there.
+- **The atomic review path has no retry budget at all** — see §10.1.
+- **A pooled `ATTACH` whose retry can land on a different connection** —
+  see §10.2.
 - **The stale `maxRefBytes` entry in the CLI-limits gate** remains (§9.2). It
   is pre-existing and unrelated to this class.
 - **The "onboard never mutates" / watchdog slow-log conflict** and the
@@ -897,14 +1156,67 @@ gate next knows the failure is not theirs.
   to this class.
 - Issue #178 stays **open**.
 
+### 10.1 The atomic review path writes the same rows with no retry at all
+
+`internal/core/web_db.go:2020` — `RecordMemoryReviewsAndApply` — opens a
+**bare** `*sql.Tx` (`tx, err := dm.db.Begin()`), not `dm.WithTx`. The
+design rationale for leaving the transactional path unbudgeted is stated at
+`internal/core/review.go:126-130`:
+
+> the transactional path — whose retry policy belongs to the transaction, not
+> the statement — exactly as it was.
+
+**For this transaction there is no retry policy.** `dm.WithTx` owns the
+`SQLITE_BUSY_SNAPSHOT` restart; a bare `Begin()` owns nothing. So
+`RecordMemoryReviewsAndApply` — the CLI's review-and-apply path — writes
+the same `memory_reviews` row and the same weight change as the two
+primitives this slice budgeted, and under ordinary contention the whole
+batch is rolled back and nothing is recorded.
+
+Neither guard sees it: the ratchet exempts every `tx` receiver by name, and
+the shared-primitive guard checks only the **pool** path.
+
+This is **pre-existing**, it is **reported** to the caller rather than
+silently lost, and it is atomic rather than partial. It is recorded here
+because it is the same defect class on the same write path, and because the
+"what remains" list should not omit it. The clean fix is `dm.WithTx` — one
+line, and it would inherit the snapshot-restart budget the rationale
+already assumes. It is not done here: it is a **production** change, and
+this slice's second commit was deliberately test-only.
+
+### 10.2 A pooled `ATTACH` whose retry can land on a different connection
+
+`internal/core/db.go:2121` — `attachShared` — runs
+`dm.ExecTracked(stmt, 5)` where `stmt` is
+`ATTACH DATABASE '…' AS shared`.
+
+SQLite's `ATTACH` is **per connection**, and the substrate's pool is
+deliberately multi-connection (`internal/core/db.go:1674`: *"SetMaxOpenConns(1)
+is INTENTIONALLY NOT called here"*). The repository already knows this:
+`similarity_candidates_store.go:927-939` pins a connection for exactly this
+reason, and §5.1.1 is the analysis of the site it protects.
+
+So the retry here is not *duplicating* the side effect; it can **misplace**
+it: an `ATTACH` that succeeded on connection A is fine, but a retried
+`ATTACH` may land on connection B, and the attachment the caller believes
+it has will not be there.
+
+This is **pre-existing** and **outside this slice's scope** — it is not one
+of the 23 corrections, and it is not a bare pool write (it goes through
+`ExecTracked`, so the ratchet does not see it). It is recorded here because
+it is the same statement as the M1 site, and because a reader deciding
+whether to add `ATTACH` to the verb list should know both halves of the
+picture: the connection-scoped site, and this pooled one.
+
+
 ---
 
 ## 11. Reproducing this work
 
 ```bash
 # the guards
-cd internal/core && go test -tags fts5 -run 'TestBarePool|TestSharedPrimitive|TestPoolMemExecer' .
-cd internal/core && go test -tags fts5 -run 'TestBarePoolWriteLosesItsArtifact|TestConvertedMemoryWriteSurvives' .
+cd internal/core && go test -tags fts5 -run 'TestBarePool|TestSharedPrimitive|TestPoolMemExecer|TestSQLDMLPattern' .
+cd internal/core && go test -tags fts5 -run 'TestBarePoolWriteLosesItsArtifact|TestConvertedMemoryWriteSurvives|TestPoolMemExecerWaitsOutContention' .
 
 # the whole runtime
 make test
@@ -928,16 +1240,47 @@ go run ./cmd/mpm-lint --gate
 The branch head is the exact commit the PR carries; the CI run linked from
 the PR is the exact-head run.
 
-**The branch carries two commits.** The first is the slice. The second is
+**The branch carries three commits.** The first is the slice. The second is
 the test-only fix for the two pre-existing CI flakes of §9.1 — a separate
 commit so that a reviewer can read it as its own unit, and so that the
-slice's review is not contaminated by an unrelated change. Neither commit
-touches production code outside the slice's own 23 conversions.
+slice's review is not contaminated by an unrelated change. The third is the
+guard-layer remediation of §12.3: the ratchet's verb list and its reasons,
+the shared-primitive guard's synthetic controls, and this record's
+corrections. None of the three touches production code outside the slice's
+own 23 conversions; the third touches **no** production code at all.
 
 The audit instrument is not in the tree — it was a throwaway analysis tool
 built for this work, and the ratchet is the permanent artefact. What the
 instrument did that the ratchet cannot do is resolve the receiver's TYPE,
 which is what made the reconciliation of §1.3 possible.
+
+### 11.2 The mutation demonstration, and how to re-run it
+
+The fifteen mutations of §8 are re-runnable. Each one is applied to the
+tree, the relevant test is run, and the mutation is reverted byte-for-byte:
+
+```bash
+# the seven mutations added for the M1/M2/M3 findings
+python3 /tmp/opencode/audit/mutate_remediation.py
+
+# the red state: the pre-fix head, with the defects present
+python3 /tmp/opencode/audit/mutate_prefix_red.py
+```
+
+The first asserts that **every** mutation is DETECTED; the second asserts
+the **red** state on the pre-fix head — that the reviewer's three probes
+left the suite green, that the record's named control did not exist, and
+that the comment-prefixed row write passed the guard silently.
+
+The ratchet's own inventory can be re-measured from the tree with the
+guard's own scanner (this is the half of §1.3 that **is** reproducible):
+
+```bash
+cd internal/core && go test -tags fts5 -run 'TestBarePoolWriteAllowlistIsComplete' -v .
+```
+
+The type-resolving scanner's half is **not** reproducible from this PR — see
+§1.3.
 
 ### 11.1 One note on running the suite with a redirected workspace
 
@@ -1054,3 +1397,47 @@ The reviewer's own verdict on the seven questions, and the caveats above,
 are reproduced verbatim in the PR's review comment, so that a human reviewer
 sees the machine pass and its limits side by side rather than a summary of
 them.
+
+### 12.3 The independent review of 2026-11-06, and what it changed
+
+An independent reviewer (a fresh context, not this session, and not the
+substrate's own review tool) reviewed the branch at `c13b5b70` against
+`main` @ `653e4633` and returned **REQUEST CHANGES**, narrowly, on the
+**guard layer**. Its verdict on the production layer was that the 23
+corrections are correct as they stand and that it "could not find a single
+production defect"; its three findings were all about the guards and this
+record.
+
+| Finding | What it was | What this branch does about it |
+|---|---|---|
+| **M1** | The ratchet's comment claimed the tree contains no bare pool `ATTACH`/`DETACH`/`REINDEX`. It does contain one (`similarity_candidates_store.go:972`), and the review reproduced the contradiction in one line of diff | §5.1.1: the verbs are added, the site is classified `connection-scoped` and allowlisted, and the comment states what is actually true. The site is **not** converted — §5.1.1 says why a pool retry budget would be wrong for it |
+| **M2** | This record cited a synthetic control (`TestPoolMemExecerRoutesThroughTheTrackedPolicy`) that **did not exist**, and three of the guard's four assertions could be switched off with the whole suite staying green | §5.3.1: the detection moved into pure functions over (rel, src); the named control now exists, and there is one for the reach check and one for the DDL-only check. The **runtime** half of the adapter's contract is pinned too (`TestPoolMemExecerWaitsOutContention`) |
+| **M3** | The DDL-only assertion was defeated by a leading SQL comment, so this record's claim that "if the primitive ever starts writing a row … the guard fails" was false | §5.2 and §4.3: the detection strips leading whitespace and leading SQL comments; the claim is now true, and precisely stated (the match stays anchored, so a trigger body stays DDL) |
+
+The review also recorded four **LOW** findings that are **not** addressed by
+this branch, and one **note**:
+
+- **L1** — the ratchet's scope gap also covers **range variables**, not
+  only parameters. The disclosure in §7.2 is extended; the gap itself is
+  not closed (it needs a change to a guard stable since `81eb8d41`).
+- **L2** — the type-resolving scanner is not shipped, so §1.3's numbers
+  cannot be reproduced from the PR alone. §1.3 now says so.
+- **L3** — the atomic review path has **no retry budget at all**. Recorded
+  in §10.1; not fixed here, because the fix is a production change.
+- **L4** — the CLI twin of four converted sites still loses the write. This
+  was already disclosed in §7's next-slice paragraph; the review confirms
+  it is not a defect of this slice.
+- **Note** — a **pooled** `ATTACH` whose retry can land on a different
+  connection. Recorded in §10.2.
+
+The review also independently confirmed the slice's central claims: that the
+23 corrections are durable, idempotent under retry, preserve their error and
+transaction semantics, and write to the same pools; that the idempotency
+premise holds (it tested it directly, with its own lock holder, rather than
+accepting the assertion); and that both of the CI fixes in the second commit
+are sound and pre-existing.
+
+**What this branch does not do:** it does not re-open the production layer,
+and it does not expand into L1–L4. The independent re-review of this
+branch is the gate.
+

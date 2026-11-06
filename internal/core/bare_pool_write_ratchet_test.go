@@ -123,6 +123,42 @@ package internal
 //   The budget on the pool path is pinned by
 //   TestSharedPrimitivePoolPathsCarryAStatementLevelBudget, which is a
 //   stronger guarantee than this list can give.
+// - reasonConnectionScoped: the write is scoped to ONE CONNECTION, not
+//   to the database. SQLite's ATTACH is per-connection: the schema it
+//   attaches is visible only to the connection that attached it, and
+//   only that connection. The site
+//   (internal/core/similarity_candidates_store.go:972) therefore runs
+//   on a PINNED `*sql.Conn` — one connection drawn from the pool and
+//   held for the length of the operation.
+//
+//   This reason is NOT "startup-ddl" and it is NOT "propagated",
+//   because neither describes what the site is:
+//
+//   - It is not startup DDL. The attachment is not made once per boot
+//     on one connection and left there; it is made per CONNECTION, on
+//     whichever connection the caller pinned, and the pool is
+//     deliberately multi-connection.
+//   - A retry budget on the pool would be WRONG, not merely redundant.
+//     The substrate's budget is spent by `execTracked`, which writes
+//     through the `*sql.DB` — so a retried ATTACH can land on a
+//     DIFFERENT pooled connection than the one that holds the
+//     attachment the caller is about to use. A retried ATTACH on the
+//     SAME connection, meanwhile, fails with "database shared is
+//     already in use" once the attachment is in place. Neither is the
+//     behaviour the site needs.
+//   - The site's own guard is the `PRAGMA database_list` check that
+//     precedes it on the same connection: the attachment is made only
+//     if it is missing, so the operation is idempotent per connection
+//     WITHOUT a retry.
+//
+//   The failure is reported to the caller as ErrSharedUnavailable, and
+//   the caller treats a shared source that cannot be attached as a
+//   broken installation rather than silently scanning half the corpus.
+//
+//   The remedy for a future connection-scoped write is a per-connection
+//   retry that keeps the SAME connection, not a pool budget. No such
+//   helper exists today, and the site does not need one: the ATTACH is
+//   preceded by a lock-free existence check.
 //
 // NON-VACUITY
 // -----------
@@ -141,6 +177,14 @@ package internal
 // tree proves the guard fires once (verified live in both directions
 // during development), whereas the synthetic controls prove it fires
 // on the SHAPE, and keep proving it as the tree changes.
+//
+// TestBarePoolScannerFlagsRepresentativeShapes carries the
+// ATTACH/DETACH/REINDEX shapes added for review finding M1, and
+// TestBarePoolAllowlistDetectsUnapprovedAttach pins the M1 site
+// itself: the exact shape of the connection-scoped ATTACH must be
+// detected by the classifier AND must not be allowlisted under any
+// OTHER file, so a NEW unapproved ATTACH anywhere in the tree fails
+// the completeness guard by shape rather than by luck.
 
 import (
 	"fmt"
@@ -176,10 +220,33 @@ import (
 // are recorded in the allowlist with those reasons — the point is that
 // they are REVIEWED, not that they are all converted.
 //
-// REINDEX, ATTACH and DETACH are deliberately NOT listed: the tree
-// contains no bare pool write of any of them, and a verb in this list
-// that no site can ever match is a claim the guard cannot back.
-var bareWriteVerb = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA|VACUUM)\b`)
+// ATTACH, DETACH and REINDEX were added on 2026-11-06 (issue #178,
+// independent review finding M1). The comment that preceded them
+// claimed the tree contains no bare pool write of any of them. THAT
+// CLAIM WAS FALSE. `internal/core/similarity_candidates_store.go:972`
+// issues `ATTACH DATABASE '%s' AS shared` through a pinned `*sql.Conn`
+// drawn from the substrate's pool, and this scanner's receiver rule
+// counts every identifier other than `tx` as a pool receiver — so the
+// site was invisible ONLY because the verb was missing.
+//
+// Both halves of the old rationale were wrong in opposite directions.
+// "A verb in this list that no site can ever match is a claim the
+// guard cannot back" is true of a verb nothing can match — but the fix
+// is to make the list COMPLETE, not to leave a hole and then assert
+// the hole is empty. A verb that a site CAN match and the list omits
+// is a hole in the guard, and the hole is invisible precisely because
+// the detector cannot see it.
+//
+// So this list is about DETECTION CAPABILITY, not about inventory: it
+// names every write shape the detector can see, and the allowlist
+// below is what says which of those shapes exist today.
+//
+// What exists today, exactly: ONE bare ATTACH
+// (internal/core/similarity_candidates_store.go:972), and NO bare
+// DETACH and NO bare REINDEX. The ATTACH is recorded below with the
+// reason `connection-scoped`, because its semantics are per-connection
+// and a pool retry budget would MISPLACE it — see THE REASONS above.
+var bareWriteVerb = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA|VACUUM|ATTACH|DETACH|REINDEX)\b`)
 
 // barePoolReason is the closed vocabulary of justifications for a
 // bare pool write. See THE REASONS above.
@@ -193,6 +260,8 @@ const (
 	reasonTestFixture   barePoolReason = "test-fixture"
 	// reasonSharedPrimitive is documented in THE REASONS above.
 	reasonSharedPrimitive barePoolReason = "shared-primitive"
+	// reasonConnectionScoped is documented in THE REASONS above.
+	reasonConnectionScoped barePoolReason = "connection-scoped"
 )
 
 // barePoolEntry is one bare pool write the guard knows about: the file
@@ -658,6 +727,10 @@ var barePoolAllowlist = []barePoolEntry{
 		Why:   reasonMigrationOnce,
 		Count: 1},
 	{File: "internal/core/similarity_candidates_store.go",
+		SQL:   "ATTACH DATABASE '%s' AS shared",
+		Why:   reasonConnectionScoped,
+		Count: 1},
+	{File: "internal/core/similarity_candidates_store.go",
 		SQL:   "INSERT OR IGNORE INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity, detected_by, detected_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
 		Why:   reasonPropagated,
 		Count: 1},
@@ -1059,7 +1132,7 @@ func TestBarePoolAllowlistIdentitiesAreUnique(t *testing.T) {
 			t.Fatalf("allowlist entry with non-positive Count: %+v", e)
 		}
 		switch e.Why {
-		case reasonPropagated, reasonStartupDDL, reasonMigrationOnce, reasonBestEffort, reasonTestFixture, reasonSharedPrimitive:
+		case reasonPropagated, reasonStartupDDL, reasonMigrationOnce, reasonBestEffort, reasonTestFixture, reasonSharedPrimitive, reasonConnectionScoped:
 		default:
 			t.Fatalf("allowlist entry with undocumented reason: %+v", e)
 		}
@@ -1196,6 +1269,80 @@ func TestBarePoolAllowlistDetectsReintroducedExecContextWrite(t *testing.T) {
 	}
 }
 
+// TestBarePoolAllowlistDetectsUnapprovedAttach is the M1 control.
+//
+// The independent review of 2026-11-06 found the ratchet's comment
+// claiming the tree contains no bare pool ATTACH — while
+// internal/core/similarity_candidates_store.go:972 carries exactly
+// one, on a pinned pooled connection. The verb was missing from the
+// detector's list, so the site was invisible.
+//
+// This test pins the fix from both ends:
+//
+//   - the CLASSIFIER must SEE the connection-scoped ATTACH shape (a
+//     synthetic source, so it keeps proving the SHAPE as the tree
+//     changes); and
+//   - the shape must be allowlisted ONLY under the one file that owns
+//     the reviewed site. A NEW bare ATTACH in any other file — the
+//     "newly introduced unapproved statement" the review asked to be
+//     demonstrated — therefore resolves to an identity that is NOT on
+//     the allowlist, and the completeness guard fails by shape rather
+//     than by luck.
+func TestBarePoolAllowlistDetectsUnapprovedAttach(t *testing.T) {
+	// The exact statement the M1 site runs, resolved by the scanner's
+	// own SQL resolution (fmt.Sprintf by its format string).
+	const attachShape = "ATTACH DATABASE '%s' AS shared"
+
+	// 1. The classifier sees it. The receiver is `conn` — a pinned
+	//    connection, not a transaction — and the scanner's receiver
+	//    rule counts every identifier other than `tx` as a pool
+	//    receiver, deliberately failing closed.
+	src := "package internal\n" +
+		"func probe(ctx context.Context, conn *sql.Conn) { _, _ = conn.ExecContext(ctx, " +
+		"fmt.Sprintf(\"" + attachShape + "\", path)) }\n"
+	sites, err := scanBarePoolSource("internal/core/probe.go", []byte(src))
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(sites) != 1 {
+		t.Fatalf("a bare ATTACH on a pinned connection must be detected as a bare pool write (got %d sites)", len(sites))
+	}
+	if !strings.Contains(sites[0].SQL, "ATTACH DATABASE") {
+		t.Fatalf("the detected site must carry the RESOLVED SQL, not the context: %q", sites[0].SQL)
+	}
+
+	// 2. The reviewed site is allowlisted, exactly once, under its own
+	//    file, with the connection-scoped reason.
+	allowed := allowlistIndex()
+	entry, ok := allowed[barePoolIdentity("internal/core/similarity_candidates_store.go", attachShape)]
+	if !ok {
+		t.Fatalf("the reviewed connection-scoped ATTACH is not allowlisted: " +
+			"the completeness guard would fail on the tree's own site")
+	}
+	if entry.Why != reasonConnectionScoped {
+		t.Fatalf("the reviewed ATTACH is recorded with reason %q, want %q — "+
+			"a pool ATTACH is not startup DDL and not a propagated write: "+
+			"its scope is one connection", entry.Why, reasonConnectionScoped)
+	}
+	if entry.Count != 1 {
+		t.Fatalf("the reviewed ATTACH is recorded with Count %d, want 1: "+
+			"the tree carries exactly one such site", entry.Count)
+	}
+
+	// 3. The SAME shape anywhere else is unapproved: a newly
+	//    introduced ATTACH fails the completeness guard, because its
+	//    identity carries a different file.
+	probeIdentity := barePoolIdentity("internal/core/probe.go", sites[0].SQL)
+	if _, ok := allowed[probeIdentity]; ok {
+		t.Fatalf("the synthetic ATTACH shape resolves to an allowlisted identity: " +
+			"a live bare ATTACH in a new file would pass the guard")
+	}
+	if _, ok := allowed[barePoolIdentity("internal/core/other.go", attachShape)]; ok {
+		t.Fatalf("the ATTACH shape is allowlisted outside its reviewed file: " +
+			"a new bare ATTACH would inherit the reviewed site's entry")
+	}
+}
+
 // TestBarePoolScannerFlagsRepresentativeShapes is the negative control:
 // the classifier must catch every bare shape — including a deliberately
 // reintroduced defect — and must not flag the guarded or
@@ -1268,6 +1415,41 @@ func TestBarePoolScannerFlagsRepresentativeShapes(t *testing.T) {
 		{
 			"bare PRAGMA write through ExecContext is caught",
 			"package p\nfunc f(ctx context.Context, dm *M) { _, _ = dm.db.ExecContext(ctx, `PRAGMA journal_mode = WAL`) }\ntype M struct { db *D }\ntype D struct{}\nfunc (d *D) ExecContext(ctx context.Context, q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
+			// The M1 gap. Before the independent review of 2026-11-06
+			// the verb list stopped at PRAGMA/VACUUM, so a bare
+			// ATTACH/DETACH/REINDEX was invisible to this guard — and
+			// the tree already carried one bare ATTACH
+			// (internal/core/similarity_candidates_store.go:972),
+			// which the comment claimed did not exist. These three
+			// cases are the negative control for that gap: they fail
+			// against the old verb list and pass against the current
+			// one.
+			"bare ATTACH is caught",
+			"package p\nfunc f(dm *M) { _, _ = dm.db.Exec(`ATTACH DATABASE '/tmp/x.db' AS shared`) }\ntype M struct { db *D }\ntype D struct{}\nfunc (d *D) Exec(q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
+			"bare DETACH is caught",
+			"package p\nfunc f(dm *M) { _, _ = dm.db.Exec(`DETACH DATABASE shared`) }\ntype M struct { db *D }\ntype D struct{}\nfunc (d *D) Exec(q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
+			"bare REINDEX is caught",
+			"package p\nfunc f(dm *M) { _, _ = dm.db.Exec(`REINDEX idx_memories`) }\ntype M struct { db *D }\ntype D struct{}\nfunc (d *D) Exec(q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
+			// The M1 site itself: the ATTACH runs on a PINNED
+			// `*sql.Conn`, and the scanner's receiver rule counts
+			// every identifier other than `tx` as a pool receiver.
+			// That is deliberate — the rule fails CLOSED, because a
+			// connection-scoped write that is invisible to the
+			// guard is exactly the hole this guard exists to close.
+			"a bare ATTACH on a pinned connection is caught",
+			"package p\nfunc f(ctx context.Context, conn *C) { _, _ = conn.ExecContext(ctx, `ATTACH DATABASE '/tmp/x.db' AS shared`) }\ntype C struct{}\nfunc (c *C) ExecContext(ctx context.Context, q string, a ...interface{}) (int, error) { return 0, nil }\n",
 			1,
 		},
 		{

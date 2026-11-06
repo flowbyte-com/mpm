@@ -11,17 +11,34 @@ happens to the write when the contention outlasts the busy timeout?**
 | Class | Occurrences | What the loss means |
 |---|---|---|
 | `ordinary` | 71 | The user's or the agent's state is not persisted. The write is lost; the caller is told, so the loss is recoverable only by redoing the work. |
-| `migration` | 51 | Schema, a one-shot backfill, a seed, or a test-fixture write. Idempotent or detection-gated, so a rerun is safe. |
+| `migration` | 52 | Schema, a one-shot backfill, a seed, or a test-fixture write. Idempotent or detection-gated, so a rerun is safe. |
 | `tx-owned` | 0 | A write inside a transaction is owned by the transaction layer. **No bare pool write on the base commit is lexically inside a `WithTx` callback.** |
 | `maintenance` | 38 | A ledger, a counter, a retention sweep, a recomputation, or a diagnostic row. Deliberately nonblocking: the failure is logged and costs a re-run, not a state. |
 
-**Total: 160 occurrences across 53 files.**
+**Total: 161 occurrences across 53 files.**
 
 The `Why` column is the merged ratchet's own reason vocabulary
 (`internal/core/bare_pool_write_ratchet_test.go`), so this table and the
 guard's allowlist cannot drift apart. The `Class` column is the
 reclassification; it is a judgement about the CONSEQUENCE of the loss, not a
 second copy of the reason.
+
+**The one `reasonConnectionScoped` site**
+(`internal/core/similarity_candidates_store.go:972`,
+`ensureSharedAttachedOnConn`) is classified `migration` because it is
+**schema**, it is **detection-gated** (the `PRAGMA database_list` check
+precedes it on the same connection), and a rerun on that connection is
+**safe** — which is exactly what the `migration` class means. It is not
+`ordinary`, because no agent state is at stake, and it is not
+`maintenance`, because its failure is fatal to the operation rather than
+deliberately nonblocking. See the companion record's §5.1.
+
+**This revision's line numbers are measured at the base commit named
+above** (`653e4633`). The previous revision of this document carried the
+line numbers of an earlier base (`3a3486cf`) under a header that named
+the later one — the same class of error as the false coverage claim the
+independent review of 2026-11-06 found in the ratchet's verb list: a
+document asserting a base it was not measured against.
 
 ---
 
@@ -172,47 +189,47 @@ second copy of the reason.
 | 215 | `migration` | `reasonStartupDDL` | `NewSQLiteConnection` | `PRAGMA journal_mode = WAL` |
 | 218 | `migration` | `reasonStartupDDL` | `NewSQLiteConnection` | `PRAGMA busy_timeout = 5000` |
 | 248 | `maintenance` | `reasonPropagated` | `WipeRecord` | `VACUUM` |
-| 663 | `maintenance` | `reasonBestEffort` | `HealthCheck` | `PRAGMA wal_checkpoint(TRUNCATE)` |
-| 1681 | `migration` | `reasonStartupDDL` | `NewDatabaseManager` | `PRAGMA foreign_keys = ON` |
-| 1682 | `migration` | `reasonStartupDDL` | `NewDatabaseManager` | `PRAGMA journal_mode = WAL` |
-| 1706 | `migration` | `reasonStartupDDL` | `NewDatabaseManager` | `PRAGMA busy_timeout = 5000` |
-| 1707 | `migration` | `reasonStartupDDL` | `NewDatabaseManager` | `PRAGMA synchronous = NORMAL` |
-| 1708 | `migration` | `reasonStartupDDL` | `NewDatabaseManager` | `PRAGMA cache_size = -64000` |
-| 2049 | `migration` | `reasonStartupDDL` | `NewSession` | `PRAGMA foreign_keys = ON` |
-| 2050 | `migration` | `reasonStartupDDL` | `NewSession` | `PRAGMA journal_mode = WAL` |
-| 2051 | `migration` | `reasonStartupDDL` | `NewSession` | `PRAGMA synchronous = NORMAL` |
-| 2052 | `migration` | `reasonStartupDDL` | `NewSession` | `PRAGMA cache_size = -64000` |
-| 2663 | `migration` | `reasonMigrationOnce` | `backfillSharedFTSIfEmpty` | `INSERT OR IGNORE INTO shared.memories_fts(rowid, content, collection, session_id, tags) SELEC…` |
-| 2922 | `migration` | `reasonStartupDDL` | `initUnifiedSchema` | `PRAGMA journal_mode = WAL` |
-| 2923 | `migration` | `reasonStartupDDL` | `initUnifiedSchema` | `PRAGMA busy_timeout = 5000` |
-| 2924 | `migration` | `reasonStartupDDL` | `initUnifiedSchema` | `PRAGMA synchronous = NORMAL` |
-| 3755 | `migration` | `reasonStartupDDL` | `createLessonsViewAndTriggers` | `CREATE VIEW IF NOT EXISTS lessons AS SELECT rowid, id, type, content, tags, reinforcement_cou…` |
-| 3769 | `migration` | `reasonStartupDDL` | `createLessonsViewAndTriggers` | `CREATE TRIGGER lessons_instead_of_insert INSTEAD OF INSERT ON lessons BEGIN INSERT INTO lesso…` |
-| 3791 | `migration` | `reasonStartupDDL` | `createLessonsViewAndTriggers` | `CREATE TRIGGER lessons_instead_of_update INSTEAD OF UPDATE ON lessons BEGIN UPDATE lessons_ba…` |
-| 3812 | `migration` | `reasonStartupDDL` | `createLessonsViewAndTriggers` | `CREATE TRIGGER lessons_instead_of_delete INSTEAD OF DELETE ON lessons BEGIN DELETE FROM lesso…` |
-| 3954 | `migration` | `reasonStartupDDL` | `ensureLessonsFTS` | `CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(content, tags, tokenize='porter uni…` |
-| 3974 | `migration` | `reasonStartupDDL` | `initFTSTables` | `CREATE VIRTUAL TABLE test_fts USING fts5(content, tokenize='porter unicode61');` |
-| 4350 | `migration` | `reasonMigrationOnce` | `UpdateSessionSummary` | `UPDATE sessions SET summary = ? WHERE session_id = ?` |
-| 4888 | `ordinary` | `reasonPropagated` | `SaveSystemConfig` | `INSERT OR REPLACE INTO system_config (key, raw_json, content_hash, updated_at, config_snapsho…` |
-| 4929 | `ordinary` | `reasonPropagated` | `DeleteSystemConfig` | `DELETE FROM system_config WHERE key = ?` |
-| 5383 | `ordinary` | `reasonPropagated` | `CreateTopic` | `INSERT INTO topics (id, name, description, created_at, tags, is_active, updated_at) VALUES (?…` |
-| 5582 | `migration` | `reasonMigrationOnce` | `AddMemoryToTopic` | `INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?,…` |
-| 5655 | `migration` | `reasonMigrationOnce` | `RemoveMemoryFromTopic` | `DELETE FROM topic_memberships WHERE memory_id = ? AND topic_id = ?` |
-| 6231 | `ordinary` | `reasonPropagated` | `DeleteLesson` | `UPDATE lessons_base SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL` |
-| 6251 | `ordinary` | `reasonPropagated` | `RestoreLesson` | `UPDATE lessons_base SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL` |
-| 6272 | `ordinary` | `reasonPropagated` | `ShredLesson` | `DELETE FROM lessons_fts WHERE rowid IN (SELECT rowid FROM lessons_base WHERE id = ?)` |
-| 6276 | `ordinary` | `reasonPropagated` | `ShredLesson` | `DELETE FROM lessons_base WHERE id = ?` |
-| 6634 | `maintenance` | `reasonPropagated` | `DecayWeights` | `UPDATE memories SET weight = MAX(weight - MAX(1, CAST(weight * ? * COALESCE( CASE json_extrac…` |
-| 6680 | `ordinary` | `reasonPropagated` | `AddWork` | `INSERT INTO works (id, title, content, status, created_at, updated_at, session_id, migrated_a…` |
-| 7165 | `ordinary` | `reasonPropagated` | `updateWorkStatus` | `UPDATE works SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?` |
-| 7795 | `ordinary` | `reasonPropagated` | `DeriveWorkVerification` | `UPDATE works SET verification = ? WHERE id = ?` |
-| 8139 | `ordinary` | `reasonPropagated` | `RecordGlobalRule` | `INSERT INTO shared.memories (id, collection, content, tags, metadata, weight, is_global, crea…` |
-| 8195 | `ordinary` | `reasonPropagated` | `PromoteToGlobal` | `INSERT INTO shared.memories (id, collection, content, tags, metadata, weight, reinforcement_c…` |
-| 8249 | `ordinary` | `reasonPropagated` | `RetireGlobalRule` | `UPDATE shared.memories SET retired_at = ? WHERE id = ? AND is_global = 1 AND deleted_at IS NU…` |
-| 8339 | `migration` | `reasonStartupDDL` | `migrateWorkEvents` | `CREATE TABLE IF NOT EXISTS work_events ( id TEXT PRIMARY KEY, work_id TEXT NOT NULL, event_in…` |
-| 8378 | `migration` | `reasonMigrationOnce` | `migrateWorkEvents` | `INSERT OR IGNORE INTO work_events (id, work_id, event_index, event_type, created_at, invocati…` |
-| 8383 | `migration` | `reasonMigrationOnce` | `migrateWorkEvents` | `UPDATE works SET migrated_at = CAST(strftime('%s','now') AS INTEGER) WHERE migrated_at IS NULL` |
-| 9077 | `maintenance` | `reasonPropagated` | `RecomputeWorkProjection` | `UPDATE works SET status = ?, title = ?, content = ?, updated_at = ?, completed_at = ?, archiv…` |
+| 671 | `maintenance` | `reasonBestEffort` | `HealthCheck` | `PRAGMA wal_checkpoint(TRUNCATE)` |
+| 1692 | `migration` | `reasonStartupDDL` | `NewDatabaseManager` | `PRAGMA foreign_keys = ON` |
+| 1693 | `migration` | `reasonStartupDDL` | `NewDatabaseManager` | `PRAGMA journal_mode = WAL` |
+| 1717 | `migration` | `reasonStartupDDL` | `NewDatabaseManager` | `PRAGMA busy_timeout = 5000` |
+| 1718 | `migration` | `reasonStartupDDL` | `NewDatabaseManager` | `PRAGMA synchronous = NORMAL` |
+| 1719 | `migration` | `reasonStartupDDL` | `NewDatabaseManager` | `PRAGMA cache_size = -64000` |
+| 2060 | `migration` | `reasonStartupDDL` | `NewSession` | `PRAGMA foreign_keys = ON` |
+| 2061 | `migration` | `reasonStartupDDL` | `NewSession` | `PRAGMA journal_mode = WAL` |
+| 2062 | `migration` | `reasonStartupDDL` | `NewSession` | `PRAGMA synchronous = NORMAL` |
+| 2063 | `migration` | `reasonStartupDDL` | `NewSession` | `PRAGMA cache_size = -64000` |
+| 2674 | `migration` | `reasonMigrationOnce` | `backfillSharedFTSIfEmpty` | `INSERT OR IGNORE INTO shared.memories_fts(rowid, content, collection, session_id, tags) SELEC…` |
+| 2933 | `migration` | `reasonStartupDDL` | `initUnifiedSchema` | `PRAGMA journal_mode = WAL` |
+| 2934 | `migration` | `reasonStartupDDL` | `initUnifiedSchema` | `PRAGMA busy_timeout = 5000` |
+| 2935 | `migration` | `reasonStartupDDL` | `initUnifiedSchema` | `PRAGMA synchronous = NORMAL` |
+| 3766 | `migration` | `reasonStartupDDL` | `createLessonsViewAndTriggers` | `CREATE VIEW IF NOT EXISTS lessons AS SELECT rowid, id, type, content, tags, reinforcement_cou…` |
+| 3780 | `migration` | `reasonStartupDDL` | `createLessonsViewAndTriggers` | `CREATE TRIGGER lessons_instead_of_insert INSTEAD OF INSERT ON lessons BEGIN INSERT INTO lesso…` |
+| 3802 | `migration` | `reasonStartupDDL` | `createLessonsViewAndTriggers` | `CREATE TRIGGER lessons_instead_of_update INSTEAD OF UPDATE ON lessons BEGIN UPDATE lessons_ba…` |
+| 3823 | `migration` | `reasonStartupDDL` | `createLessonsViewAndTriggers` | `CREATE TRIGGER lessons_instead_of_delete INSTEAD OF DELETE ON lessons BEGIN DELETE FROM lesso…` |
+| 3965 | `migration` | `reasonStartupDDL` | `ensureLessonsFTS` | `CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(content, tags, tokenize='porter uni…` |
+| 3985 | `migration` | `reasonStartupDDL` | `initFTSTables` | `CREATE VIRTUAL TABLE test_fts USING fts5(content, tokenize='porter unicode61');` |
+| 4361 | `migration` | `reasonMigrationOnce` | `UpdateSessionSummary` | `UPDATE sessions SET summary = ? WHERE session_id = ?` |
+| 4899 | `ordinary` | `reasonPropagated` | `SaveSystemConfig` | `INSERT OR REPLACE INTO system_config (key, raw_json, content_hash, updated_at, config_snapsho…` |
+| 4940 | `ordinary` | `reasonPropagated` | `DeleteSystemConfig` | `DELETE FROM system_config WHERE key = ?` |
+| 5394 | `ordinary` | `reasonPropagated` | `CreateTopic` | `INSERT INTO topics (id, name, description, created_at, tags, is_active, updated_at) VALUES (?…` |
+| 5593 | `migration` | `reasonMigrationOnce` | `AddMemoryToTopic` | `INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?,…` |
+| 5666 | `migration` | `reasonMigrationOnce` | `RemoveMemoryFromTopic` | `DELETE FROM topic_memberships WHERE memory_id = ? AND topic_id = ?` |
+| 6242 | `ordinary` | `reasonPropagated` | `DeleteLesson` | `UPDATE lessons_base SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL` |
+| 6262 | `ordinary` | `reasonPropagated` | `RestoreLesson` | `UPDATE lessons_base SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL` |
+| 6283 | `ordinary` | `reasonPropagated` | `ShredLesson` | `DELETE FROM lessons_fts WHERE rowid IN (SELECT rowid FROM lessons_base WHERE id = ?)` |
+| 6287 | `ordinary` | `reasonPropagated` | `ShredLesson` | `DELETE FROM lessons_base WHERE id = ?` |
+| 6645 | `maintenance` | `reasonPropagated` | `DecayWeights` | `UPDATE memories SET weight = MAX(weight - MAX(1, CAST(weight * ? * COALESCE( CASE json_extrac…` |
+| 6691 | `ordinary` | `reasonPropagated` | `AddWork` | `INSERT INTO works (id, title, content, status, created_at, updated_at, session_id, migrated_a…` |
+| 7176 | `ordinary` | `reasonPropagated` | `updateWorkStatus` | `UPDATE works SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?` |
+| 7806 | `ordinary` | `reasonPropagated` | `DeriveWorkVerification` | `UPDATE works SET verification = ? WHERE id = ?` |
+| 8150 | `ordinary` | `reasonPropagated` | `RecordGlobalRule` | `INSERT INTO shared.memories (id, collection, content, tags, metadata, weight, is_global, crea…` |
+| 8206 | `ordinary` | `reasonPropagated` | `PromoteToGlobal` | `INSERT INTO shared.memories (id, collection, content, tags, metadata, weight, reinforcement_c…` |
+| 8260 | `ordinary` | `reasonPropagated` | `RetireGlobalRule` | `UPDATE shared.memories SET retired_at = ? WHERE id = ? AND is_global = 1 AND deleted_at IS NU…` |
+| 8350 | `migration` | `reasonStartupDDL` | `migrateWorkEvents` | `CREATE TABLE IF NOT EXISTS work_events ( id TEXT PRIMARY KEY, work_id TEXT NOT NULL, event_in…` |
+| 8389 | `migration` | `reasonMigrationOnce` | `migrateWorkEvents` | `INSERT OR IGNORE INTO work_events (id, work_id, event_index, event_type, created_at, invocati…` |
+| 8394 | `migration` | `reasonMigrationOnce` | `migrateWorkEvents` | `UPDATE works SET migrated_at = CAST(strftime('%s','now') AS INTEGER) WHERE migrated_at IS NULL` |
+| 9088 | `maintenance` | `reasonPropagated` | `RecomputeWorkProjection` | `UPDATE works SET status = ?, title = ?, content = ?, updated_at = ?, completed_at = ?, archiv…` |
 
 ## `internal/core/embedding_migration.go` — 3
 
@@ -366,10 +383,11 @@ second copy of the reason.
 | 179 | `migration` | `reasonMigrationOnce` | `reviveSeedRow` | `UPDATE memories SET deleted_at = NULL, content = ?, tags = ?, metadata = ?, is_prime_directiv…` |
 | 235 | `migration` | `reasonMigrationOnce` | `insertSeedRow` | `INSERT OR IGNORE INTO memories (id, collection, content, tags, metadata, is_prime_directive, …` |
 
-## `internal/core/similarity_candidates_store.go` — 1
+## `internal/core/similarity_candidates_store.go` — 2
 
 | Line | Class | Why | Function | Statement |
 |---|---|---|---|---|
+| 972 | `migration` | `reasonConnectionScoped` | `ensureSharedAttachedOnConn` | `ATTACH DATABASE '%s' AS shared` |
 | 1258 | `ordinary` | `reasonPropagated` | `EnqueueSimilarityCandidatesTransactional` | `INSERT OR IGNORE INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarit…` |
 
 ## `internal/core/skill_db.go` — 3

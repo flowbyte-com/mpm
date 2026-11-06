@@ -244,3 +244,102 @@ func TestConvertedMemoryWriteSurvivesContention(t *testing.T) {
 		t.Fatalf("the weight is %v, want 42 — the write did not land", weight)
 	}
 }
+
+// TestPoolMemExecerWaitsOutContention is the RUNTIME half of the
+// adapter's contract.
+//
+// The AST guard in shared_primitive_budget_guard_test.go says the
+// adapter's Exec routes through the substrate's statement-level retry
+// policy. That is a claim about the CODE. This test is the claim
+// about the BEHAVIOUR: the adapter really does wait ordinary
+// contention out and land its write, where a bare pool write of the
+// same statement loses the artifact.
+//
+// It exists because an AST assertion alone cannot prove that the
+// policy it routes through is worth routing through. The review of
+// 2026-11-06 (finding M2) showed that the adapter's assertion could
+// be switched off without anything failing; this test fails if the
+// adapter stops routing through the tracked policy in a way that
+// changes what happens to the write.
+//
+// The two halves run against the SAME disposable database and the SAME
+// held lock, so the difference between them is the retry policy and
+// nothing else:
+//
+//  1. a BARE pool write of the same statement fails while the lock is
+//     held, and the row is not there; and
+//  2. the same statement through poolMemExecer succeeds after the
+//     lock is released.
+func TestPoolMemExecerWaitsOutContention(t *testing.T) {
+	dir := t.TempDir()
+	dsn := contentionDSN(t, dir, "adapter-contention.db")
+
+	holder, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open the lock holder: %v", err)
+	}
+	defer holder.Close()
+	if _, err := holder.Exec(`CREATE TABLE artifacts (id TEXT PRIMARY KEY, body TEXT)`); err != nil {
+		t.Fatalf("create the artifacts table: %v", err)
+	}
+
+	writer, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("open the contending writer: %v", err)
+	}
+	defer writer.Close()
+	// One connection, so the writer cannot quietly serialise itself.
+	writer.SetMaxOpenConns(1)
+
+	release := holdWriteLock(t, holder)
+
+	// --- 1. the bare pool write loses the artifact -------------------
+	const bareStatement = `INSERT INTO artifacts (id, body) VALUES ('bare-adapter', 'lost')`
+	if _, err := writer.Exec(bareStatement); err == nil {
+		t.Fatal("the bare pool write SUCCEEDED while the write lock was held — " +
+			"the contention did not reproduce, so this test proves nothing")
+	} else if !isBusyError(err) {
+		t.Fatalf("the bare pool write failed with %v, which is not a lock contention", err)
+	}
+	var body string
+	err = writer.QueryRow(`SELECT body FROM artifacts WHERE id = 'bare-adapter'`).Scan(&body)
+	if err == nil {
+		t.Fatalf("the bare pool write reported failure but the row IS there (body=%q)", body)
+	}
+	if err != sql.ErrNoRows {
+		t.Fatalf("reading the bare row back: %v", err)
+	}
+
+	// --- 2. the adapter's write survives the same contention ---------
+	// The lock is released while the adapter's write is in flight, so
+	// the adapter has to WAIT IT OUT — that is the whole difference.
+	executor := poolMemExecer{db: writer, retries: 5}
+	done := make(chan error, 1)
+	go func() {
+		_, err := executor.Exec(`INSERT INTO artifacts (id, body) VALUES ('budgeted-adapter', 'kept')`)
+		done <- err
+	}()
+
+	// Give the adapter's write time to fail at least one attempt
+	// against the held lock, so the success below is the result of a
+	// RETRY and not of a write that never contended.
+	time.Sleep(300 * time.Millisecond)
+	release()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the adapter's write did not survive the contention: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the adapter's write never returned")
+	}
+
+	var kept string
+	if err := writer.QueryRow(`SELECT body FROM artifacts WHERE id = 'budgeted-adapter'`).Scan(&kept); err != nil {
+		t.Fatalf("the adapter's write reported success but the row is not there: %v", err)
+	}
+	if kept != "kept" {
+		t.Fatalf("the adapter's row has body %q, want %q", kept, "kept")
+	}
+}
