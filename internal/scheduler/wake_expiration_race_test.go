@@ -277,7 +277,7 @@ func TestSweepDoesNotOverwriteAConcurrentSettlement(t *testing.T) {
 	}
 	done := make(chan sweepResult, 1)
 	go func() {
-		retired, err := SweepOverdueNotificationWakes(context.Background(), h.sweepDB, sweepNow)
+		retired, _, err := SweepOverdueNotificationWakes(context.Background(), h.sweepDB, sweepNow)
 		done <- sweepResult{retired: retired, err: err}
 	}()
 
@@ -360,7 +360,7 @@ func TestSweepSkipsAConcurrentlyRetiredCandidateAndContinuesTheBatch(t *testing.
 	done := make(chan int, 1)
 	errc := make(chan error, 1)
 	go func() {
-		retired, err := SweepOverdueNotificationWakes(context.Background(), h.sweepDB, sweepNow)
+		retired, _, err := SweepOverdueNotificationWakes(context.Background(), h.sweepDB, sweepNow)
 		if err != nil {
 			errc <- err
 			return
@@ -430,7 +430,7 @@ func TestCronSweepDoesNotOverwriteAConcurrentSettlement(t *testing.T) {
 	done := make(chan int, 1)
 	errc := make(chan error, 1)
 	go func() {
-		retired, err := SweepOverdueCronWakes(context.Background(), h.sweepDB, sweepNow, 10)
+		retired, _, err := SweepOverdueCronWakes(context.Background(), h.sweepDB, sweepNow, 10)
 		if err != nil {
 			errc <- err
 			return

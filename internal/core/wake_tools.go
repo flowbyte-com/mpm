@@ -367,7 +367,147 @@ func WakeKindAgentOwned(kind string) bool {
 // The result is that a malformed metadata document is read and written
 // as the EMPTY OBJECT — which is exactly how a NULL or empty
 // metadata is already treated.
-const WakeMetadataJSON = `CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END`
+//
+// BUT "PARSEABLE" IS NOT ENOUGH — THE DOCUMENT MUST BE WRITABLE.
+//
+// The first version of this guard was:
+//
+//	CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END
+//
+// json_valid() returns 1 for every parseable JSON document, including
+// the ones that are not OBJECTS: 'null', '42', '"str"', 'true', '[]'.
+// For those the THEN branch kept the original document — and
+// SQLite's json_set() on a non-object document returns the document
+// UNCHANGED, silently dropping the key:
+//
+//	json_set('null',  '$.k','v') -> null
+//	json_set('42',    '$.k','v') -> 42
+//	json_set('"str"', '$.k','v') -> "str"
+//	json_set('true',  '$.k','v') -> true
+//	json_set('[]',    '$.k','v') -> []
+//
+// The write "landed" (one row affected) and carried NO audit note. The
+// 7-day sweep's own read-back assertion then failed, and because the
+// sweep is one transaction for the whole batch, every healthy overdue
+// row behind that one was left un-retired — the very "one bad row
+// stops the sweep" failure this guard exists to remove.
+//
+// So the guard yields a WRITABLE OBJECT: the original document when it
+// IS an object, and the empty object otherwise. json_type() does raise
+// on malformed input, but it is only ever reached inside the THEN
+// branch of json_valid(metadata) — and CASE evaluates only the branch
+// it selects. That is a property of CASE itself, not of the evaluation
+// order of an expression list, which is the dependence this guard
+// exists to eliminate.
+//
+// The result: a malformed document, a JSON scalar and a JSON array are
+// all read and written as the EMPTY OBJECT; a real object is preserved
+// verbatim.
+const WakeMetadataJSON = `CASE WHEN json_valid(metadata) THEN CASE WHEN json_type(metadata) = 'object' THEN metadata ELSE '{}' END ELSE '{}' END`
+
+// WakeMetadataIsCorrupt is the always-valid predicate for "this row's
+// metadata is CORRUPT".
+//
+// A row is corrupt when its metadata is PRESENT, NON-EMPTY, and NOT a
+// parseable JSON document. json_valid() never raises — it returns 0
+// for malformed input, 1 for valid input and NULL for NULL input — so
+// this predicate is safe in a WHERE clause with no dependence on
+// evaluation order.
+//
+// It is deliberately NOT "not a JSON object": a JSON scalar or array
+// is parseable, and the guard above makes it writable. A corrupt
+// document is one that no JSON function can read at all.
+//
+// WHY CORRUPT ROWS ARE A DISTINCT CLASS.
+//
+// A corrupt document is the one shape whose ORIGINAL BYTES may name an
+// owner that cannot be read back: the truncated prefix
+// '{"kind": "cron"' is not parseable, so the kind is unreadable — but
+// the bytes are exactly the evidence that the row was a CRON wake.
+// Reading it as untagged would silently reclassify scheduler-owned
+// work as an ordinary notification, and writing to it would destroy
+// the only copy of that evidence. See WakeMetadataCorruption.
+//
+// A VALID JSON SCALAR OR ARRAY IS NOT CORRUPT. It parses, so no JSON
+// function can raise on it, and the guard above makes it writable. Its
+// original bytes are replaced by the audit-note object when a writer
+// touches it — that is normalisation, not corruption. The distinction
+// matters because only a MALFORMED document can hide an owner: a
+// well-formed document either names its kind in full or names none at
+// all.
+//
+// THE ADOPTED POLICY (issue #178, defect W4)
+// ------------------------------------------
+// A corrupt row is owned by NO partition. It is never delivered, never
+// claimed, never retired by a retention sweep, never resolved by an
+// agent and never executed by the scheduler. Its original bytes are
+// preserved verbatim, because they are the only evidence of what it
+// was. Every surface that meets one rejects it INDIVIDUALLY, with a
+// diagnostic that carries those bytes, and carries on with the healthy
+// rows. One corrupt row never blocks, delays or rolls back work on any
+// other row.
+const WakeMetadataIsCorrupt = `(metadata IS NOT NULL AND metadata <> '' AND json_valid(metadata) = 0)`
+
+// The surface names a writer that refused to touch a corrupt row.
+//
+// The vocabulary is shared so that a rejection record says WHICH
+// writer rejected the row, and so that no surface invents its own
+// spelling.
+const (
+	// WakeSurfaceNotificationExpiration is the 7-day notification retention sweep.
+	WakeSurfaceNotificationExpiration = "notification_expiration"
+	// WakeSurfaceCronRetention is the 1-hour cron retention sweep.
+	WakeSurfaceCronRetention = "cron_retention"
+	// WakeSurfaceResolve is the agent-facing wake resolver.
+	WakeSurfaceResolve = "resolve_wake"
+	// WakeSurfaceClaim is the scheduler's notification claim.
+	WakeSurfaceClaim = "dispatch_claim"
+	// WakeSurfaceSettlement is the scheduler's wake settlement.
+	WakeSurfaceSettlement = "wake_settlement"
+)
+
+// WakeMetadataCorruption is the diagnostic record for a row that a
+// writer refused to touch because its metadata is corrupt.
+//
+// It carries the ORIGINAL METADATA BYTES on purpose: the rejection
+// PRESERVES them (the row is never written), so the record is the only
+// place the operator can read what the row's bytes actually were —
+// including, in the truncated case, the name of the owner the row was
+// meant to be.
+type WakeMetadataCorruption struct {
+	// WakeID is the row's id.
+	WakeID string
+	// Metadata is the row's original metadata, verbatim and never
+	// overwritten.
+	Metadata string
+	// Surface names the writer that rejected the row.
+	Surface string
+}
+
+// String renders the corruption for a log line.
+func (c WakeMetadataCorruption) String() string {
+	return c.WakeID + " (" + c.Surface + "): metadata is not a parseable JSON document: " + c.Metadata
+}
+
+// WakeMetadataIsCorruptValue is the GO twin of the
+// WakeMetadataIsCorrupt SQL predicate.
+//
+// The writers that already hold a candidate row's metadata classify it
+// in Go rather than issuing another query, so the Go rule and the SQL
+// rule must agree exactly. A test pins them to each other by
+// evaluating BOTH against the same fixture table — behaviour, not
+// string equality.
+//
+// The rules are the same: present, non-empty, and not a parseable JSON
+// document. encoding/json's Valid and SQLite's json_valid agree on
+// every shape the column can hold; the agreement is what the pinning
+// test asserts.
+func WakeMetadataIsCorruptValue(metadata sql.NullString) bool {
+	if !metadata.Valid || metadata.String == "" {
+		return false
+	}
+	return !json.Valid([]byte(metadata.String))
+}
 
 // WakeKindExpr is the always-valid expression for a wake's `kind`.
 //
@@ -379,6 +519,15 @@ const WakeMetadataJSON = `CASE WHEN json_valid(metadata) THEN metadata ELSE '{}'
 // It reads the kind through WakeMetadataJSON, so it never raises on
 // malformed metadata and never depends on SQL evaluation order. See
 // WakeMetadataJSON for the full argument.
+//
+// THE EXPRESSION IS NOT THE POLICY. It reads a corrupt document as
+// untagged — safely, with no raise. Whether an untagged row
+// is then DELIVERED, CLAIMED or RETIRED is a separate decision, and
+// the W4 policy is that a corrupt row is delivered, claimed and
+// retired by NOBODY. Every surface that acts on a row therefore
+// excludes the corrupt ones with WakeMetadataIsCorrupt BEFORE it
+// consults the kind. The expression above is only what a surface sees
+// once that exclusion has been applied.
 const WakeKindExpr = `COALESCE(json_extract(` + WakeMetadataJSON + `, '$.kind'), '')`
 
 // The canonical kind filters. Each is TRUE for the rows whose kind is
@@ -635,18 +784,48 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 		auditCreatedBy = ""
 		auditResolvedAt = 0
 
-		var fired int
-		var createdBy string
-		var metadata string
+		var (
+			fired     int
+			createdBy string
+			metadata  sql.NullString
+			corrupt   int
+			rowKind   sql.NullString
+		)
 		row := node.QueryRowTracked(`
-		SELECT fired, created_by, COALESCE(metadata, '')
+		SELECT fired, created_by, metadata,
+		       CASE WHEN `+WakeMetadataIsCorrupt+` THEN 1 ELSE 0 END,
+		       json_extract(`+WakeMetadataJSON+`, '$.kind')
 		FROM scheduled_wakes WHERE id = ?
 	`, wakeID)
-		if scanErr := row.Scan(&fired, &createdBy, &metadata); scanErr != nil {
+		if scanErr := row.Scan(&fired, &createdBy, &metadata, &corrupt, &rowKind); scanErr != nil {
 			if scanErr == sql.ErrNoRows {
 				return &wakeResolveStatusError{status: "wake_not_found", err: fmt.Errorf("resolve wake: wake %q not found", wakeID)}
 			}
 			return &wakeResolveStatusError{status: "lookup_failed", err: fmt.Errorf("resolve wake: lookup: %w", scanErr)}
+		}
+
+		// CORRUPT METADATA — THE OWNERSHIP QUESTION, ANSWERED ONCE.
+		//
+		// A row whose metadata is present, non-empty and NOT a
+		// parseable JSON document has an owner that cannot be
+		// determined. The truncated prefix '{"kind": "cron"' is the
+		// evidence that the row was a CRON wake, and it cannot be read
+		// back as one.
+		//
+		// Reading it as UNTAGGED would make it an agent-owned
+		// notification wake — and the agent would then be able to
+		// retire scheduler-owned work whose handler never ran. That is
+		// the same decision the retention sweeps and the claim make, so
+		// it is made HERE, ONCE, for the whole substrate: a corrupt row
+		// is owned by NO partition.
+		//
+		// The refusal is a refusal, not a repair: the row is NOT
+		// written, so the original bytes survive for the operator.
+		if corrupt != 0 {
+			return &wakeResolveStatusError{status: "corrupt_metadata", err: fmt.Errorf(
+				"resolve wake: row %q has a corrupt metadata document (%q): its owner cannot be determined, "+
+					"so the agent may not retire it — an untagged reading would let the agent retire "+
+					"scheduler-owned work whose handler never ran", wakeID, metadata.String)}
 		}
 
 		// The KIND PROBE. The row's metadata.kind selects the wake's
@@ -665,36 +844,27 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 		// json_extract raises an error on malformed JSON rather than
 		// returning NULL — which would surface as `lookup_failed` and
 		// fail every write through the wake lifecycle for legacy rows.
-		// The matcher now guards the json_extract with json_valid so
-		// malformed input collapses to NULL (which we already accept as
-		// "kind absent" → untagged notification wake). Three inputs the
-		// legacy compat branch covers, in order:
-		//   1. metadata IS NULL            → JSON validity probe skipped,
-		//                                    treat as no kind.
-		//   2. metadata == ''              → same.
-		//   3. json_valid(metadata) == 0   → malformed / non-JSON text;
-		//                                    treat as no kind rather
-		//                                    than raising a SQL parse
-		//                                    error.
-		//   4. otherwise                  → SELECT json_extract(...,
-		//                                    '$.kind').
 		//
-		// 2026-11-04 (wake-ownership correction): the probe's OUTPUT is
-		// interpreted by the shared ownership policy, not by a local
-		// allowlist. A kind absent from the metadata is an untagged wake
-		// — a notification wake, which the agent owns. A kind the agent
-		// does not own belongs to the scheduler.
-		var rowKind sql.NullString
-		if err := node.QueryRowTracked(
-			`SELECT CASE
-		    WHEN ? IS NULL OR ? = '' THEN NULL
-		    WHEN json_valid(?) = 0 THEN NULL
-		    ELSE json_extract(?, '$.kind')
-		 END`,
-			metadata, metadata, metadata, metadata,
-		).Scan(&rowKind); err != nil {
-			return &wakeResolveStatusError{status: "lookup_failed", err: fmt.Errorf("resolve wake: probe kind: %w", err)}
-		}
+		// 2026-11-05 (issue #178, W4): the probe no longer carries its
+		// OWN spelling of the rule. It reads the kind through the
+		// canonical WakeMetadataJSON expression, exactly like every
+		// other kind-reading surface, and the corruption question is
+		// answered by the canonical WakeMetadataIsCorrupt predicate
+		// above. There is no second dialect of the same rule left in
+		// this package to drift.
+		//
+		// The inputs the legacy compat branch covered are all still
+		// covered, by the canonical expression:
+		//   1. metadata IS NULL            — the guard yields '{}',
+		//                                    json_extract finds no
+		//                                    kind -> untagged.
+		//   2. metadata == ''              — same.
+		//   3. json_valid(metadata) == 0   — the guard yields '{}'
+		//                                    -> untagged; and a
+		//                                    MALFORMED document is
+		//                                    refused above rather
+		//                                    than read as untagged.
+		//   4. otherwise                  — the document's kind.
 		kind := ""
 		if rowKind.Valid {
 			kind = rowKind.String
@@ -925,10 +1095,17 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 		whereExtra = ` AND (` + wakeKindSQL([]string{"notification"}, true) + `)`
 	}
 
+	// A CORRUPT ROW IS NEVER FOLDED. The fold RETIRES what it
+	// delivers, so folding a row whose owner cannot be determined
+	// would deliver scheduler-owned work to the agent as an ordinary
+	// notification AND retire it — the partition shift the W4 policy
+	// forbids. The exclusion is the canonical predicate, so it cannot
+	// drift from the one the claim and the sweeps use.
 	rows, err := tx.Query(
 		`SELECT id, target_time, reason, theory_id, created_by, metadata, created_at
 		 FROM scheduled_wakes
 		 WHERE fired = 0 AND target_time <= ?`+whereExtra+`
+		   AND NOT `+WakeMetadataIsCorrupt+`
 		 ORDER BY target_time ASC`,
 		args...,
 	)

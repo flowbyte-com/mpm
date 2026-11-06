@@ -275,7 +275,7 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 	// bounded (LIMIT 100) and runs in its own transaction so a
 	// backlog drains over multiple ticks without ever blocking a
 	// single tick. See wake_expiration.go for the full contract.
-	s.RegisterTickHandler("notification_expiration", NotificationExpirationTickHandler(context.Background(), db))
+	s.RegisterTickHandler("notification_expiration", NotificationExpirationTickHandler(context.Background(), db, log))
 	// Register the cron-retention sweep (also wake_expiration.go)
 	// for the bounded retirement of cron-kind bookkeeping rows.
 	// This sweep is cadence-gated (every 60min) inside its own
@@ -378,11 +378,19 @@ func (s *Scheduler) RegisterTickHandler(name string, fn func(ctx context.Context
 // wakes must remain available for the fold until the user/agent
 // acknowledges them.
 func (s *Scheduler) QueryDueWakes(now time.Time) ([]Wake, error) {
+	// A CORRUPT ROW IS NOT A DUE WAKE. The reader parses the metadata
+	// with encoding/json, and a corrupt document fails to parse, so the
+	// row would read as kind "notification" — a kind no handler owns, and
+	// a scheduler-owned row would be silently reclassified as an
+	// ordinary notification. Excluding corrupt rows here means the
+	// scheduler never sees a row whose owner it cannot determine, and
+	// never executes or settles one.
 	rows, err := s.db.Query(
 		`SELECT id, target_time, reason, COALESCE(theory_id,''),
 		        created_by, created_at, COALESCE(metadata,'')
 		 FROM scheduled_wakes
 		 WHERE fired = 0 AND target_time <= ?
+		   AND NOT `+core.WakeMetadataIsCorrupt+`
 		 ORDER BY target_time ASC`,
 		now.Unix(),
 	)
@@ -677,6 +685,15 @@ func (s *Scheduler) hasHandler(kind string) bool {
 // survives. The always-valid form reads a malformed document as
 // untagged (i.e. as a notification) and raises on nothing.
 //
+// THE CORRUPT ROWS ARE EXCLUDED, and the exclusion is load-bearing.
+// This query must match dispatchClaimNextAdHocWake's WHERE clause
+// EXACTLY, and the claim does not take a corrupt row. A corrupt row
+// that stayed in this query would arm the timer at its (past)
+// target_time, the dispatcher would drain nothing, and the cycle
+// would repeat at zero delay — the 100% CPU wedge this filter
+// exists to prevent. A corrupt row is owned by no partition, so it
+// is not a notification, and it is not a deadline.
+//
 // `now` is currently unused by the SQL but kept in the signature so
 // future implementations can substitute server-side clock if the
 // database clock drifts.
@@ -687,6 +704,7 @@ func (s *Scheduler) computeEarliestDeadline(ctx context.Context, now time.Time) 
 			SELECT target_time AS t FROM scheduled_wakes
 			WHERE fired = 0
 			  AND `+core.WakeNotificationKindFilter+`
+			  AND NOT `+core.WakeMetadataIsCorrupt+`
 			UNION ALL
 			SELECT next_run_at AS t FROM scheduled_tasks WHERE status = 'active'
 		)

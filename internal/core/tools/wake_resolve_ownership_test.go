@@ -190,6 +190,12 @@ func TestHandleResolveWake_AllowsAgentOwnedKinds(t *testing.T) {
 // notification wake — that is what the fold delivers and what the
 // resolver has always accepted. The ownership change must not narrow
 // it.
+//
+// A MALFORMED document is not in this list, and that is the W4 policy
+// (issue #178): a document that is present, non-empty and not
+// parseable has an owner that cannot be determined, so the agent may
+// not retire it. It is refused with the status "corrupt_metadata" —
+// see TestHandleResolveWake_RefusesCorruptMetadata.
 func TestHandleResolveWake_UntaggedWakeStillResolves(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -201,7 +207,6 @@ func TestHandleResolveWake_UntaggedWakeStillResolves(t *testing.T) {
 		{"json_without_kind", `{"source":"legacy-v1"}`},
 		{"json_null_kind", `{"kind":null}`},
 		{"empty_kind", `{"kind":""}`},
-		{"malformed_json", `{not-actually-json{`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -214,6 +219,46 @@ func TestHandleResolveWake_UntaggedWakeStillResolves(t *testing.T) {
 				"an untagged wake is a notification wake and must still resolve")
 			require.Equal(t, "resolved", m["status"])
 			require.Equal(t, 1, wakeFired(t, dm, id))
+		})
+	}
+}
+
+// TestHandleResolveWake_RefusesCorruptMetadata pins the W4 corruption
+// policy at the tool surface.
+//
+// A document that is present, non-empty and NOT a parseable JSON
+// document has an owner that cannot be determined. The truncated
+// prefix names a scheduler-owned row, and reading it as untagged
+// would let the agent retire scheduler-owned work whose handler never
+// ran.
+//
+// The refusal is a refusal, not a repair: the row is not written, so
+// its original bytes survive for the operator.
+func TestHandleResolveWake_RefusesCorruptMetadata(t *testing.T) {
+	cases := []struct {
+		name     string
+		metadata string
+	}{
+		{"malformed_json", `{not-actually-json{`},
+		{"truncated_json", `{"kind":`},
+		{"truncated_snapshot", `{"kind": "snapshot"`},
+		{"not_json_at_all", `notification`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dm := newTestSharedDM(t)
+			id := seedResolveWake(t, dm, "wk-resolve-corrupt-"+tc.name, tc.metadata)
+
+			m := resolveWakeViaTool(t, dm, id, "already_satisfied")
+
+			require.Equal(t, false, m["success"],
+				"a corrupt row must not be retirable: its owner cannot be determined")
+			require.Equal(t, "corrupt_metadata", m["status"],
+				"a corrupt row must be refused with its own status, not not_a_wake")
+			require.Equal(t, 0, wakeFired(t, dm, id),
+				"a refused corrupt row must remain unfired")
+			require.Equal(t, 0, resolveAuditCount(t, dm, id),
+				"a refused corrupt row must not write an audit row")
 		})
 	}
 }

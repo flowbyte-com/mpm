@@ -58,10 +58,21 @@ import (
 // JSON, so an unguarded call would abort this statement on a single
 // corrupt metadata row and the claim would then fail for EVERY row —
 // one bad row would stall the whole notification queue. The
-// always-valid form reads a malformed document as untagged (i.e. as a
-// notification), so the corrupt row is claimable and the healthy rows
-// behind it are still delivered. It also carries no dependence on SQL
+// always-valid form never raises and carries no dependence on SQL
 // evaluation order, which an OR-chain of json_extract() calls would.
+//
+// A CORRUPT ROW IS NOT CLAIMED. The always-valid form reads a corrupt
+// document as UNTAGGED, and an untagged row matches the notification
+// filter — so without an explicit exclusion the claim would deliver
+// scheduler-owned work to the agent as an ordinary notification. The
+// truncated prefix '{"kind": "snapshot"' names a snapshot row; reading
+// it as untagged would retire a partition the agent does not own and
+// lose the work. The claim therefore excludes corrupt rows with
+// core.WakeMetadataIsCorrupt — the canonical predicate, so the
+// claim, the retention sweeps and the fold cannot disagree about which
+// rows belong to no partition. A corrupt row keeps its bytes and its
+// fired=0 state; it is reported by the retention sweep's diagnostic
+// and by the wakes_corrupt_metadata health counter.
 //
 // CRITICAL: this function does NOT flip fired=1. The 2026-09-23
 // release-blocker repair splits the scheduler-dispatch audit trail
@@ -107,6 +118,7 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 			  AND dispatched_at IS NULL
 			  AND target_time <= ?
 			  AND `+core.WakeNotificationKindFilter+`
+			  AND NOT `+core.WakeMetadataIsCorrupt+`
 			ORDER BY target_time ASC
 			LIMIT 1
 		)

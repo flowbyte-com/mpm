@@ -905,6 +905,7 @@ func (dm *DatabaseManager) gatherOverdueWakes() []OverdueWake {
 		WHERE fired = 0
 		  AND target_time <= CAST(strftime('%s','now') AS INTEGER)
 		  AND reason != ''
+		  AND NOT ` + WakeMetadataIsCorrupt + `
 		ORDER BY target_time ASC
 		LIMIT 5`)
 	if err != nil {

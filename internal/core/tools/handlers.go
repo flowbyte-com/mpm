@@ -6612,10 +6612,15 @@ func handleResolveWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	if err != nil {
 		// Not every error is a failure to surface to the agent.
 		// For the "refused but recoverable" states (wake_not_found,
-		// not_a_wake, invalid_reason), the error message already
-		// names the cause; the agent can correct the call and
-		// retry. The `success:false` envelope makes the refusal
-		// machine-readable too.
+		// not_a_wake, invalid_reason, corrupt_metadata), the error
+		// message already names the cause; the agent can correct the
+		// call and retry. The `success:false` envelope makes the
+		// refusal machine-readable too.
+		//
+		// corrupt_metadata is the W4 refusal (issue #178): a row whose
+		// metadata is not a parseable JSON document has an owner that
+		// cannot be determined, so the agent may not retire it. The
+		// row is NOT written, so its original bytes survive.
 		return map[string]interface{}{
 			"success": false,
 			"status":  status,
