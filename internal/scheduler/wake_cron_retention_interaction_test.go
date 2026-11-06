@@ -221,6 +221,89 @@ func TestCronRetention_RetirementIsAuditable(t *testing.T) {
 	}
 }
 
+// TestCronSweep_CapacityIsCalibratedForOneTask documents the
+// one-task calibration of the sweep's capacity.
+//
+// THE INVARIANT. The cron backlog is bounded only while
+//
+//	cron-tasks x 60 rows/hour  <=  sweep capacity per hour
+//
+// and the sweep's normal capacity is CronRetentionNormalLimit = 60
+// rows/hour. One one-minute cron task produces exactly 60 rows/hour,
+// so the two are balanced AT ONE TASK. A second one-minute task
+// produces 120/hour against a 60/hour sweep, and the backlog grows by
+// 60 rows/hour; from the fourth task it grows even in catch-up mode
+// (240 produced vs 180 retired).
+//
+// THIS TEST IS A DOCUMENTATION PIN, NOT A WISH. It asserts the
+// CURRENT behaviour, so that the calibration is visible and
+// checkable rather than a claim in a comment. It will FAIL when the
+// capacity is re-derived for the second one-minute task — and that
+// failure is the signal to update CronRetentionNormalLimit, the
+// doctor's escalation ladder (60/240), and the documentation that
+// states the one-task calibration.
+//
+// It matters because the cron wake is now the AGENT's delivery path:
+// a cron row the sweep retires before the fold reached it was never
+// delivered. The sweep's capacity is therefore part of the delivery
+// contract, not only a housekeeping limit.
+func TestCronSweep_CapacityIsCalibratedForOneTask(t *testing.T) {
+	s := newTestScheduler(t)
+	now := time.Now()
+
+	// Count the pending cron rows.
+	pendingCron := func() int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0`,
+		).Scan(&n); err != nil {
+			t.Fatalf("count pending wakes: %v", err)
+		}
+		return n
+	}
+
+	// ONE one-minute task for one hour: 60 rows, all past the
+	// retention window. The normal cap retires every one of them, so
+	// the backlog does not grow.
+	for i := 0; i < 60; i++ {
+		seedCronWake(t, s, now.Add(-2*time.Hour).Add(time.Duration(i)*time.Minute), "task-one")
+	}
+	retired, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if retired != CronRetentionNormalLimit {
+		t.Errorf("sweep retired %d, want %d: the normal cap must match ONE one-minute "+
+			"task's hourly production", retired, CronRetentionNormalLimit)
+	}
+	if got := pendingCron(); got != 0 {
+		t.Errorf("%d pending wake(s) after the sweep: one task's production must be "+
+			"fully retired by the normal cap", got)
+	}
+
+	// TWO one-minute tasks for one hour: 120 rows. The normal cap
+	// retires 60 of them, so 60/hour accumulate.
+	for i := 0; i < 120; i++ {
+		seedCronWake(t, s, now.Add(-2*time.Hour).Add(time.Duration(i)*time.Minute), "task-two")
+	}
+	retired2, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if retired2 != CronRetentionNormalLimit {
+		t.Errorf("sweep retired %d, want %d", retired2, CronRetentionNormalLimit)
+	}
+	if got := pendingCron(); got != 60 {
+		t.Errorf("%d pending wake(s) after the sweep, want 60: the capacity is calibrated "+
+			"for ONE one-minute task, and a second task's production (120/hour) outruns "+
+			"the sweep (60/hour). If this now drains, the capacity has been re-derived "+
+			"for the second task — update CronRetentionNormalLimit, the doctor's "+
+			"escalation ladder (60/240), and the documentation that states the "+
+			"one-task calibration.", got)
+	}
+}
+
 // TestDispatchClaim_DoesNotClaimACronWake pins that the scheduler and
 // the fold never race for the same row.
 //

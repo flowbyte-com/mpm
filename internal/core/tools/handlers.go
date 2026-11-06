@@ -2841,7 +2841,9 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	// Cold-start sweep: check for wakes that came due while the system
 	// was offline. The agent sees these immediately on boot — no need to
 	// wait for the next tool call to trigger the opportunistic fold.
-	// Pass nil kinds for backward-compatible default (notification-only).
+	// Pass nil kinds for the default delivery path: every AGENT-OWNED
+	// pending wake (notification, cascade and cron). The scheduler's
+	// kinds are excluded, so they still reach their handler.
 	wakes, wErr := dm.CheckPendingWakes(time.Now(), nil)
 
 	// v4 wire format: project the v4 fields (GlobalRules, AvailableSkills)
@@ -5015,7 +5017,8 @@ func splitTags(s string) []string {
 // tasks (WakesPending) from incoming epistemic events (EventWakesPending).
 //
 // kinds is forwarded to CheckPendingWakes — see that function for the
-// semantics. nil = backward-compatible default (notification-only).
+// semantics. nil = the default delivery path (every AGENT-OWNED
+// pending wake: notification, cascade and cron).
 func checkWakesAndFold(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, out map[string]interface{}, kinds []string) map[string]interface{} {
 	if out == nil {
 		out = map[string]interface{}{}
@@ -5176,7 +5179,8 @@ func handleCheckWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 
 // readKindsParam extracts the optional kinds array from a tool payload.
 // Returns nil if absent, malformed, or empty — nil triggers the
-// backward-compatible default (notification-only) in CheckPendingWakes.
+// the default delivery path (every AGENT-OWNED pending wake) in
+// CheckPendingWakes.
 func readKindsParam(p map[string]interface{}) []string {
 	if p == nil {
 		return nil
@@ -5245,13 +5249,25 @@ func handleListWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	// F-5 (2026-09-04 residual inventory, P2): the JSON Schema for
 	// mpm_wakes list advertises `kinds: string[]` but pre-fix this
 	// parameter was silently discarded — every agent filtering on
-	// kinds received the unfiltered result set. The kinds semantics
-	// here match CheckPendingWakes at wake_tools.go:226-249: nil/empty
-	// → no filter (backward-compat default for list is "all wakes",
-	// NOT notification-only); explicit list → IN filter on
-	// json_extract(metadata, '$.kind'); "*" → no filter. We post-filter
-	// the ListScheduledWakes result set rather than changing the DB
-	// layer signature, which keeps the fix narrowly scoped to the bug.
+	// kinds received the unfiltered result set.
+	//
+	// The kinds semantics here are NOT the same as CheckPendingWakes's,
+	// and an earlier version of this comment claimed they matched:
+	//
+	//	list_wakes : nil/empty → no filter (ALL wakes, including the
+	//	             scheduler-owned ones); explicit list → IN filter on
+	//	             json_extract(metadata, '$.kind'); "*" → no filter.
+	//	             list is a READ surface: it must be able to show the
+	//	             operator the scheduler's wakes too.
+	//	fold       : nil/empty → the agent-owned allowlist (notification,
+	//	             cascade, cron); explicit list → the requested
+	//	             agent-owned kinds; "*" → the agent-owned allowlist.
+	//	             The fold RETIRES what it delivers, so it may only
+	//	             ever touch wakes the agent owns.
+	//
+	// We post-filter the ListScheduledWakes result set rather than
+	// changing the DB layer signature, which keeps the fix narrowly
+	// scoped to the bug.
 	kinds := readKindsParam(p)
 	items, err := dm.ListScheduledWakes(includeFired, overdueOnly, limit)
 	if err != nil {

@@ -592,16 +592,67 @@ func (r *sweepRetirer) retire(ctx context.Context, id, reason string, nowUnix in
 // retirement UPDATE carries an `AND fired = 0` guard, so it is a
 // compare-and-set on the retirement flag: a row the fold settled
 // between the candidate SELECT and the UPDATE is SKIPPED, not
-// overwritten. And the retirement is never silent — it writes the
-// audit note expired.reason=cron_1h_retention into the row's
-// metadata, so an operator can tell a swept row from a delivered one.
+// overwritten.
 //
-// The window also bounds the fold's burst. A cron task on a
-// one-minute schedule produces ~60 undelivered rows per window, so a
-// returning agent receives at most one window's worth in a single
-// fold. Widening the window widens that burst, and the sweep's
-// capacity (60 rows/hour, 180 on catch-up) is calibrated against the
-// one-hour window; the two must move together.
+// THE SWEEP IS AUDITABLE. THE FOLD IS NOT. The retirement writes the
+// audit note expired.reason=cron_1h_retention into the row's
+// metadata, so an operator can tell a SWEPT row from a DELIVERED one.
+//
+// That property belongs to the SWEEP path alone. The fold writes no
+// note at all, and the fold's pipeline is
+//
+//	selected -> COMMIT(fired=1, fired_at) -> presented to the agent
+//
+// so a crash between the COMMIT and the presentation leaves a row that
+// is byte-identical to a genuinely delivered one. There are THREE
+// states, not two:
+//
+//	LOST row  : fired=1 fired_at=<t> metadata={... no note ...}
+//	SWEPT row : fired=1 fired_at=<t> metadata={..., expired:{reason:
+//	            "cron_1h_retention"}}
+//	DELIVERED : fired=1 fired_at=<t> metadata={... no note ...}
+//
+// LOST and DELIVERED are INDISTINGUISHABLE in the substrate. A sweep
+// note proves the row was swept; the ABSENCE of one proves nothing
+// about the fold. Opportunistic delivery is AT-MOST-ONCE and is NOT
+// crash-safe: a wake lost in the fold's crash window is not
+// re-delivered (the row is fired=1) and, for a cron wake, not
+// re-injected (the next tick is a NEW row). This is a Stage B/C
+// concern — the delivery axis needs a `presented` write by the fold
+// and a claim/lease so a crashed fold is reclaimable — and it is
+// recorded there, not fixed here.
+//
+// THE REAL BOUND. The window does NOT bound the fold's batch. The
+// fold's batch is bounded by the PENDING BACKLOG, and the backlog is
+// bounded only while
+//
+//	cron-tasks x 60 rows/hour  <=  sweep capacity per hour
+//
+// where the sweep capacity is CronRetentionNormalLimit = 60 rows/hour
+// normally and CronRetentionCatchUpLimit = 180 on catch-up. One
+// one-minute cron task produces exactly 60 rows/hour and the sweep
+// retires exactly 60/hour, so the two are balanced AT ONE TASK. The
+// second one-minute cron task produces 120/hour against a 60/hour
+// sweep, and the backlog grows by 60 rows/hour. From the fourth task
+// the backlog grows even in catch-up mode (240 produced vs 180
+// retired). Therefore:
+//
+//   - CronRetentionNormalLimit MUST be re-derived when a second
+//     one-minute cron task is added, and the doctor's escalation
+//     ladder (60/240) with it. The capacity is calibrated for ONE
+//     task, and the calibration is not stated anywhere else.
+//   - The fold's own per-call budget (core.MaxCronWakePerCheck and
+//     core.MaxWakeNotificationBytesPerKind) bounds what the AGENT
+//     receives per call; it does NOT bound the backlog, and it does
+//     not make a backlog that outruns the sweep deliverable. A cron
+//     row the sweep retires before the fold reached it was never
+//     delivered — the delivery deadline was missed, not shortened.
+//
+// An earlier version of this comment claimed the window "bounds the
+// fold's burst" because a one-minute cron task produces ~60 rows per
+// window. That is true of ONE task and false of two, and the fold's
+// burst is now bounded by the delivery budget rather than by the
+// window. The invariant is stated above.
 //
 // Diagnostic contract for `mpm doctor` / `mpm status`. The cron-wake
 // retention is intentionally visible to operators via the
