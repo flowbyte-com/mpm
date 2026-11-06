@@ -92,12 +92,24 @@ type MemoryStore struct {
 }
 
 // execTracked routes through DatabaseManager.ExecTracked when available,
-// falling back to the raw s.DB.Exec for standalone/test usage.
+// falling back to the same statement-level policy for standalone usage.
+//
+// The fallback used to be a bare `s.DB.Exec`, which meant a store built
+// without a DatabaseManager silently lost the caller's retry budget: the
+// budget was a property of the MANAGER, not of the statement. Issue
+// #178's first remediation slice routes the memory write path through
+// this helper, so the fallback has to carry the same budget or the
+// guarantee would depend on how the store happened to be constructed.
+//
+// The fallback uses the same pool-level implementation the manager wraps
+// (execTracked), minus the manager's watchdog instrumentation — there is
+// no manager to instrument when there is no manager.
 func (s *MemoryStore) execTracked(query string, retries int, args ...interface{}) (sql.Result, error) {
 	if s.DM != nil {
 		return s.DM.ExecTracked(query, retries, args...)
 	}
-	return s.DB.Exec(query, args...)
+	out := execTracked(s.DB.DB, query, retries, nil, args...)
+	return out.Result, out.Err
 }
 
 // parseMemoryCreatedAt converts a RFC3339-formatted string into Unix-epoch
@@ -716,10 +728,10 @@ func (s *MemoryStore) addMemoryDirect(collection, content, sessionID string, tag
 		return "", fmt.Errorf("addMemoryDirect: invalid createdAt %q: %w", createdAt, err)
 	}
 
-	_, err = s.DB.Exec(`
+	_, err = s.execTracked(`
 		INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id, retrieval_priority, importance, confidence, weight, content_hash)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, collection, content, sessID, string(tagsJSON), string(metadataJSON), string(embeddingJSON), createdAtSec, "", "0.5", "0.5", InitialConfidence(artifactTypeFromCollection(collection)), weight, contentHash)
+	`, 5, id, collection, content, sessID, string(tagsJSON), string(metadataJSON), string(embeddingJSON), createdAtSec, "", "0.5", "0.5", InitialConfidence(artifactTypeFromCollection(collection)), weight, contentHash)
 	return id, err
 }
 
@@ -2707,12 +2719,12 @@ func (s *MemoryStore) DeleteMemory(id string, collection string) error {
 	}
 
 	// Set deleted_at so active-memory queries (WHERE deleted_at IS NULL) exclude this record.
-	result, err := s.DB.Exec(`
+	result, err := s.execTracked(`
 		UPDATE memories
 		SET deleted_at = CAST(strftime('%s','now') AS INTEGER),
 		    metadata = JSON_SET(COALESCE(metadata, '{}'), '$.is_deleted', true)
 		WHERE id = ? AND collection = ?
-	`, id, collection)
+	`, 5, id, collection)
 	if err != nil {
 		return fmt.Errorf("delete failed: %w", err)
 	}
@@ -3408,19 +3420,19 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 		// share a dimension while producing incomparable spaces — so the
 		// fingerprint must name the model, not just measure the vector.
 		fp := CurrentEmbeddingFingerprint()
-		_, execErr = s.DB.Exec(`UPDATE memories
+		_, execErr = s.execTracked(`UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
 			    embedding_source = ?, embedding_dimension = ?, embedding_model = ?,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?`,
+			WHERE id = ?`, 5,
 			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash,
 			"provider", len(embedding), fp.Model, id)
 	} else {
 		// Embedding not regenerated — preserve the existing column.
-		_, execErr = s.DB.Exec(`UPDATE memories
+		_, execErr = s.execTracked(`UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, content_hash = ?,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?`,
+			WHERE id = ?`, 5,
 			content, string(tagsJSON), string(metadataJSON), contentHash, id)
 	}
 	if execErr != nil {
@@ -3454,11 +3466,11 @@ func (s *MemoryStore) ReinforceMemory(id string, delta int) error {
 	}
 
 	weightGain := (delta + 1) / 2
-	_, err := s.DB.Exec(`
+	_, err := s.execTracked(`
 		UPDATE memories
 		SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100)
 		WHERE id = ?
-	`, delta, weightGain, id)
+	`, 5, delta, weightGain, id)
 	return err
 }
 
@@ -3476,12 +3488,12 @@ func (s *MemoryStore) WeakenMemory(id string, delta int) error {
 	}
 
 	weightLoss := (delta + 1) / 2
-	_, err := s.DB.Exec(`
+	_, err := s.execTracked(`
 		UPDATE memories
 		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
 		    weight = MAX(weight - ?, 1)
 		WHERE id = ?
-	`, delta, weightLoss, id)
+	`, 5, delta, weightLoss, id)
 	return err
 }
 
@@ -3517,13 +3529,13 @@ func (s *MemoryStore) SetMemoryTTL(id string, expiresAt time.Time) error {
 	}
 
 	if expiresAt.IsZero() {
-		_, err := s.DB.Exec(`UPDATE memories SET expires_at = NULL WHERE id = ?`, id)
+		_, err := s.execTracked(`UPDATE memories SET expires_at = NULL WHERE id = ?`, 5, id)
 		return err
 	}
 
-	_, err := s.DB.Exec(`
+	_, err := s.execTracked(`
 		UPDATE memories SET expires_at = ? WHERE id = ?
-	`, expiresAt.Format(time.RFC3339), id)
+	`, 5, expiresAt.Format(time.RFC3339), id)
 	return err
 }
 

@@ -110,6 +110,19 @@ package internal
 //   statement budget by design; persistent failure is logged, but it
 //   never blocks the caller.
 // - reasonTestFixture: test helper database. Not production traffic.
+// - reasonSharedPrimitive: the write runs through a SHARED primitive —
+//   one function whose executor is a pool on one call site and a
+//   transaction on another — so that the semantics cannot drift apart.
+//   The pool call site passes a BUDGETED executor (poolMemExecer), so
+//   the write is not bare there; the transactional call site passes the
+//   transaction, whose retry policy belongs to the transaction. The
+//   scanner is syntactic and cannot see which executor a call site
+//   passes, so it keeps flagging the shared `ex.Exec` site. The site
+//   therefore STAYS in this list rather than being deleted: a NEW bare
+//   write through the same primitive must still trip the surplus check.
+//   The budget on the pool path is pinned by
+//   TestSharedPrimitivePoolPathsCarryAStatementLevelBudget, which is a
+//   stronger guarantee than this list can give.
 //
 // NON-VACUITY
 // -----------
@@ -147,7 +160,26 @@ import (
 // part of itself, so a retry can compound the damage and DDL wants a
 // transaction instead — but a NEW bare DDL site must still trip review
 // rather than land silently.
-var bareWriteVerb = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b`)
+//
+// PRAGMA and VACUUM were added on 2026-11-06 (issue #178, first
+// remediation slice). They were a DETECTOR GAP: a bare
+// `db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")` or `db.Exec("VACUUM INTO ?")`
+// was invisible to this guard, because the verb list stopped at the DML
+// and DDL verbs. A detector that cannot see a write shape cannot keep
+// that shape honest, and the shape is one line away from every future
+// caller.
+//
+// The two verbs are here for the same reason the DDL verbs are: a bare
+// pool PRAGMA/VACUUM has no statement-level retry budget, so under
+// contention it is lost the same way a bare INSERT is. Most of them are
+// startup connection configuration or best-effort maintenance, and they
+// are recorded in the allowlist with those reasons — the point is that
+// they are REVIEWED, not that they are all converted.
+//
+// REINDEX, ATTACH and DETACH are deliberately NOT listed: the tree
+// contains no bare pool write of any of them, and a verb in this list
+// that no site can ever match is a claim the guard cannot back.
+var bareWriteVerb = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA|VACUUM)\b`)
 
 // barePoolReason is the closed vocabulary of justifications for a
 // bare pool write. See THE REASONS above.
@@ -159,6 +191,8 @@ const (
 	reasonMigrationOnce barePoolReason = "migration-once"
 	reasonBestEffort    barePoolReason = "best-effort"
 	reasonTestFixture   barePoolReason = "test-fixture"
+	// reasonSharedPrimitive is documented in THE REASONS above.
+	reasonSharedPrimitive barePoolReason = "shared-primitive"
 )
 
 // barePoolEntry is one bare pool write the guard knows about: the file
@@ -195,6 +229,10 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "UPDATE reference_chunks SET embedding = NULL, embedding_source = 'null', embedding_dimension = NULL, embedding_model = NULL",
 		Why:   reasonMigrationOnce,
 		Count: 1},
+	{File: "cmd/mpm/handlers_backup.go",
+		SQL:   "PRAGMA wal_checkpoint(TRUNCATE)",
+		Why:   reasonPropagated,
+		Count: 1},
 	{File: "cmd/mpm/handlers_gc.go",
 		SQL:   "DELETE FROM memories WHERE deleted_at IS NOT NULL AND deleted_at < strftime('%s','now', '-30 days') AND",
 		Why:   reasonPropagated,
@@ -223,6 +261,10 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "DELETE FROM memories_fts WHERE rowid IN (SELECT rowid FROM memories WHERE deleted_at IS NOT NULL)",
 		Why:   reasonPropagated,
 		Count: 1},
+	{File: "cmd/mpm/maint_cmds.go",
+		SQL:   "PRAGMA incremental_vacuum",
+		Why:   reasonBestEffort,
+		Count: 1},
 	{File: "cmd/mpm/self_heal.go",
 		SQL:   "INSERT INTO memories (id, collection, content, metadata, created_at, updated_at) VALUES (?, 'projects', ?, ?, CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER)) ON CONFLICT(id) DO UPDATE SET metadata = excluded.metadata, updated_at = CAST(strftime('%s','now') AS INTEGER)",
 		Why:   reasonPropagated,
@@ -244,7 +286,7 @@ var barePoolAllowlist = []barePoolEntry{
 		Why:   reasonPropagated,
 		Count: 1},
 	{File: "internal/blobstore/fs.go",
-		SQL:   "INSERT INTO blobs (id, source_tool, source_call_id, session_id, size_bytes, content_type, created_at, expires_at, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		SQL:   "DELETE FROM blobs WHERE expires_at < ?",
 		Why:   reasonPropagated,
 		Count: 1},
 	{File: "internal/blobstore/fs.go",
@@ -252,7 +294,7 @@ var barePoolAllowlist = []barePoolEntry{
 		Why:   reasonPropagated,
 		Count: 2},
 	{File: "internal/blobstore/fs.go",
-		SQL:   "DELETE FROM blobs WHERE expires_at < ?",
+		SQL:   "INSERT INTO blobs (id, source_tool, source_call_id, session_id, size_bytes, content_type, created_at, expires_at, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		Why:   reasonPropagated,
 		Count: 1},
 	{File: "internal/core/active_uptime.go",
@@ -384,6 +426,30 @@ var barePoolAllowlist = []barePoolEntry{
 		Why:   reasonPropagated,
 		Count: 1},
 	{File: "internal/core/db.go",
+		SQL:   "PRAGMA busy_timeout = 5000",
+		Why:   reasonStartupDDL,
+		Count: 3},
+	{File: "internal/core/db.go",
+		SQL:   "PRAGMA cache_size = -64000",
+		Why:   reasonStartupDDL,
+		Count: 2},
+	{File: "internal/core/db.go",
+		SQL:   "PRAGMA foreign_keys = ON",
+		Why:   reasonStartupDDL,
+		Count: 3},
+	{File: "internal/core/db.go",
+		SQL:   "PRAGMA journal_mode = WAL",
+		Why:   reasonStartupDDL,
+		Count: 4},
+	{File: "internal/core/db.go",
+		SQL:   "PRAGMA synchronous = NORMAL",
+		Why:   reasonStartupDDL,
+		Count: 3},
+	{File: "internal/core/db.go",
+		SQL:   "PRAGMA wal_checkpoint(TRUNCATE)",
+		Why:   reasonBestEffort,
+		Count: 1},
+	{File: "internal/core/db.go",
 		SQL:   "UPDATE lessons_base SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
 		Why:   reasonPropagated,
 		Count: 1},
@@ -419,12 +485,20 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "UPDATE works SET verification = ? WHERE id = ?",
 		Why:   reasonPropagated,
 		Count: 1},
+	{File: "internal/core/db.go",
+		SQL:   "VACUUM",
+		Why:   reasonPropagated,
+		Count: 1},
 	{File: "internal/core/embedding_migration.go",
 		SQL:   "INSERT INTO embedding_migration_log (memory_id, old_weight, new_weight, reason, migrated_at) VALUES ('sentinel', 0, 0, 'migration_applied', CAST(strftime('%s','now') AS INTEGER))",
 		Why:   reasonMigrationOnce,
 		Count: 1},
 	{File: "internal/core/embedding_migration.go",
 		SQL:   "UPDATE memories SET synthetic = 1 WHERE synthetic = 0 AND collection = 'theories' AND deleted_at IS NULL AND json_extract(metadata, '$.challenged_memory_id') IN ( SELECT id FROM memories WHERE embedding_source = 'hash' AND deleted_at IS NULL )",
+		Why:   reasonMigrationOnce,
+		Count: 1},
+	{File: "internal/core/embedding_migration.go",
+		SQL:   "VACUUM INTO ?",
 		Why:   reasonMigrationOnce,
 		Count: 1},
 	{File: "internal/core/epistemology_tools.go",
@@ -496,23 +570,11 @@ var barePoolAllowlist = []barePoolEntry{
 		Why:   reasonStartupDDL,
 		Count: 1},
 	{File: "internal/core/memory.go",
-		SQL:   "INSERT INTO memories (id, collection, content, session_id, tags, metadata, embedding, created_at, reference_id, retrieval_priority, importance, confidence, weight, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory.go",
 		SQL:   "UPDATE memories SET collection = collection || '_inactive', metadata = JSON_SET(COALESCE(metadata, '{}'), '$.is_deleted', true)",
 		Why:   reasonPropagated,
 		Count: 1},
 	{File: "internal/core/memory.go",
 		SQL:   "UPDATE memories SET collection = collection || '_inactive', metadata = JSON_SET(COALESCE(metadata, '{}'), '$.is_deleted', true) WHERE collection = ?",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory.go",
-		SQL:   "UPDATE memories SET content = ?, tags = ?, metadata = ?, content_hash = ?, updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory.go",
-		SQL:   "UPDATE memories SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?, embedding_source = ?, embedding_dimension = ?, embedding_model = ?, updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
 		Why:   reasonPropagated,
 		Count: 1},
 	{File: "internal/core/memory.go",
@@ -524,28 +586,8 @@ var barePoolAllowlist = []barePoolEntry{
 		Why:   reasonBestEffort,
 		Count: 1},
 	{File: "internal/core/memory.go",
-		SQL:   "UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER), metadata = JSON_SET(COALESCE(metadata, '{}'), '$.is_deleted', true) WHERE id = ? AND collection = ?",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory.go",
-		SQL:   "UPDATE memories SET expires_at = ? WHERE id = ?",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory.go",
-		SQL:   "UPDATE memories SET expires_at = NULL WHERE id = ?",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory.go",
 		SQL:   "UPDATE memories SET is_long_term = 1, weight = 10 WHERE weight = 1 AND is_long_term = 0 AND json_extract(metadata, '$.is_long_term') = 'true'",
 		Why:   reasonMigrationOnce,
-		Count: 1},
-	{File: "internal/core/memory.go",
-		SQL:   "UPDATE memories SET reinforcement_count = MAX(reinforcement_count - ?, 0), weight = MAX(weight - ?, 1) WHERE id = ?",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory.go",
-		SQL:   "UPDATE memories SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100) WHERE id = ?",
-		Why:   reasonPropagated,
 		Count: 1},
 	{File: "internal/core/memory.go",
 		SQL:   "UPDATE topics SET is_active = 0, updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
@@ -555,40 +597,32 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "DELETE FROM lessons WHERE id = ?",
 		Why:   reasonPropagated,
 		Count: 1},
-	{File: "internal/core/memory_tools.go",
-		SQL:   "UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory_tools.go",
-		SQL:   "UPDATE memories SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory_tools.go",
-		SQL:   "UPDATE memories SET reinforcement_count = MAX(reinforcement_count - ?, 0), weight = MAX(weight - ?, 1), last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory_tools.go",
-		SQL:   "UPDATE memories SET weight = 10, is_long_term = 1 WHERE id = ? AND deleted_at IS NULL AND collection != 'lessons'",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory_tools.go",
-		SQL:   "UPDATE memories SET weight = ? WHERE id = ? AND deleted_at IS NULL",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/memory_tools.go",
-		SQL:   "UPDATE memories SET weight = MIN(weight + 1, 9), last_accessed_at = CAST(strftime('%s','now', '+' || ? || ' days') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL",
-		Why:   reasonPropagated,
-		Count: 1},
 	{File: "internal/core/migrate_md.go",
 		SQL:   "UPDATE raw_memories SET status='approved', memory_id=?, updated_at=? WHERE id=?",
 		Why:   reasonMigrationOnce,
 		Count: 1},
-	{File: "internal/core/reference_db.go",
-		SQL:   "UPDATE reference_chunks SET embedding = ?, embedding_source = ?, embedding_dimension = ?, embedding_model = ? WHERE id = ?",
-		Why:   reasonPropagated,
+	{File: "internal/core/migration_memories_affinity_rebuild.go",
+		SQL:   "PRAGMA foreign_keys = OFF",
+		Why:   reasonMigrationOnce,
+		Count: 1},
+	{File: "internal/core/migration_memories_affinity_rebuild.go",
+		SQL:   "PRAGMA foreign_keys = ON",
+		Why:   reasonMigrationOnce,
+		Count: 1},
+	{File: "internal/core/migration_memories_created_at_not_null.go",
+		SQL:   "PRAGMA foreign_keys = OFF",
+		Why:   reasonMigrationOnce,
+		Count: 1},
+	{File: "internal/core/migration_memories_created_at_not_null.go",
+		SQL:   "PRAGMA foreign_keys = ON",
+		Why:   reasonMigrationOnce,
 		Count: 1},
 	{File: "internal/core/reference_db.go",
 		SQL:   "UPDATE reference_chunks SET embedding = ?, embedding_source = 'provider', embedding_dimension = ?, embedding_model = ? WHERE id = ?",
+		Why:   reasonPropagated,
+		Count: 1},
+	{File: "internal/core/reference_db.go",
+		SQL:   "UPDATE reference_chunks SET embedding = ?, embedding_source = ?, embedding_dimension = ?, embedding_model = ? WHERE id = ?",
 		Why:   reasonPropagated,
 		Count: 1},
 	{File: "internal/core/reference_ingest.go",
@@ -605,7 +639,7 @@ var barePoolAllowlist = []barePoolEntry{
 		Count: 1},
 	{File: "internal/core/review.go",
 		SQL:   "INSERT INTO memory_reviews (memory_id, reviewed_at, decision, note) VALUES (?, ?, ?, ?) ON CONFLICT(memory_id) DO UPDATE SET reviewed_at = excluded.reviewed_at, decision = excluded.decision, note = excluded.note",
-		Why:   reasonPropagated,
+		Why:   reasonSharedPrimitive,
 		Count: 1},
 	{File: "internal/core/scheduled_tasks.go",
 		SQL:   "DELETE FROM scheduled_tasks WHERE id = ?",
@@ -623,6 +657,10 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "UPDATE memories SET deleted_at = NULL, content = ?, tags = ?, metadata = ?, is_prime_directive = 1, collection = 'directives' WHERE id = ? AND deleted_at IS NOT NULL AND deleted_at > 0",
 		Why:   reasonMigrationOnce,
 		Count: 1},
+	{File: "internal/core/similarity_candidates_store.go",
+		SQL:   "INSERT OR IGNORE INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity, detected_by, detected_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+		Why:   reasonPropagated,
+		Count: 1},
 	{File: "internal/core/skill_db.go",
 		SQL:   "UPDATE memories SET content = ?, tags = ?, metadata = ?, is_long_term = 1, deleted_at = NULL, updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
 		Why:   reasonPropagated,
@@ -633,10 +671,6 @@ var barePoolAllowlist = []barePoolEntry{
 		Count: 1},
 	{File: "internal/core/skill_db.go",
 		SQL:   "UPDATE memories SET is_global = 1, metadata = json_set(COALESCE(metadata, '{}'), '$.derived_from_skill_id', ?, '$.promoted_at', strftime('%s','now')) WHERE id = ? AND collection = 'skills' AND deleted_at IS NULL",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/similarity_candidates_store.go",
-		SQL:   "INSERT OR IGNORE INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity, detected_by, detected_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
 		Why:   reasonPropagated,
 		Count: 1},
 	{File: "internal/core/testhelpers.go",
@@ -672,32 +706,8 @@ var barePoolAllowlist = []barePoolEntry{
 		Why:   reasonBestEffort,
 		Count: 1},
 	{File: "internal/core/web_db.go",
-		SQL:   "UPDATE memories SET content = ?, tags = ?, metadata = ?, content_hash = ?, updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/web_db.go",
-		SQL:   "UPDATE memories SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?, updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/web_db.go",
-		SQL:   "UPDATE memories SET expires_at = ? WHERE id = ?",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/web_db.go",
-		SQL:   "UPDATE memories SET expires_at = NULL WHERE id = ?",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/web_db.go",
 		SQL:   "UPDATE memories SET reinforcement_count = MAX(reinforcement_count - ?, 0), weight = MAX(weight - ?, 1), last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/web_db.go",
-		SQL:   "UPDATE memories SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100), last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND deleted_at IS NULL",
-		Why:   reasonPropagated,
-		Count: 1},
-	{File: "internal/core/web_db.go",
-		SQL:   "UPDATE memories SET weight = MAX(weight + ?, 1), last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
-		Why:   reasonPropagated,
+		Why:   reasonSharedPrimitive,
 		Count: 1},
 	{File: "internal/scheduler/drill_handler.go",
 		SQL:   "UPDATE drill_runs SET status='error', error_message=?, completed_at=? WHERE id=?",
@@ -706,6 +716,18 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/telemetry/store.go",
 		SQL:   "CREATE TABLE IF NOT EXISTS telemetry_invocation ( invocation_id TEXT PRIMARY KEY, parent_invocation_id TEXT, session_id TEXT, framework TEXT NOT NULL, framework_version TEXT, provider TEXT NOT NULL, model TEXT NOT NULL, model_revision TEXT, started_at INTEGER NOT NULL, completed_at INTEGER NOT NULL, received_at INTEGER NOT NULL, status TEXT NOT NULL, stop_reason TEXT, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER, duration_ms INTEGER, provider_metadata TEXT NOT NULL DEFAULT '{}', schema_version TEXT NOT NULL ); CREATE INDEX IF NOT EXISTS idx_tel_session ON telemetry_invocation(session_id); CREATE INDEX IF NOT EXISTS idx_tel_parent_inv ON telemetry_invocation(parent_invocation_id); CREATE INDEX IF NOT EXISTS idx_tel_started_at ON telemetry_invocation(started_at); CREATE INDEX IF NOT EXISTS idx_tel_framework ON telemetry_invocation(framework);",
 		Why:   reasonStartupDDL,
+		Count: 1},
+	{File: "internal/update/backup.go",
+		SQL:   "VACUUM INTO '%s'",
+		Why:   reasonPropagated,
+		Count: 1},
+	{File: "internal/update/health.go",
+		SQL:   "VACUUM INTO '%s'",
+		Why:   reasonPropagated,
+		Count: 1},
+	{File: "internal/update/preflight.go",
+		SQL:   "VACUUM INTO '%s'",
+		Why:   reasonPropagated,
 		Count: 1},
 }
 
@@ -1037,7 +1059,7 @@ func TestBarePoolAllowlistIdentitiesAreUnique(t *testing.T) {
 			t.Fatalf("allowlist entry with non-positive Count: %+v", e)
 		}
 		switch e.Why {
-		case reasonPropagated, reasonStartupDDL, reasonMigrationOnce, reasonBestEffort, reasonTestFixture:
+		case reasonPropagated, reasonStartupDDL, reasonMigrationOnce, reasonBestEffort, reasonTestFixture, reasonSharedPrimitive:
 		default:
 			t.Fatalf("allowlist entry with undocumented reason: %+v", e)
 		}
@@ -1225,6 +1247,36 @@ func TestBarePoolScannerFlagsRepresentativeShapes(t *testing.T) {
 		{
 			"bare local db.ExecContext is caught",
 			"package p\nfunc f(ctx context.Context, db *D) { _, _ = db.ExecContext(ctx, `CREATE TABLE t (a)`) }\ntype D struct{}\nfunc (d *D) ExecContext(ctx context.Context, q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
+			// The PRAGMA/VACUUM gap. Before 2026-11-06 the verb list
+			// stopped at the DML and DDL verbs, so a bare PRAGMA or
+			// VACUUM on the pool was invisible to this guard. These
+			// two cases are the negative control for that gap: they
+			// fail against the old verb list and pass against the
+			// current one.
+			"bare PRAGMA write is caught",
+			"package p\nfunc f(dm *M) { _, _ = dm.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`) }\ntype M struct { db *D }\ntype D struct{}\nfunc (d *D) Exec(q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
+			"bare VACUUM write is caught",
+			"package p\nfunc f(dm *M) { _, _ = dm.db.Exec(`VACUUM INTO ?`, \"/tmp/x.db\") }\ntype M struct { db *D }\ntype D struct{}\nfunc (d *D) Exec(q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
+			"bare PRAGMA write through ExecContext is caught",
+			"package p\nfunc f(ctx context.Context, dm *M) { _, _ = dm.db.ExecContext(ctx, `PRAGMA journal_mode = WAL`) }\ntype M struct { db *D }\ntype D struct{}\nfunc (d *D) ExecContext(ctx context.Context, q string, a ...interface{}) (int, error) { return 0, nil }\n",
+			1,
+		},
+		{
+			// A shared primitive: the executor is a parameter, so the
+			// scanner cannot see which concrete type it carries. It
+			// fails CLOSED and counts the site — the pool call site of
+			// such a primitive is the one that loses the write.
+			"a shared primitive's Exec is caught",
+			"package p\nfunc f(ex E) { _, _ = ex.Exec(`INSERT INTO t VALUES (?)`, 1) }\ntype E interface { Exec(q string, a ...interface{}) (int, error) }\n",
 			1,
 		},
 		{
