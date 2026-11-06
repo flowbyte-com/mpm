@@ -3136,6 +3136,29 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("scheduled_wakes dispatched_at migration failed: %w", err)
 	}
+	// 2026-11-04, issue #178 Stage A (M1): the delivery-state axis on
+	// scheduled_wakes — five nullable columns (delivery_state,
+	// lease_expires_at, claimed_by, claimed_at, delivered_at) and the
+	// partial index idx_sw_delivery_claim.
+	//
+	// STRICTLY ADDITIVE and BEHAVIOUR-NEUTRAL: no row is modified, no
+	// backfill runs, and no reader, writer or predicate changes. The
+	// axis is carried by columns nothing reads yet.
+	//
+	// It runs HERE, inside the FATAL migration transaction, and NOT in
+	// SafeMigrations: that loop is best-effort and silences errors (it
+	// only warns), and a silently-missing column is far worse than a
+	// failed open. A failure rolls the whole migration back and
+	// NewDatabaseManager returns an error.
+	//
+	// The base DDL is deliberately unchanged: dispatched_at and
+	// fired_by are migration-only columns too, so a fresh database and
+	// a migrated one have identical schemas produced by one code path.
+	// See migration_scheduled_wakes_delivery_state.go.
+	if err := MigrateScheduledWakesDeliveryState(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("scheduled_wakes delivery_state migration failed: %w", err)
+	}
 	// Positive-direction (constructive) cascade: polarity column on
 	// epistemic_provenance. Idempotent via the schema_migrations sentinel
 	// pattern. See migration_epistemic_provenance_polarity.go for the
