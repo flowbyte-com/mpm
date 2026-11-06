@@ -1153,6 +1153,117 @@ var WorkTables = []string{
 	`CREATE INDEX IF NOT EXISTS idx_work_purge_audit_time ON work_purge_audit(purged_at DESC);`,
 }
 
+// SkillPackageTables contains the multi-file Skill Package storage: a
+// manifest row per packaged skill version, one row per file in the package,
+// and content-addressed blob rows for the bytes.
+//
+// WHY THIS IS ITS OWN SLICE, AND NOT A MEMBER OF BaseTables
+// ---------------------------------------------------------
+// attachShared rewrites every `CREATE TABLE` in BaseTables to
+// `shared.<name>` and runs it against the attached shared database
+// (internal/core/db.go, the attachShared CREATE TABLE loop and the
+// CREATE INDEX loop that follows it). A table declared in BaseTables is
+// therefore created in EVERY shared database — which is exactly what the
+// Skill Package design forbids: package bytes live in the local substrate
+// and the `.skill` archive is the transport, not the shared schema.
+//
+// This slice is applied by the same local-only path that applies
+// ReferenceTables and WorkTables, and is deliberately OUTSIDE the
+// attachShared loops. It is a sibling of ReferenceTables, not a member of
+// BaseTables. The invariant is pinned by the test
+// TestSkillPackageTablesAreLocalOnly, which asserts that none of the three
+// names appears in shared.sqlite_master.
+//
+// The three tables are created in dependency order — blobs, packages,
+// files — so no foreign key ever points at a table that does not exist
+// yet. skill_packages references memories(id), which BaseTables has
+// already created by the time this slice runs.
+//
+// SCOPE: this slice is storage only. No reader, writer, importer or
+// exporter exists for these tables yet — the import/export paths are later
+// stages of the approved Skill Packages design (PR #222, §10). The tables
+// are created empty and stay empty until then.
+var SkillPackageTables = []string{
+	// skill_package_blobs — content-addressed storage. One row per distinct
+	// byte sequence. sha256 is the primary key, so the same bytes are
+	// stored once no matter how many packages reference them.
+	`CREATE TABLE IF NOT EXISTS skill_package_blobs (
+		sha256      TEXT PRIMARY KEY,
+		size_bytes  INTEGER NOT NULL,
+		content     BLOB NOT NULL,
+		created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+	);`,
+
+	// skill_packages — the package manifest. One row per skill version that
+	// has a package. The primary key IS the skill id: there is no second
+	// identity space and no mapping table.
+	//
+	// declared_version / version_source record HOW the effective version was
+	// arrived at ('declared' or 'package_declares_no_version'), so a row
+	// always says whether its version came from the package or from MPM.
+	// version_override's effective value lives in `version`; the manifest
+	// JSON carries the full override record.
+	//
+	// ON DELETE CASCADE on skill_id: shredding a skill takes its package
+	// rows with it, which is what makes the prune/shred distinction a
+	// deliberate operator decision rather than an accident.
+	`CREATE TABLE IF NOT EXISTS skill_packages (
+		skill_id          TEXT PRIMARY KEY,
+		name              TEXT NOT NULL,
+		version           TEXT NOT NULL,
+		declared_version  TEXT,
+		version_source    TEXT NOT NULL,
+		format            TEXT NOT NULL DEFAULT 'mpm-skill-package/1',
+		entrypoint        TEXT NOT NULL,
+		entrypoint_sha256 TEXT NOT NULL,
+		manifest          TEXT NOT NULL,
+		package_hash      TEXT NOT NULL,
+		source_sha256     TEXT,
+		is_global         INTEGER NOT NULL DEFAULT 0,
+		created_at        INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+		updated_at        INTEGER,
+		FOREIGN KEY (skill_id) REFERENCES memories(id) ON DELETE CASCADE
+	);`,
+
+	// skill_package_files — one row per file in a package.
+	//
+	// (skill_id, path) is the primary key: `path` is the CANONICAL path
+	// (NFC-normalised, POSIX-separated, collision-checked) and it is the
+	// file's identity. `raw_path` is the name as it appeared in the source
+	// archive and is display-only — it never addresses a file and is never
+	// compared for identity.
+	//
+	// secret_scanned / poison_scanned record WHICH scanners actually ran on
+	// this file. A binary asset has poison_scanned = 0 — a disclosed skip,
+	// not a claim of safety. A row can never claim a scan that did not
+	// happen, because an import that could not scan writes no row at all.
+	//
+	// ON DELETE NO ACTION on the blob foreign key means a blob that is still
+	// referenced by a file row CANNOT be deleted. The garbage collector
+	// therefore deletes file rows first and unreferenced blobs second.
+	`CREATE TABLE IF NOT EXISTS skill_package_files (
+		skill_id         TEXT NOT NULL,
+		path             TEXT NOT NULL,
+		sha256           TEXT NOT NULL,
+		size_bytes       INTEGER NOT NULL,
+		content_type     TEXT NOT NULL,
+		role             TEXT NOT NULL,
+		executable       INTEGER NOT NULL DEFAULT 0,
+		secret_scanned   INTEGER NOT NULL DEFAULT 0,
+		poison_scanned   INTEGER NOT NULL DEFAULT 0,
+		raw_path         TEXT,
+		PRIMARY KEY (skill_id, path),
+		FOREIGN KEY (skill_id) REFERENCES skill_packages(skill_id) ON DELETE CASCADE,
+		FOREIGN KEY (sha256) REFERENCES skill_package_blobs(sha256) ON DELETE NO ACTION
+	);`,
+
+	// Required by the collector: a foreign key indexes the parent side, but
+	// the collector needs the child side to answer "which files reference
+	// this blob" cheaply.
+	`CREATE INDEX IF NOT EXISTS idx_skill_package_files_sha256
+		ON skill_package_files(sha256);`,
+}
+
 // ReferenceIndexes contains the indexes that support the reference tables.
 // Separate from CommonIndexes so isolated reference DBs (test fixtures)
 // get the matching indexes too — without them, queries against the audit

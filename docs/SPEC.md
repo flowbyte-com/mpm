@@ -65,6 +65,7 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.5 [Multi-Agent Shared Epistemology (Layers 0–4)](#65-multi-agent-shared-epistemology-layers-04)
    - 6.6 [Telemetry Sidecar (mpm-telemetry)](#66-telemetry-sidecar-mpm-telemetry)
    - 6.7 [Epistemic Compaction](#67-epistemic-compaction)
+   - 6.8 [Skill Package Storage (P1 — storage only)](#68-skill-package-storage-p1--storage-only)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -275,6 +276,8 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 #### Skill
 
 Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures can be evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
+
+**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). It is **storage only**: no package can be imported, read or exported yet, and a skill saved the ordinary way is unaffected.
 
 #### Evidence
 
@@ -1820,6 +1823,116 @@ raw_count        = actionable_pending + deferred_count
 Returning a deferred row to the pool is `mpm compact requeue-deferred` — **CLI only, and deliberately not exposed on the MCP surface**. A deferral is a machine decision; a requeue is a *human overriding a machine decision*, and an agent able to requeue could undo a refusal on its own judgement, putting the loop back just more slowly. The `compact` action's params schema is `additionalProperties: false`, so requeue is not merely undocumented there — it is unreachable.
 
 The operator can always see what they are overriding: `mpm compact deferred` lists the deferred rows with their reason, batch, and a content sample. See [`mpm compact`](#compact--compaction-operator-surface) for the command surface.
+
+### 6.8 Skill Package Storage (P1 — storage only)
+
+MPM skills are single Markdown documents. The multi-file **skill package** format — an entrypoint plus supporting references, scripts and assets, distributed as a ZIP archive — is specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), which is delivered in stages; **this section describes stage P1, which is storage only.**
+
+#### What P1 adds
+
+Three **additive** tables. No existing table, row, index or trigger is modified.
+
+```sql
+-- Content-addressed storage. One row per distinct byte sequence.
+CREATE TABLE IF NOT EXISTS skill_package_blobs (
+    sha256      TEXT PRIMARY KEY,
+    size_bytes  INTEGER NOT NULL,
+    content     BLOB NOT NULL,
+    created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+);
+
+-- The package manifest. One row per skill version that has a package.
+CREATE TABLE IF NOT EXISTS skill_packages (
+    skill_id          TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    version           TEXT NOT NULL,
+    declared_version  TEXT,
+    version_source    TEXT NOT NULL,
+    format            TEXT NOT NULL DEFAULT 'mpm-skill-package/1',
+    entrypoint        TEXT NOT NULL,
+    entrypoint_sha256 TEXT NOT NULL,
+    manifest          TEXT NOT NULL,
+    package_hash      TEXT NOT NULL,
+    source_sha256     TEXT,
+    is_global         INTEGER NOT NULL DEFAULT 0,
+    created_at        INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    updated_at        INTEGER,
+    FOREIGN KEY (skill_id) REFERENCES memories(id) ON DELETE CASCADE
+);
+
+-- One row per file in a package.
+CREATE TABLE IF NOT EXISTS skill_package_files (
+    skill_id         TEXT NOT NULL,
+    path             TEXT NOT NULL,
+    sha256           TEXT NOT NULL,
+    size_bytes       INTEGER NOT NULL,
+    content_type     TEXT NOT NULL,
+    role             TEXT NOT NULL,
+    executable       INTEGER NOT NULL DEFAULT 0,
+    secret_scanned   INTEGER NOT NULL DEFAULT 0,
+    poison_scanned   INTEGER NOT NULL DEFAULT 0,
+    raw_path         TEXT,
+    PRIMARY KEY (skill_id, path),
+    FOREIGN KEY (skill_id) REFERENCES skill_packages(skill_id) ON DELETE CASCADE,
+    FOREIGN KEY (sha256) REFERENCES skill_package_blobs(sha256) ON DELETE NO ACTION
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_package_files_sha256
+    ON skill_package_files(sha256);
+```
+
+The primary key of `skill_packages` **is** the skill id: there is no second identity space and no mapping table. `skill_package_files` is keyed on `(skill_id, path)`, where `path` is the **canonical** path — NFC-normalised, POSIX-separated, collision-checked — and it is the file's identity; `raw_path` is the name as it appeared in the source archive and is **display-only**. `secret_scanned` and `poison_scanned` record **which scanners actually ran** on a file: a binary asset carries `poison_scanned = 0`, a *disclosed skip* rather than a claim of safety. `ON DELETE NO ACTION` on the blob foreign key means a blob still referenced by a file row cannot be deleted, so a garbage collector must delete file rows first and unreferenced blobs second.
+
+#### What P1 does **not** add
+
+**No reader, writer, importer or exporter exists for these tables.** They are created empty and stay empty. There is no CLI command, no MCP action and no agent-facing surface for packages. A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
+
+The later stages — canonicalisation, the importer, the read API, the export writer, the CLI and MCP surfaces — are described in §10 of the design document and are **not** part of this change. Several operator decisions in that design (the accepted archive layouts, the prune exemption's form, the binary-asset default, cross-workspace sharing) are **open**, and this stage does not decide any of them. In particular, the age-based prune still removes ordinary skills exactly as it did before; the package-aware prune exemption is a later stage and an operator decision.
+
+#### The tables are local-only
+
+The shared database runs "the same table schema as the local DB", but only the tables in `BaseTables` reach it: `attachShared` rewrites every `CREATE TABLE` in that slice to `shared.<name>` and runs it against the attached file. The package tables are declared in their own schema slice, `SkillPackageTables` — a sibling of `ReferenceTables`, **not** a member of `BaseTables` — and are applied by the local schema-initialisation path outside the `attachShared` loops.
+
+**Consequence: no shared database ever receives the package tables, not even empty ones.** A package's bytes live in the local substrate; the `.skill` archive is the portable artefact, not the shared schema. `internal/core/skill_package_schema_test.go` pins this, and pins the negative control that the shared-schema probe can tell a shared table from a local-only one.
+
+#### The restore allow-list
+
+The three tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **accepts** a dump that contains them. Without that registration every backup taken after this change would be rejected by `mpm restore-db` — a loud, immediate failure.
+
+They are deliberately **not** on `RuntimeCanonicalSchema`: they are declared in Go source, and the source-checked half of the allow-list is the correct one.
+
+The registration also has a second, deliberate consequence, described next.
+
+#### The two rollbacks are different operations
+
+| | **binary rollback (lossless, blind)** | **schema rollback (destructive)** |
+|---|---|---|
+| what it is | an old binary runs against a database that has the package tables | `DROP TABLE` on the three package tables |
+| package bytes | **retained but invisible** — still in the file; they reappear when the new binary returns | **irreversibly destroyed**, including third-party files that exist nowhere else |
+| everything else | untouched | untouched |
+| operator-visible signal | none — there is no schema-version gate anywhere in the tree, so the old binary opens the newer database without complaint | the tables are gone |
+| pre-condition | **export the packages first** | **export the packages first** — this is the only copy |
+
+"Lossless" applies to the database, not to the operator's ability to use it. A binary rollback preserves the bytes on disk, but it also creates a restore incompatibility, and the two are not independent.
+
+**"Blind" is the accurate word for the old binary's view.** An old binary has no way to know the three tables exist; it does not warn, it does not refuse, and it does not adapt. Nothing in the substrate would tell an operator that a package was present.
+
+#### After a binary rollback, `mpm restore-db` of a new-binary backup fails closed
+
+`mpm backup` is `sqlite3 .dump` — generic. It does not know which tables exist. So a backup taken by the **new** binary contains the three package tables, and an **old** binary's `mpm restore-db` rejects any dump naming a table that is not on its `CanonicalMPMSchema` allow-list — and the three package tables are not on it.
+
+> **After a binary rollback, restoring a backup taken by the new binary fails closed.** The old binary can produce a backup it cannot restore, and it can refuse a backup it produced itself once the new binary has run.
+
+**The allow-list is not weakened to hide this.** Relaxing `restore-db` to skip unknown tables with a warning would trade a loud, safe refusal for a silent, partial restore — exactly the class of failure the validator exists to prevent.
+
+**The operator procedure is therefore mandatory, not advisory:**
+
+1. **Before any binary rollback**, export every package to a `.skill` archive: `mpm skill export <name> --output <file>.skill` for each package. *(The export writer is a later stage; until it ships, no package can exist and the export step is a no-op — see "What P1 does not add" above.)*
+2. Verify the exports exist and are non-empty.
+3. Only then roll the binary back.
+4. The old binary's `restore-db` will still refuse a new-binary dump. Restore with the **old** binary from a backup taken **before** packages existed, or restore with the new binary.
+
+This is stated rather than designed away: making the old binary able to restore a package-bearing dump is impossible without changing the old binary, which by definition is not being changed. The incompatibility is a property of the rollback, not a defect to be papered over.
 
 ---
 
