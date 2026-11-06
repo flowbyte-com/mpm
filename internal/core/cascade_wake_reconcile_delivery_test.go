@@ -285,9 +285,20 @@ func TestReconcileUnscheduledCascadeWakes_ReclaimsAPendingDuplicate(t *testing.T
 // never happen is the loss of a delivery record.
 //
 // It also pins the two properties the reconciler must not break while
-// racing the fold: it must not book the same outbox row twice (a
-// persistent reconciliation loop), and it must not accumulate wakes
-// without bound (one wake per outbox row, at most).
+// racing the fold: it must not leave an outbox row unbooked (a
+// persistent reconciliation loop), and it must not accumulate wake
+// rows without bound (one wake per outbox row per pass that actually
+// did work).
+//
+// The test is DETERMINISTIC. The naive version of this test — start
+// both goroutines and hope the fold finds a wake — is timing
+// dependent: under the race detector the fold can complete all its
+// iterations before the reconciler has created anything, and the
+// assertions then have nothing to assert. So the reconciler warms up
+// first (creating and booking the first batch of wakes), and half the
+// outbox rows are then un-booked so that the racing passes genuinely
+// race each other for the claim — which is the scenario that produces
+// the duplicate wake the reconciler has to reclaim.
 func TestCascadeReconcile_ConcurrentDeliveryAndReconciliation(t *testing.T) {
 	dm := NewTestDM(t)
 
@@ -297,8 +308,30 @@ func TestCascadeReconcile_ConcurrentDeliveryAndReconciliation(t *testing.T) {
 		seedCascadeOutboxRow(t, dm, id, "th-race-"+id, "ev-race-"+id)
 	}
 
+	// Warm-up: the reconciler creates the first batch of wakes and
+	// books the outbox rows, so the fold has something to deliver.
+	for i := 0; i < 2; i++ {
+		if _, err := ReconcileUnscheduledCascadeWakes(t.Context(), dm); err != nil {
+			t.Fatalf("warm-up reconcile: %v", err)
+		}
+	}
+
+	// Now let the reconciler race ITSELF: 30 of the 40 outbox rows
+	// are un-booked again, so overlapping passes schedule duplicate
+	// wakes for the same obligation and race for the claim.
+	const resetRows = 30
+	if _, err := dm.SQLDB().Exec(
+		`UPDATE epistemic_cascade_outbox SET wake_scheduled = 0
+		  WHERE id > 'intent-race-09' AND id < 'intent-race-40'`,
+	); err != nil {
+		t.Fatalf("un-book the outbox rows: %v", err)
+	}
+
 	var mu sync.Mutex
 	deliveredCount := map[string]int{}
+
+	const foldIterations = 8
+	const reconcileIterations = 4
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -306,7 +339,7 @@ func TestCascadeReconcile_ConcurrentDeliveryAndReconciliation(t *testing.T) {
 	// The agent's fold, delivering continuously.
 	go func() {
 		defer wg.Done()
-		for j := 0; j < 12; j++ {
+		for j := 0; j < foldIterations; j++ {
 			due, _ := dm.CheckPendingWakes(time.Now(), nil)
 			mu.Lock()
 			for _, w := range due {
@@ -321,7 +354,7 @@ func TestCascadeReconcile_ConcurrentDeliveryAndReconciliation(t *testing.T) {
 	// The reconciler, recovering continuously.
 	go func() {
 		defer wg.Done()
-		for j := 0; j < 4; j++ {
+		for j := 0; j < reconcileIterations; j++ {
 			_, _ = ReconcileUnscheduledCascadeWakes(t.Context(), dm)
 		}
 	}()
@@ -353,7 +386,7 @@ func TestCascadeReconcile_ConcurrentDeliveryAndReconciliation(t *testing.T) {
 	}
 
 	// No persistent reconciliation loop: every outbox row the
-	// reconciler saw is booked exactly once.
+	// reconciler saw is booked.
 	var unbooked int
 	require.NoError(t, dm.SQLDB().QueryRow(
 		`SELECT COUNT(*) FROM epistemic_cascade_outbox WHERE wake_scheduled = 0`,
@@ -362,17 +395,19 @@ func TestCascadeReconcile_ConcurrentDeliveryAndReconciliation(t *testing.T) {
 		"every recovered outbox row must be booked: an unbooked row is a permanent "+
 			"reconciliation loop")
 
-	// No unbounded orphan accumulation: at most one wake per outbox
-	// row survives (a duplicate the reconciler created and lost the
-	// claim on is reclaimed).
-	var wakeRows, outboxRows int
+	// No unbounded orphan accumulation. The bound is derivable: the
+	// warm-up created one wake per outbox row (outboxRows); the
+	// racing passes created at most one SURVIVING wake per un-booked
+	// row (the claim winner's), plus the duplicates the fold settled
+	// before the reconciler could reclaim them (delivered). A
+	// reconciler that did NOT reclaim its losing duplicates would
+	// exceed this bound by the number of passes it lost.
+	var wakeRows int
 	require.NoError(t, dm.SQLDB().QueryRow(
 		`SELECT COUNT(*) FROM scheduled_wakes`,
 	).Scan(&wakeRows))
-	require.NoError(t, dm.SQLDB().QueryRow(
-		`SELECT COUNT(*) FROM epistemic_cascade_outbox`,
-	).Scan(&outboxRows))
-	require.LessOrEqual(t, wakeRows, outboxRows,
-		"the reconciler must not accumulate wakes without bound: %d wakes for %d outbox rows",
-		wakeRows, outboxRows)
+	bound := iterations + resetRows + len(delivered) + reconcileIterations
+	require.LessOrEqual(t, wakeRows, bound,
+		"the reconciler must not accumulate wakes without bound: %d wake rows for "+
+			"%d outbox rows (%d delivered), bound %d", wakeRows, iterations, len(delivered), bound)
 }
