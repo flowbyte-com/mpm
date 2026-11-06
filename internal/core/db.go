@@ -2954,6 +2954,29 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		}
 	}
 
+	// Skill Package storage — LOCAL-ONLY.
+	//
+	// This slice is deliberately NOT part of BaseTables: attachShared
+	// rewrites every `CREATE TABLE` in BaseTables to `shared.<name>` and
+	// runs it against the attached shared database, so a package table
+	// declared there would be created as `shared.skill_packages` in EVERY
+	// shared database. Package bytes live in the local substrate; the
+	// `.skill` archive is the transport, not the shared schema.
+	//
+	// The tables are created empty and stay empty: this is storage only.
+	// No reader, writer, importer or exporter for them exists yet — the
+	// import/export paths are later stages of the approved Skill Packages
+	// design (PR #222, §10).
+	//
+	// The slice is applied here, alongside ReferenceTables and WorkTables,
+	// and outside the attachShared loops. The invariant is pinned by
+	// TestSkillPackageTablesAreLocalOnly.
+	for _, sqlQuery := range SkillPackageTables {
+		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
+			return fmt.Errorf("failed to execute skill package schema: %w\nSQL: %s", err, sqlQuery)
+		}
+	}
+
 	for _, sqlQuery := range ReferenceIndexes {
 		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
 			return fmt.Errorf("failed to execute reference index: %w\nSQL: %s", err, sqlQuery)
@@ -3135,6 +3158,29 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	if err := MigrateScheduledWakesDispatchedAt(tx); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("scheduled_wakes dispatched_at migration failed: %w", err)
+	}
+	// 2026-11-04, issue #178 Stage A (M1): the delivery-state axis on
+	// scheduled_wakes — five nullable columns (delivery_state,
+	// lease_expires_at, claimed_by, claimed_at, delivered_at) and the
+	// partial index idx_sw_delivery_claim.
+	//
+	// STRICTLY ADDITIVE and BEHAVIOUR-NEUTRAL: no row is modified, no
+	// backfill runs, and no reader, writer or predicate changes. The
+	// axis is carried by columns nothing reads yet.
+	//
+	// It runs HERE, inside the FATAL migration transaction, and NOT in
+	// SafeMigrations: that loop is best-effort and silences errors (it
+	// only warns), and a silently-missing column is far worse than a
+	// failed open. A failure rolls the whole migration back and
+	// NewDatabaseManager returns an error.
+	//
+	// The base DDL is deliberately unchanged: dispatched_at and
+	// fired_by are migration-only columns too, so a fresh database and
+	// a migrated one have identical schemas produced by one code path.
+	// See migration_scheduled_wakes_delivery_state.go.
+	if err := MigrateScheduledWakesDeliveryState(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("scheduled_wakes delivery_state migration failed: %w", err)
 	}
 	// Positive-direction (constructive) cascade: polarity column on
 	// epistemic_provenance. Idempotent via the schema_migrations sentinel

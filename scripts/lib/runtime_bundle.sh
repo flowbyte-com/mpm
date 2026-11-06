@@ -441,10 +441,87 @@ PY
 # FIRST commit line is still the one that is reported. The count is
 # what keeps it to the first one, and the ABSENCE of `exit` is what
 # keeps the pipe open until the producer is done.
+#
+# WHY THE PRODUCER'S STATUS IS THE HELPER'S BUSINESS
+# --------------------------------------------------
+# The probe is a pipeline, and a pipeline has no status of its own.
+# Without `pipefail` its status is the LAST command's — the parser's —
+# and with `pipefail` it is the rightmost NONZERO status, which is the
+# producer's only when the producer failed AND the parser did not.
+#
+# That made the producer's failure a property of the CALLER's shell
+# configuration rather than of the probe:
+#
+#   * `scripts/assemble-release-bundle.sh` runs with `set -u` only, so
+#     the pipeline's status was the parser's 0, and a binary that
+#     printed a valid commit and THEN failed had that commit accepted;
+#   * a helper invoked inside `if ! ...` has `errexit` SUSPENDED for
+#     its whole body, so even under `pipefail` the failed assignment
+#     did not stop `rb_validate_bundle` — the validation carried on
+#     with the very commit the failing producer had printed.
+#
+# So the two statuses are read AT THE PIPELINE BOUNDARY, inside a
+# subshell whose shell options are this helper's own: `errexit` off, so
+# the pipeline cannot abort before its statuses have been read, and the
+# producer's and the parser's statuses taken from `PIPESTATUS`
+# separately, so neither is inferred from the other. Nothing here
+# depends on the caller's `pipefail`, and nothing here turns the
+# caller's `errexit` off.
+#
+# THE CONTRACT, which is the same for every caller:
+#
+#   * 0 — the producer exited 0 and the parser exited 0. The commit is
+#     on stdout, and it is EMPTY if the producer reported no commit.
+#   * the PRODUCER's own status — the producer failed. Nothing is
+#     printed on stdout: a failed producer yields NO identity.
+#   * the PARSER's status — the parser failed.
+#
+# A caller must therefore CHECK the status, not only the value: the
+# value alone cannot distinguish "the binary reported no commit" from
+# "the binary failed to report anything at all".
+#
+# The Go mirror of these checks (internal/update/verify.go) has always
+# failed closed on a producer that exits nonzero — it treats the failed
+# run as "no commit reported" and refuses the bundle. This helper now
+# agrees with it.
 rb_reported_commit() {
     local binary="${1:-}"
     [ -n "$binary" ] || return 1
-    "$binary" --version 2>/dev/null | awk '/commit:/{ if (count == 0) { print $2; count = 1 } }'
+
+    # `status` is the helper's own verdict; `out` is the identity, and
+    # it is printed only when the probe succeeded.
+    local out status=0
+    out="$(
+        # errexit off: the pipeline's status is read below, not acted on
+        # here. pipefail off: neither status is inferred from the
+        # pipeline's, because PIPESTATUS carries both of them.
+        set +e
+        set +o pipefail
+        "$binary" --version 2>/dev/null | awk '/commit:/{ if (count == 0) { print $2; count = 1 } }'
+        # BOTH statuses are read in ONE command: PIPESTATUS is
+        # overwritten by every command, so reading them one at a time
+        # would lose the producer's.
+        local producer_status="${PIPESTATUS[0]}" parser_status="${PIPESTATUS[1]}"
+        if [ "$producer_status" -ne 0 ]; then
+            printf 'rb_reported_commit: %s --version failed (exit %s)\n' \
+                "$binary" "$producer_status" >&2
+            exit "$producer_status"
+        fi
+        if [ "$parser_status" -ne 0 ]; then
+            printf 'rb_reported_commit: the commit parser failed (exit %s)\n' \
+                "$parser_status" >&2
+            exit "$parser_status"
+        fi
+        exit 0
+    )" || status=$?
+
+    if [ "$status" -ne 0 ]; then
+        # The reason is already on stderr. No identity is printed: a
+        # failed probe yields nothing for a caller to trust.
+        return "$status"
+    fi
+    printf '%s\n' "$out"
+    return 0
 }
 
 # rb_validate_bundle <bundle_dir> [expected_rev]
@@ -528,10 +605,23 @@ rb_validate_bundle() {
 
     # 5. The binaries must report the revision they claim. This is the
     #    check that a bundle is not a MIX of two builds.
+    #
+    #    The probe's STATUS is checked as well as its value, and the
+    #    check is explicit (`if ! ...`) rather than implied by the
+    #    assignment's status: this function is called from inside `if
+    #    ! rb_validate_bundle ...`, and `errexit` is SUSPENDED for the
+    #    whole body of a function invoked in a condition context — so a
+    #    failed assignment would not have stopped the validation.
     local commit reported
     commit="$(rb_release_field "$bundle" commit)"
     if [ -n "$commit" ] && [ "$commit" != "unknown" ]; then
-        reported="$(rb_reported_commit "$bundle/bin/mpm")"
+        reported=""
+        if ! reported="$(rb_reported_commit "$bundle/bin/mpm")"; then
+            rb_err "the bundle's mpm binary failed to report its build commit"
+            rb_err "(its --version exited nonzero — a binary that cannot report its own"
+            rb_err "identity successfully cannot be trusted to report the right one)"
+            return 1
+        fi
         if [ -z "$reported" ]; then
             rb_err "the bundle's mpm binary did not report a build commit"
             return 1
