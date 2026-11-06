@@ -102,6 +102,17 @@ const ExpirationReasonValue = "notification_7d_retention"
 // retired (fired=1, metadata carries the audit note) is filtered
 // by the WHERE clause and never re-touched.
 //
+// CONCURRENCY. The candidate SELECT runs outside the retirement
+// transaction, so another writer can retire a candidate between the
+// SELECT and the UPDATE. The UPDATE therefore carries an `AND
+// fired = 0` guard and is a compare-and-set on the retirement flag:
+// it retires a wake only if the wake is still pending. A wake that
+// was retired in the meantime is SKIPPED — the sweep does not
+// overwrite the other writer's `fired_at` or metadata, which for a
+// scheduler settlement is the only record of when the handler
+// actually finished. A skipped candidate is not counted as retired
+// and does not abort the batch.
+//
 // The function is exposed for direct invocation by tests and for
 // future CLI / on-demand paths. The tick handler
 // (NotificationExpirationTickHandler) is the production caller.
@@ -182,6 +193,22 @@ func SweepOverdueNotificationWakes(ctx context.Context, db *sql.DB, now time.Tim
 			return retired, fmt.Errorf("sweep: ctx cancelled mid-batch: %w", err)
 		}
 
+		// RACE GUARD. `AND fired = 0` in the UPDATE below is what
+		// makes the retirement atomic. The candidate SELECT above
+		// ran OUTSIDE this transaction, so between that SELECT and
+		// this UPDATE the wake may have been retired by somebody
+		// else — most importantly by a scheduler settlement, which
+		// records the moment the handler finished. Without the
+		// guard this UPDATE would overwrite that settlement's
+		// `fired_at` and its metadata, destroying the only record
+		// of when the handler actually completed.
+		//
+		// With the guard the UPDATE is a compare-and-set on the
+		// retirement flag: it retires the wake only if it is still
+		// pending. If it is not, the statement affects zero rows
+		// and the wake is skipped (see the RowsAffected handling
+		// below) — the other writer's evidence is left untouched.
+		//
 		// Build the new metadata: take the existing JSON object
 		// (or {} if absent), set the audit keys, write back as a
 		// JSON string.
@@ -210,7 +237,7 @@ func SweepOverdueNotificationWakes(ctx context.Context, db *sql.DB, now time.Tim
 			        SELECT target_time FROM scheduled_wakes WHERE id = ?
 			      )
 			    )
-			WHERE id = ?
+			WHERE id = ? AND fired = 0
 		`
 		res, err := tx.ExecContext(ctx, updateQuery,
 			nowUnix,
@@ -223,18 +250,29 @@ func SweepOverdueNotificationWakes(ctx context.Context, db *sql.DB, now time.Tim
 			return retired, fmt.Errorf("sweep: update %s: %w", c.id, err)
 		}
 
-		// Read-back assertion (Substrate Defense Triad, rule 3).
-		// A wake retired by the sweep must be findable with
-		// fired=1 AND the audit note present in metadata. We
-		// don't return an error if RowsAffected is 0 on a
-		// table that might be a view; in the production
-		// scheduled_wakes is a real table so 0 is an error.
+		// RowsAffected: 0 means the candidate was no longer
+		// retirable — it was retired by another writer between the
+		// candidate SELECT and this UPDATE, or it was removed.
+		//
+		// This is the "lost the race" outcome, and the substrate's
+		// own CAS idiom treats it as a benign no-op rather than an
+		// error: the wake resolver returns "already_resolved" when
+		// its guarded UPDATE affects zero rows. Treating it as an
+		// error here would abort the whole batch — the deferred
+		// Rollback would undo every candidate this sweep had
+		// already retired, so one concurrent settlement would
+		// cancel the entire sweep. The remaining candidates must
+		// still be retired.
+		//
+		// A row this sweep retired is still asserted below with the
+		// full read-back. A skipped row is not asserted: this sweep
+		// did not write it, so there is nothing of ours to verify.
 		rowsAffected, raErr := res.RowsAffected()
 		if raErr != nil {
 			return retired, fmt.Errorf("sweep: rows-affected %s: %w", c.id, raErr)
 		}
 		if rowsAffected == 0 {
-			return retired, fmt.Errorf("sweep: update %s affected 0 rows (concurrent change?)", c.id)
+			continue
 		}
 
 		var (
@@ -450,6 +488,13 @@ func cronRetentionProbeBacklog(ctx context.Context, db *sql.DB, cutoffUnix int64
 // Idempotent on the same input: a wake that has already been retired
 // (fired=1) is filtered by the WHERE clause and never re-touched.
 //
+// CONCURRENCY. As in SweepOverdueNotificationWakes: the candidate
+// SELECT runs outside the retirement transaction, so the retirement
+// UPDATE carries an `AND fired = 0` guard and is a compare-and-set on
+// the retirement flag. A candidate retired by another writer in the
+// meantime is SKIPPED — not overwritten, not counted, and it does not
+// abort the batch.
+//
 // maxRows bounds the per-call work; the caller chooses between
 // CronRetentionNormalLimit and CronRetentionCatchUpLimit based on
 // backlog size. The sweep itself never inspects backlog — it
@@ -517,6 +562,15 @@ func SweepOverdueCronWakes(ctx context.Context, db *sql.DB, now time.Time, maxRo
 			return retired, fmt.Errorf("cron sweep: ctx cancelled mid-batch: %w", err)
 		}
 
+		// `AND fired = 0` is the race guard. The candidate SELECT
+		// above ran OUTSIDE this transaction, so the wake may have
+		// been retired by another writer between that SELECT and
+		// this UPDATE. The guard makes the retirement a
+		// compare-and-set on the retirement flag: this statement
+		// retires the wake only if it is still pending, and
+		// otherwise affects zero rows and the wake is skipped —
+		// leaving the other writer's `fired_at` and metadata
+		// untouched.
 		updateQuery := `
 			UPDATE scheduled_wakes
 			SET fired = 1,
@@ -529,7 +583,7 @@ func SweepOverdueCronWakes(ctx context.Context, db *sql.DB, now time.Time, maxRo
 			        SELECT target_time FROM scheduled_wakes WHERE id = ?
 			      )
 			    )
-			WHERE id = ?
+			WHERE id = ? AND fired = 0
 		`
 		res, err := tx.ExecContext(ctx, updateQuery,
 			nowUnix,
@@ -542,12 +596,19 @@ func SweepOverdueCronWakes(ctx context.Context, db *sql.DB, now time.Time, maxRo
 			return retired, fmt.Errorf("cron sweep: update %s: %w", c.id, err)
 		}
 
+		// RowsAffected: 0 means the candidate was retired by
+		// another writer before this statement ran (or removed).
+		// That is the "lost the race" outcome and it is benign:
+		// the substrate's own CAS idiom treats a zero-row guarded
+		// UPDATE as a no-op. Treating it as an error would abort
+		// the batch, and the deferred Rollback would undo every
+		// candidate this sweep had already retired.
 		rowsAffected, raErr := res.RowsAffected()
 		if raErr != nil {
 			return retired, fmt.Errorf("cron sweep: rows-affected %s: %w", c.id, raErr)
 		}
 		if rowsAffected == 0 {
-			return retired, fmt.Errorf("cron sweep: update %s affected 0 rows (concurrent change?)", c.id)
+			continue
 		}
 
 		var (
