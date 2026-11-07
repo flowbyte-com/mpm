@@ -596,15 +596,21 @@ through M8 in §8.
 
 | Gate | Result |
 |---|---|
-| `internal/core` suite (`go test -tags fts5 ./...`) | see §11.3 |
-| `make test-race` (the canonical gate) | see §11.3 |
-| `make test-scripts` | see §11.3 |
-| `make release-gate` | see §11.3 |
-| `go run ./cmd/mpm-lint --gate` | see §11.3 |
-| `make docs-check` | see §11.3 |
+| `internal/core` suite (`go test -tags fts5 ./...`) | ✅ |
+| `internal/core` suite under `-race` | ✅ `ok github.com/flowbyte-com/mpm-core 445.093s` (438.373 s in the release-gate re-run) |
+| `make test-race` (the canonical gate) | ✅ exit 0 — it includes `make test-scripts`, `make test-bench` and `make test-agent-installation` |
+| `make test-scripts` | ✅ 889 tests (floor 50) |
+| `make test-bench` | ✅ 217 tests (floor 50) |
+| `make test-agent-installation` | ✅ 481 tests (floor 300) |
+| `make test-release` | ✅ `ok github.com/flowbyte-com/mpm/release_acceptance 12.115s` (36 tests, floor 20) |
+| `make release-gate` (`test-race` + `test-release`) | ✅ **exit 0** on the re-run; the first attempt is §11.2 |
+| `go run ./cmd/mpm-lint --gate` | ✅ PASS (go, mutex, sql, fd, imports thresholds all at or under their ceilings) |
+| `make docs-check` | ✅ 13 checks, 0 review items, 0 errors |
+| the CI on the PR head (`904bc9ee`) | ✅ 3/3 — *Full test suite*, *Build + core tests*, *Release gate (cross-agent continuity + public-CLI subprocess suite)* |
 
-### 11.2 One pre-existing failure, and what it is
+### 11.2 One pre-existing failure, and one transient timeout
 
+**The build-ordering artefact.**
 `internal/core/build_config_invariants_test.go`'s
 `TestBuildConfig_ToolsModuleIsInFullTestGates` runs `make -n test` and
 fails with `exit status 2` **in a checkout that has not been built**. The
@@ -623,6 +629,49 @@ worktree, and it disappears in the same worktree after `make build` — which
 is what CI does before it sweeps. The same artefact was seen and explained
 in the previous session's `internal/update` sweep ("developer build
 artifact missing").
+
+**The transient timeout.** The FIRST `make release-gate` attempt on this
+tree failed — and it is worth reporting rather than hiding, because the
+failure mode is a timeout, not an assertion:
+
+```
+panic: test timed out after 10m0s
+	running tests:
+		TestWakeContext_PreviousSession_CompatibilityMatrix (1s)
+FAIL	github.com/flowbyte-com/mpm-core	600.051s
+```
+
+The Makefile's `test-race` recipe runs the `internal/core` module with
+**no `-timeout`**, so it inherits Go's **10-minute per-package** default.
+The suite's -race duration on this machine is ~7m20s, which leaves about
+2m40s of headroom — and a loaded machine can eat it.
+
+The tree is not the cause, and the evidence is a controlled measurement
+rather than an assertion:
+
+| Tree | `internal/core` under `-race` |
+|---|---|
+| the **unmodified** base `056ce449` | `ok … 437.974s` |
+| **this tree** | `ok … 445.093s` |
+
+a **+7.1 s (+1.6 %)** difference, against a run-to-run spread on this
+tree alone of 441.014 s → 445.093 s. The change adds a ~2.7 s test and
+eight conversions that add a counter increment; it does not move the
+suite. The first `make test-race` attempt on this exact tree also passed
+(end to end, exit 0), and the CI's *Full test suite* job — which runs with
+`-timeout 20m` — is green on the PR head.
+
+The re-run of `make release-gate` on a quiet machine is **green end to
+end, exit 0** (§11.1), with the `internal/core` package at 438.373 s.
+
+**What a reader should take from this.** The `internal/core` -race suite
+sits at roughly 73 % of Go's default per-package budget on a 12-core
+machine. That margin is a property of the Makefile, not of this slice, but
+it is thin enough that a loaded runner can turn it red — the same class of
+thing as the `internal/update` flake recorded in `docs/dev/session-b-update-manager.md`.
+Adding `-timeout 20m` to the `test-race` recipe for the `internal/core`
+module would remove the cliff. That is a Makefile change, outside this
+slice's scope, and it is left as a recommendation rather than smuggled in.
 
 ---
 
