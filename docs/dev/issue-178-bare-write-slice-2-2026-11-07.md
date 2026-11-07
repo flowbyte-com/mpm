@@ -27,7 +27,12 @@ What this slice does:
   hid those three writes cannot recur silently (§6);
 - reproduces every one of the eight failures against isolated SQLite
   databases and shows the red-to-green transition (§7);
-- demonstrates thirteen mutations of the guard, all caught (§8).
+- demonstrates thirteen mutations of the guard, all caught (§8);
+- and — after **C's independent review** (§12) — **removes the file-path
+  escape hatch** from that guard, reclassifies the four entries that
+  depended on it by their actual execution semantics, and encodes C's
+  M17 mutation as a permanent negative control (§6.1, §6.2, §8.1,
+  §12.2).
 
 ---
 
@@ -377,41 +382,119 @@ asserts, for every `migration-once` entry:
 
 1. the entry names a function, and the live site is still **in that
    function** — a one-shot migration that *moved* is caught; and
-2. the function name **or** the file path carries a **migration verb** from
-   a closed vocabulary — `migrat`, `backfill`, `seed`, `rebuild`,
-   `enforce`, `prune`, `sentinel`.
+2. the entry satisfies `classifyMigrationOnce` — **the FUNCTION NAME**
+   carries a **migration verb** from a closed vocabulary (`migrat`,
+   `backfill`, `seed`, `rebuild`, `enforce`, `prune`, `sentinel`), **or**
+   the exact `(file, function)` pair is **explicitly enumerated** in
+   `barePoolMigrationExceptions` with a stated reason.
+
+> **CORRECTED after C's independent review (finding F1).** The rule as
+> first shipped accepted an entry when the function name **or the file
+> path** carried a migration verb. The file-path arm was an unchecked
+> escape hatch: it granted migration status to **every** write in a
+> verb-named file, so a **new** one-shot migration in such a file was
+> accepted **silently** — every guard test green. C's mutation M17
+> demonstrated exactly that. **The file path is not evidence.** A path is
+> a property of the FILE; the class is a claim about the WRITE. The rule
+> is now `classifyMigrationOnce`, and the file path appears nowhere in it.
 
 The vocabulary is deliberately short and deliberately **excludes** the
 verbs a user path uses — `mark`, `promote`, `update` — because those
 names are shared by ordinary surfaces (`MarkHandoffRead`, `PromoteMemory`,
 `UpdateMemory`) and would let a user-path write pass as a migration.
 
-All twenty surviving `migration-once` entries satisfy the rule, and they
-satisfy it for the right reason: `migrateWorkEvents`, `backfillSharedFTSIfEmpty`,
-`BackfillContentHash`, `BackfillLTMFlags`, `insertSeedRow`, `reviveSeedRow`,
-`recordSentinel`, `recordLessonsFTSSentinel`, `PromoteRawMemoryBatch`,
-`RebuildMemoriesColumnAffinity`, `EnforceMemoriesCreatedAtNotNull`,
-`updateMemoryEmbedding`, `runReferenceBackfill`, `PruneCascadeOutbox`,
-`takeBackup`, `markSyntheticTheories`, `handleMigrate`.
+**The exclusion has a consequence, and it is not a gap.** Two genuine
+migrations carry exactly those verbs in their **function names** —
+`markSyntheticTheories` and `PromoteRawMemoryBatch`. Before the
+correction they passed on the **file-path arm**, which is why this
+record's earlier claim that all twenty entries "satisfy it for the right
+reason" was **false for four of the twenty**. They now hold **explicit
+enumerated exceptions**, which is the honest place for a migration whose
+name the vocabulary cannot name.
+
+#### The twenty entries, and how each is now classified
+
+Sixteen satisfy the **primary rule** — the function name carries a
+migration verb:
+
+`runReferenceBackfill`, `PruneCascadeOutbox`, `backfillSharedFTSIfEmpty`,
+`migrateWorkEvents` (×2), `recordSentinel`, `recordLessonsFTSSentinel`,
+`BackfillContentHash`, `BackfillLTMFlags`,
+`RebuildMemoriesColumnAffinity` (×2),
+`EnforceMemoriesCreatedAtNotNull` (×2), `insertSeedRow`, `reviveSeedRow`,
+`handleMigrate`.
+
+Four hold an **enumerated exception**, each classified by its **actual
+execution semantics** — when it runs, what gates it, what a rerun does —
+not by its name:
+
+| Entry | What it actually is | Why it needs an exception |
+|---|---|---|
+| `cmd/mpm/backfill_embeddings.go` — `updateMemoryEmbedding` | the **per-row update** inside the operator-driven `mpm backfill-embeddings` **command**. It runs only when an operator runs the backfill, it writes an **absolute** embedding value, and a rerun converges on the same value. Never on an agent's path. | its name names the *row*, not the *operation* — it carries no migration verb |
+| `internal/core/embedding_migration.go` — `markSyntheticTheories` | **step 3** of `RunMigration`, whose whole orchestrator **short-circuits on the `embedding_migration_log` sentinel row**, so the step runs at most once per database. It writes the absolute value `synthetic = 1`. | its verb `mark` is shared with the user path `MarkHandoffRead`, so it cannot be in the vocabulary |
+| `internal/core/embedding_migration.go` — `takeBackup` | **step 1** of the same sentinel-gated `RunMigration`: the pre-migration `VACUUM INTO` backup. It writes a **timestamped file**, not a row, so a rerun cannot corrupt anything. | its verb `backup` is not a migration verb |
+| `internal/core/migrate_md.go` — `PromoteRawMemoryBatch` | the operator-driven raw-memory promotion (`mpm migrate`). It is **not** one-shot in the "runs once" sense, but it **is** detection-gated in the sense the class means: each row is promoted at most once because the promotion stamps `status='approved'`, so a rerun only picks up newly pending rows. It writes absolute values. | its verb `promote` is shared with the user path `PromoteMemory`, so it cannot be in the vocabulary |
+
+The exception list is **closed and enumerated**: it is a map of exact
+`(file, function)` pairs to reasons, not a pattern. A pair that is not in
+it gets nothing — which is what makes a **second** new write in
+`internal/core/migrate_md.go` (or in `embedding_migration.go`, or in
+`backfill_embeddings.go`) **rejected**, even though two of those files
+hold grants. The guard additionally asserts that every grant states a
+reason, is used by exactly one live entry, and is **not redundant** (an
+entry whose function name already carries a vocabulary verb must not also
+hold a grant, or the grant would be a second, invisible way in).
 
 The three misfiled sites would **fail** the rule: `UpdateSessionSummary`,
 `AddMemoryToTopic` and `RemoveMemoryFromTopic` carry no migration verb,
-and `internal/core/db.go` carries none either. The rule catches exactly
-the defect this slice found.
+and their file `internal/core/db.go` carries none either — and the file
+path is no longer evidence in any case. The rule catches exactly the
+defect this slice found, and it now also catches the shape C found.
 
 ### 6.2 The approximation, stated honestly
 
-The vocabulary check is a proxy. It can be fooled by a user-path function
-whose name happens to carry a migration verb (`PromoteMemory`), and it
-cannot see whether the migration is genuinely idempotent. What it *does*
-guarantee is that the classification names a function, that the function is
-where the write actually is, and that the classification was re-examined
-whenever the code moved. The residual hole is closed by review, not by the
-guard — and the guard's job is to make the review **visible**.
+> **CORRECTED after C's independent review (finding F1).** This section
+> previously claimed that the approximation was "load-bearing in one
+> direction only: a migration whose verb is not in the vocabulary is
+> **over-reported** … **never under-reported**". **That sentence was
+> false**, and C demonstrated the counterexample: the file-path arm
+> under-reported, silently, in exactly the direction the claim denied.
 
-The approximation is load-bearing in one direction only: a migration whose
-verb is not in the vocabulary is **over-reported** (it must be reviewed and
-the vocabulary extended, a reviewable act), never under-reported.
+What the guard now demonstrably enforces:
+
+- **A new write cannot inherit migration status from its file's path.**
+  The path is not consulted. A new one-shot migration in a verb-named
+  file is rejected unless its exact `(file, function)` pair is
+  enumerated — and a grant covers its pair only, so a *second* new write
+  in the same file is rejected too.
+- **Every migration-once entry names its function, and the live site must
+  still be in it.** A relocation is caught.
+- **Every entry is either verb-named or explicitly enumerated**, and the
+  enumeration is closed, reasoned, single-use and non-redundant.
+
+What the guard still does **not** enforce, stated plainly:
+
+- **It cannot verify that a migration is idempotent.** The class's
+  operational meaning is "a retry or a rerun is safe", and that is a
+  property of the statement's semantics, which no name-based rule can
+  check.
+- **A user-path function whose OWN NAME carries a vocabulary verb can
+  still be misfiled.** `PromoteMemory` would satisfy the primary rule.
+  The rule cannot tell a user path from a migration path by name alone.
+  What has changed is *where* that judgement lives: it is now made in
+  **one enumerated, visible list** with a stated reason, rather than in a
+  rule's second arm, and the recorded `Func` means a misfiling has to
+  name the live function the guard then checks against the code.
+- **A grant is still a human judgement.** Adding one is a reviewable act
+  in the guard's own source, and it is visible in a four-entry list — but
+  it is not mechanically derived.
+
+So the corrected statement of the direction is: **the rule over-reports
+rather than under-reports for every write that is not enumerated** (a
+genuine migration whose function name lacks a vocabulary verb must be
+enumerated, which is a reviewable act), and **the residual
+under-reporting surface is the enumerated list itself** — four entries,
+each with a stated reason, each checkable against the code.
 
 ### 6.3 The negative controls for the eight converted shapes
 
@@ -565,6 +648,76 @@ file was reverted **byte-for-byte** afterwards (verified by `md5sum`).
 | M12 | name a `migration-once` entry after a user-path function | the new migration-once guard |
 | M13 | relocate a `migration-once` write out of its migration function | the new migration-once guard |
 
+### 8.1 The five mutations C's review added
+
+C's independent review (§12.2) ran its own mutation battery and found
+one the table above missed. **M17 was NOT caught**: the rule's file-path
+arm accepted a new one-shot migration in a verb-named file, silently, with
+every guard test green. That was finding F1, and it is merge-blocking.
+
+The remediation (§6.1, §6.2) removes the file-path arm, replaces it with
+an **enumerated exception list** keyed by exact `(file, function)` pairs,
+and adds a permanent negative control for the M17 shape. The battery below
+was re-run against the corrected guard in a **disposable worktree**, with
+the M17 mutation as its baseline. **All eleven were caught, none missed.**
+
+| # | Mutation | Caught by |
+|---|---|---|
+| **M17** | **a NEW one-shot migration whose function name carries no vocabulary verb, in a file whose path carries one** | **the migration-once guard — by name** |
+| M18 | a **SECOND** unapproved write in the same verb-named file | the migration-once guard (a grant covers its pair only) |
+| M19 | a grant that names a pair with **no live entry** (a dead grant) | the migration-once guard's dead-grant check |
+| M20 | a **redundant** grant whose function name already carries a verb | the migration-once guard's redundant-grant check |
+| M21 | a grant that **states no reason** | the migration-once guard's reason check |
+| M1 | revert `UpdateSessionSummary` to a bare pool write | the completeness guard (surplus) |
+| M9 | re-add a deleted allowlist entry for a converted shape | the stale-entry guard **and** the negative control |
+| M10 | misfile a `migration-once` entry under an ordinary function name | the migration-once guard |
+| M11 | drop the `Func` from a `migration-once` entry | the migration-once guard |
+| M12 | name a `migration-once` entry after a user-path function | the migration-once guard |
+| M13 | relocate a `migration-once` write out of its migration function | the migration-once guard |
+
+M17's red state, reproduced on the reviewed head `9c1eb4f3` **before** the
+correction — every guard test green, which is the defect:
+
+```
+--- PASS: TestBarePoolWriteAllowlistIsComplete
+--- PASS: TestBarePoolAllowlistHasNoStaleEntries
+--- PASS: TestBarePoolAllowlistIdentitiesAreUnique
+--- PASS: TestBarePoolMultisetIdentitiesDetected
+--- PASS: TestBarePoolAllowlistDetectsReintroducedSlice2Writes
+--- PASS: TestBarePoolMigrationOnceEntriesNameAMigrationFunction
+--- PASS: TestBarePoolAllowlistDetectsReintroducedWrite
+--- PASS: TestBarePoolAllowlistDetectsReintroducedExecContextWrite
+--- PASS: TestBarePoolAllowlistDetectsUnapprovedAttach
+```
+
+and its green state **after** the correction — caught by name, with the
+reason stated:
+
+```
+--- FAIL: TestBarePoolMigrationOnceEntriesNameAMigrationFunction
+    migration-once entries whose classification is not checkable:
+      internal/core/migrate_md.go: function "zzOneShotRepair" carries no migration verb,
+      and the pair is not in the enumerated exception list (barePoolMigrationExceptions) —
+      a migration-once write must either carry a migration verb in its FUNCTION NAME, or be
+      enumerated explicitly with its reason. The file path is NOT evidence:
+      UPDATE raw_memories SET status = 'repaired' WHERE id = ?
+```
+
+The M17 shape is now **asserted in the repository**, permanently, by
+`TestBarePoolMigrationOnceRejectsANewWriteInAVerbNamedFile`. Before this
+remediation the guard's sensitivity was asserted nowhere, which is how the
+hole survived a review.
+
+### 8.2 What the mutation demonstration still is not
+
+**It is a manual exercise, not a test.** The mutations M1–M21 are applied,
+the guard is run, and the files are reverted byte-for-byte; nothing in the
+suite asserts the guard's own sensitivity to most of them. The **M17
+shape** is now the exception — it is encoded as a permanent test — and
+that is the one whose absence let the hole through. Encoding the rest is
+C's finding F5, which is **out of scope for this remediation** and remains
+open (§12.3).
+
 ---
 
 ## 9. What remains
@@ -613,6 +766,13 @@ crash window remains open by design.
   checks *where* a migration lives; it does not and cannot check that the
   migration is idempotent (§6.2).
 - **The scheduler's Stage B/C.** Not in scope by instruction.
+- **C's four residual findings** — F2 (the general statement of the
+  failure-path latency, and the wake-context exposure), F3 (`UpdateSessionSummary`
+  is broken three ways, not one), F4 (the green subtest exercises a schema
+  that does not exist in production) and F5 (the mutation demonstration is
+  still a manual exercise for every mutation except the M17 shape). They
+  are out of scope for this remediation by instruction, and they are
+  **documented, not dismissed** (§12.1, §12.3).
 
 ---
 
@@ -639,16 +799,27 @@ through M8 in §8.
 | Gate | Result |
 |---|---|
 | `internal/core` suite (`go test -tags fts5 ./...`) | ✅ |
-| `internal/core` suite under `-race` | ✅ `ok github.com/flowbyte-com/mpm-core 445.093s` (438.373 s in the release-gate re-run) |
+| `internal/core` suite under `-race` | ✅ `ok github.com/flowbyte-com/mpm-core 445.093s` on the slice's head; **433.544 s** on the F1 remediation's head (`ec0af1d0`) |
 | `make test-race` (the canonical gate) | ✅ exit 0 — it includes `make test-scripts`, `make test-bench` and `make test-agent-installation` |
 | `make test-scripts` | ✅ 889 tests (floor 50) |
 | `make test-bench` | ✅ 217 tests (floor 50) |
 | `make test-agent-installation` | ✅ 481 tests (floor 300) |
-| `make test-release` | ✅ `ok github.com/flowbyte-com/mpm/release_acceptance 12.115s` (36 tests, floor 20) |
-| `make release-gate` (`test-race` + `test-release`) | ✅ **exit 0** on the re-run; the first attempt is §11.2 |
+| `make test-release` | ✅ `ok github.com/flowbyte-com/mpm/release_acceptance 12.115s` / `12.358s` (36 tests, floor 20) |
+| `make release-gate` (`test-race` + `test-release`) | ✅ **exit 0** on the re-run and on the F1 remediation's head; the first attempt is §11.2 |
 | `go run ./cmd/mpm-lint --gate` | ✅ PASS (go, mutex, sql, fd, imports thresholds all at or under their ceilings) |
 | `make docs-check` | ✅ 13 checks, 0 review items, 0 errors |
-| the CI on this branch | ✅ 3/3 on every head that carries this tree — *Full test suite*, *Build + core tests*, *Release gate (cross-agent continuity + public-CLI subprocess suite)*. The Go tree is byte-identical across the branch's heads; the later ones differ only in this record and in commit-message trailers |
+| the CI on this branch | ✅ 3/3 on every head that carries this tree — *Full test suite*, *Build + core tests*, *Release gate (cross-agent continuity + public-CLI subprocess suite)*. The Go tree is byte-identical across the slice's heads; the F1 remediation's head changes only the guard (a test file) and this record |
+
+### 11.1.1 The F1 remediation's own gates
+
+| Gate | Result |
+|---|---|
+| the guard suite (`go test -tags fts5 -run 'TestBarePool' .`) | ✅ 14 tests — including the new `TestBarePoolMigrationOnceRejectsANewWriteInAVerbNamedFile` |
+| `go vet -tags fts5 .` (`internal/core`) | ✅ exit 0 |
+| `make release-gate` on `ec0af1d0` | ✅ **exit 0** — `internal/core` under `-race` at **433.544 s**, `cmd/mpm` at 468.298 s, `internal/core/tools` at 72.060 s, `release_acceptance` at 12.358 s |
+| `make docs-check` | ✅ 13 checks, 0 review items, 0 errors |
+| `go run ./cmd/mpm-lint --gate` | ✅ PASS |
+| the inventory ↔ live-scanner reconciliation | ✅ **exact, both directions** — 133 occurrences / 53 files; 0 live sites without a document row; 0 document rows without a live site; 46 `ordinary` / 49 `migration` / 38 `maintenance` / 0 `tx-owned` |
 
 ### 11.2 One pre-existing failure, and one transient timeout
 
@@ -715,16 +886,132 @@ Adding `-timeout 20m` to the `test-race` recipe for the `internal/core`
 module would remove the cliff. That is a Makefile change, outside this
 slice's scope, and it is left as a recommendation rather than smuggled in.
 
+### 11.2.1 A third failure — one I caused, and the fix
+
+During the F1 remediation, a `make test-race` run failed:
+
+```
+--- FAIL: TestBuildProvenance_TheCanonicalScriptStampIsEmbeddedInTheBinary
+    the canonically stamped binary does not report this checkout's HEAD commit
+    "ec0af1d05b437c67f2784525b976278e45356c2a":
+      MPM 0.1.0-dev+g9c1eb4f3.dirty.t1794069844
+        commit:  9c1eb4f38cfd89e7798d59a68735cba5b5c77024
+```
+
+**This was my own doing, and the failure is precise about it.** The
+`test-race` recipe builds first, stamping the binary with the HEAD at
+build time (`9c1eb4f3`); I then **committed while the run was in flight**,
+moving HEAD to `ec0af1d0`; and `cmd/mpm`'s provenance test later compared
+the already-built binary against the **current** HEAD and found them
+different. The test is an invariant — *the binary must report this
+checkout's HEAD* — and it was correct to fail.
+
+The fix is procedural, not a code change: **the tree must be stable for
+the duration of a gate run.** The run was repeated with no commits during
+it, and it passed end to end (§11.1.1).
+
+It is recorded here because the record's §11.2 exists to report failures
+rather than hide them, and this one is mine.
+
 ---
 
 ## 12. The review
 
-This work has **not** been independently reviewed. It is published for
-review, and it stops there.
+**This work HAS now been independently reviewed.** C reviewed the branch
+independently, verified the eight conversions and the red-to-green
+reproduction against the base rather than taking them on trust, and
+returned **REQUEST CHANGES — narrowly, on F1**.
 
-### 12.1 The review that was run, and what it cannot be
+C's verdict on the substance:
 
-The substrate's own `mpm_request_review` was run against the **production
+> "the **eight conversions are correct** — the defect reproduces with the
+> real production method at the base (the write is lost, no retry
+> absorbed) and is fixed at the head (a retry is absorbed, the write
+> lands); the **red state reproduces** on the PR's own test; **retry
+> safety holds** for all eight; the **transaction semantics hold** for
+> all eight; and the **inventory is exact** in both directions, with the
+> arithmetic reconciling against the base's own previous revision."
+
+### 12.1 C's findings, and what happened to each
+
+| # | Severity | Finding | Disposition |
+|---|---|---|---|
+| **F1** | **MEDIUM — blocking** | The `migration-once` guard **under-reported** in the direction §6.2 said was impossible, because the **file-path half** of the disjunction was unchecked. C's mutation **M17** — a new one-shot migration with a non-vocabulary function name in a verb-named file — was accepted **silently**, every guard test green. §6.1's "they satisfy it for the right reason" was false for **4 of 20** entries, two of which carry the verbs the same section says the vocabulary excludes (`mark`, `promote`). | **REMEDIATED in this revision** — §6.1, §6.2, §8.1. The file-path arm is **removed**; the four are reclassified by their actual execution semantics and hold **enumerated exceptions**; the M17 shape is a **permanent negative control**. |
+| **F2** | MEDIUM | The new budget makes a **failed** write cost ≈33 s at the production busy window (measured 5.015 s → 33.151 s), and failure paths that also write an audit row cost **two** budgets (66.3 s measured). The record stated this for `DeleteHandoff` only; the same shape is on the **wake-context path** (`wake_context.go:652` → `MarkHandoffRead` → `LogAudit`), measured 38.154 s → 66.275 s — an agent's session-start call. No latency contract is violated, but there is **no cancellation**. | **OPEN — documentation** (§12.3). Out of scope for this remediation by instruction; the general shape is not yet stated in the record. |
+| **F3** | LOW | `UpdateSessionSummary` is dead **and** broken three ways, not one: no `summary` column; **not an upsert** (an `UPDATE` — a call for an unknown `session_id` returns `nil` and writes nothing); and `session_id` is **not unique** (one call updated two rows). | **OPEN — follow-up.** The filed follow-up should be *"fix or remove the function"*, not *"add a column"*. Recorded as MPM work `abf57027de5654de`; to be updated. |
+| **F4** | LOW | The green `UpdateSessionSummary` case exercises a schema that does not exist in production (the harness adds the column). "end to end" overstates it. | **OPEN — wording** (§12.3). One sentence fixes it; not done in this remediation by instruction (F2–F5 out of scope). |
+| **F5** | INFO | The mutation demonstration is a **one-time manual exercise**, not a test. Nothing in the suite asserts the guard's own sensitivity, which is how F1's class went unnoticed. | **PARTLY ADDRESSED.** The **M17 shape specifically** is now a permanent test (§8.1) — it is the one whose absence let the hole through. Encoding the remaining mutations as tests remains open. |
+| — | INFO | PR #234 and PR #232 merge cleanly — zero conflicts — and the merged tree passes the relevant `internal/core` suites. The file sets do not overlap. | Noted; unchanged. |
+
+### 12.2 The F1 remediation, in detail
+
+**The defect.** The rule shipped as: a `migration-once` entry is acceptable
+if the function name **or the file path** carries a migration verb. The
+file-path arm granted migration status to **every** write in a verb-named
+file. The class is a claim about the **write**; a path is a property of
+the **file**. So the arm was an unchecked escape hatch, and it was the
+escape hatch through which a *new* ordinary write could acquire migration
+status without anybody noticing.
+
+**The fix, in four parts.**
+
+1. **The file path is not evidence.** The rule is now
+   `classifyMigrationOnce`: the **function name** must carry a migration
+   verb, **or** the exact `(file, function)` pair must be enumerated.
+   `hasMigrationVerb(e.File)` appears nowhere in the rule.
+
+2. **The four file-path-dependent entries were reviewed by their actual
+   execution semantics** and reclassified in §6.1's table — when each
+   runs, what gates it, what a rerun does. All four are genuine
+   migrations; none of them can be identified by the mechanical rule, so
+   all four hold an **enumerated exception** with a stated reason.
+
+3. **The exception list is closed, enumerated and single-use.** It is a
+   map of exact `(file, function)` pairs to reasons — not a pattern. The
+   guard asserts every grant states a reason, is used by exactly one live
+   entry, and is **not redundant** (an entry whose function name already
+   carries a vocabulary verb must not also hold a grant).
+
+4. **The M17 shape is a permanent negative control.**
+   `TestBarePoolMigrationOnceRejectsANewWriteInAVerbNamedFile` asserts
+   the M17 entry is rejected, that the same shape is rejected in each of
+   the other verb-named files, that a verb-free file is still rejected,
+   that an entry naming no function is rejected — **and** that the four
+   genuine exception-holders and three verb-named migrations are still
+   accepted. The correction bounds the class; it does not ban it.
+
+**The production diff needs no change.** `internal/core/db.go` and
+`internal/core/handoff.go` are **byte-for-byte identical** to the head C
+reviewed — `git diff 9c1eb4f3 HEAD -- internal/core/db.go internal/core/handoff.go`
+is **empty**. The eight approved conversions are untouched, and no retry
+budget or transaction behaviour was modified.
+
+**What F1 did NOT find.** C's verdict was explicitly that the eight
+conversions "can merge as they stand", and that "the **production diff**
+(`db.go`, `handoff.go`) needs no change". The remediation is confined to
+the guard and to this record.
+
+### 12.3 What is still open after this remediation
+
+- **F2** — the general statement of the failure-path latency, and the
+  wake-context exposure (`internal/core/wake_context.go:652`), is not yet
+  in the record. §5.2.1 states the shape for `DeleteHandoff` only.
+- **F3** — the filed follow-up for `UpdateSessionSummary` says "add a
+  column"; C's measurement shows the function is not an upsert and
+  `session_id` is not unique, so the correct resolution is "fix or remove
+  the function". The follow-up needs updating.
+- **F4** — §4.3's phrase "so the production call can be exercised end to
+  end" overstates what the green subtest proves.
+- **F5** — the mutation demonstration remains a manual exercise for every
+  mutation except the M17 shape.
+- **The residual judgement surface of the guard itself** — a user-path
+  function whose own name carries a vocabulary verb (`PromoteMemory`) can
+  still be misfiled, and the guard cannot verify that a migration is
+  idempotent. §6.2 states both.
+
+### 12.4 The substrate's own review, and what it cannot be
+
+The substrate's `mpm_request_review` was run against the **production
 diff itself**, with a prompt that asked for verdicts on nine specific
 questions rather than for a summary. The first run — against the
 production diff alone — **declined to give verdicts**, on the ground that
@@ -754,7 +1041,7 @@ but the missing sessions.summary schema change remains and the LogAudit
 retry interaction and classification bypasses are not fully resolved by the
 artifacts."
 
-### 12.2 What was done with the concerns
+### 12.5 What was done with the substrate review's concerns
 
 **Concern 3 — the `LogAudit` interaction — is settled, by measurement.**
 §5.2.1: `LogAudit` was **already** budgeted at the base commit and
@@ -769,35 +1056,43 @@ window, which is the price of the budget and buys a shred that lands.
 the review agrees the framing is honest rather than a way of making the
 numbers look good.
 
-**Concern 7 — the classification bypasses — are already stated in §6.2.**
-The guard closes the misfiling hole it was built for; it does not and
-cannot verify that a migration is idempotent, and a user-path function
-whose name carries a migration verb could still be misfiled. The review's
-assessment agrees: "useful and over-reporting is safer than silent
+**Concern 7 — the classification bypasses — were already stated in §6.2,
+and the false claim in it has since been corrected.** The substrate
+review's assessment was: "useful and over-reporting is safer than silent
 under-reporting, but it does not completely close the classification
-hole." That is the honest scope of the fix, stated the same way in the
-record.
+hole." **C's independent review then showed that the "never
+under-reported" claim was false**, and this revision removes the arm that
+under-reported (§12.2). What remains is stated in §6.2: the guard cannot
+verify idempotence, and a user-path function whose own name carries a
+vocabulary verb can still be misfiled — a judgement that now lives in one
+enumerated, visible list rather than in a rule's second arm.
 
-### 12.3 What this is NOT
+### 12.6 What the substrate's review is NOT
 
-The first slice's record §12 is explicit about the difference between a
-self-review and an independent one, and this slice has had only the
-former: the work was checked against the tree, against the mutation
-demonstration, against the base commit's behaviour and by the substrate's
-own review components — all by the agent that wrote it.
+The substrate's `mpm_request_review` is a **self-review**: the work was
+checked against the tree, against the mutation demonstration, against the
+base commit's behaviour and by the substrate's own review components — all
+by the agent that wrote it.
 
-**An independent reviewer should still read this PR.** The review should
-focus on:
+**C's review is the independent one, and it is the one that counted.** It
+found a defect the self-review missed, and this revision is its
+remediation. The re-review C is asked for is therefore a review of the
+**remediation**, not of the whole slice:
 
-1. **The eight conversions** — the retry-safety arguments in §5.1, and the
-   error-surface and transaction-semantics arguments in §5.2–§5.3.
-2. **The `migration-once` guard** — whether the closed vocabulary in §6.1
-   is the right one, and whether requiring the `Func` field on that class
-   only (and not on the others) is the right scope.
-3. **The scope decision** — three of the eight sites have no production
-   caller today (§4.3), and the slice converted them anyway.
-4. **The `sessions.summary` finding** — whether the missing column should
-   be fixed in this slice after all, or filed separately as §10 proposes.
-5. **The double budget on `DeleteHandoff`'s failure path** (§5.2.1) —
-   whether paying it twice is acceptable, and whether `LogAudit`'s own
-   budget should be spent on a path that is already failing.
+1. **The rule change** — is "the function name, or an enumerated
+   exception" the right rule, and is the file path correctly excluded from
+   it? (§6.1, §12.2)
+2. **The four classifications** — does the table in §6.1 classify each of
+   the four by its actual execution semantics, and is each exception's
+   stated reason accurate? (§6.1)
+3. **The exception mechanism's narrowness** — is a closed list of exact
+   `(file, function)` pairs with reasons, single-use and non-redundant,
+   narrow enough to close the hole, or does it reintroduce one?
+   (§6.1, §8.1)
+4. **The four residual findings** — F2, F3, F4 and F5, which this
+   remediation deliberately does **not** address (§12.3). Are any of them
+   actually merge-blocking?
+5. **The unchanged production diff** — `internal/core/db.go` and
+   `internal/core/handoff.go` are byte-for-byte identical to the head C
+   reviewed, so the eight conversions need no re-review beyond
+   confirmation that they are untouched.
