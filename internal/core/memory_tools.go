@@ -855,11 +855,11 @@ func (dm *DatabaseManager) SoftDeleteMemory(memoryID string) (map[string]interfa
 	// Defense Triad rule 3: read-back proves the mutation landed. A silent
 	// 0-row UPDATE from a typo'd id is the failure class this assertion
 	// catches — soft-delete MUST error so callers know nothing happened.
-	res, err := dm.db.Exec(`
+	res, err := dm.ExecTracked(`
 		UPDATE memories
 		SET deleted_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
-	`, memoryID)
+	`, 5, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("delete: %w", err)
 	}
@@ -923,11 +923,11 @@ func (dm *DatabaseManager) RestoreMemory(memoryID string) (map[string]interface{
 		return nil, fmt.Errorf("memory_id is required")
 	}
 
-	res, err := dm.db.Exec(`
+	res, err := dm.ExecTracked(`
 		UPDATE memories
 		SET deleted_at = NULL
 		WHERE id = ? AND deleted_at IS NOT NULL
-	`, memoryID)
+	`, 5, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("restore: %w", err)
 	}
@@ -1061,12 +1061,12 @@ func (dm *DatabaseManager) SnoozeMemory(memoryID string, days int) (map[string]i
 	if days <= 0 {
 		days = 1
 	}
-	res, err := dm.db.Exec(`
+	res, err := dm.ExecTracked(`
 		UPDATE memories
 		SET weight = MIN(weight + 1, 9),
 		    last_accessed_at = CAST(strftime('%s','now', '+' || ? || ' days') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
-	`, days, memoryID)
+	`, 5, days, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("snooze: %w", err)
 	}
@@ -1095,7 +1095,7 @@ func (dm *DatabaseManager) SetMemoryWeight(memoryID string, weight float64) (map
 	if weight < 0 || weight > 100 {
 		return nil, fmt.Errorf("weight must be 0-100 (got %v)", weight)
 	}
-	res, err := dm.db.Exec(`UPDATE memories SET weight = ? WHERE id = ? AND deleted_at IS NULL`, weight, memoryID)
+	res, err := dm.ExecTracked(`UPDATE memories SET weight = ? WHERE id = ? AND deleted_at IS NULL`, 5, weight, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("set weight: %w", err)
 	}
@@ -1128,11 +1128,11 @@ func (dm *DatabaseManager) PromoteMemory(memoryID string) (map[string]interface{
 	// LTM). Directives, decisions, theories, notes, memories are all
 	// safe — LTM on them is either idempotent (directives) or just
 	// weight=10 (no destructive side-effect).
-	res, err := dm.db.Exec(`
+	res, err := dm.ExecTracked(`
 		UPDATE memories
 		SET weight = 10, is_long_term = 1
 		WHERE id = ? AND deleted_at IS NULL AND collection != 'lessons'
-	`, memoryID)
+	`, 5, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("promote: %w", err)
 	}
@@ -1223,7 +1223,7 @@ func (dm *DatabaseManager) WeakenMemoryTool(memoryID string, delta int) (map[str
 
 	// Capture the pre-state in the same statement so the response can
 	// surface weight_before / reinforcement_count_before without a race.
-	res, err := dm.db.Exec(`
+	res, err := dm.ExecTracked(`
 		UPDATE memories
 		SET reinforcement_count = MAX(reinforcement_count - ?, 0),
 		    weight = MAX(weight - ?, 1),
@@ -1231,7 +1231,7 @@ func (dm *DatabaseManager) WeakenMemoryTool(memoryID string, delta int) (map[str
 		    runtime_seconds_since_access = 0,
 		    runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
-	`, delta, weightLoss, memoryID)
+	`, 5, delta, weightLoss, memoryID)
 	if err != nil {
 		if isBusyError(err) {
 			return nil, fmt.Errorf("weaken: write contended: %w", err)
