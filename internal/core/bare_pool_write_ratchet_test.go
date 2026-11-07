@@ -282,6 +282,25 @@ type barePoolEntry struct {
 	// removing one (by routing it through ExecTracked or into a
 	// transaction) makes the entry stale until it is decremented.
 	Count int
+	// Func is the name of the function the call sits in.
+	//
+	// It is REQUIRED for the `migration-once` class and optional
+	// elsewhere. The reason is in THE REASONS above: `migration-once`
+	// is a claim about WHEN a write runs — once, on a migration path,
+	// never on a user path — and that claim is only checkable if it
+	// names the place the write lives. Without the name, the claim is
+	// unfalsifiable, and a reviewer filing an ordinary user-state
+	// write under this class is invisible to every mechanical guard,
+	// because classification is human judgement.
+	//
+	// The second remediation slice (issue #178) found exactly that: three
+	// ordinary contended writes — a session summary, a topic membership
+	// insert and a topic membership delete — were filed as
+	// `migration-once`, and the misfiling was what hid them from the
+	// ordinary-write accounting. Naming the function, and checking the
+	// name against a closed migration vocabulary, is what makes the
+	// class falsifiable.
+	Func string
 }
 
 // barePoolAllowlist is the complete inventory of bare pool writes on
@@ -293,11 +312,13 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "cmd/mpm/backfill_embeddings.go",
 		SQL:   "UPDATE memories SET embedding = ?, embedding_source = ?, embedding_dimension = ?, embedding_model = ? WHERE id = ?",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "updateMemoryEmbedding"},
 	{File: "cmd/mpm/backfill_embeddings.go",
 		SQL:   "UPDATE reference_chunks SET embedding = NULL, embedding_source = 'null', embedding_dimension = NULL, embedding_model = NULL",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "runReferenceBackfill"},
 	{File: "cmd/mpm/handlers_backup.go",
 		SQL:   "PRAGMA wal_checkpoint(TRUNCATE)",
 		Why:   reasonPropagated,
@@ -393,7 +414,8 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/core/cascade_outbox.go",
 		SQL:   "DELETE FROM epistemic_cascade_outbox WHERE status IN ('materialized', 'failed') AND updated_at < CAST(strftime('%s','now', '-' || ? || ' days') AS INTEGER)",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "PruneCascadeOutbox"},
 	{File: "internal/core/cascade_wake_reconcile.go",
 		SQL:   "UPDATE epistemic_cascade_outbox SET wake_scheduled = 1, updated_at = ? WHERE id = ? AND wake_scheduled = 0",
 		Why:   reasonPropagated,
@@ -473,11 +495,13 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/core/db.go",
 		SQL:   "INSERT OR IGNORE INTO shared.memories_fts(rowid, content, collection, session_id, tags) SELECT rowid, content, COALESCE(collection, ''), COALESCE(session_id, ''), COALESCE(tags, '') FROM shared.memories WHERE is_global = 1 AND deleted_at IS NULL",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "backfillSharedFTSIfEmpty"},
 	{File: "internal/core/db.go",
 		SQL:   "INSERT OR IGNORE INTO work_events (id, work_id, event_index, event_type, created_at, invocation_id, note, title, content, directive_ids) SELECT lower(hex(randomblob(16))), id, 0, 'created', created_at, NULL, '', title, content, '[]' FROM works WHERE migrated_at IS NULL AND NOT EXISTS (SELECT 1 FROM work_events WHERE work_events.work_id = works.id AND work_events.event_index = 0);",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "migrateWorkEvents"},
 	{File: "internal/core/db.go",
 		SQL:   "INSERT OR REPLACE INTO system_config (key, raw_json, content_hash, updated_at, config_snapshot) VALUES (?, ?, ?, CAST(strftime('%s','now') AS INTEGER), ?)",
 		Why:   reasonPropagated,
@@ -525,7 +549,8 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/core/db.go",
 		SQL:   "UPDATE works SET migrated_at = CAST(strftime('%s','now') AS INTEGER) WHERE migrated_at IS NULL",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "migrateWorkEvents"},
 	{File: "internal/core/db.go",
 		SQL:   "UPDATE works SET status = ?, title = ?, content = ?, updated_at = ?, completed_at = ?, archived_at = ? WHERE id = ?",
 		Why:   reasonPropagated,
@@ -537,15 +562,18 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/core/embedding_migration.go",
 		SQL:   "INSERT INTO embedding_migration_log (memory_id, old_weight, new_weight, reason, migrated_at) VALUES ('sentinel', 0, 0, 'migration_applied', CAST(strftime('%s','now') AS INTEGER))",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "recordSentinel"},
 	{File: "internal/core/embedding_migration.go",
 		SQL:   "UPDATE memories SET synthetic = 1 WHERE synthetic = 0 AND collection = 'theories' AND deleted_at IS NULL AND json_extract(metadata, '$.challenged_memory_id') IN ( SELECT id FROM memories WHERE embedding_source = 'hash' AND deleted_at IS NULL )",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "markSyntheticTheories"},
 	{File: "internal/core/embedding_migration.go",
 		SQL:   "VACUUM INTO ?",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "takeBackup"},
 	{File: "internal/core/epistemology_tools.go",
 		SQL:   "UPDATE memories SET metadata = json_patch(COALESCE(metadata,'{}'), ?) WHERE id = ? AND deleted_at IS NULL",
 		Why:   reasonPropagated,
@@ -601,7 +629,8 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/core/lessons_fts_sync.go",
 		SQL:   "INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, CAST(strftime('%s','now') AS INTEGER))",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "recordLessonsFTSSentinel"},
 	{File: "internal/core/memory.go",
 		SQL:   "ALTER TABLE %s ADD COLUMN %s %s",
 		Why:   reasonStartupDDL,
@@ -617,7 +646,8 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/core/memory.go",
 		SQL:   "UPDATE memories SET content_hash = lower(hex(sha256(content))) WHERE content_hash IS NULL OR content_hash = ''",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "BackfillContentHash"},
 	{File: "internal/core/memory.go",
 		SQL:   "UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now') AND",
 		Why:   reasonBestEffort,
@@ -625,7 +655,8 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/core/memory.go",
 		SQL:   "UPDATE memories SET is_long_term = 1, weight = 10 WHERE weight = 1 AND is_long_term = 0 AND json_extract(metadata, '$.is_long_term') = 'true'",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "BackfillLTMFlags"},
 	{File: "internal/core/memory.go",
 		SQL:   "UPDATE topics SET is_active = 0, updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
 		Why:   reasonPropagated,
@@ -637,23 +668,28 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/core/migrate_md.go",
 		SQL:   "UPDATE raw_memories SET status='approved', memory_id=?, updated_at=? WHERE id=?",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "PromoteRawMemoryBatch"},
 	{File: "internal/core/migration_memories_affinity_rebuild.go",
 		SQL:   "PRAGMA foreign_keys = OFF",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "RebuildMemoriesColumnAffinity"},
 	{File: "internal/core/migration_memories_affinity_rebuild.go",
 		SQL:   "PRAGMA foreign_keys = ON",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "RebuildMemoriesColumnAffinity"},
 	{File: "internal/core/migration_memories_created_at_not_null.go",
 		SQL:   "PRAGMA foreign_keys = OFF",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "EnforceMemoriesCreatedAtNotNull"},
 	{File: "internal/core/migration_memories_created_at_not_null.go",
 		SQL:   "PRAGMA foreign_keys = ON",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "EnforceMemoriesCreatedAtNotNull"},
 	{File: "internal/core/reference_db.go",
 		SQL:   "UPDATE reference_chunks SET embedding = ?, embedding_source = 'provider', embedding_dimension = ?, embedding_model = ? WHERE id = ?",
 		Why:   reasonPropagated,
@@ -689,11 +725,13 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/core/seed/engine.go",
 		SQL:   "INSERT OR IGNORE INTO memories (id, collection, content, tags, metadata, is_prime_directive, weight, confidence, retrieval_priority, importance, created_at, updated_at) VALUES (?, 'directives', ?, ?, ?, 1, 10, 1.0, 1.0, 1.0, ?, ?)",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "insertSeedRow"},
 	{File: "internal/core/seed/engine.go",
 		SQL:   "UPDATE memories SET deleted_at = NULL, content = ?, tags = ?, metadata = ?, is_prime_directive = 1, collection = 'directives' WHERE id = ? AND deleted_at IS NOT NULL AND deleted_at > 0",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "reviveSeedRow"},
 	{File: "internal/core/similarity_candidates_store.go",
 		SQL:   "ATTACH DATABASE '%s' AS shared",
 		Why:   reasonConnectionScoped,
@@ -721,7 +759,8 @@ var barePoolAllowlist = []barePoolEntry{
 	{File: "internal/core/tools/handlers.go",
 		SQL:   "UPDATE raw_memories SET status='rejected', llm_notes='undo by mcp tool', updated_at=? WHERE import_batch=? AND status IN ('pending','approved')",
 		Why:   reasonMigrationOnce,
-		Count: 1},
+		Count: 1,
+		Func:  "handleMigrate"},
 	{File: "internal/core/vector_index.go",
 		SQL:   "DELETE FROM WHERE memory_id = ?",
 		Why:   reasonPropagated,
@@ -777,6 +816,57 @@ type barePoolSite struct {
 	File string
 	Line int
 	SQL  string
+	// Func is the name of the function the call sits in ("" when the
+	// call is not inside a named function declaration — a package-level
+	// var initializer, say).
+	//
+	// It is what makes the `migration-once` classification checkable:
+	// that class claims the write runs ONCE, on a migration path, and
+	// never on a user path. The enclosing function's name is the
+	// observable proxy for that claim, so the guard can compare the
+	// claim against the code.
+	Func string
+}
+
+// funcDeclRange is one function declaration's name and source range.
+type funcDeclRange struct {
+	name  string
+	start token.Pos
+	end   token.Pos
+}
+
+// funcDeclRanges returns every function declaration in file, with its
+// name and source range.
+//
+// The name is the bare function or method name ("migrateWorkEvents",
+// "handleMigrate"). The receiver type is deliberately NOT part of it:
+// the vocabulary the migration-once guard checks is a vocabulary of
+// VERBS, and a verb reads the same on a method as on a function.
+func funcDeclRanges(file *ast.File) []funcDeclRange {
+	var out []funcDeclRange
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		out = append(out, funcDeclRange{
+			name:  fn.Name.Name,
+			start: fn.Pos(),
+			end:   fn.End(),
+		})
+	}
+	return out
+}
+
+// enclosingFunc returns the name of the function declaration that
+// contains pos, or "" when pos is not inside one.
+func enclosingFunc(ranges []funcDeclRange, pos token.Pos) string {
+	for _, r := range ranges {
+		if r.start <= pos && pos <= r.end {
+			return r.name
+		}
+	}
+	return ""
 }
 
 // bareWriteMethod returns the argument index at which the SQL lives for
@@ -859,6 +949,7 @@ func scanBarePoolSource(rel string, src []byte) ([]barePoolSite, error) {
 	}
 	scope := literalScope(file.Decls)
 	txRanges := withTxRanges(fset, file)
+	funcRanges := funcDeclRanges(file)
 
 	inTx := func(pos token.Pos) bool {
 		for _, r := range txRanges {
@@ -901,6 +992,7 @@ func scanBarePoolSource(rel string, src []byte) ([]barePoolSite, error) {
 			File: rel,
 			Line: fset.Position(call.Pos()).Line,
 			SQL:  sql,
+			Func: enclosingFunc(funcRanges, call.Pos()),
 		})
 		return true
 	})
@@ -1143,6 +1235,192 @@ func TestBarePoolMultisetIdentitiesDetected(t *testing.T) {
 	if surplus, _ := diffBarePool([]barePoolSite{mkSite(10), mkSite(42), mkSite(77)}, allow2); len(surplus) != 1 {
 		t.Fatalf("a third identical write must surface exactly one surplus occurrence, got %+v", surplus)
 	}
+}
+
+// TestBarePoolAllowlistDetectsReintroducedSlice2Writes is the negative
+// control for the SECOND remediation slice's eight conversions.
+//
+// The convention this guard has always kept is that a converted site
+// DELETES its allowlist entry, and the deletion is the record. But a
+// deletion alone only proves the entry is gone: it does not prove the
+// shape would be CAUGHT if it came back. This test closes that gap for
+// the eight sites the second slice converted, one by one:
+//
+//  1. the exact converted SQL shape must NOT be on the allowlist, under
+//     ANY reason — so a reintroduction cannot pass by inheriting a
+//     neighbour's entry; and
+//  2. the classifier must still SEE the shape as a bare pool write — so
+//     a live reintroduction is caught by shape, not by luck.
+//
+// The shapes are the ones the slice removed:
+//
+//   - internal/core/db.go:      UPDATE sessions SET summary = ...
+//   - internal/core/db.go:      INSERT OR IGNORE INTO topic_memberships ...
+//   - internal/core/db.go:      DELETE FROM topic_memberships ...
+//   - internal/core/db.go:      INSERT INTO works ...
+//   - internal/core/db.go:      UPDATE works SET status = ...
+//   - internal/core/db.go:      UPDATE works SET verification = ...
+//   - internal/core/handoff.go: UPDATE session_handoffs SET read_at = ...
+//   - internal/core/handoff.go: DELETE FROM session_handoffs WHERE id = ?
+//
+// Two of the eight were filed under `migration-once` — a MISFILE. The
+// misfiling is what hid them from the ordinary-write accounting, and
+// TestBarePoolMigrationOnceEntriesNameAMigrationFunction is the guard
+// that makes the class falsifiable in future.
+func TestBarePoolAllowlistDetectsReintroducedSlice2Writes(t *testing.T) {
+	converted := []struct {
+		file string
+		sql  string
+	}{
+		{"internal/core/db.go", "UPDATE sessions SET summary = ? WHERE session_id = ?"},
+		{"internal/core/db.go", "INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)"},
+		{"internal/core/db.go", "DELETE FROM topic_memberships WHERE memory_id = ? AND topic_id = ?"},
+		{"internal/core/db.go", "INSERT INTO works (id, title, content, status, created_at, updated_at, session_id, migrated_at) VALUES (?, ?, ?, 'open', ?, ?, ?, ?)"},
+		{"internal/core/db.go", "UPDATE works SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?"},
+		{"internal/core/db.go", "UPDATE works SET verification = ? WHERE id = ?"},
+		{"internal/core/handoff.go", "UPDATE session_handoffs SET read_at = ?, read_by = ? WHERE id = ? AND read_at IS NULL"},
+		{"internal/core/handoff.go", "DELETE FROM session_handoffs WHERE id = ?"},
+	}
+
+	allowed := allowlistIndex()
+	for _, c := range converted {
+		if _, ok := allowed[barePoolIdentity(c.file, c.sql)]; ok {
+			t.Fatalf("%s: the converted shape is allowlisted again: %s", c.file, firstLine(c.sql))
+		}
+		// The classifier must still see the shape as bare, so a live
+		// reintroduction fails the completeness guard.
+		src := "package internal\n" +
+			"func probe(dm *DatabaseManager) { _, _ = dm.db.Exec(`" + c.sql + "`, 1, \"x\") }\n"
+		sites, err := scanBarePoolSource(c.file, []byte(src))
+		if err != nil {
+			t.Fatalf("%s: scan: %v", c.file, err)
+		}
+		if len(sites) != 1 {
+			t.Fatalf("%s: the converted shape is not detected as a bare pool write (got %d sites): %s",
+				c.file, len(sites), firstLine(c.sql))
+		}
+		if _, ok := allowed[barePoolIdentity(c.file, sites[0].SQL)]; ok {
+			t.Fatalf("%s: the converted shape resolves to an allowlisted identity: %s",
+				c.file, firstLine(c.sql))
+		}
+	}
+}
+
+// TestBarePoolMigrationOnceEntriesNameAMigrationFunction is the guard
+// against the MISFILING hole the second remediation slice found.
+//
+// The `migration-once` class is a claim about WHEN a write runs: once,
+// on a migration path, never on a user path. Three ordinary contended
+// writes — a session summary, a topic-membership insert and a
+// topic-membership delete — were filed under it, and because
+// classification is human judgement, no mechanical guard could see them.
+// The claim was unfalsifiable: nothing tied the class to the place the
+// write actually lives.
+//
+// This test ties it. Every `migration-once` entry must:
+//
+//  1. NAME the function the write sits in, and the live site must still
+//     be in that function (so a relocation is caught); and
+//  2. name a function or a file whose name carries a MIGRATION VERB
+//     (so an ordinary user-path function cannot be filed under this
+//     class without tripping the guard).
+//
+// The vocabulary is CLOSED. A new one-shot migration whose name carries
+// none of these verbs fails here, and adding a verb is a reviewable act
+// — which is the point: the class stays falsifiable instead of becoming
+// a place where ordinary writes go to hide.
+//
+// The approximation is load-bearing in one direction only: a migration
+// whose verb is not in the vocabulary is over-reported (it must be
+// reviewed), never under-reported. A user-path function that DOES carry
+// a migration verb ("PromoteMemory", "SeedRow") can still be misfiled,
+// and that hole is closed by the recorded Func — the misfiling would
+// have to name a function the guard then checks against the live code.
+func TestBarePoolMigrationOnceEntriesNameAMigrationFunction(t *testing.T) {
+	root, err := writeBudgetRepoRoot()
+	if err != nil {
+		t.Skipf("the repository root is not reachable from this checkout (%v)", err)
+	}
+	byFile, _, err := scanBarePoolRepository(root)
+	if err != nil {
+		t.Fatalf("walk the runtime: %v", err)
+	}
+	live := map[string][]barePoolSite{}
+	for _, sites := range byFile {
+		for _, s := range sites {
+			id := barePoolIdentity(s.File, s.SQL)
+			live[id] = append(live[id], s)
+		}
+	}
+
+	var problems []string
+	for _, e := range barePoolAllowlist {
+		if e.Why != reasonMigrationOnce {
+			continue
+		}
+		if e.Func == "" {
+			problems = append(problems, fmt.Sprintf(
+				"%s: a migration-once entry must name the function it lives in: %s",
+				e.File, firstLine(e.SQL)))
+			continue
+		}
+		id := barePoolIdentity(e.File, e.SQL)
+		sites := live[id]
+		if len(sites) == 0 {
+			// The stale-entry guard reports this separately; nothing to
+			// check against here.
+			continue
+		}
+		for _, s := range sites {
+			if s.Func != e.Func {
+				problems = append(problems, fmt.Sprintf(
+					"%s: the migration-once entry names function %q but the live write is in %q — "+
+						"a one-shot migration that MOVED is a review, not a reclassification: %s",
+					e.File, e.Func, s.Func, firstLine(e.SQL)))
+			}
+		}
+		if !hasMigrationVerb(e.File) && !hasMigrationVerb(e.Func) {
+			problems = append(problems, fmt.Sprintf(
+				"%s: function %q carries no migration verb — a migration-once write must live on a "+
+					"migration path (the file %q carries none either): %s",
+				e.File, e.Func, e.File, firstLine(e.SQL)))
+		}
+	}
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Fatalf("migration-once entries whose classification is not checkable:\n  %s",
+			strings.Join(problems, "\n  "))
+	}
+}
+
+// migrationVerbs is the CLOSED vocabulary of migration verbs. A
+// migration-once write must live in a file or a function whose name
+// carries one of them.
+//
+// The list is deliberately short and deliberately excludes the verbs a
+// USER path would use — "mark", "promote", "update" — because those
+// names are shared by ordinary surfaces (MarkHandoffRead,
+// PromoteMemory, UpdateMemory) and would let a user-path write pass as
+// a migration.
+var migrationVerbs = []string{
+	"migrat", // migrate, migration
+	"backfill",
+	"seed",
+	"rebuild",
+	"enforce",
+	"prune",
+	"sentinel",
+}
+
+// hasMigrationVerb reports whether name carries a migration verb.
+func hasMigrationVerb(name string) bool {
+	lower := strings.ToLower(name)
+	for _, verb := range migrationVerbs {
+		if strings.Contains(lower, verb) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestBarePoolAllowlistDetectsReintroducedWrite is the regression the
