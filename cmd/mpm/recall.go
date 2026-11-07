@@ -657,14 +657,14 @@ func handleRecall(args []string) int {
 			ids = append(ids, "?")
 			vals = append(vals, id)
 		}
-		if _, err := dm.SQLDB().Exec(fmt.Sprintf(`
+		if _, err := dm.ExecTracked(fmt.Sprintf(`
 			UPDATE memories
 			SET weight = MIN(weight + 0.5, 100.0),
 			    last_accessed_at = CAST(strftime('%%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%%s','now') AS INTEGER)
 			WHERE id IN (%s)
 			  AND weight >= 1
 			  AND (last_accessed_at IS NULL OR last_accessed_at < CAST(strftime('%%s','now', '-1 hour') AS INTEGER))
-		`, strings.Join(ids, ",")), vals...); err != nil {
+		`, strings.Join(ids, ",")), 5, vals...); err != nil {
 			slog.Warn("implicit reinforcement failed", "error", err)
 		}
 	}
@@ -857,30 +857,6 @@ func ftsHitCount(db *sql.DB, query, collection, since, until string, weightBelow
 		return -1
 	}
 	return n
-}
-
-// recallEmptyMarkers are the phrases that tell the smart-recall
-// "did you mean?" hint (cmd/mpm/main.go) that recall produced zero
-// results.
-//
-// The lexical path says "No memories found for:" — it matched nothing.
-// The semantic path says "No candidates returned for:" — it produced no
-// ranked candidates. They are different claims and are kept distinct, so
-// the marker list has to cover both.
-var recallEmptyMarkers = []string{
-	"No memories found for:",
-	"No candidates returned for:",
-}
-
-// recallProducedNoResults reports whether a captured recall output
-// contains one of the empty-result markers.
-func recallProducedNoResults(output string) bool {
-	for _, marker := range recallEmptyMarkers {
-		if strings.Contains(output, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 // boundQueryEcho keeps the no-results message readable when the query

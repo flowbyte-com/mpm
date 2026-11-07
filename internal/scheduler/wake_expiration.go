@@ -62,10 +62,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
+
+	core "github.com/flowbyte-com/mpm-core"
 )
 
 // NotificationRetentionWindow is the grace period before a
@@ -100,58 +104,106 @@ const ExpirationReasonValue = "notification_7d_retention"
 // retired (fired=1, metadata carries the audit note) is filtered
 // by the WHERE clause and never re-touched.
 //
+// CONCURRENCY. The candidate SELECT runs outside the retirement
+// transaction, so another writer can retire a candidate between the
+// SELECT and the UPDATE. The UPDATE therefore carries an `AND
+// fired = 0` guard and is a compare-and-set on the retirement flag:
+// it retires a wake only if the wake is still pending. A wake that
+// was retired in the meantime is SKIPPED — the sweep does not
+// overwrite the other writer's `fired_at` or metadata, which for a
+// scheduler settlement is the only record of when the handler
+// actually finished. A skipped candidate is not counted as retired
+// and does not abort the batch.
+//
 // The function is exposed for direct invocation by tests and for
 // future CLI / on-demand paths. The tick handler
 // (NotificationExpirationTickHandler) is the production caller.
-func SweepOverdueNotificationWakes(ctx context.Context, db *sql.DB, now time.Time) (int, error) {
+func SweepOverdueNotificationWakes(ctx context.Context, db *sql.DB, now time.Time) (int, []core.WakeMetadataCorruption, error) {
 	// 1. Compute the cutoff. We compare against unix-epoch seconds
 	//    to match the integer storage class of target_time.
 	cutoff := now.Add(-NotificationRetentionWindow).Unix()
 
-	// 2. Identify candidates. The kind filter is intentionally
-	//    permissive: untagged wakes default to "notification" via
-	//    Wake.Kind(), so a missing or NULL json_extract result is
-	//    also a candidate. An explicit system kind (e.g. snapshot)
-	//    is NOT a candidate — those are dispatched eagerly and
-	//    self-mark fired.
+	// 2. Identify candidates. TWO bounded queries, for TWO populations.
+	//
+	//    (a) THE RETIREMENT CANDIDATES: the healthy overdue rows. The
+	//        kind filter is intentionally permissive: untagged wakes
+	//        default to "notification" via Wake.Kind(), so a missing
+	//        or NULL json_extract result is also a candidate. An
+	//        explicit system kind (e.g. snapshot) is NOT a candidate —
+	//        those are dispatched eagerly and self-mark fired.
+	//
+	//        The filter is core.WakeNotificationKindFilter, which
+	//        reads the kind through an always-valid-JSON extraction.
+	//        json_extract() RAISES on malformed JSON, so an unguarded
+	//        call aborts the whole candidate SELECT on a single corrupt
+	//        metadata row — and a corrupt row would then block the
+	//        retention of EVERY healthy overdue row behind it, forever.
+	//        The always-valid form raises on nothing. It also carries
+	//        no dependence on SQL evaluation order, which an OR-chain
+	//        of json_extract() calls would.
+	//
+	//        The corrupt rows are EXCLUDED from this query, and the
+	//        exclusion is not cosmetic. A corrupt row is never
+	//        retired, so letting it consume one of the sweep's
+	//        bounded slots would starve the healthy rows behind it:
+	//        with as many corrupt rows as the limit, the sweep would
+	//        retire NOTHING. That is the very "one bad row stops the
+	//        sweep" class this defect is about, one level up.
+	//
+	//    (b) THE CORRUPT ROWS: reported, never touched. They are
+	//        fetched by their own bounded query so that the
+	//        diagnostic survives the exclusion above, and so that a
+	//        corrupt row never consumes the retirement capacity.
 	candidateQuery := `
 		SELECT id, metadata
 		FROM scheduled_wakes
 		WHERE fired = 0
 		  AND target_time < ?
-		  AND (
-		    json_extract(metadata, '$.kind') IS NULL
-		    OR json_extract(metadata, '$.kind') = ''
-		    OR json_extract(metadata, '$.kind') = 'notification'
-		  )
+		  AND ` + core.WakeNotificationKindFilter + `
+		  AND NOT ` + core.WakeMetadataIsCorrupt + `
 		ORDER BY target_time ASC
 		LIMIT ?
 	`
+	corruptQuery := `
+		SELECT id, metadata
+		FROM scheduled_wakes
+		WHERE fired = 0
+		  AND target_time < ?
+		  AND ` + core.WakeMetadataIsCorrupt + `
+		ORDER BY target_time ASC
+		LIMIT ?
+	`
+	rejected, err := sweepCorruptRows(ctx, db, corruptQuery, cutoff, NotificationRetentionLimit,
+		core.WakeSurfaceNotificationExpiration)
+	if err != nil {
+		return 0, nil, err
+	}
+
 	rows, err := db.QueryContext(ctx, candidateQuery, cutoff, NotificationRetentionLimit)
 	if err != nil {
-		return 0, fmt.Errorf("sweep: query candidates: %w", err)
+		return 0, nil, fmt.Errorf("sweep: query candidates: %w", err)
 	}
 	type candidate struct {
 		id       string
-		metadata *string
+		metadata sql.NullString
 	}
 	var candidates []candidate
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.id, &c.metadata); err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("sweep: scan candidate: %w", err)
+			return 0, nil, fmt.Errorf("sweep: scan candidate: %w", err)
 		}
 		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return 0, fmt.Errorf("sweep: iterate candidates: %w", err)
+		return 0, nil, fmt.Errorf("sweep: iterate candidates: %w", err)
 	}
 	rows.Close()
 
-	if len(candidates) == 0 {
-		return 0, nil
+	if len(candidates) == 0 && len(rejected) == 0 {
+		return 0, nil, nil
 	}
 
 	// 3. Retire each candidate inside a single transaction. The
@@ -160,95 +212,69 @@ func SweepOverdueNotificationWakes(ctx context.Context, db *sql.DB, now time.Tim
 	//    same as a row that actually flipped to fired=1. We
 	//    re-read each row post-UPDATE to confirm the state
 	//    change took effect.
+	//
+	//    PER-ROW ISOLATION. Each row's work runs inside a SAVEPOINT
+	//    (retireSweepRow), so a failure on one row rolls back that row
+	//    alone and leaves the rows already retired in this batch
+	//    intact. The batch is committed with whatever succeeded and
+	//    the per-row failures are returned as an error. Before this,
+	//    one failing row aborted the whole transaction and undid
+	//    every retirement the sweep had already made — the "one bad row
+	//    stops the sweep" class this defect is about.
 	nowUnix := now.Unix()
 	retired := 0
+	var failures []error
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("sweep: begin tx: %w", err)
+		return 0, nil, fmt.Errorf("sweep: begin tx: %w", err)
 	}
 	defer tx.Rollback() // safe no-op after Commit
 
+	retirer := &sweepRetirer{tx: tx, label: "sweep"}
 	for _, c := range candidates {
 		if err := ctx.Err(); err != nil {
-			return retired, fmt.Errorf("sweep: ctx cancelled mid-batch: %w", err)
+			return retired, rejected, fmt.Errorf("sweep: ctx cancelled mid-batch: %w", err)
 		}
 
-		// Build the new metadata: take the existing JSON object
-		// (or {} if absent), set the audit keys, write back as a
-		// JSON string. We use COALESCE to handle the
-		// metadata IS NULL case (a wake created via raw INSERT
-		// without metadata).
-		updateQuery := `
-			UPDATE scheduled_wakes
-			SET fired = 1,
-			    fired_at = ?,
-			    metadata = json_set(
-			      COALESCE(metadata, '{}'),
-			      '$.' || ? || '.reason', ?,
-			      '$.' || ? || '.at', ?,
-			      '$.' || ? || '.target_time', (
-			        SELECT target_time FROM scheduled_wakes WHERE id = ?
-			      )
-			    )
-			WHERE id = ?
-		`
-		res, err := tx.ExecContext(ctx, updateQuery,
-			nowUnix,
-			ExpirationMetadataKey, ExpirationReasonValue,
-			ExpirationMetadataKey, nowUnix,
-			ExpirationMetadataKey, c.id,
-			c.id,
-		)
-		if err != nil {
-			return retired, fmt.Errorf("sweep: update %s: %w", c.id, err)
+		// A CORRUPT ROW IS REJECTED, NOT RETIRED.
+		//
+		// A row whose metadata is present, non-empty and not a
+		// parseable JSON document is owned by NO partition. Retiring
+		// it here would report a scheduler-owned row under the
+		// NOTIFICATION reason — a wrong audit trail — and destroy
+		// the only copy of the bytes that name its owner.
+		//
+		// The candidate query already excludes corrupt rows, so this
+		// check is the TOCTOU GUARD: a row corrupted between the
+		// candidate query and this loop is rejected here instead of
+		// being retired.
+		if core.WakeMetadataIsCorruptValue(c.metadata) {
+			rejected = appendSweepRejection(rejected, core.WakeMetadataCorruption{
+				WakeID:   c.id,
+				Metadata: c.metadata.String,
+				Surface:  core.WakeSurfaceNotificationExpiration,
+			})
+			continue
 		}
 
-		// Read-back assertion (Substrate Defense Triad, rule 3).
-		// A wake retired by the sweep must be findable with
-		// fired=1 AND the audit note present in metadata. We
-		// don't return an error if RowsAffected is 0 on a
-		// table that might be a view; in the production
-		// scheduled_wakes is a real table so 0 is an error.
-		rowsAffected, raErr := res.RowsAffected()
-		if raErr != nil {
-			return retired, fmt.Errorf("sweep: rows-affected %s: %w", c.id, raErr)
+		ok, rowErr := retirer.retire(ctx, c.id, ExpirationReasonValue, nowUnix)
+		if rowErr != nil {
+			failures = append(failures, rowErr)
+			continue
 		}
-		if rowsAffected == 0 {
-			return retired, fmt.Errorf("sweep: update %s affected 0 rows (concurrent change?)", c.id)
+		if ok {
+			retired++
 		}
-
-		var (
-			fired    int
-			firedAt  int64
-			metadata string
-		)
-		readBack := tx.QueryRowContext(ctx,
-			`SELECT fired, fired_at, COALESCE(metadata, '{}') FROM scheduled_wakes WHERE id = ?`,
-			c.id,
-		)
-		if err := readBack.Scan(&fired, &firedAt, &metadata); err != nil {
-			return retired, fmt.Errorf("sweep: read-back %s: %w", c.id, err)
-		}
-		if fired != 1 {
-			return retired, fmt.Errorf("sweep: read-back %s: fired=%d, want 1", c.id, fired)
-		}
-		if firedAt != nowUnix {
-			return retired, fmt.Errorf("sweep: read-back %s: fired_at=%d, want %d", c.id, firedAt, nowUnix)
-		}
-		// Audit note must be present and carry the right reason.
-		reason := extractMetadataString(metadata, ExpirationMetadataKey+".reason")
-		if reason != ExpirationReasonValue {
-			return retired, fmt.Errorf("sweep: read-back %s: missing %s.reason=%q (got %q)",
-				c.id, ExpirationMetadataKey, ExpirationReasonValue, reason)
-		}
-
-		retired++
 	}
 
 	if err := tx.Commit(); err != nil {
-		return retired, fmt.Errorf("sweep: commit: %w", err)
+		return retired, rejected, fmt.Errorf("sweep: commit: %w", err)
 	}
-	return retired, nil
+	if len(failures) > 0 {
+		return retired, rejected, fmt.Errorf("sweep: %d row(s) failed and were skipped; "+
+			"the rows that succeeded were retired: %w", len(failures), errors.Join(failures...))
+	}
+	return retired, rejected, nil
 }
 
 // NotificationExpirationTickHandler is the production entry point
@@ -259,14 +285,259 @@ func SweepOverdueNotificationWakes(ctx context.Context, db *sql.DB, now time.Tim
 // Errors are returned (and logged by the caller) so a transient
 // SQLite BUSY does not silently disable the sweep — the next tick
 // will retry.
-func NotificationExpirationTickHandler(ctx context.Context, db *sql.DB) func(ctx context.Context) error {
+func NotificationExpirationTickHandler(ctx context.Context, db *sql.DB, log *slog.Logger) func(ctx context.Context) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	// The reporter remembers what it has already logged. This sweep
+	// runs on EVERY tick (about once a minute), so a corrupt row that
+	// is never repaired would otherwise produce one log line per
+	// minute, forever.
+	reporter := &wakeCorruptionReporter{}
 	return func(ctx context.Context) error {
-		_, err := SweepOverdueNotificationWakes(ctx, db, time.Now())
+		retired, rejected, err := SweepOverdueNotificationWakes(ctx, db, time.Now())
+		for _, c := range reporter.newOnes(rejected) {
+			log.Error("wake metadata is corrupt — row rejected and PRESERVED",
+				"wake_id", c.WakeID,
+				"surface", c.Surface,
+				"metadata", c.Metadata,
+			)
+		}
 		if err != nil {
 			return fmt.Errorf("notification-expiration sweep: %w", err)
 		}
+		if retired > 0 && log != nil {
+			log.Debug("notification-expiration sweep retired wakes", "count", retired)
+		}
 		return nil
 	}
+}
+
+// sweepCorruptRows returns the corrupt rows the sweep is rejecting.
+//
+// The rows are read by a bounded query of their own, so they never
+// consume the sweep's retirement capacity: a corrupt row is never
+// retired, so letting it occupy one of the bounded candidate slots
+// would starve the healthy rows behind it.
+//
+// The list is capped at limit rows. The wakes_corrupt_metadata health
+// counter carries the true count, so a backlog of corrupt rows stays
+// visible even when the sweep reports only its first page.
+func sweepCorruptRows(ctx context.Context, db *sql.DB, query string, cutoff int64, limit int, surface string) ([]core.WakeMetadataCorruption, error) {
+	rows, err := db.QueryContext(ctx, query, cutoff, limit)
+	if err != nil {
+		return nil, fmt.Errorf("sweep: query corrupt rows: %w", err)
+	}
+	defer rows.Close()
+	var out []core.WakeMetadataCorruption
+	for rows.Next() {
+		var (
+			id       string
+			metadata sql.NullString
+		)
+		if err := rows.Scan(&id, &metadata); err != nil {
+			return nil, fmt.Errorf("sweep: scan corrupt row: %w", err)
+		}
+		out = append(out, core.WakeMetadataCorruption{
+			WakeID:   id,
+			Metadata: metadata.String,
+			Surface:  surface,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sweep: iterate corrupt rows: %w", err)
+	}
+	return out, nil
+}
+
+// appendSweepRejection adds a rejection unless the row is already
+// recorded. The corrupt rows are fetched by their own query and may
+// also be met in the retirement loop, so the same row must not be
+// reported twice.
+func appendSweepRejection(list []core.WakeMetadataCorruption, c core.WakeMetadataCorruption) []core.WakeMetadataCorruption {
+	for _, existing := range list {
+		if existing.WakeID == c.WakeID {
+			return list
+		}
+	}
+	return append(list, c)
+}
+
+// wakeCorruptionReporter reports wake-metadata corruption to the log
+// ONCE per distinct row.
+//
+// The notification sweep runs on EVERY scheduler tick (about once a
+// minute), so a corrupt row that is never repaired would otherwise
+// produce one log line per minute, forever. The reporter remembers
+// what it has already reported and reports only what is NEW. A row
+// that is repaired (or removed) drops out of the reported set, so a
+// later recurrence is reported again.
+//
+// The reporter is a log-volume boundary, not a security boundary: the
+// diagnostic itself is per-row and complete — the sweep returns EVERY
+// rejection it made, and the wakes_corrupt_metadata health counter
+// counts every corrupt row at any time.
+type wakeCorruptionReporter struct {
+	mu       sync.Mutex
+	reported map[string]struct{}
+}
+
+// newOnes returns the corruptions that have not been reported yet and
+// records them.
+func (r *wakeCorruptionReporter) newOnes(corruptions []core.WakeMetadataCorruption) []core.WakeMetadataCorruption {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.reported == nil {
+		r.reported = make(map[string]struct{})
+	}
+	present := make(map[string]struct{}, len(corruptions))
+	var fresh []core.WakeMetadataCorruption
+	for _, c := range corruptions {
+		key := c.WakeID + "\x00" + c.Metadata
+		present[key] = struct{}{}
+		if _, seen := r.reported[key]; !seen {
+			fresh = append(fresh, c)
+		}
+	}
+	for key := range r.reported {
+		if _, ok := present[key]; !ok {
+			delete(r.reported, key)
+		}
+	}
+	for _, c := range fresh {
+		r.reported[c.WakeID+"\x00"+c.Metadata] = struct{}{}
+	}
+	return fresh
+}
+
+// sweepRetirer retires rows for one retention sweep, one row at a
+// time, with PER-ROW ISOLATION.
+//
+// Each row's work runs inside a SAVEPOINT. A failure on THIS row
+// rolls back to the savepoint and leaves every row already retired in
+// the batch intact. Without the savepoint the sweep's single
+// transaction would undo the whole batch on the first per-row failure
+// — the "one bad row stops the sweep" class this defect is about.
+//
+// The `AND fired = 0` guard in the UPDATE is the compare-and-set that
+// makes the retirement safe against a concurrent settlement (#226): a
+// wake another writer already retired is SKIPPED, not overwritten, so
+// the other writer's `fired_at` and metadata survive.
+type sweepRetirer struct {
+	tx    *sql.Tx
+	label string
+	seq   int
+}
+
+// retire retires one candidate row and asserts the retirement.
+//
+// It returns true when this call retired the row, false when the row
+// was skipped (the race was lost — nothing of ours to assert), and an
+// error when the row failed. On an error the row's work has been
+// rolled back and the batch is still usable.
+func (r *sweepRetirer) retire(ctx context.Context, id, reason string, nowUnix int64) (bool, error) {
+	r.seq++
+	// A unique savepoint name per row: SQLite stacks a savepoint onto
+	// an existing one with the same name, so a name that was not
+	// released would silently accumulate.
+	savepoint := fmt.Sprintf("wake_sweep_row_%d", r.seq)
+	if _, err := r.tx.ExecContext(ctx, "SAVEPOINT "+savepoint); err != nil {
+		return false, fmt.Errorf("%s: savepoint %s: %w", r.label, id, err)
+	}
+
+	// fail rolls THIS row back and leaves the batch intact.
+	fail := func(err error) (bool, error) {
+		if _, rbErr := r.tx.ExecContext(ctx, "ROLLBACK TO "+savepoint); rbErr != nil {
+			return false, fmt.Errorf("%s: rollback %s: %w (original failure: %v)",
+				r.label, id, rbErr, err)
+		}
+		if _, relErr := r.tx.ExecContext(ctx, "RELEASE "+savepoint); relErr != nil {
+			return false, fmt.Errorf("%s: release %s: %w (original failure: %v)",
+				r.label, id, relErr, err)
+		}
+		return false, err
+	}
+
+	updateQuery := `
+		UPDATE scheduled_wakes
+		SET fired = 1,
+		    fired_at = ?,
+		    metadata = json_set(
+		      ` + core.WakeMetadataJSON + `,
+		      '$.' || ? || '.reason', ?,
+		      '$.' || ? || '.at', ?,
+		      '$.' || ? || '.target_time', (
+		        SELECT target_time FROM scheduled_wakes WHERE id = ?
+		      )
+		    )
+		WHERE id = ? AND fired = 0
+	`
+	res, err := r.tx.ExecContext(ctx, updateQuery,
+		nowUnix,
+		ExpirationMetadataKey, reason,
+		ExpirationMetadataKey, nowUnix,
+		ExpirationMetadataKey, id,
+		id,
+	)
+	if err != nil {
+		return fail(fmt.Errorf("%s: update %s: %w", r.label, id, err))
+	}
+
+	// RowsAffected: 0 means the candidate was no longer retirable — it
+	// was retired by another writer between the candidate SELECT and
+	// this UPDATE, or it was removed.
+	//
+	// This is the "lost the race" outcome, and the substrate's own
+	// CAS idiom treats it as a benign no-op rather than an error: the
+	// wake resolver returns "already_resolved" when its guarded UPDATE
+	// affects zero rows. Treating it as an error here would abort the
+	// whole batch — the deferred Rollback would undo every candidate this
+	// sweep had already retired, so one concurrent settlement would
+	// cancel the entire sweep.
+	//
+	// A row this sweep retired is still asserted below with the full
+	// read-back. A skipped row is not asserted: this sweep did not
+	// write it, so there is nothing of ours to verify.
+	rowsAffected, raErr := res.RowsAffected()
+	if raErr != nil {
+		return fail(fmt.Errorf("%s: rows-affected %s: %w", r.label, id, raErr))
+	}
+	if rowsAffected == 0 {
+		if _, err := r.tx.ExecContext(ctx, "RELEASE "+savepoint); err != nil {
+			return false, fmt.Errorf("%s: release %s: %w", r.label, id, err)
+		}
+		return false, nil
+	}
+
+	var (
+		fired    int
+		firedAt  int64
+		metadata string
+	)
+	readBack := r.tx.QueryRowContext(ctx,
+		`SELECT fired, fired_at, COALESCE(metadata, '{}') FROM scheduled_wakes WHERE id = ?`,
+		id,
+	)
+	if err := readBack.Scan(&fired, &firedAt, &metadata); err != nil {
+		return fail(fmt.Errorf("%s: read-back %s: %w", r.label, id, err))
+	}
+	if fired != 1 {
+		return fail(fmt.Errorf("%s: read-back %s: fired=%d, want 1", r.label, id, fired))
+	}
+	if firedAt != nowUnix {
+		return fail(fmt.Errorf("%s: read-back %s: fired_at=%d, want %d", r.label, id, firedAt, nowUnix))
+	}
+	// Audit note must be present and carry the right reason.
+	note := extractMetadataString(metadata, ExpirationMetadataKey+".reason")
+	if note != reason {
+		return fail(fmt.Errorf("%s: read-back %s: missing %s.reason=%q (got %q)",
+			r.label, id, ExpirationMetadataKey, reason, note))
+	}
+
+	if _, err := r.tx.ExecContext(ctx, "RELEASE "+savepoint); err != nil {
+		return false, fmt.Errorf("%s: release %s: %w", r.label, id, err)
+	}
+	return true, nil
 }
 
 // =============================================================================
@@ -413,7 +684,7 @@ func cronRetentionProbeBacklog(ctx context.Context, db *sql.DB, cutoffUnix int64
 		  SELECT 1 FROM scheduled_wakes
 		  WHERE fired = 0
 		    AND target_time < ?
-		    AND json_extract(metadata, '$.kind') = 'cron'
+		    AND `+core.WakeCronKindFilter+`
 		  LIMIT ?
 		)
 	`, cutoffUnix, CronRetentionCatchUpThreshold+1).Scan(&n)
@@ -430,6 +701,13 @@ func cronRetentionProbeBacklog(ctx context.Context, db *sql.DB, cutoffUnix int64
 // Idempotent on the same input: a wake that has already been retired
 // (fired=1) is filtered by the WHERE clause and never re-touched.
 //
+// CONCURRENCY. As in SweepOverdueNotificationWakes: the candidate
+// SELECT runs outside the retirement transaction, so the retirement
+// UPDATE carries an `AND fired = 0` guard and is a compare-and-set on
+// the retirement flag. A candidate retired by another writer in the
+// meantime is SKIPPED — not overwritten, not counted, and it does not
+// abort the batch.
+//
 // maxRows bounds the per-call work; the caller chooses between
 // CronRetentionNormalLimit and CronRetentionCatchUpLimit based on
 // backlog size. The sweep itself never inspects backlog — it
@@ -441,126 +719,104 @@ func cronRetentionProbeBacklog(ctx context.Context, db *sql.DB, cutoffUnix int64
 // the WHERE clause excludes notification-kind wakes (covered by the
 // other sweep) and system kinds (covered by their eager-dispatch
 // handlers).
-func SweepOverdueCronWakes(ctx context.Context, db *sql.DB, now time.Time, maxRows int) (int, error) {
+func SweepOverdueCronWakes(ctx context.Context, db *sql.DB, now time.Time, maxRows int) (int, []core.WakeMetadataCorruption, error) {
 	if maxRows <= 0 || maxRows > CronRetentionCatchUpLimit {
 		maxRows = CronRetentionCatchUpLimit
 	}
 
 	cutoff := now.Add(-CronRetentionWindow).Unix()
 
+	// The candidate filter matches kind='cron' ONLY, so a corrupt row
+	// — which reads as untagged — is not a candidate here. The explicit
+	// exclusion states the policy at the query rather than relying on
+	// that accident, so the sweep cannot start retiring corrupt rows
+	// if the kind filter is ever widened.
 	candidateQuery := `
 		SELECT id, metadata
 		FROM scheduled_wakes
 		WHERE fired = 0
 		  AND target_time < ?
-		  AND json_extract(metadata, '$.kind') = 'cron'
+		  AND ` + core.WakeCronKindFilter + `
+		  AND NOT ` + core.WakeMetadataIsCorrupt + `
 		ORDER BY target_time ASC
 		LIMIT ?
 	`
 	rows, err := db.QueryContext(ctx, candidateQuery, cutoff, maxRows)
 	if err != nil {
-		return 0, fmt.Errorf("cron sweep: query candidates: %w", err)
+		return 0, nil, fmt.Errorf("cron sweep: query candidates: %w", err)
 	}
 	type candidate struct {
 		id       string
-		metadata *string
+		metadata sql.NullString
 	}
 	var candidates []candidate
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.id, &c.metadata); err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("cron sweep: scan candidate: %w", err)
+			return 0, nil, fmt.Errorf("cron sweep: scan candidate: %w", err)
 		}
 		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return 0, fmt.Errorf("cron sweep: iterate candidates: %w", err)
+		return 0, nil, fmt.Errorf("cron sweep: iterate candidates: %w", err)
 	}
 	rows.Close()
 
 	if len(candidates) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	nowUnix := now.Unix()
 	retired := 0
+	var rejected []core.WakeMetadataCorruption
+	var failures []error
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("cron sweep: begin tx: %w", err)
+		return 0, nil, fmt.Errorf("cron sweep: begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
+	retirer := &sweepRetirer{tx: tx, label: "cron sweep"}
 	for _, c := range candidates {
 		if err := ctx.Err(); err != nil {
-			return retired, fmt.Errorf("cron sweep: ctx cancelled mid-batch: %w", err)
+			return retired, rejected, fmt.Errorf("cron sweep: ctx cancelled mid-batch: %w", err)
 		}
 
-		updateQuery := `
-			UPDATE scheduled_wakes
-			SET fired = 1,
-			    fired_at = ?,
-			    metadata = json_set(
-			      COALESCE(metadata, '{}'),
-			      '$.' || ? || '.reason', ?,
-			      '$.' || ? || '.at', ?,
-			      '$.' || ? || '.target_time', (
-			        SELECT target_time FROM scheduled_wakes WHERE id = ?
-			      )
-			    )
-			WHERE id = ?
-		`
-		res, err := tx.ExecContext(ctx, updateQuery,
-			nowUnix,
-			ExpirationMetadataKey, CronRetentionReasonValue,
-			ExpirationMetadataKey, nowUnix,
-			ExpirationMetadataKey, c.id,
-			c.id,
-		)
-		if err != nil {
-			return retired, fmt.Errorf("cron sweep: update %s: %w", c.id, err)
+		// A CORRUPT ROW IS REJECTED, NOT RETIRED. The candidate
+		// filter already excludes one (a corrupt row reads as
+		// untagged, not as cron), but the rejection is made here too
+		// so that the policy holds even if the filter changes — and so
+		// that the row's bytes are reported rather than silently
+		// skipped.
+		if core.WakeMetadataIsCorruptValue(c.metadata) {
+			rejected = append(rejected, core.WakeMetadataCorruption{
+				WakeID:   c.id,
+				Metadata: c.metadata.String,
+				Surface:  core.WakeSurfaceCronRetention,
+			})
+			continue
 		}
 
-		rowsAffected, raErr := res.RowsAffected()
-		if raErr != nil {
-			return retired, fmt.Errorf("cron sweep: rows-affected %s: %w", c.id, raErr)
+		ok, rowErr := retirer.retire(ctx, c.id, CronRetentionReasonValue, nowUnix)
+		if rowErr != nil {
+			failures = append(failures, rowErr)
+			continue
 		}
-		if rowsAffected == 0 {
-			return retired, fmt.Errorf("cron sweep: update %s affected 0 rows (concurrent change?)", c.id)
+		if ok {
+			retired++
 		}
-
-		var (
-			fired    int
-			firedAt  int64
-			metadata string
-		)
-		readBack := tx.QueryRowContext(ctx,
-			`SELECT fired, fired_at, COALESCE(metadata, '{}') FROM scheduled_wakes WHERE id = ?`,
-			c.id,
-		)
-		if err := readBack.Scan(&fired, &firedAt, &metadata); err != nil {
-			return retired, fmt.Errorf("cron sweep: read-back %s: %w", c.id, err)
-		}
-		if fired != 1 {
-			return retired, fmt.Errorf("cron sweep: read-back %s: fired=%d, want 1", c.id, fired)
-		}
-		if firedAt != nowUnix {
-			return retired, fmt.Errorf("cron sweep: read-back %s: fired_at=%d, want %d", c.id, firedAt, nowUnix)
-		}
-		reason := extractMetadataString(metadata, ExpirationMetadataKey+".reason")
-		if reason != CronRetentionReasonValue {
-			return retired, fmt.Errorf("cron sweep: read-back %s: missing %s.reason=%q (got %q)",
-				c.id, ExpirationMetadataKey, CronRetentionReasonValue, reason)
-		}
-
-		retired++
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("cron sweep: commit: %w", err)
+		return retired, rejected, fmt.Errorf("cron sweep: commit: %w", err)
 	}
-	return retired, nil
+	if len(failures) > 0 {
+		return retired, rejected, fmt.Errorf("cron sweep: %d row(s) failed and were skipped; "+
+			"the rows that succeeded were retired: %w", len(failures), errors.Join(failures...))
+	}
+	return retired, rejected, nil
 }
 
 // cronRetentionState tracks the last sweep timestamp for cadence
@@ -600,6 +856,10 @@ type cronRetentionState struct {
 // No locking required.
 func CronRetentionTickHandler(ctx context.Context, db *sql.DB, log *slog.Logger) func(ctx context.Context) error {
 	state := &cronRetentionState{}
+	// The reporter remembers what it has already logged, so a corrupt
+	// row that is never repaired cannot turn the hourly sweep into a
+	// log flood.
+	reporter := &wakeCorruptionReporter{}
 	return func(ctx context.Context) error {
 		now := time.Now()
 		nowUnix := now.Unix()
@@ -619,7 +879,16 @@ func CronRetentionTickHandler(ctx context.Context, db *sql.DB, log *slog.Logger)
 			cap = CronRetentionCatchUpLimit
 		}
 
-		retired, err := SweepOverdueCronWakes(ctx, db, now, cap)
+		retired, rejected, err := SweepOverdueCronWakes(ctx, db, now, cap)
+		for _, c := range reporter.newOnes(rejected) {
+			if log != nil {
+				log.Error("wake metadata is corrupt — row rejected and PRESERVED",
+					"wake_id", c.WakeID,
+					"surface", c.Surface,
+					"metadata", c.Metadata,
+				)
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("cron retention sweep: %w", err)
 		}

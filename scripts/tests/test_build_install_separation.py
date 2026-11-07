@@ -53,6 +53,15 @@ ALL_BINARIES = (
     "mpm-telemetry",
 )
 
+# The standalone updater. `make build` produces it (it is part of the
+# release bundle), but `make install` deliberately does NOT promote it:
+# the updater must survive version switches and a broken active
+# release, so it is installed as a real file at the data-root top
+# level by the update workflow itself (see internal/update/activate.go
+# installStableUpdater), not as a symlink into a release. The install
+# test below pins that split.
+UPDATE_BINARY = "mpm-update"
+
 # Distinct from any real content so "unchanged" means "the sentinel is
 # still here, byte for byte", not "some file exists".
 SENTINEL = b"MAGIC-SENTINEL-not-a-real-binary\x00"
@@ -272,7 +281,7 @@ class TestBuildInstallIsolation(unittest.TestCase):
             + self.build.stdout + self.build.stderr,
         )
         build_dir = self.sandbox.checkout / ".build" / "bin"
-        for name in ALL_BINARIES:
+        for name in ALL_BINARIES + (UPDATE_BINARY,):
             self.assertTrue(
                 (build_dir / name).is_file(),
                 f"make build did not produce {name} in {build_dir}",
@@ -316,6 +325,8 @@ class TestBuildInstallIsolation(unittest.TestCase):
         for name in ALL_BINARIES:
             developer = self.sandbox.checkout / ".build" / "bin" / name
             installed = prefix / "bin" / name
+            # (mpm-update is asserted separately below: installed by the
+            # updater, not by make install.)
             self.assertTrue(
                 installed.is_file(),
                 f"make install did not promote {name} to {installed}",
@@ -326,6 +337,15 @@ class TestBuildInstallIsolation(unittest.TestCase):
                 f"installed {name} is not byte-identical to the developer "
                 "artifact; promotion must not rewrite or strip the binary",
             )
+        # The standalone updater is built but NOT promoted by make
+        # install: it must not resolve into a release bundle. Its home
+        # is the data-root top level, installed by the update workflow.
+        self.assertFalse(
+            (prefix / "bin" / UPDATE_BINARY).exists(),
+            "make install promoted mpm-update into the release prefix; "
+            "the updater is installed by the update workflow itself, so "
+            "that it survives version switches and a broken release",
+        )
 
 
 class TestLiveInstallSentinel(unittest.TestCase):

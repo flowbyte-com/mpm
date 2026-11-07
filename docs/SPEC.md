@@ -65,6 +65,8 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.5 [Multi-Agent Shared Epistemology (Layers 0–4)](#65-multi-agent-shared-epistemology-layers-04)
    - 6.6 [Telemetry Sidecar (mpm-telemetry)](#66-telemetry-sidecar-mpm-telemetry)
    - 6.7 [Epistemic Compaction](#67-epistemic-compaction)
+   - 6.8 [Skill Package Storage (P1 — storage only)](#68-skill-package-storage-p1--storage-only)
+   - 6.9 [Project-Scoped Continuity Storage (Stage 1 — storage only)](#69-project-scoped-continuity-storage-stage-1--storage-only)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -275,6 +277,8 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 #### Skill
 
 Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures can be evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
+
+**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). It is **storage only**: no package can be imported, read or exported yet, and a skill saved the ordinary way is unaffected.
 
 #### Evidence
 
@@ -1266,7 +1270,7 @@ For a step-by-step recipe for connecting OpenCode — including the plugin regis
 
 The MCP server exposes the full MPM substrate as native function calls. Adding a new tool is a single Go function — no plugin path, no shell wrapper, no parallel documentation.
 
-The **default model-facing surface** is the compact 3-tool set: `mpm_memory`, `mpm_context`, `mpm_help` — **intentionally fixed**, not derived. Hosts receive this on session start; the model sees a small, stable surface covering the core loop: memorise and recall (`mpm_memory`), wake refresh, directives, routing and the activity feed (`mpm_context`), plus handoff through `mpm_context` action `write_handoff` (see the handoff table below), and capability discovery (`mpm_help`). It does **not** cover skills, work items, topics, references or the scratchpad — those need `MPM_EXPOSE_ALL_TOOLS=1` or the `mpm call` fallback. The OpenCode plugin is the exception: it registers 17 typed tools directly, so every one of them is native there. The block below lists the **Registry entries** — the internal substrate; the count is derived dynamically from the live Registry and grows or shrinks as tools are added or removed. The full registered MCP surface includes those Registry entries plus the `mpm_help` discovery closure (registered at server init by `cmd/mpm-mcp`); the on-wire tool count is `len(Registry) + 1` and is **not** pinned in prose. The agent discovers specialist tools on demand via `mpm_help`'s `list`/`show` actions; those same actions are reachable over the CLI fallback (`mpm call mpm_help --payload '{"action":"list"}'`), so a host with no native tool surface can still enumerate the surface instead of consulting a hard-coded tool list. Tools filtered out of the default `tools/list` are NOT directly callable over the compact MCP transport; reach them through `mpm call <tool> --payload '...'` (CLI fallback, every host) or by setting `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block to restore the full registered MCP surface natively.
+The **default model-facing surface** is the compact 3-tool set: `mpm_memory`, `mpm_context`, `mpm_help` — **intentionally fixed**, not derived. Hosts receive this on session start; the model sees a small, stable surface covering the core loop: memorise and recall (`mpm_memory`), wake refresh, directives, routing and the activity feed (`mpm_context`), plus handoff through `mpm_context` action `write_handoff` (see the handoff table below), and capability discovery (`mpm_help`). It does **not** cover skills, work items, topics, references or the scratchpad — those need `MPM_EXPOSE_ALL_TOOLS=1` or the `mpm call` fallback. The OpenCode plugin is the exception: it registers 17 typed tools directly, so every one of them is native there. The block below lists the **Registry entries** — the internal substrate; the count is derived dynamically from the live Registry and grows or shrinks as tools are added or removed. The full registered MCP surface includes those Registry entries plus the `mpm_help` discovery closure and the `mpm_route` router (both registered at server init by `cmd/mpm-mcp`); the on-wire tool count is `len(Registry) + 2` — 23 with the 21 entries above. The agent discovers specialist tools on demand via `mpm_help`'s `list`/`show` actions; those same actions are reachable over the CLI fallback (`mpm call mpm_help --payload '{"action":"list"}'`), so a host with no native tool surface can still enumerate the surface instead of consulting a hard-coded tool list. Tools filtered out of the default `tools/list` are NOT directly callable over the compact MCP transport; reach them through `mpm call <tool> --payload '...'` (CLI fallback, every host) or by setting `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block to restore the full registered MCP surface natively.
 
 ```
 <!-- tools:begin — auto-generated by `go generate ./internal/tools/`. Do not edit by hand. -->
@@ -1354,7 +1358,7 @@ Because the rule lives in the transport rather than in any one handler, it appli
 
 #### MCP/CLI parity: what is exposed via both surfaces
 
-Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The one tool that is not a Registry entry — the `mpm_help` discovery closure — is reachable through `mpm call mpm_help` as well, and both **discovery** transports serve the same catalogue, so discovery never reports a different schema depending on which discovery transport was used. (That parity is between the two ways of asking for discovery. It is not a claim that a tool's registered schema is the schema its native compact MCP wrapper publishes — see the `mpm_help` actions paragraph below.) The set of names `mpm call` can reach without a Registry entry is defined once (`tools.CallRoutedTools`) and is read both by the CLI dispatcher and by the agent-protocol documentation guard, so a name cannot be documented as reachable and then fail at call time. The full Registry has **21 entries** (the MCP surface is 22 — those 21 plus the `mpm_help` discovery closure registered at server init by `cmd/mpm-mcp`). Of those 21:
+Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The one tool that is not a Registry entry — the `mpm_help` discovery closure — is reachable through `mpm call mpm_help` as well, and both **discovery** transports serve the same catalogue, so discovery never reports a different schema depending on which discovery transport was used. (That parity is between the two ways of asking for discovery. It is not a claim that a tool's registered schema is the schema its native compact MCP wrapper publishes — see the `mpm_help` actions paragraph below.) The set of names `mpm call` can reach without a Registry entry is defined once (`tools.CallRoutedTools`) and is read both by the CLI dispatcher and by the agent-protocol documentation guard, so a name cannot be documented as reachable and then fail at call time. The full Registry has **21 entries** (the full MCP surface is 23 — those 21 plus the `mpm_help` discovery closure and the `mpm_route` router, both registered at server init by `cmd/mpm-mcp`; the default compact surface is 3). Of those 21:
 
 - **15 aggregator tools** (`{action, params}` shape): `mpm_memory`, `mpm_theories`, `mpm_decisions`, `mpm_lessons`, `mpm_topics`, `mpm_references`, `mpm_evidence`, `mpm_confidence`, `mpm_context`, `mpm_skills`, `mpm_wakes`, `mpm_handoff`, `mpm_scratchpad`, `mpm_system`, `mpm_work`. These cover the daily cognitive workflow: read/write memory and the memory feedback loop (`mpm_memory` actions `save`/`query`/`show`/`delete`/`restore`/`reinforce`/`weaken`/`snooze`/`set_weight`/`patch`/`promote`/`review`/`synthesize`/`challenge`/`commit_milestone`; permanent shredding is operator-only on the CLI and refused here), lessons, topics, references, theories, decisions, evidence, confidence, route + wake + directives, cross-session handoff (`mpm_handoff` actions `write`/`read`/`list`/`shred`), intra-session scratchpad (`mpm_scratchpad` actions `flush`/`read`/`discard`/`promote`), work tracking (`mpm_work` — same Fat-RPC pattern), and system maintenance + health.
 - **6 standalone tools** (each with its own narrower schema): `mpm_retrieval_diagnose` (per-node BM25 diagnostic with 3-stage trace; CLI form `mpm call explain_retrieval`), `mpm_resolve` (resolves `mpm://memory/<id>` / `mpm://lesson/<id>` / `mpm://theory/<id>` / `mpm://work/<id>` URI pointers with a default 512-byte cap, caller-controllable via `opts.MaxBytes`), `mpm_blob_read` (raw blob fetch by id, 256 KiB server ceiling), `mpm_blob_search` (pointer search across the blobstore), `mpm_log_to_changelog` (self-report agent work tied to a git commit SHA), and `mpm_request_review` (concurrent multi-component review).
@@ -1490,7 +1494,7 @@ There is no explicit `mpm ops init --shared` command. Creation happens implicitl
 3. `attachShared` ensures the directory exists (`os.MkdirAll`, mode 0700), ATTACHes the file via `ATTACH DATABASE '<path>' AS shared` (creating it if absent — SQLite creates the file on first write), and runs the canonical `BaseTables` DDL (`CREATE TABLE IF NOT EXISTS`) plus `SafeMigrations` against the attached schema.
 4. After boot, `mpm ops shared status` confirms: `MPM_SHARED_DB` value, `shared_attached: true|false`, `shared.memories` row count, `is_global=1` count, file size.
 
-The shared DB uses the **same table schema** as the local DB (`memories`, `theories`, `evidence`, `directives`, etc.). Volatile host-only tables (`scheduled_wakes`, local `sessions`, transient `scratchpads`) are deliberately **excluded** from the shared schema — their lifecycle is host-local and would be wrong if cross-shared. Cross-DB queries are plain SQL: `SELECT … FROM shared.memories WHERE …`. No IPC, no separate service.
+The shared DB uses the **same table schema** as the local DB (`memories`, `theories`, `evidence`, `directives`, etc.). Volatile host-only tables (`scheduled_wakes`, local `sessions`, transient `scratchpads`) are deliberately **excluded** from the shared schema — their lifecycle is host-local and would be wrong if cross-shared. The Project-Scoped Continuity tables (`projects`, `project_names`, `continuity_threads`, `continuity_checkpoints`) are excluded for the same reason: a project's identity is durable inside one workspace, and broadcasting it would give the same project id to unrelated work — see [§6.9](#69-project-scoped-continuity-storage-stage-1--storage-only). Cross-DB queries are plain SQL: `SELECT … FROM shared.memories WHERE …`. No IPC, no separate service.
 
 #### How Agents Know to Use It
 
@@ -1821,6 +1825,164 @@ Returning a deferred row to the pool is `mpm compact requeue-deferred` — **CLI
 
 The operator can always see what they are overriding: `mpm compact deferred` lists the deferred rows with their reason, batch, and a content sample. See [`mpm compact`](#compact--compaction-operator-surface) for the command surface.
 
+### 6.8 Skill Package Storage (P1 — storage only)
+
+MPM skills are single Markdown documents. The multi-file **skill package** format — an entrypoint plus supporting references, scripts and assets, distributed as a ZIP archive — is specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), which is delivered in stages; **this section describes stage P1, which is storage only.**
+
+#### What P1 adds
+
+Three **additive** tables. No existing table, row, index or trigger is modified.
+
+```sql
+-- Content-addressed storage. One row per distinct byte sequence.
+CREATE TABLE IF NOT EXISTS skill_package_blobs (
+    sha256      TEXT PRIMARY KEY,
+    size_bytes  INTEGER NOT NULL,
+    content     BLOB NOT NULL,
+    created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+);
+
+-- The package manifest. One row per skill version that has a package.
+CREATE TABLE IF NOT EXISTS skill_packages (
+    skill_id          TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    version           TEXT NOT NULL,
+    declared_version  TEXT,
+    version_source    TEXT NOT NULL,
+    format            TEXT NOT NULL DEFAULT 'mpm-skill-package/1',
+    entrypoint        TEXT NOT NULL,
+    entrypoint_sha256 TEXT NOT NULL,
+    manifest          TEXT NOT NULL,
+    package_hash      TEXT NOT NULL,
+    source_sha256     TEXT,
+    is_global         INTEGER NOT NULL DEFAULT 0,
+    created_at        INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    updated_at        INTEGER,
+    FOREIGN KEY (skill_id) REFERENCES memories(id) ON DELETE CASCADE
+);
+
+-- One row per file in a package.
+CREATE TABLE IF NOT EXISTS skill_package_files (
+    skill_id         TEXT NOT NULL,
+    path             TEXT NOT NULL,
+    sha256           TEXT NOT NULL,
+    size_bytes       INTEGER NOT NULL,
+    content_type     TEXT NOT NULL,
+    role             TEXT NOT NULL,
+    executable       INTEGER NOT NULL DEFAULT 0,
+    secret_scanned   INTEGER NOT NULL DEFAULT 0,
+    poison_scanned   INTEGER NOT NULL DEFAULT 0,
+    raw_path         TEXT,
+    PRIMARY KEY (skill_id, path),
+    FOREIGN KEY (skill_id) REFERENCES skill_packages(skill_id) ON DELETE CASCADE,
+    FOREIGN KEY (sha256) REFERENCES skill_package_blobs(sha256) ON DELETE NO ACTION
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_package_files_sha256
+    ON skill_package_files(sha256);
+```
+
+The primary key of `skill_packages` **is** the skill id: there is no second identity space and no mapping table. `skill_package_files` is keyed on `(skill_id, path)`, where `path` is the **canonical** path — NFC-normalised, POSIX-separated, collision-checked — and it is the file's identity; `raw_path` is the name as it appeared in the source archive and is **display-only**. `secret_scanned` and `poison_scanned` record **which scanners actually ran** on a file: a binary asset carries `poison_scanned = 0`, a *disclosed skip* rather than a claim of safety. `ON DELETE NO ACTION` on the blob foreign key means a blob still referenced by a file row cannot be deleted, so a garbage collector must delete file rows first and unreferenced blobs second.
+
+#### What P1 does **not** add
+
+**No reader, writer, importer or exporter exists for these tables.** They are created empty and stay empty. There is no CLI command, no MCP action and no agent-facing surface for packages. A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
+
+The later stages — canonicalisation, the importer, the read API, the export writer, the CLI and MCP surfaces — are described in §10 of the design document and are **not** part of this change. Several operator decisions in that design (the accepted archive layouts, the prune exemption's form, the binary-asset default, cross-workspace sharing) are **open**, and this stage does not decide any of them. In particular, the age-based prune still removes ordinary skills exactly as it did before; the package-aware prune exemption is a later stage and an operator decision.
+
+#### The tables are local-only
+
+The shared database runs "the same table schema as the local DB", but only the tables in `BaseTables` reach it: `attachShared` rewrites every `CREATE TABLE` in that slice to `shared.<name>` and runs it against the attached file. The package tables are declared in their own schema slice, `SkillPackageTables` — a sibling of `ReferenceTables`, **not** a member of `BaseTables` — and are applied by the local schema-initialisation path outside the `attachShared` loops.
+
+**Consequence: no shared database ever receives the package tables, not even empty ones.** A package's bytes live in the local substrate; the `.skill` archive is the portable artefact, not the shared schema. `internal/core/skill_package_schema_test.go` pins this, and pins the negative control that the shared-schema probe can tell a shared table from a local-only one.
+
+#### The restore allow-list
+
+The three tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **accepts** a dump that contains them. Without that registration every backup taken after this change would be rejected by `mpm restore-db` — a loud, immediate failure.
+
+They are deliberately **not** on `RuntimeCanonicalSchema`: they are declared in Go source, and the source-checked half of the allow-list is the correct one.
+
+The registration also has a second, deliberate consequence, described next.
+
+#### The two rollbacks are different operations
+
+| | **binary rollback (lossless, blind)** | **schema rollback (destructive)** |
+|---|---|---|
+| what it is | an old binary runs against a database that has the package tables | `DROP TABLE` on the three package tables |
+| package bytes | **retained but invisible** — still in the file; they reappear when the new binary returns | **irreversibly destroyed**, including third-party files that exist nowhere else |
+| everything else | untouched | untouched |
+| operator-visible signal | none — there is no schema-version gate anywhere in the tree, so the old binary opens the newer database without complaint | the tables are gone |
+| pre-condition | **export the packages first** | **export the packages first** — this is the only copy |
+
+"Lossless" applies to the database, not to the operator's ability to use it. A binary rollback preserves the bytes on disk, but it also creates a restore incompatibility, and the two are not independent.
+
+**"Blind" is the accurate word for the old binary's view.** An old binary has no way to know the three tables exist; it does not warn, it does not refuse, and it does not adapt. Nothing in the substrate would tell an operator that a package was present.
+
+#### After a binary rollback, `mpm restore-db` of a new-binary backup fails closed
+
+`mpm backup` is `sqlite3 .dump` — generic. It does not know which tables exist. So a backup taken by the **new** binary contains the three package tables, and an **old** binary's `mpm restore-db` rejects any dump naming a table that is not on its `CanonicalMPMSchema` allow-list — and the three package tables are not on it.
+
+> **After a binary rollback, restoring a backup taken by the new binary fails closed.** The old binary can produce a backup it cannot restore, and it can refuse a backup it produced itself once the new binary has run.
+
+**The allow-list is not weakened to hide this.** Relaxing `restore-db` to skip unknown tables with a warning would trade a loud, safe refusal for a silent, partial restore — exactly the class of failure the validator exists to prevent.
+
+**The operator procedure is therefore mandatory, not advisory:**
+
+1. **Before any binary rollback**, export every package to a `.skill` archive: `mpm skill export <name> --output <file>.skill` for each package. *(The export writer is a later stage; until it ships, no package can exist and the export step is a no-op — see "What P1 does not add" above.)*
+2. Verify the exports exist and are non-empty.
+3. Only then roll the binary back.
+4. The old binary's `restore-db` will still refuse a new-binary dump. Restore with the **old** binary from a backup taken **before** packages existed, or restore with the new binary.
+
+This is stated rather than designed away: making the old binary able to restore a package-bearing dump is impossible without changing the old binary, which by definition is not being changed. The incompatibility is a property of the rollback, not a defect to be papered over.
+
+### 6.9 Project-Scoped Continuity Storage (Stage 1 — storage only)
+
+MPM's substrate is organised around **artifacts** — memories, lessons, theories, evidence — and each artifact belongs to one session and one workspace. A **project** is a different grain: a durable identity that outlives every thread, every checkpoint and every session inside it. Project-Scoped Continuity adds that grain.
+
+The architecture is specified in the **Continuity architecture document** (PR #224, *"Project-Scoped Continuity"*), which is delivered in stages; **this section describes stage 1, which is storage only.**
+
+#### What stage 1 adds
+
+Four **additive** tables. No existing table, row, index or trigger is modified, and no existing reader, writer, API or scheduler behaviour changes.
+
+| table | what it holds |
+|---|---|
+| `projects` | the permanent stub: an identity that outlives every thread, every checkpoint and every session. `deleted_at IS NULL` means alive. |
+| `project_names` | the resolution domain: every key that resolves to a project, with `name` case-insensitive (`COLLATE NOCASE`). |
+| `continuity_threads` | an independent line of work inside a project; several may be active at once, each with its own `revision` for optimistic concurrency. |
+| `continuity_checkpoints` | the append-only ledger of resume briefs. A checkpoint is never edited; it is superseded by a later one, and the thread's `last_checkpoint_id` names the current one. |
+
+The DDL is authoritative in `internal/core/migration_continuity_project_model.go`, where it is a single literal transcribed byte-for-byte from the architecture document. A test pins its SHA-256, so the shipped schema cannot drift from the approved architecture without failing the build. It is deliberately **not** copied here: a second copy in prose is a second thing to keep in sync, and this document is the product contract, not the schema source.
+
+Four properties are enforced by the database itself, not by convention:
+
+- **No silent duplicate project creation.** At most one *live* holder of a name, case-insensitively; at most one *canonical* live name per project. A withdrawn name is history and does not occupy the name, so a name becomes reusable after its holder is deleted.
+- **Containment is a storage property.** `continuity_checkpoints.project_id` is denormalised from the thread, and a composite foreign key keeps the denormalisation honest: a checkpoint cannot name a project other than its thread's. Every reference is `ON DELETE RESTRICT`, so a hard delete of a project with children is refused and the ledger cannot be destroyed by a cascade.
+- **The resume pointer is sound.** A thread's `last_checkpoint_id` may only name a checkpoint of *that* thread, and a checkpoint's `supersedes` may only name a checkpoint of *its own* thread.
+- **Focus is unique while live.** One live thread per normalised focus slug per project; a superseded or deleted thread releases its focus.
+
+`created_by` / `deleted_by` carry the **writer identity**, not an owner: the workspace is a single-operator trust domain and there is no authorization model in this design.
+
+#### What stage 1 does **not** add
+
+**No reader, writer, project API, deletion operation or audit write exists for these tables.** They are created empty and stay empty. There is no CLI command, no MCP action and no agent-facing surface for projects.
+
+Session-to-project binding, automatic checkpointing and pointer resolution are later stages. The stage-1 schema exists so that the later stages have somewhere to put state, and so that the containment guarantees are established at the storage boundary before any API can rely on them.
+
+#### The tables are local-only
+
+The shared database runs "the same table schema as the local DB", but only the tables in `BaseTables` reach it: `attachShared` rewrites every `CREATE TABLE` in that slice to `shared.<name>` and runs it against the attached file. The Continuity tables are **not** in `BaseTables` — they are created by a migration, in the local schema only.
+
+**Consequence: no shared database ever receives the Continuity tables, not even empty ones.** A project's identity is durable inside *one* workspace; broadcasting it to every workspace that reads the shared store would give the same project id to unrelated work.
+
+#### The restore allow-list
+
+The four tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **accepts** a dump that contains them. Without that registration every backup taken after this change would be rejected by `mpm restore-db` — a loud, immediate failure.
+
+They are deliberately **not** on `RuntimeCanonicalSchema`: they are declared in Go source, and the source-checked half of the allow-list is the correct one.
+
+The registration has a second, deliberate consequence: an **old** binary's allow-list does not name them, so **restoring a backup taken by the new binary with an old binary fails closed** — the old binary refuses the dump. The allow-list is not weakened to hide this. Relaxing `restore-db` to skip unknown tables with a warning would trade a loud, safe refusal for a silent, partial restore — exactly the class of failure the validator exists to prevent.
+
 ---
 
 ## 7. Core Stability
@@ -1874,7 +2036,7 @@ Three surfaces share one substrate (`internal/core/tools` registry):
 
 ```bash
 mpm                # Readiness dashboard — verifies substrate is ready, auto-starts scheduler
-mpm <query>        # FTS5 search (default when called with a bare string)
+mpm <unknown>      # Unknown command: exits nonzero with a suggestion — never an implicit search (use `mpm recall <query>`)
 mpm add <text>     # Add a new memory
 mpm add -i         # Interactive add — opens $EDITOR
 mpm snooze <id>    # Bump a memory's relevance (no LTM promotion)
@@ -2782,7 +2944,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`decision`** — Decision CRUD
 - **`decisions`** — List decisions
 - **`directives`** — Show behavioral directives
-- **`doctor`** — Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)
+- **`doctor`** _(aliases: doc)_ — Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)
 - **`drills`** — Behavioural drill execution + compatibility matrix (list|show|run|report)
 - **`evidence`** — Manage evidence (add|list) — confidence foundation
 - **`export`** — Export memories to JSON
@@ -2813,7 +2975,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`provenance`** — Show artifact provenance (mpm provenance help for subcommands)
 - **`prune`** — Prune expired memories
 - **`read-skill`** — Read skill by name (or id) and optional version
-- **`recall`** _(aliases: s)_ — Recall relevant context
+- **`recall`** _(aliases: r)_ — Recall relevant context
 - **`record_decision`** — Record decision (full substrate form: context, choice, rationale)
 - **`reference`** — Manage reference documents
 - **`reinforce`** — Record reinforcement (provenance/display; does not affect current retrieval ranking — see §6.3)
@@ -2843,6 +3005,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`theory`** — Theory CRUD
 - **`topic`** — Manage topics
 - **`tour`** — Walk through cognitive verbs (--demo auto-runs each step; --step N jumps)
+- **`update`** — Update the runtime to a newer release (check, apply, rollback)
 - **`version`** — Show version + build identity
 - **`wake`** — Show wake context (--json, --strict)
 - **`weaken`** — Record weakening (provenance/display; does not affect current retrieval ranking — see §6.3)
@@ -2886,12 +3049,30 @@ Companion tools: `check_wakes`, `list_wakes`. Architecture: `scheduled_wakes` ta
 
 **Wakes are one-shot.** A wake fires once, gets marked `fired=1`, and is retired by GC. For *recurring* workflows, use `scheduled_tasks` (the Agentic Cron surface — see below). The `recurring_rule` field that historically lived on `schedule_wake` is retired as of 2026-10-04; see the migration note further down.
 
+**A wake whose `metadata` is not a parseable JSON document belongs to no partition.** A row whose metadata is present, non-empty and malformed is *corrupt*: it is never delivered by the fold, never claimed by the scheduler, never retired by a retention sweep, and never resolved by an agent — `mpm_wakes resolve` refuses it with the status `corrupt_metadata`. Its original bytes are preserved, because they are the only evidence of what the row was (a truncated `{"kind": "cron"` names a cron wake that cannot be read back). Every surface that meets one rejects it individually, with a diagnostic carrying those bytes, and carries on with the healthy rows: one corrupt row never blocks, delays or rolls back work on any other row. The `wakes_corrupt_metadata` health counter counts them. A *valid* but non-object document (`null`, `42`, `[]`) is **not** corrupt — it parses, so it is normalised to an empty object plus the audit note.
+
 **Trade-off vs. a real-time push daemon:** MCP has no server-initiated messages over stdio, so `mpm-mcp` cannot fire a wake back to a sleeping agent. The opportunistic fold is the next-best mechanism — at-most-once-on-next-contact, not real-time. For Wimbledon R1, WC2026 group stage, and monthly Meshal reminder use cases this is sufficient. Real-time push would require an SSE transport change and is deferred.
 #### Autonomous wake execution (mpm-scheduler + mpm-critic)
 
 *System-kind wakes (snapshot, critic, GC, broadcast) execute unattended via the 60s ticker — for the tasks the agent would forget.*
 
 For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; after each handler returns, the scheduler calls MarkFired (`fired=1`) which here records the system-kind terminal transition (the handler's completion is itself the terminal event — internal to the scheduler, no separate user/agent ack is needed). Notification-kind and untagged wakes pass through to the opportunistic fold unchanged. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Build via `make build` (to `.build/bin/`); promote to the install prefix with `make install` or `./install.sh`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters system kinds from the opportunistic fold so the two surfaces don't race for the same wake.
+
+**Wake ownership.** A wake kind has exactly one owner, and the fold only ever retires what it owns.
+
+* The **agent** owns `notification` (explicitly, or by being untagged), `cascade` and `cron`. The opportunistic fold delivers those to the agent and retires them when the agent acknowledges them. `cron` rows are the recurring-task bookkeeping the agent acts on: they carry the `directive_id` the agent has to consult, and the scheduler's ad-hoc claim deliberately excludes them.
+* The **scheduler** owns every other kind — `snapshot`, `critic_audit`, `gc`, `broadcast`, `cascade_summary`, `drill`, and any kind a future binary introduces. The scheduler runs them through a registered handler and retires them after the handler returns. Registering a handler for an agent-owned kind is refused, because the fold would retire the wake before the handler could run it.
+
+The agent's list is an allowlist, so the default is deny: an unknown kind is not the agent's. The practical consequence for the public surface is that `mpm_wakes check` with `kinds=["*"]` surfaces every AGENT-OWNED pending wake and no scheduler-owned wake, and a `kinds` list naming a scheduler-owned kind surfaces nothing. A scheduler-owned wake that is already persisted is never reclassified, deleted or retired by an agent-facing operation.
+
+**Arming authorisation.** Ownership is enforced in both directions. The agent-facing scheduling surface (`mpm_wakes schedule`) may arm only the kinds the agent owns — `notification` (explicitly or untagged), `cascade` and `cron`. A request naming a scheduler-owned kind (`drill`, `broadcast`, `snapshot`, `gc`, `critic_audit`, `cascade_summary`) or an unknown kind is refused and no wake row is created. The refusal names the kind and the armable set, so the caller can correct itself.
+
+The gate is at the agent-facing boundary, not in the DB-layer producer: `ScheduleWake` is shared with the internal producers — the scheduler's ingest handler, the cascade materializer, the wake reconcile loop and the cron task runner — and those keep their existing capabilities, including the kinds the agent may not arm. A `metadata.kind` that is present but not a string is refused as malformed, because such a wake is delivered by nobody and dispatched by nobody.
+
+**Resolution authorisation.** The same policy governs the explicit, audited retirement path. `mpm_wakes resolve` names one wake id and retires it (`fired=1`, `fired_by="wake-resolver"`, one audit row). It may retire only the kinds the agent owns — `notification` (explicitly or untagged), `cascade` and `cron`. A scheduler-owned kind is refused with status `not_a_wake`, the wake stays pending, and the scheduler dispatches it as usual: retiring one would set `fired=1`, the scheduler's due-wake query selects only `fired=0` rows, and the handler would never run. An unknown or malformed kind is refused the same way. The reason taxonomy, the idempotent re-resolve behaviour (`already_resolved`, no second audit row), the audit attribution and the response envelope are unchanged. A cron wake is a `scheduled_wakes` row the agent owns — not a `scheduled_tasks` row — so `delete_task` does not apply to it and is no longer named as guidance.
+
+**Resolution under contention.** The resolver reads the wake row and then writes it, in one transaction. That read-then-write pair is what makes a deferred transaction vulnerable: the read takes the transaction's read snapshot, and the write has to upgrade it to the write lock. Under WAL, any commit by another connection between those two points invalidates the snapshot, and the upgrade fails with `SQLITE_BUSY_SNAPSHOT` — a class that shares its primary code and its `"database is locked"` message with ordinary lock contention, is never serviced by the busy handler (so `busy_timeout` does not wait on it), and cannot be cleared by retrying the statement inside the same transaction. The remedy is a transaction restart against a fresh snapshot, which the substrate's transaction layer performs under a bounded budget. Two concurrent resolutions of *different* agent-owned wakes therefore both succeed: the loser's transaction is restarted rather than failed with `resolve wake: update: database is locked`. If the budget is exhausted the resolution fails with status `update_failed` and the wake is left pending with no audit row. The audit row is written outside the transaction, so a restart cannot duplicate the audit call — and that is the whole of the guarantee: it is a guarantee about the *call*, not about the row's existence. A normal successful resolution attempts to write one audit event, but the audit write is a separate, best-effort write and is **not atomic with the settlement commit** — a crash between the commit and the write, or a failure of that write itself, can leave a committed resolution with **no** audit entry. The guarantee is therefore *at most one* audit row per successful resolution: one in the normal case, and none if the audit write was lost — not *exactly one*.
+
 #### Agentic Cron (Recurring Tasks)
 
 *Recurring workflows with fail-fast directive validation — catch typos at upsert, not silent wake drops at 3 AM.*

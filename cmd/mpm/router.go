@@ -59,10 +59,10 @@ func NewRouter() *CommandRouter {
 		// Info / diagnostics
 		"version": {Name: "version", Description: "Show version + build identity", MinArgs: 0, MaxArgs: 0},
 		"help":    {Name: "help", Description: "Show CLI catalogue", MinArgs: 0, MaxArgs: 0},
-		"doctor":  {Name: "doctor", Description: "Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)", MinArgs: 0, Help: printDoctorHelp},
+		"doctor":  {Name: "doctor", Description: "Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)", MinArgs: 0, Help: printDoctorHelp, Aliases: []string{"doc"}},
 
 		// Memory verbs — capability-named
-		"recall":       {Name: "recall", Description: "Recall relevant context", MinArgs: 1, Aliases: []string{"s"}},
+		"recall":       {Name: "recall", Description: "Recall relevant context", MinArgs: 1, Aliases: []string{"r"}},
 		"add":          {Name: "add", Description: "Persist knowledge (prefix content with `-- ` if it starts with `-`)", MinArgs: 1},
 		"ls":           {Name: "ls", Description: "List memories", MinArgs: 0},
 		"show":         {Name: "show", Description: "Show memory details", MinArgs: 1},
@@ -145,6 +145,7 @@ func NewRouter() *CommandRouter {
 		"directives": {Name: "directives", Description: "Show behavioral directives"},
 		"lifecycle":  {Name: "lifecycle", Description: "Lifecycle asymmetry notes for artifact families", MinArgs: 0, MaxArgs: 1},
 		"status":     {Name: "status", Description: "Show system status (incl. lesson proposals awaiting operator review)", MinArgs: 0},
+		"update":     {Name: "update", Description: "Update the runtime to a newer release (check, apply, rollback)", MinArgs: 0},
 		"persona":    {Name: "persona", Description: "Manage personas"},
 		"ops":        {Name: "ops", Description: "Engine-room operations (maintenance, diagnostics)"},
 		"onboard":    {Name: "onboard", Description: "Guided setup and verification of an MPM installation", MinArgs: 0, MaxArgs: -1},
@@ -269,7 +270,13 @@ func (r *CommandRouter) Execute(args []string) int {
 	// and it is deliberately generous: a token the codebase knows
 	// about is passed on, and the leaf that does not support it
 	// rejects it itself.
-	if rc := rejectUnknownCommandOption(cmdName, args[1:]); rc != 0 {
+	//
+	// The guard runs under the CANONICAL command name: `cmd` is
+	// already resolved through aliases above, and the registry and
+	// the deferred-owner table are keyed by canonical names. An
+	// alias spelling (`mpm r --json`) must accept exactly what the
+	// canonical spelling (`mpm recall --json`) accepts.
+	if rc := rejectUnknownCommandOption(cmd.Name, args[1:]); rc != 0 {
 		return rc
 	}
 
@@ -445,6 +452,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleLifecycleHelp(args[1:])
 	case "status":
 		return handleStatus(args[1:])
+	case "update":
+		return handleUpdate(args[1:])
 	case "memory":
 		return handleMemory(args[1:])
 	case "mode":
@@ -702,6 +711,8 @@ func (r *CommandRouter) handleHelp(args []string) int {
 	case "ops":
 		printOpsHelp()
 		return 0
+	case "update":
+		return printUpdateHelp()
 	case "onboard":
 		printOnboardHelp()
 		return 0
@@ -846,6 +857,8 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 	case "ops":
 		printOpsHelp()
 		return 0
+	case "update":
+		return printUpdateHelp()
 	case "onboard":
 		printOnboardHelp()
 		return 0
@@ -1773,6 +1786,12 @@ func PrintHelp() {
 
 func (r *CommandRouter) unknownCommand(name string) {
 	r.errorf("[!] Error: unknown command '%s'\n", name)
+	// Suggest the closest registered command without executing
+	// anything: a mistyped command must fail visibly, never run a
+	// search or a neighbouring command on the operator's behalf.
+	if suggestion := suggestCommandName(name, r); suggestion != "" {
+		fmt.Printf("    Did you mean %q? Try `mpm %s --help`.\n", suggestion, suggestion)
+	}
 	fmt.Printf("    Run 'mpm help' for available commands.\n")
 }
 

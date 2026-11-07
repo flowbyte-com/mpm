@@ -492,19 +492,19 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 	var err error
 	if embedding != nil {
 		embeddingJSON, _ := json.Marshal(embedding)
-		res, err = dm.db.Exec(`
+		res, err = dm.ExecTracked(`
 			UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ?
-		`, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
+		`, 5, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
 	} else {
-		res, err = dm.db.Exec(`
+		res, err = dm.ExecTracked(`
 			UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, content_hash = ?,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ?
-		`, content, string(tagsJSON), string(metadataJSON), contentHash, id)
+		`, 5, content, string(tagsJSON), string(metadataJSON), contentHash, id)
 	}
 	if err != nil {
 		return err
@@ -541,12 +541,12 @@ func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 		weightGain = 1
 	}
 
-	res, err := dm.db.Exec(`
+	res, err := dm.ExecTracked(`
 		UPDATE memories
 		SET reinforcement_count = reinforcement_count + ?, weight = MIN(weight + ?, 100),
 		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
-	`, delta, weightGain, id)
+	`, 5, delta, weightGain, id)
 	if err != nil {
 		if isBusyError(err) {
 			// Surface the contention signal rather than swallowing
@@ -591,12 +591,12 @@ func (dm *DatabaseManager) ReinforceMemory(id string, delta int) error {
 // AdjustMemoryWeight adjusts weight by delta with a hard floor of 1.
 // Used by the +/- feedback shortcuts. Errors when the id matches no row.
 func (dm *DatabaseManager) AdjustMemoryWeight(id string, delta int) error {
-	res, err := dm.db.Exec(`
+	res, err := dm.ExecTracked(`
 		UPDATE memories
 		SET weight = MAX(weight + ?, 1),
 		    last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ?
-	`, delta, id)
+	`, 5, delta, id)
 	if err != nil {
 		return err
 	}
@@ -699,7 +699,7 @@ func (dm *DatabaseManager) ChallengeAndReinforce(id string, delta int) error {
 // state landed and surfaces the silent-promotion class of failures
 // (trigger swallowing the UPDATE, view with INSTEAD OF, etc.).
 func (dm *DatabaseManager) WeakenMemory(id string, delta int) error {
-	return weakenMemoryOn(dm.db, id, delta)
+	return weakenMemoryOn(poolMemExecer{db: dm.db, retries: 5}, id, delta)
 }
 
 // weakenMemoryOn is the weakening primitive, over an executor.
@@ -772,11 +772,11 @@ func (dm *DatabaseManager) SetMemoryTTL(id string, expiresAt time.Time) error {
 	var res sql.Result
 	var err error
 	if expiresAt.IsZero() {
-		res, err = dm.db.Exec(`UPDATE memories SET expires_at = NULL WHERE id = ?`, id)
+		res, err = dm.ExecTracked(`UPDATE memories SET expires_at = NULL WHERE id = ?`, 5, id)
 	} else {
-		res, err = dm.db.Exec(`
+		res, err = dm.ExecTracked(`
 			UPDATE memories SET expires_at = ? WHERE id = ?
-		`, expiresAt.Unix(), id)
+		`, 5, expiresAt.Unix(), id)
 	}
 	if err != nil {
 		return err
@@ -1288,10 +1288,10 @@ func (dm *DatabaseManager) SearchReferenceChunks(q string, limit int) ([]map[str
 // Errors are swallowed: a failure to record an interaction must not break
 // the search results, and the audit table is not on the critical path.
 func (dm *DatabaseManager) recordReferenceInteraction(docID string, chunkID *string, query, searchKind string, rank int, score sql.NullFloat64) {
-	_, _ = dm.db.Exec(`
+	_, _ = dm.ExecTracked(`
 		INSERT INTO reference_interactions (id, doc_id, chunk_id, query, search_kind, rank, score, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, GenerateID(), docID, chunkID, query, searchKind, rank, score, time.Now().Unix())
+	`, 5, GenerateID(), docID, chunkID, query, searchKind, rank, score, time.Now().Unix())
 }
 
 // GetRecentInteractions returns the N most recent reference interactions.

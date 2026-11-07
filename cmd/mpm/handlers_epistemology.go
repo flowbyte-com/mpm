@@ -153,7 +153,7 @@ func handleProposeTheory(args []string) int {
 			"id":      mem.ID,
 			"status":  status,
 		})
-		return respond("", string(out)+"\n", 0)
+		return respond(string(out)+"\n", "", 0)
 	}
 	return respond("", fmt.Sprintf("✅ Theory proposed: %s (status: %s)\n", mem.ID, status), 0)
 }
@@ -499,7 +499,7 @@ func handleRecordDecision(args []string) int {
 				"supersedes": supersedes,
 				"action":     "supersede",
 			})
-			return respond("", string(out)+"\n", 0)
+			return respond(string(out)+"\n", "", 0)
 		}
 		return respond("", fmt.Sprintf("✅ Decision superseded: %s (was %s)\n", newID, supersedes), 0)
 	}
@@ -531,7 +531,7 @@ func handleRecordDecision(args []string) int {
 			"id":      mem.ID,
 			"action":  "record",
 		})
-		return respond("", string(out)+"\n", 0)
+		return respond(string(out)+"\n", "", 0)
 	}
 	return respond("", fmt.Sprintf("✅ Decision recorded: %s\n", mem.ID), 0)
 }
@@ -1008,8 +1008,9 @@ func backfillEpistemologyTopics() {
 			if tErr != nil {
 				continue
 			}
-			res, execErr := dm.SQLDB().Exec(
+			res, execErr := dm.ExecTracked(
 				`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
+				5,
 				id, topicID, now, "primary",
 			)
 			if execErr == nil {
@@ -1247,14 +1248,14 @@ func handleHint(args []string) int {
 
 	if len(overlaps) == 0 {
 		if jsonOutput {
-			return respond("", "[]\n", 0)
+			return respond("[]\n", "", 0)
 		}
 		return respond("", "", 0)
 	}
 
 	if jsonOutput {
 		out, _ := json.MarshalIndent(overlaps, "", "  ")
-		return respond("", string(out)+"\n", 0)
+		return respond(string(out)+"\n", "", 0)
 	}
 
 	// Regular mode: show first hint only, formatted

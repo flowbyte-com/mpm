@@ -78,7 +78,7 @@ the plugin install hook
 `<!-- END MPM-MANAGED SECTION:opencode-instructions -->`.
 **Manual verification (no installer):** the `mpm-opencode` plugin
 reads `AGENTS.md` at session start AND injects wake context
-automatically via its `experimental.chat.system.transform` hook.
+automatically via its `ctx.session.hook("context")` hook.
 Verify with `opencode run` against a project containing the file;
 wake should appear in the system prompt before the first turn.
 
@@ -241,29 +241,52 @@ For the host, when editing the persistent file by hand:
 # Tool-reference stability contract
 
 The block above pins the action enum values that agents see. Changes to
-the underlying schema require regeneration of this file. Verified against
-the live registry at `internal/core/tools/registry_list.go` on the date
-in this file's git log.
+the underlying schema require regeneration of this file.
 
-| Tool | Action values | Required params on write |
+The table's **action column** is **pinned against the live registry** at
+`internal/core/tools/registry_list.go`: every tool the registry registers
+has a row here, every row names a tool the registry registers, and every
+action in a row is an action the registry offers.
+`agent_installation/tests/test_tool_reference_contract_pins_registry.py`
+fails the build when the two drift apart, so a row here cannot name an
+action that does not exist, cannot name a tool that does not exist, and a
+tool that exists cannot be missing.
+
+The **required-params column** is prose and is NOT machine-checked. The
+registry publishes per-action required params for only one tool
+(`mpm_theories`); for the aggregators the requirement lives in the
+handler, not in the published schema. A claim in that column is therefore
+held to the implementation by review rather than by a build gate — so it
+changes with the handler, and a stale claim in it is a review finding.
+
+The registry is the canonical vocabulary. The compact MCP wrappers
+(`cmd/mpm-mcp/tools.go`) publish a deliberately smaller vocabulary for the
+same tool — `mpm_memory` and `mpm_context` are the two compact cases —
+and a transport may accept transport-specific actions the registry does
+not list; the canonical protocol says which.
+
+| Tool | Action values | Required params (by action) |
 |---|---|---|
 | `mpm_handoff` | `write`, `read`, `list`, `shred` | `write` requires `summary`. `state` enum: `clean` `crashed` `interrupted` `force_end`. No `note` parameter. |
-| `mpm_scratchpad` | `flush`, `read`, `discard`, `promote` | — |
+| `mpm_scratchpad` | `flush`, `read`, `discard`, `promote` | `flush` requires `session_id` and `thesis`. |
 | `mpm_memory` | `save`, `query`, `show`, `delete`, `restore`, `reinforce`, `weaken`, `snooze`, `set_weight`, `patch`, `promote`, `review`, `synthesize`, `challenge`, `restore_challenge`, `commit_milestone` | `query` defaults `projection: "summary"`; full via `projection: "full"`. `delete` is a reversible soft delete; `restore` clears the tombstone. Permanent shredding is operator-only (`mpm memory shred <id>` from a terminal) and is refused on every agent surface — no payload field, including `confirm=true`, unlocks it. |
-| `mpm_decisions` | `record`, `supersede`, `invalidate` | — |
+| `mpm_theories` | `propose`, `resolve`, `show`, `list`, `query` | `propose` requires `hypothesis`. `resolve` requires `id` (alias `theoryId`) and `conclusion` (free text — what the evidence showed), plus `status` (`proven` or `disproven`; alias `newStatus`) — except on the arbitration branch, where `winner_id` (alias `winnerId`) selects the outcome instead. A theory is a testable claim with defined success conditions, not a guess — propose one rather than recording it as a fact. |
+| `mpm_decisions` | `record`, `supersede`, `invalidate`, `show`, `list`, `query` | `record` requires `choice`. `supersede` requires the `id` of the decision being replaced plus the replacement `choice`. `invalidate` requires `id`. |
 | `mpm_lessons` | `propose`, `search`, `list`, `delete`, `restore` | **Creating a trusted lesson is operator-only.** A lesson is trusted on arrival — the lesson surface has no pending state — so `save` is refused at the execution point on every agent surface, and no payload field unlocks it. Use `propose`: it records a PENDING proposal that an operator reviews and promotes with `mpm lesson promote <id>`. A proposal is NOT a lesson and does not appear in lesson search, lesson list, or the wake context until it is promoted. `propose` requires `params.fact`; optional `params.type` (valid: `"insight"`, `"warning"`, `"practice"`; defaults to `"insight"`), `params.tags`. Lifecycle: `delete` is reversible soft delete (sets tombstone), `restore` clears the tombstone. Permanent shredding is operator-only (`mpm lesson shred <id>`) and is refused on every agent surface. All lifecycle actions accept canonical `id` (alias: `lesson_id`). |
-| `mpm_topics` | `create`, `search`, `link` | — |
-| `mpm_references` | `add`, `read`, `search`, `list` | freshness surfaced as `current` `stale` `version-bound` `historical` `unknown` |
-| `mpm_context` | `read_wake_context`, `read_directives`, `proactive_recall_hint`, `query_global_rules`, `record_global_rule`, `promote_to_global`, `route` | `read_wake_context` accepts `params.projection: "compact"` |
-| `mpm_skills` | `save`, `read`, `list`, `delete`, `promote_to_global`, `workshop` | `workshop` requires `intent`, `mode`, `task_context`, `workflow_description`, `failure_recovery`, `recent_actions`, `evidence` |
-| `mpm_wakes` | `schedule`, `check`, `check_pending_event`, `list`, `digest`, `upsert_task`, `list_tasks`, `delete_task` | — |
-| `mpm_work` | `create`, `list`, `show`, `update`, `complete`, `cancel`, `history`, `note`, `reopen`, `resolve_contradiction` | `complete` requires `work_id`; host session termination does NOT auto-trigger |
+| `mpm_topics` | `create`, `search`, `link`, `unlink`, `list`, `show` | `create` requires `name`; `link` and `unlink` require `memory_id` and `topic_id`. |
+| `mpm_references` | `add`, `import`, `read`, `search`, `list` | `add` ingests ONE document (`filepath`, `url` or `source` — supply exactly one); `import` ingests a CORPUS (`documents` or `manifest`). freshness surfaced as `current` `stale` `version-bound` `historical` `unknown` |
+| `mpm_evidence` | `add`, `list`, `source_groups` | `add` requires `artifact_id`, `type`, `source_group` and `created_by`. `artifact_type` vocabulary is `memory`, `theory`, `decision`, `lesson`, `work`. `list` requires `artifact_id` AND `artifact_type` — neither is defaulted. `source_groups` enumerates the accepted `source_group` vocabulary. |
+| `mpm_confidence` | `show`, `recompute`, `explain`, `history`, `changes`, `trend`, `quality` | `show`, `recompute`, `explain`, `history` and `trend` require `artifact_id`; `changes` and `quality` take none. |
+| `mpm_context` | `read_wake_context`, `read_directives`, `proactive_recall_hint`, `query_global_rules`, `record_global_rule`, `retire_global_rule`, `promote_to_global`, `route`, `recent_activity`, `contextual_candidates`, `contextual_selection`, `contextual_materialization` | `read_wake_context` accepts `params.projection: "compact"`. `record_global_rule` and `retire_global_rule` require `confirm (true)`; `promote_to_global` requires `confirm (true)` and `memory_id`. The compact MCP wrapper publishes a smaller vocabulary for this tool — it adds `write_handoff` and `read_handoff`, and omits `retire_global_rule`, `promote_to_global`, `recent_activity` and the three `contextual_*` diagnostics; the canonical protocol says which surface it is talking about. |
+| `mpm_skills` | `save`, `read`, `list`, `delete`, `promote_to_global`, `workshop` | `workshop` requires `mode` (`form` | `refine`) and `decision_model.boundary` (`procedure` | `judgment` | `knowledge`); the four `decision_model` axis scores must be within 0..5. `refine` mode also requires `change_type` and `intent` (the existing skill's name). `task_context`, `workflow_description`, `failure_recovery`, `recent_actions` and `evidence` are size-capped, not required. |
+| `mpm_wakes` | `schedule`, `check`, `check_pending_event`, `list`, `digest`, `resolve`, `upsert_task`, `list_tasks`, `delete_task` | `resolve` requires `wake_id` and `reason` (`reconciled`, `obsolete`, `superseded` or `already_satisfied`). It retires only the agent-owned kinds (notification, cascade, cron); a scheduler-owned or unknown kind is refused with status `not_a_wake`, and a row whose metadata is present, non-empty and not a parseable JSON document is refused with status `corrupt_metadata` — the agent may not retire it and the row is left untouched. |
+| `mpm_work` | `create`, `list`, `show`, `update`, `complete`, `cancel`, `history`, `note`, `reopen`, `archive`, `unarchive`, `resolve_contradiction` | `complete` requires `work_id`; host session termination does NOT auto-trigger. `archive` and `unarchive` also require `work_id`; they move the item out of and back into the active list without deleting its ledger. |
 | `mpm_resolve` | (no `action`) | `uri: mpm://...` |
 | `mpm_blob_read` | (no `action`) | `id`, `offset`, `max_bytes` |
 | `mpm_blob_search` | (no `action`) | `id`, `query` |
 | `mpm_memory` action=`challenge` | `memory_id`, `evidence` | Weaken a memory; creates a pending theory contesting it. Companion: `restore_challenge` action undoes. |
 | `mpm_retrieval_diagnose` | (no `action`) | `query`, `limit`, `collection`, `scope`, `trace` |
-| `mpm_system` | `gc_run`, `compact`, `health_check`, `migrate`, `query_audit_log`, `list_clusters`, `snooze_cluster`, `resolve_cluster`, `annotate_cluster`, `critic_findings` | `compact` drains raw memories into LESSON PROPOSALS, not into trusted lessons: the memories it reads are agent-writable, so a derivation needs operator review. `lessons_created` is always 0 — read `proposals_created` and `proposal_ids`. An operator promotes a derived lesson with `mpm lesson promote <id>`. |
+| `mpm_system` | `gc_run`, `compact`, `health_check`, `migrate`, `query_audit_log`, `list_clusters`, `snooze_cluster`, `unsnooze_cluster`, `resolve_cluster`, `annotate_cluster`, `critic_findings`, `event_ingest`, `event_counters` | `compact` drains raw memories into LESSON PROPOSALS, not into trusted lessons: the memories it reads are agent-writable, so a derivation needs operator review. `lessons_created` is always 0 — read `proposals_created` and `proposal_ids`. An operator promotes a derived lesson with `mpm lesson promote <id>`. `unsnooze_cluster` undoes a `snooze_cluster`. |
 
 Companion standalones (transport-namespace may differ per host):
 

@@ -1,6 +1,6 @@
 > The mpm-opencode plugin handles session-start wake-context
 > injection automatically via its
-> `experimental.chat.system.transform` hook. This AGENTS.md
+> `ctx.session.hook("context")` hook. This AGENTS.md
 > section adds the **behavioral** layer (handoff discipline,
 > persist-during-work, recovery) that the hook can't reasonably
 > inject. Edit the canonical managed block in
@@ -58,8 +58,8 @@ Check its version and freshness. Full contract:
 
 ## OpenCode-specific notes
 
-The mpm-opencode plugin's `experimental.chat.system.transform`
-hook handles wake-context injection automatically — you do not
+The mpm-opencode plugin's `ctx.session.hook("context")` hook
+handles wake-context injection automatically — you do not
 need to call `read_wake_context` manually at session start.
 
 The plugin stamps provenance for every MPM call:

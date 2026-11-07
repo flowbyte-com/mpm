@@ -389,8 +389,8 @@ func (dm *DatabaseManager) PromoteRawMemoryBatch(importBatch string, dryRun bool
 		if err := json.Unmarshal([]byte(p.metaJSON), &meta); err != nil {
 			// Malformed metadata — reject with note
 			if !dryRun {
-				_, _ = dm.db.Exec(`UPDATE raw_memories SET status='rejected', llm_notes='malformed metadata', updated_at=? WHERE id=?`,
-					float64(time.Now().Unix()), p.id)
+				_, _ = dm.ExecTracked(`UPDATE raw_memories SET status='rejected', llm_notes='malformed metadata', updated_at=? WHERE id=?`,
+					5, float64(time.Now().Unix()), p.id)
 			}
 			continue
 		}
@@ -424,8 +424,8 @@ func (dm *DatabaseManager) PromoteRawMemoryBatch(importBatch string, dryRun bool
 
 		out, _, err := dm.SaveMemoryWithContext(p.text, "memories", tags, float64(weight), ttl, ActiveContext{})
 		if err != nil {
-			_, _ = dm.db.Exec(`UPDATE raw_memories SET status='rejected', llm_notes=?, updated_at=? WHERE id=?`,
-				fmt.Sprintf("save failed: %v", err), float64(time.Now().Unix()), p.id)
+			_, _ = dm.ExecTracked(`UPDATE raw_memories SET status='rejected', llm_notes=?, updated_at=? WHERE id=?`,
+				5, fmt.Sprintf("save failed: %v", err), float64(time.Now().Unix()), p.id)
 			continue
 		}
 

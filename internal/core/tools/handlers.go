@@ -5083,11 +5083,83 @@ func handleScheduleWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 	// wake_tools.go ScheduleWake for the producer-side fix; see
 	// wake_tools.go ResolveWake for the consumer-side matcher.
 
+	// ARMING AUTHORISATION — the agent-facing surface.
+	//
+	// A wake kind has exactly one owner (see internal/core/wake_tools.go
+	// AgentOwnedWakeKinds). The agent owns notification, cascade and
+	// cron; everything else belongs to the scheduler, which runs it
+	// through a registered handler. This handler is the ONLY agent-facing
+	// producer of wakes — the CLI (`mpm call mpm_wakes`) and the MCP
+	// server both reach it through the tool registry — so this is where
+	// the authorisation boundary belongs.
+	//
+	// The gate lives HERE, not in ScheduleWake, on purpose. ScheduleWake
+	// is the DB-layer producer, and the internal producers need their
+	// capabilities: the scheduler's ingest handler, the cascade
+	// materializer, the wake reconcile loop and the cron task runner all
+	// arm through it, and some of them arm kinds the agent may not.
+	// Refusing at the producer would break them; refusing at the
+	// agent-facing boundary leaves them untouched.
+	//
+	// Without this gate, `mpm_wakes schedule` with metadata.kind=drill
+	// armed a wake the scheduler would execute as a behavioural drill,
+	// and metadata.kind=broadcast armed a wake the scheduler would fan
+	// out to other agents — both from an untrusted agent call, with no
+	// permission boundary of any kind.
+	kind, kindErr := requestedWakeKind(metadata)
+	if kindErr != nil {
+		return nil, kindErr
+	}
+	if !mpminternal.WakeKindAgentOwned(kind) {
+		return nil, fmt.Errorf(
+			"wake kind %q is not armable from the agent scheduling surface: it is a scheduler-owned kind, "+
+				"and the scheduler runs it through a registered handler (see internal/scheduler/system_handlers.go). "+
+				"The agent may arm only: %s. This wake was NOT created.",
+			kind, strings.Join(mpminternal.AgentOwnedWakeKinds, ", "))
+	}
+
 	out, err := dm.ScheduleWake(reason, targetTime, theoryID, createdBy, metadata)
 	if err != nil {
 		return nil, err
 	}
 	return checkWakesAndFold(dm, ac, out, nil), nil
+}
+
+// requestedWakeKind returns the wake kind the caller asked for, or an
+// error if the request is malformed.
+//
+// The kind is read from metadata["kind"], which is caller-supplied and
+// need not be a string. The readings match what the rest of the
+// substrate does with the same value:
+//
+//   - ABSENT kind: the canonical notification default. ScheduleWake
+//     authors kind=notification when the caller supplies none, so an
+//     absent kind is an ordinary notification wake.
+//   - NULL kind: json_extract yields NULL, which the fold's matcher
+//     reads as untagged — that is, as a notification wake.
+//   - EMPTY string kind: likewise untagged, likewise a notification
+//     wake.
+//
+// A kind that is present but NOT a string (a number, a bool, an array,
+// an object) is malformed: it persists as a non-string JSON value, which
+// neither the fold's kind matcher nor the scheduler's handler registry
+// recognises. Such a wake is an orphan — nobody delivers it and nobody
+// dispatches it — so it is refused here rather than armed.
+func requestedWakeKind(metadata map[string]interface{}) (string, error) {
+	if metadata == nil {
+		return "notification", nil
+	}
+	raw, present := metadata["kind"]
+	if !present || raw == nil {
+		return "notification", nil
+	}
+	kind, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf(
+			"metadata.kind must be a string, got %T — a wake with a non-string kind is delivered by nobody "+
+				"and dispatched by nobody. This wake was NOT created.", raw)
+	}
+	return kind, nil
 }
 
 func handleCheckWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[string]interface{}) (interface{}, error) {
@@ -5394,7 +5466,9 @@ func handleHealthCheck(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 //     max_batches_reached, where work may remain.
 //   - batches_processed: count of batches that committed a lesson.
 //   - raw_processed: sum of compacted raw memories across all batches.
-//   - lessons_created: equal to batches_processed on success.
+//   - lessons_created: always 0. The compaction records its synthesis
+//     as lesson PROPOSALS, not trusted lessons, so the derived
+//     proposals_created / proposal_ids carry the count.
 //   - raw_remaining: live read of the pressure view after the loop.
 //     Counts every un-compacted memory, INCLUDING rows a refusal has
 //     deferred. It is the right number for "how much is in the pool"
@@ -6540,10 +6614,17 @@ func handleResolveWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	if err != nil {
 		// Not every error is a failure to surface to the agent.
 		// For the "refused but recoverable" states (wake_not_found,
-		// not_a_wake, invalid_reason), the error message already
-		// names the cause; the agent can correct the call and
-		// retry. The `success:false` envelope makes the refusal
-		// machine-readable too.
+		// not_a_wake, invalid_reason, corrupt_metadata), the error
+		// message already names the cause; the agent can correct the
+		// call and retry. The `success:false` envelope makes the
+		// refusal machine-readable too.
+		//
+		// corrupt_metadata is the W4 refusal (issue #178): a row whose
+		// metadata is present, non-empty and not a parseable JSON
+		// document has an owner that cannot be determined, so the agent
+		// may not retire it. The row is NOT written, so its original
+		// bytes survive. Absent or empty metadata is NOT corrupt — it
+		// reads as untagged, which is agent-owned.
 		return map[string]interface{}{
 			"success": false,
 			"status":  status,

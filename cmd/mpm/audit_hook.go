@@ -124,7 +124,7 @@ func recordToolInvocation(
 	// internal/core/tool_outcome.go.
 	outcomeClass, outcomeCode := computeToolOutcome(resultStatus, err)
 
-	_, auditErr := dm.Exec(`
+	_, auditErr := dm.ExecTracked(`
 		INSERT INTO tool_invocations
 		    (id, session_id, tool_name, action, invocation_id,
 		     actor_kind, framework_name, payload_hash, result_status,
@@ -132,6 +132,7 @@ func recordToolInvocation(
 		     mpm_session_id, framework_session_id,
 		     outcome_class, outcome_code)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		5,
 		id, sessionID, toolName, action, invocationID,
 		actorKind, frameworkName, sha256OfPayload(payload), resultStatus,
 		startedAt.Unix(), completedAt.Unix(), completedAt.Sub(startedAt).Milliseconds(),
@@ -173,12 +174,12 @@ func computeToolOutcome(resultStatus string, err error) (class mpminternal.ToolO
 	return class, code
 }
 
-// sqlDBLike is the minimal surface we need to insert audit rows. Both
-// *mpminternal.DatabaseManager (via SQLDB()) and the CoreDB interface
-// satisfy this — accepting a tiny contract keeps the helper testable
-// without dragging in the full CoreDB surface.
+// sqlDBLike is the minimal surface we need to insert audit rows: the
+// statement-level retry budget. Both CoreDB and
+// *mpminternal.DatabaseManager satisfy this — accepting a tiny contract
+// keeps the helper testable without dragging in the full CoreDB surface.
 type sqlDBLike interface {
-	Exec(query string, args ...interface{}) (sql.Result, error)
+	ExecTracked(query string, retries int, args ...interface{}) (sql.Result, error)
 }
 
 // extractAction reads payload["action"] as a string, defaulting to "".

@@ -108,8 +108,9 @@ func handleOpsInitTopics(args []string) int {
 				usererror.Warn("init topics: GetOrCreateTopic(%s): %v", collection, tErr)
 				continue
 			}
-			execRes, execErr := dm.SQLDB().Exec(
+			execRes, execErr := dm.ExecTracked(
 				`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
+				5,
 				id, topicID, now, "primary",
 			)
 			if execErr != nil {

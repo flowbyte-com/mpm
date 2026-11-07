@@ -255,12 +255,17 @@ func ProcessScheduledTasks(db *sql.DB) (int, error) {
 		// Calculate the next occurrence AFTER now. If cron became
 		// invalid mid-flight (e.g., operator typo corrected then
 		// re-typo'd), pause the task to prevent a poison-pill loop.
+		// The pause is RETURNED, not dropped: a task that should have
+		// been paused keeps running and keeps re-injecting wakes when
+		// the pause write is lost.
 		nextRun, err := CalculateNextRun(t.cronExpr, now)
 		if err != nil {
-			_, _ = tx.Exec(
+			if _, uerr := tx.Exec(
 				`UPDATE scheduled_tasks SET status = ?, updated_at = ? WHERE id = ?`,
 				ScheduledTaskPaused, now.Unix(), t.id,
-			)
+			); uerr != nil {
+				return 0, fmt.Errorf("pause poison-pill task %s: %w", t.id, uerr)
+			}
 			continue
 		}
 

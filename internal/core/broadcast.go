@@ -240,12 +240,12 @@ func (dm *DatabaseManager) BroadcastMemory(memoryID string, opts BroadcastOpts) 
 			continue
 		}
 
-		res, err := dm.db.Exec(`
+		res, err := dm.ExecTracked(`
 			INSERT OR IGNORE INTO shared.bcast_event_wakes
 				(wake_id, target_session, source_agent, memory_id, kind,
 				 content_hash, rationale, fired, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
-		`, wakeID, target.SessionID, sourceAgent, memoryID, kind,
+		`, 5, wakeID, target.SessionID, sourceAgent, memoryID, kind,
 			contentHash, rationale)
 		if err != nil {
 			// Report the per-target error but keep going.

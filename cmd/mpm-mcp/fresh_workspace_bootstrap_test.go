@@ -38,6 +38,18 @@ import (
 	"time"
 )
 
+// mcpBootstrapped reports whether the D-013 bootstrap has created both
+// directories in the workspace.
+func mcpBootstrapped(ws string) bool {
+	for _, sub := range []string{"mode", "persona"} {
+		info, err := os.Stat(filepath.Join(ws, sub))
+		if err != nil || !info.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
 // TestMcpBootstrapsModeAndPersonaDirsOnFreshWorkspace pins the D-013
 // bootstrap behaviour. Pre-fix: mpm-mcp on a fresh workspace
 // logged.Fatal'd inside NewRouter.loadComponents because os.ReadDir
@@ -82,14 +94,48 @@ func TestMcpBootstrapsModeAndPersonaDirsOnFreshWorkspace(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	select {
-	case <-done:
-		// Process exited on its own — fine, it would only do so on
-		// a fatal. We still want to inspect what the operator saw.
-	case <-time.After(800 * time.Millisecond):
-		// 800 ms is long enough for main() to walk past the DB
-		// open (line ~80 in main.go), the bootstrap loop (line
-		// ~124), and NewRouter (line ~139). Stop the process.
+
+	// Wait for the bootstrap directories to APPEAR, rather than for a
+	// fixed interval to elapse.
+	//
+	// A fixed budget is a timing assumption, and the boot is not
+	// bounded by the code: it opens a database, runs the schema
+	// initialisation and the migrations, and then builds the router.
+	// On a loaded 2-vCPU CI runner that can take longer than any
+	// constant chosen here, and the test then reports a regression
+	// that did not happen — the directories simply had not been
+	// created YET.
+	//
+	// Waiting for the effect is both faster in the normal case (the
+	// directories appear as soon as the bootstrap loop runs) and
+	// correct in the failure case (the ceiling is generous, and the
+	// process exiting early — a fatal — ends the wait immediately).
+	//
+	// The defect is pre-existing and was exposed by the CI of issue
+	// #178's bare-write slice; see
+	// docs/dev/issue-178-bare-write-audit-and-slice-1-2026-11-06.md
+	// §9.1.
+	const bootDeadline = 30 * time.Second
+	deadline := time.Now().Add(bootDeadline)
+	exited := false
+	for {
+		if mcpBootstrapped(ws) {
+			break
+		}
+		select {
+		case <-done:
+			// The process exited on its own — it would only do so
+			// on a fatal. Stop waiting; the assertions below will
+			// say what the operator saw.
+			exited = true
+		default:
+		}
+		if exited || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !exited {
 		_ = cmd.Process.Kill()
 		<-done
 	}

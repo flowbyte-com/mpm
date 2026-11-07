@@ -71,10 +71,48 @@ rb_err() {
     if declare -F err >/dev/null 2>&1; then err "$@"; else printf 'ERROR: %s\n' "$*" >&2; fi
 }
 
-# The five binaries, in the canonical promotion order. Defined once here
-# so the bundle validator, the installer and the tests cannot disagree
-# about what a complete runtime is.
-RB_BINARIES="mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry"
+# The standalone updater. It is RELEASE-SCOPED in the bundle
+# (bin/mpm-update, so it rolls back with the release and is validated
+# with everything else) AND provisioned a second time as a REAL file at
+# the top of the data root, where a version switch cannot reach it.
+#
+# WHY BOTH. The updater is the tool that repairs a broken runtime, so it
+# cannot live only inside the runtime it repairs: in the versioned layout
+# bin/ is a symlink into the active release, so a binary placed there
+# dies with that release — exactly what must not happen to the recovery
+# tool. The data-root copy is state, survives version switches, and is
+# what the operator runs directly when `current` is broken.
+RB_UPDATER_BINARY="mpm-update"
+
+# Rollback state for the standalone updater.
+#
+# The previous executable is COPIED aside (never moved out of the way)
+# and a journal records whether there was one at all. Both are created
+# before the replacement and removed only when the promotion commits, so
+# a promotion that rolls back can put the previous recovery tool back
+# exactly as it was — including the case where there was none.
+RB_UPDATER_BACKUP_NAME=".$RB_UPDATER_BINARY.previous"
+RB_UPDATER_JOURNAL_NAME=".$RB_UPDATER_BINARY.rollback"
+
+# The runtime binaries the substrate itself needs, in the canonical
+# promotion order. This is the list the Go verifier
+# (internal/update/verify.go runtimeBinaries) enforces, and the list the
+# non-bundle install path promotes. Kept separate so the difference is
+# explicit: a release built before the updater existed has these five
+# and no updater, and the updater must still be able to verify it.
+RB_CORE_BINARIES="mpm mpm-scheduler mpm-critic mpm-mcp mpm-telemetry"
+
+# The binaries a complete runtime contains: the five above plus the
+# standalone updater. Defined once here so the bundle validator, the
+# installer, the release assembler and the tests cannot disagree about
+# what a complete runtime is.
+#
+# The updater is in this list because a bundle that omitted it could
+# never provision the standalone copy: the installer would report a
+# successful install over an installation with no recovery executable,
+# and no later update could repair it (an already-current update returns
+# before the provisioning step). See rb_provision_stable_updater below.
+RB_BINARIES="$RB_CORE_BINARIES $RB_UPDATER_BINARY"
 
 # The OpenCode runtime payload manifest.
 #
@@ -96,6 +134,19 @@ RB_PAYLOAD_MANIFEST_RELPATH="scripts/runtime_payloads.json"
 # The name of the file the payloads are declared in, relative to the
 # repository root.
 RB_PAYLOAD_MANIFEST="runtime_payloads.json"
+
+# Where the declaration travels INSIDE a bundle.
+#
+# A bundle must describe its own contents. The validator that checks a
+# candidate must not depend on a source tree it does not have (a
+# downloaded release) or on a validator built from a different revision
+# than the bundle (a stale one checking a newer bundle). Shipping the
+# declaration with the thing it declares removes both dependencies.
+#
+# The Go updater reads this copy (internal/update/payload.go,
+# bundlePayloadManifestRelPath) and the shell stages it from the same
+# file, so the two producers emit the same shape.
+RB_BUNDLE_PAYLOAD_MANIFEST="agent_installation/runtime_payloads.json"
 
 # Paths a bundle must NEVER carry. These are the state half of the
 # installation; a bundle that carried them would let a version switch
@@ -299,6 +350,24 @@ rb_stage_payloads() {
         rb_log "  runtime payload staged: $staged"
     done <<< "$records"
 
+    # The bundle carries its own declaration.
+    #
+    # The staged payload is validated HERE, but the bundle is validated
+    # again later — by the installer, and by the updater, possibly by a
+    # different build of the validator. A bundle that says what it
+    # carries can be checked against its own contents; one that does
+    # not can only be checked against a list somebody else remembers.
+    local bundle_manifest="$bundle_dir/$RB_BUNDLE_PAYLOAD_MANIFEST"
+    mkdir -p "$(dirname "$bundle_manifest")" || {
+        rb_err "could not create the directory for the bundle's payload declaration"
+        return 1
+    }
+    if ! cp -p "$manifest" "$bundle_manifest"; then
+        rb_err "could not copy the runtime payload declaration into the bundle"
+        return 1
+    fi
+    rb_log "  payload declaration carried at $RB_BUNDLE_PAYLOAD_MANIFEST"
+
     rb_log "  staged $count runtime package payload(s)"
     return 0
 }
@@ -345,6 +414,219 @@ PY
 
 # ---------- validation ----------
 
+# rb_reported_commit <binary>
+#
+# The build commit a runtime binary reports about itself.
+#
+# WHY THE CONSUMER READS TO EOF
+# -----------------------------
+# The obvious way to write this is
+#
+#     "$binary" --version | awk '/commit:/{print $2; exit}'
+#
+# and it is wrong in a way that only shows up when the producer has
+# more than one thing to say. The `exit` closes the read end of the
+# pipe the moment the commit line is seen. If the producer still has
+# output to write — a second section, a trailing line, anything — that
+# write now fails with EPIPE and the producer is killed by SIGPIPE.
+#
+# Under `set -o pipefail` the pipeline's status is then the producer's
+# SIGPIPE status, 141. The statement that captures it is a bare
+# assignment under `set -e`, so 141 becomes the CALLER's exit status:
+# an installation that dies with 141 and says nothing at all about what
+# it was doing. The identity was extracted correctly; only the STATUS
+# was wrong, and the status is what killed the run.
+#
+# Reading to EOF costs one extra read and cannot change the value: the
+# FIRST commit line is still the one that is reported. The count is
+# what keeps it to the first one, and the ABSENCE of `exit` is what
+# keeps the pipe open until the producer is done.
+#
+# WHY THE PRODUCER'S STATUS IS THE HELPER'S BUSINESS
+# --------------------------------------------------
+# The probe is a pipeline, and a pipeline has no status of its own.
+# Without `pipefail` its status is the LAST command's — the parser's —
+# and with `pipefail` it is the rightmost NONZERO status, which is the
+# producer's only when the producer failed AND the parser did not.
+#
+# That made the producer's failure a property of the CALLER's shell
+# configuration rather than of the probe:
+#
+#   * `scripts/assemble-release-bundle.sh` runs with `set -u` only, so
+#     the pipeline's status was the parser's 0, and a binary that
+#     printed a valid commit and THEN failed had that commit accepted;
+#   * a helper invoked inside `if ! ...` has `errexit` SUSPENDED for
+#     its whole body, so even under `pipefail` the failed assignment
+#     did not stop `rb_validate_bundle` — the validation carried on
+#     with the very commit the failing producer had printed.
+#
+# So the two statuses are read AT THE PIPELINE BOUNDARY, inside a
+# subshell whose shell options are this helper's own: `errexit` off, so
+# the pipeline cannot abort before its statuses have been read, and the
+# producer's and the parser's statuses taken from `PIPESTATUS`
+# separately, so neither is inferred from the other. Nothing here
+# depends on the caller's `pipefail`, and nothing here turns the
+# caller's `errexit` off.
+#
+# THE CONTRACT, which is the same for every caller:
+#
+#   * 0 — the producer exited 0 and the parser exited 0. The commit is
+#     on stdout, and it is EMPTY if the producer reported no commit.
+#   * the PRODUCER's own status — the producer failed. Nothing is
+#     printed on stdout: a failed producer yields NO identity.
+#   * the PARSER's status — the parser failed.
+#
+# A caller must therefore CHECK the status, not only the value: the
+# value alone cannot distinguish "the binary reported no commit" from
+# "the binary failed to report anything at all".
+#
+# The Go mirror of these checks (internal/update/verify.go) has always
+# failed closed on a producer that exits nonzero — it treats the failed
+# run as "no commit reported" and refuses the bundle. This helper now
+# agrees with it.
+rb_reported_commit() {
+    local binary="${1:-}"
+    [ -n "$binary" ] || return 1
+
+    # `status` is the helper's own verdict; `out` is the identity, and
+    # it is printed only when the probe succeeded.
+    local out status=0
+    out="$(
+        # errexit off: the pipeline's status is read below, not acted on
+        # here. pipefail off: neither status is inferred from the
+        # pipeline's, because PIPESTATUS carries both of them.
+        set +e
+        set +o pipefail
+        "$binary" --version 2>/dev/null | awk '/commit:/{ if (count == 0) { print $2; count = 1 } }'
+        # BOTH statuses are read in ONE command: PIPESTATUS is
+        # overwritten by every command, so reading them one at a time
+        # would lose the producer's.
+        local producer_status="${PIPESTATUS[0]}" parser_status="${PIPESTATUS[1]}"
+        if [ "$producer_status" -ne 0 ]; then
+            printf 'rb_reported_commit: %s --version failed (exit %s)\n' \
+                "$binary" "$producer_status" >&2
+            exit "$producer_status"
+        fi
+        if [ "$parser_status" -ne 0 ]; then
+            printf 'rb_reported_commit: the commit parser failed (exit %s)\n' \
+                "$parser_status" >&2
+            exit "$parser_status"
+        fi
+        exit 0
+    )" || status=$?
+
+    if [ "$status" -ne 0 ]; then
+        # The reason is already on stderr. No identity is printed: a
+        # failed probe yields nothing for a caller to trust.
+        return "$status"
+    fi
+    printf '%s\n' "$out"
+    return 0
+}
+
+# rb_version_output <binary>
+#
+# The binary's own version output, fail-closed.
+#
+# WHY IT EXISTS
+# -------------
+# rb_reported_commit answers ONE question: what COMMIT does the binary
+# report? Some callers need a different answer. The rehearsal asserts
+# the IDENTITY FORMAT — "MPM 0.1.0-dev+g<short-commit>.t<build-epoch>" —
+# which is the FIRST LINE of the output and is not a field of the
+# commit. This helper returns the output itself, so the caller can take
+# what it needs from the captured string.
+#
+# WHY IT IS NOT A PIPELINE
+# -----------------------
+# rb_reported_commit is a pipeline because it PARSES while it reads.
+# This helper does not parse: it returns the output and lets the caller
+# take what it needs from the captured string afterwards. So there is no
+# pipe — and a pipe is where the SIGPIPE hazard lives (see
+# rb_reported_commit's header above). A parser that stops at the first
+# line closes the pipe, and a producer that still has output to write
+# is killed with SIGPIPE, exit 141.
+#
+# Reading the producer's output with a command substitution reads it to
+# EOF and cannot close the pipe early, so no parser can kill the
+# producer. And because the probe is a single COMMAND and not a
+# pipeline, its status IS the producer's status: there is no second
+# status to reconcile, and nothing depends on the caller's `pipefail`.
+#
+# THE CONTRACT, which is the same shape as rb_reported_commit's:
+#
+#   * 0 — the producer exited 0. The output is on stdout, and it is
+#     EMPTY if the producer reported nothing at all.
+#   * the PRODUCER's own status — the producer failed. Nothing is
+#     printed on stdout: a failed producer yields NO output.
+#
+# A caller must therefore CHECK the status, not only the value: the
+# value alone cannot distinguish "the binary reported nothing" from
+# "the binary failed to report anything at all".
+#
+# The producer's stderr is discarded, exactly as rb_reported_commit
+# discards it. A version probe reads the identity, and a diagnostic
+# line mixed into the captured output would corrupt it.
+rb_version_output() {
+    local binary="${1:-}"
+    [ -n "$binary" ] || return 1
+
+    # `out` and `status` are assigned SEPARATELY on purpose:
+    # `local out="$(...)"` would mask the command substitution's status
+    # behind `local`'s own, and the status is the whole point.
+    local out status=0
+    out="$("$binary" --version 2>/dev/null)" || status=$?
+    if [ "$status" -ne 0 ]; then
+        printf 'rb_version_output: %s --version failed (exit %s)\n' \
+            "$binary" "$status" >&2
+        return "$status"
+    fi
+    printf '%s\n' "$out"
+    return 0
+}
+
+# rb_version_first_line <binary>
+#
+# The binary's build identity — the FIRST line of its version output.
+#
+# Same contract as rb_version_output, and the same reason it exists:
+# the identity assertions match against the first line, and the first
+# line is taken from the CAPTURED output, never from a pipe. Nothing
+# closes the pipe early, so a producer that still has output to write
+# is never killed with SIGPIPE.
+#
+# For the mpm binaries the first line is the build identity:
+#
+#     MPM 0.1.0-dev+g06c029ba.t1792679720
+#
+# The telemetry sidecar prints its own heading first ("MPM · Telemetry ·
+# version"), so its first line is that heading and its build identity is
+# on a later line. That is a property of the sidecar's renderer, not of
+# this helper, and a caller that needs the sidecar's identity asks for
+# the COMMIT instead.
+rb_version_first_line() {
+    local binary="${1:-}"
+    [ -n "$binary" ] || return 1
+
+    # The probe itself is rb_version_output's, so the contract is
+    # defined once. Its diagnostic is suppressed here and replaced with
+    # one that names THIS helper — a caller that asked for the first
+    # line should not be told about rb_version_output.
+    local out status=0
+    out="$(rb_version_output "$binary" 2>/dev/null)" || status=$?
+    if [ "$status" -ne 0 ]; then
+        printf 'rb_version_first_line: %s --version failed (exit %s)\n' \
+            "$binary" "$status" >&2
+        return "$status"
+    fi
+    # The first line, taken from the captured string: everything up to
+    # the first newline. A command substitution strips trailing
+    # newlines, so a single-line output has no newline left and
+    # `%%` leaves it whole.
+    printf '%s\n' "${out%%$'\n'*}"
+    return 0
+}
+
 # rb_validate_bundle <bundle_dir> [expected_rev]
 #
 # Everything that must be true before a bundle is allowed to become the
@@ -357,11 +639,20 @@ rb_validate_bundle() {
 
     [ -d "$bundle" ] || { rb_err "bundle directory does not exist: $bundle"; return 1; }
 
-    # 1. The five binaries.
+    # 1. The runtime binaries (the five substrate binaries plus the
+    #    standalone updater — see RB_BINARIES). A release carrying no
+    #    updater would be one whose recovery executable can never be
+    #    provisioned, so its absence is a validation failure, not a
+    #    warning.
     for bin in $RB_BINARIES; do
         local p="$bundle/bin/$bin"
         if [ ! -e "$p" ]; then
             rb_err "bundle is missing bin/$bin"
+            if [ "$bin" = "$RB_UPDATER_BINARY" ]; then
+                rb_err "the updater is the recovery executable: without it a broken runtime has no"
+                rb_err "repair path, and no later update can create one (an already-current update"
+                rb_err "returns before the provisioning step)."
+            fi
             return 1
         fi
         if [ ! -f "$p" ]; then
@@ -417,10 +708,23 @@ rb_validate_bundle() {
 
     # 5. The binaries must report the revision they claim. This is the
     #    check that a bundle is not a MIX of two builds.
+    #
+    #    The probe's STATUS is checked as well as its value, and the
+    #    check is explicit (`if ! ...`) rather than implied by the
+    #    assignment's status: this function is called from inside `if
+    #    ! rb_validate_bundle ...`, and `errexit` is SUSPENDED for the
+    #    whole body of a function invoked in a condition context — so a
+    #    failed assignment would not have stopped the validation.
     local commit reported
     commit="$(rb_release_field "$bundle" commit)"
     if [ -n "$commit" ] && [ "$commit" != "unknown" ]; then
-        reported="$("$bundle/bin/mpm" --version 2>/dev/null | awk '/commit:/{print $2; exit}')"
+        reported=""
+        if ! reported="$(rb_reported_commit "$bundle/bin/mpm")"; then
+            rb_err "the bundle's mpm binary failed to report its build commit"
+            rb_err "(its --version exited nonzero — a binary that cannot report its own"
+            rb_err "identity successfully cannot be trusted to report the right one)"
+            return 1
+        fi
         if [ -z "$reported" ]; then
             rb_err "the bundle's mpm binary did not report a build commit"
             return 1
@@ -471,6 +775,235 @@ rb_install_release() {
         return 1
     }
     rb_log "  release installed at releases/$rev"
+    return 0
+}
+
+# ---------- the standalone recovery executable ----------
+
+# rb_provision_stable_updater <data_root> <release_dir> [rev]
+#
+# Install the release's updater as a REAL file at <data_root>/mpm-update,
+# beside the state rather than inside a release.
+#
+# WHY THIS EXISTS. The release bundle carries bin/mpm-update so that it
+# is versioned, validates with the rest of the runtime and rolls back
+# with it. That copy is NOT reachable as a recovery path: in the
+# versioned layout <data root>/bin is a symlink into the active release,
+# so a binary there dies with the release it is meant to repair. The
+# recovery executable must be independent of the thing it recovers, so a
+# second, stable copy is provisioned here, at the top of the data root,
+# where a version switch cannot reach it.
+#
+# ATOMICITY. The previous executable is COPIED aside and the validated
+# staged copy is renamed straight over the destination. There is no
+# interval in which <data root>/mpm-update does not exist — the recovery
+# tool must not be missing at the moment it becomes necessary. Any failure
+# removes the staged file and leaves the existing executable exactly as it
+# was. That is the difference between "the installer failed" and "the
+# installer failed and now you cannot recover either".
+#
+# Returns 0 when the data root holds a good standalone updater; non-zero
+# when it does not, having left whatever was there before untouched.
+rb_provision_stable_updater() {
+    local data_root="$1" release_dir="$2" rev="${3:-}"
+    local src="$release_dir/bin/$RB_UPDATER_BINARY"
+    local dst="$data_root/$RB_UPDATER_BINARY"
+    local stage="$data_root/.$RB_UPDATER_BINARY.stage.$$"
+    local previous="$data_root/$RB_UPDATER_BACKUP_NAME"
+    local journal="$data_root/$RB_UPDATER_JOURNAL_NAME"
+
+    # 1. The SOURCE must be the validated, executable release copy. A
+    #    bundle that reached here without it is refused rather than
+    #    silently reported as provisioned (the defect this closes: a
+    #    success banner over an installation with no recovery tool).
+    if [ ! -f "$src" ]; then
+        rb_err "the release carries no bin/$RB_UPDATER_BINARY (expected $src)"
+        rb_err "refusing to activate a runtime whose recovery executable cannot be provisioned"
+        return 1
+    fi
+    if [ ! -x "$src" ]; then
+        rb_err "the release's bin/$RB_UPDATER_BINARY is not executable"
+        return 1
+    fi
+
+    # 2. Stage beside the destination. Nothing visible has changed yet.
+    rm -f "$stage" 2>/dev/null || true
+    if ! cp "$src" "$stage"; then
+        rb_err "could not stage the standalone updater at $stage"
+        rm -f "$stage" 2>/dev/null || true
+        return 1
+    fi
+    if ! chmod 0755 "$stage"; then
+        rb_err "could not make the staged updater executable"
+        rm -f "$stage" 2>/dev/null || true
+        return 1
+    fi
+
+    # 3. VALIDATE BEFORE PROMOTION. The staged copy must be a regular,
+    #    executable, byte-identical copy of the release's updater. A
+    #    truncated or substituted copy must never reach the data root,
+    #    because this is the file an operator runs when nothing else
+    #    works.
+    local reason=""
+    if [ -L "$stage" ]; then
+        reason="the staged updater is a symlink"
+    elif [ ! -f "$stage" ]; then
+        reason="the staged updater is not a regular file"
+    elif [ ! -x "$stage" ]; then
+        reason="the staged updater is not executable"
+    elif ! cmp -s "$src" "$stage"; then
+        reason="the staged updater is not byte-identical to the release's copy"
+    fi
+    if [ -n "$reason" ]; then
+        rb_err "$reason — refusing to provision a recovery executable that could be wrong"
+        rm -f "$stage" 2>/dev/null || true
+        return 1
+    fi
+
+    # 4. PRESERVE, THEN REPLACE IN ONE RENAME.
+    #
+    #    The previous executable is COPIED aside, never moved: moving it
+    #    would leave <data root>/mpm-update absent for the interval
+    #    between the two renames, and that interval is exactly when an
+    #    operator whose runtime just failed might run it. There must be no
+    #    instant at which the recovery executable does not exist.
+    #
+    #    So: copy the old one aside (a rollback copy, not a displacement),
+    #    then rename(2) the validated staged file straight over the
+    #    destination. rename(2) is atomic, so a reader sees either the old
+    #    executable or the new one — never neither, never a truncated file.
+    #
+    #    rb_rename_over, NOT `mv -f`. GNU mv treats a destination that is a
+    #    SYMLINK TO A DIRECTORY as a directory operand and moves the source
+    #    INSIDE the linked directory, leaving the symlink in place. That is
+    #    a containment violation — the recovery executable would be written
+    #    into whatever directory the symlink named and `mpm-update` would
+    #    still not be an executable. rb_rename_over uses `mv -T` (or
+    #    os.rename), which replaces the destination entry itself.
+    local previous_state="none"
+    if [ -e "$dst" ] || [ -L "$dst" ]; then
+        if [ ! -f "$dst" ] && [ ! -L "$dst" ]; then
+            rb_err "the existing updater at $dst is neither a regular file nor a symlink"
+            rm -f "$stage" 2>/dev/null || true
+            return 1
+        fi
+        rm -f "$previous" 2>/dev/null || true
+        # -a preserves mode and symlinks as symlinks, so an odd prior
+        # state is restored faithfully rather than being normalised away.
+        #
+        # $previous is removed immediately above, so this writes into a
+        # path that does not exist: it cannot descend into a stale symlink
+        # to a directory. (A same-UID process racing that one-instruction
+        # window is outside the threat model — the bundle lock already
+        # excludes concurrent installers.)
+        if ! cp -a "$dst" "$previous"; then
+            rb_err "could not preserve the existing updater at $previous"
+            rm -f "$stage" "$previous" 2>/dev/null || true
+            return 1
+        fi
+        previous_state="previous"
+    fi
+
+    # The journal is written BEFORE the swap. A crash between the swap and
+    # the journal would otherwise leave a new executable with no record of
+    # what to put back, and the promotion's rollback would silently keep
+    # the wrong one.
+    rm -f "$journal" 2>/dev/null || true
+    if ! printf '%s\n' "$previous_state" > "$journal"; then
+        rb_err "could not record the updater rollback state at $journal"
+        rm -f "$stage" "$previous" 2>/dev/null || true
+        return 1
+    fi
+
+    if ! rb_rename_over "$stage" "$dst"; then
+        # rename(2) failed, so the destination is UNTOUCHED — the old
+        # executable is still in place. Nothing to restore.
+        rb_err "could not install the standalone updater at $dst"
+        rm -f "$stage" "$previous" "$journal" 2>/dev/null || true
+        return 1
+    fi
+
+    # 5. Read back. The provisioning step reports success only for a real
+    #    file: a symlink here would resolve into a release, which is the
+    #    failure mode this function exists to prevent.
+    if [ -L "$dst" ] || [ ! -f "$dst" ] || [ ! -x "$dst" ]; then
+        rb_err "the standalone updater at $dst is not a real executable after provisioning"
+        return 1
+    fi
+
+    rb_log "  standalone updater: $dst (real file, independent of releases/${rev:-?})"
+    return 0
+}
+
+# rb_restore_stable_updater <data_root>
+#
+# Put back whatever the last rb_provision_stable_updater replaced, using
+# the journal it wrote. Called when a promotion ROLLS BACK: the pointer
+# is being returned to the previous runtime, so the recovery executable
+# must be returned with it — otherwise the installation is left with a
+# recovery tool from a release that is no longer active.
+#
+# A first installation is the interesting case: the journal says "none",
+# and the restored state is "no standalone updater". Removing it is
+# correct, not destructive — there was nothing there before.
+#
+# Returns 0 when the data root matches its pre-provisioning state (or when
+# provisioning never ran), non-zero when it does not.
+#
+# The restore uses rb_rename_over for the same reason provisioning does: a
+# destination that is a symlink to a directory must be REPLACED, not
+# entered. A saved state that was itself a symlink is restored as that
+# exact symlink, because the journal's copy was taken with `cp -a` (which
+# does not dereference).
+rb_restore_stable_updater() {
+    local data_root="$1"
+    local dst="$data_root/$RB_UPDATER_BINARY"
+    local previous="$data_root/$RB_UPDATER_BACKUP_NAME"
+    local journal="$data_root/$RB_UPDATER_JOURNAL_NAME"
+
+    # No journal: provisioning never reached the swap, so the destination
+    # is whatever it was. Nothing to undo.
+    [ -e "$journal" ] || return 0
+
+    local state
+    state="$(cat "$journal" 2>/dev/null || true)"
+    case "$state" in
+        previous)
+            if [ ! -e "$previous" ] && [ ! -L "$previous" ]; then
+                rb_err "the journal says a previous updater existed but $previous is gone"
+                return 1
+            fi
+            if ! rb_rename_over "$previous" "$dst"; then
+                rb_err "could not restore the previous updater from $previous"
+                return 1
+            fi
+            rb_log "  recovery executable restored to its previous version"
+            ;;
+        none)
+            # `rm` never follows a symlink operand, so this removes the
+            # entry (real file or link) and never touches anything it
+            # pointed at.
+            rm -f "$dst" 2>/dev/null || true
+            rb_log "  recovery executable removed (there was none before this promotion)"
+            ;;
+        *)
+            rb_err "unreadable updater rollback journal at $journal (content: ${state:-<empty>})"
+            return 1
+            ;;
+    esac
+    rm -f "$journal" 2>/dev/null || true
+    return 0
+}
+
+# rb_commit_stable_updater <data_root>
+#
+# Drop the rollback state once a promotion has fully committed. Until this
+# runs, the previous executable and its journal are the material a
+# rollback needs.
+rb_commit_stable_updater() {
+    local data_root="$1"
+    rm -f "$data_root/$RB_UPDATER_BACKUP_NAME" 2>/dev/null || true
+    rm -f "$data_root/$RB_UPDATER_JOURNAL_NAME" 2>/dev/null || true
     return 0
 }
 

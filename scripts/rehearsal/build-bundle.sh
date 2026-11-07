@@ -114,6 +114,22 @@ if [ "$staged_count" -eq 0 ]; then
   exit 1
 fi
 
+# ── the bundle carries its own declaration ───────────────────────────────
+#
+# The same file the bundle was staged from travels inside the bundle, so
+# a validator can check the bundle against its own contents instead of
+# against a list somebody else remembers. The path is defined once, in
+# the shared library, and the Go updater reads the same one.
+mkdir -p "$(dirname "$DEST/$RB_BUNDLE_PAYLOAD_MANIFEST")" || {
+  echo "build-bundle: could not create the directory for the bundle's payload declaration" >&2
+  exit 1
+}
+cp -p "$MANIFEST_FILE" "$DEST/$RB_BUNDLE_PAYLOAD_MANIFEST" || {
+  echo "build-bundle: could not copy the runtime payload declaration into the bundle" >&2
+  exit 1
+}
+echo "  [stage] payload declaration carried at $RB_BUNDLE_PAYLOAD_MANIFEST"
+
 # ── the build identity ────────────────────────────────────────────────────
 cat > "$DEST/RELEASE.json" <<EOF
 {

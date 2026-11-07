@@ -96,7 +96,9 @@ What the script does, in order:
 ### 1b. Validate
 
 ```bash
-./install.sh --validate       # same checks the install script runs
+./install.sh --validate              # same checks the install script runs
+./install.sh --validate --bundle     # bundle layout: also verifies the standalone
+                                     # recovery executable at ~/.mpm/mpm-update
 ```
 
 Or manually:

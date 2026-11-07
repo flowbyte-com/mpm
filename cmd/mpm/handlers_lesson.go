@@ -9,6 +9,8 @@ import (
 
 	"github.com/flowbyte-com/mpm-core"
 
+	"github.com/flowbyte-com/mpm-core/usererror"
+
 	"github.com/flowbyte-com/mpm/cmd/mpm/render"
 )
 
@@ -54,7 +56,14 @@ func handleLesson(args []string) int {
 	case "stats":
 		return handleLessonStats()
 	default:
-		return handleLessonHelp()
+		// An unrecognised subcommand is an error, not a help page.
+		// The router skips the first token for subcommand families
+		// so the dispatcher reports it (see cli_options_registry.go);
+		// printing help with exit 0 here swallowed the mistake, so
+		// `mpm lesson --bogus` SUCCEEDED. Mirrors handleOps.
+		usererror.Error("mpm lesson: unknown subcommand %q", subCmd)
+		handleLessonHelp()
+		return 1
 	}
 }
 

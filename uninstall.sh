@@ -346,6 +346,17 @@ build_plan() {
         fi
     done
 
+    # 3b. The standalone updater's convenience link names the DATA-ROOT
+    #     copy, not $PREFIX/bin, so it needs its own ownership check.
+    #     A real file at that path is never removed: the installer would
+    #     not have created one.
+    local updater_link="$LOCAL_BIN/mpm-update"
+    if [ -L "$updater_link" ] && verify_owned_symlink "$updater_link" "$DATA_ROOT/mpm-update"; then
+        PLAN_RUNTIME_SYMLINKS+=("$updater_link")
+    elif [ -e "$updater_link" ] || [ -L "$updater_link" ]; then
+        warn "skipping $updater_link — does not point at $DATA_ROOT/mpm-update (refusing to delete foreign executable)"
+    fi
+
     # 4. Installed binaries.
     #
     # THE BUNDLE LAYOUT IS A DIFFERENT SHAPE. In the versioned-bundle
@@ -388,7 +399,15 @@ build_plan() {
                 warn "refusing to remove release-scoped paths: the data root '$DATA_ROOT' is not a usable root"
                 ;;
             *)
-                for bundle_runtime in "$DATA_ROOT/current" "$DATA_ROOT/releases" "$DATA_ROOT/staging"; do
+                # The standalone recovery executable lives at the data
+                # root as a REAL file, so it is not covered by the
+                # symlink or releases steps. It is release-scoped
+                # runtime (a copy of a release's mpm-update), never
+                # operator state, so it is removed with the rest of the
+                # runtime. Leaving it behind would be a stray executable
+                # that a fresh install of an older release would have to
+                # reason about.
+                for bundle_runtime in "$DATA_ROOT/current" "$DATA_ROOT/releases" "$DATA_ROOT/staging" "$DATA_ROOT/mpm-update"; do
                     case "$bundle_runtime" in
                         "$DATA_ROOT"/*) ;;
                         *)

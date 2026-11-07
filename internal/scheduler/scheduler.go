@@ -275,7 +275,7 @@ func New(db *sql.DB, log *slog.Logger) (*Scheduler, error) {
 	// bounded (LIMIT 100) and runs in its own transaction so a
 	// backlog drains over multiple ticks without ever blocking a
 	// single tick. See wake_expiration.go for the full contract.
-	s.RegisterTickHandler("notification_expiration", NotificationExpirationTickHandler(context.Background(), db))
+	s.RegisterTickHandler("notification_expiration", NotificationExpirationTickHandler(context.Background(), db, log))
 	// Register the cron-retention sweep (also wake_expiration.go)
 	// for the bounded retirement of cron-kind bookkeeping rows.
 	// This sweep is cadence-gated (every 60min) inside its own
@@ -331,7 +331,27 @@ func (s *Scheduler) Close() error {
 // Register attaches a HandlerFunc for the given wake kind. Registering
 // overwrites any previous handler for that kind. Adding a new system kind
 // is a one-line operation; central dispatch never needs editing.
+//
+// A kind that belongs to the AGENT's notification surface is REFUSED.
+// The agent's kinds are delivered and retired by the opportunistic
+// fold; a handler for one of them would execute the same wake twice —
+// once by the fold, once by the scheduler.
+//
+// The refusal is logged rather than silent, and it leaves the kind
+// unhandled, so the misconfiguration is visible in the daemon's log
+// instead of being discovered as a wake that ran twice.
+//
+// The boundary is defined in the core module (core.WakeKindAgentOwned)
+// because the fold lives there and the two halves must not drift.
 func (s *Scheduler) Register(kind string, h HandlerFunc) {
+	if core.WakeKindAgentOwned(kind) {
+		if s.log != nil {
+			s.log.Error("refusing to register a handler for an agent-owned wake kind",
+				"kind", kind,
+				"reason", "the opportunistic fold delivers and retires this kind; a handler would execute the same wake twice")
+		}
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.handlers[kind] = h
@@ -358,11 +378,19 @@ func (s *Scheduler) RegisterTickHandler(name string, fn func(ctx context.Context
 // wakes must remain available for the fold until the user/agent
 // acknowledges them.
 func (s *Scheduler) QueryDueWakes(now time.Time) ([]Wake, error) {
+	// A CORRUPT ROW IS NOT A DUE WAKE. The reader parses the metadata
+	// with encoding/json, and a corrupt document fails to parse, so the
+	// row would read as kind "notification" — a kind no handler owns, and
+	// a scheduler-owned row would be silently reclassified as an
+	// ordinary notification. Excluding corrupt rows here means the
+	// scheduler never sees a row whose owner it cannot determine, and
+	// never executes or settles one.
 	rows, err := s.db.Query(
 		`SELECT id, target_time, reason, COALESCE(theory_id,''),
 		        created_by, created_at, COALESCE(metadata,'')
 		 FROM scheduled_wakes
 		 WHERE fired = 0 AND target_time <= ?
+		   AND NOT `+core.WakeMetadataIsCorrupt+`
 		 ORDER BY target_time ASC`,
 		now.Unix(),
 	)
@@ -647,6 +675,25 @@ func (s *Scheduler) hasHandler(kind string) bool {
 // deadline is the soonest moment the dispatcher could possibly
 // claim. Returns time.Time{} (zero) when nothing is pending.
 //
+// The filter is core.WakeNotificationKindFilter, which reads the kind
+// through an always-valid-JSON extraction: json_extract() RAISES on
+// malformed JSON, so an unguarded call would abort this query on a
+// single corrupt metadata row — and this query's error is logged and
+// swallowed by scheduleNextDeadline, which then falls back to the
+// plain interval. One malformed row would therefore cost the
+// scheduler its deadline-driven wake-up for as long as the row
+// survives. The always-valid form reads a malformed document as
+// untagged (i.e. as a notification) and raises on nothing.
+//
+// THE CORRUPT ROWS ARE EXCLUDED, and the exclusion is load-bearing.
+// This query must match dispatchClaimNextAdHocWake's WHERE clause
+// EXACTLY, and the claim does not take a corrupt row. A corrupt row
+// that stayed in this query would arm the timer at its (past)
+// target_time, the dispatcher would drain nothing, and the cycle
+// would repeat at zero delay — the 100% CPU wedge this filter
+// exists to prevent. A corrupt row is owned by no partition, so it
+// is not a notification, and it is not a deadline.
+//
 // `now` is currently unused by the SQL but kept in the signature so
 // future implementations can substitute server-side clock if the
 // database clock drifts.
@@ -656,13 +703,8 @@ func (s *Scheduler) computeEarliestDeadline(ctx context.Context, now time.Time) 
 		SELECT MIN(t) FROM (
 			SELECT target_time AS t FROM scheduled_wakes
 			WHERE fired = 0
-			  AND (
-			    metadata IS NULL
-			    OR metadata = ''
-			    OR json_extract(metadata, '$.kind') IS NULL
-			    OR json_extract(metadata, '$.kind') = ''
-			    OR json_extract(metadata, '$.kind') = 'notification'
-			  )
+			  AND `+core.WakeNotificationKindFilter+`
+			  AND NOT `+core.WakeMetadataIsCorrupt+`
 			UNION ALL
 			SELECT next_run_at AS t FROM scheduled_tasks WHERE status = 'active'
 		)

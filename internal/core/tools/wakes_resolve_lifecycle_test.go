@@ -12,11 +12,14 @@
 //   - Idempotent: re-running on an already-fired wake      → already_resolved (no new audit row)
 //   - Wake not found                                       → wake_not_found
 //   - Invalid reason enum                                  → invalid_reason
-//   - Row whose metadata.kind is a non-wake kind
-//     (e.g. "cron")                                        → not_a_wake
-//     (the row is a scheduled_tasks-owned row; the surface
-//   refuses to retire it because scheduled tasks have their
-//   own lifecycle (`delete_task` / `upsert_task`).)
+//   - Row whose metadata.kind is a SCHEDULER-owned kind
+//     (e.g. "cascade_summary")                            → not_a_wake
+//     (the scheduler owns it and runs it through a registered
+//     handler; the agent may not retire it.)
+//   - Row whose metadata is not a parseable JSON document → corrupt_metadata
+//     (issue #178, W4: the row's owner cannot be determined, so the
+//     agent may not retire it. The row is not written, so its
+//     original bytes survive.)
 //
 // 2026-09-29: the non-wake discriminator is metadata.kind, NOT the
 // absence of it. Rows with `kind` absent (NULL, empty, or `{}`)
@@ -27,7 +30,16 @@
 // in internal/core/wake_lifecycle_d1_test.go. The fixture below
 // previously inserted a kind-less row and expected a refusal, which
 // contradicted that contract since D-1 landed; it now inserts the
-// real scheduled-task shape (an explicit non-wake kind).
+// real non-agent-owned shape (an explicit scheduler-owned kind).
+//
+// 2026-11-04 (wake-ownership correction): the discriminator is now the
+// shared wake-ownership policy (WakeKindAgentOwned) — the same one the
+// arming gate and the opportunistic fold use. Two kinds moved: `cron`
+// is AGENT-owned (the fold delivers it, and it carries the
+// directive_id the agent must consult) and is therefore resolvable;
+// `cascade_summary` is SCHEDULER-owned and is therefore NOT. The
+// refusal message no longer points at `delete_task`, which never
+// applied to a scheduled_wakes row.
 //
 // The reason taxonomy is canonical:
 //
@@ -79,9 +91,10 @@ func seedCascadeWake(t *testing.T, dm *internal.DatabaseManager, reason string) 
 	return id
 }
 
-// seedScheduleTaskOwnedRow inserts a row carrying an explicit
-// non-wake `metadata.kind` — the shape of a row owned by
-// scheduled_tasks rather than the wakes lifecycle.
+// seedSchedulerOwnedRow inserts a row carrying a SCHEDULER-owned
+// `metadata.kind` — the shape of a row the scheduler dispatches
+// through a registered handler, and which the agent may therefore
+// NOT retire.
 //
 // 2026-09-29: this fixture previously inserted metadata with no
 // `kind` at all and asserted that such a row is refused as
@@ -92,19 +105,27 @@ func seedCascadeWake(t *testing.T, dm *internal.DatabaseManager, reason string) 
 // test's success=false assertion failed, and the following
 // `m["error"].(string)` type assertion then panicked on the absent
 // error field. The fixture now writes the real discriminator the
-// resolver keys on: an explicit non-wake kind ("cron"), matching
-// TestD1_ResolveWake_RejectsScheduledTaskKind in
+// resolver keys on: an explicit non-agent-owned kind.
+//
+// 2026-11-04 (wake-ownership correction): the fixture's kind was
+// "cron", on the theory that a cron row belongs to `delete_task`. A
+// cron wake is a `scheduled_wakes` row and `delete_task` does not
+// apply to it; under the wake-ownership model `cron` is AGENT-owned
+// and IS resolvable. The fixture now uses `cascade_summary`, which
+// the scheduler dispatches through a registered handler — the exact
+// class of row the agent must not be able to retire. Matching
+// TestD1_ResolveWake_RejectsSchedulerOwnedKind in
 // internal/core/wake_lifecycle_d1_test.go.
-func seedScheduleTaskOwnedRow(t *testing.T, dm *internal.DatabaseManager) string {
+func seedSchedulerOwnedRow(t *testing.T, dm *internal.DatabaseManager) string {
 	t.Helper()
 	now := timeNowUnixForResolve()
-	id := "task-row-" + internal.GenerateID()
+	id := "scheduler-row-" + internal.GenerateID()
 	_, err := dm.SQLDB().Exec(`
 		INSERT INTO scheduled_wakes
 			(id, target_time, reason, theory_id, recurring_rule, fired, fired_at, created_by, metadata)
-		VALUES (?, ?, 'cron:epistemic-compaction', NULL, NULL, 0, NULL, 'mpm-scheduler',
-		        '{"kind":"cron","directive_id":"mpm-seed-epistemic-compaction-policy","expired":{}}')
-	`, id, now)
+		VALUES (?, ?, ?, NULL, NULL, 0, NULL, 'mpm-scheduler',
+		        '{"kind":"cascade_summary"}')
+	`, id, now, "cascade summary wake row")
 	require.NoError(t, err)
 	return id
 }
@@ -246,18 +267,25 @@ func TestWakesResolve_RequiresReason(t *testing.T) {
 	assert.Contains(t, err.Error(), "reason is required")
 }
 
-// TestWakesResolve_RejectsScheduleTaskRows pins the safety
-// boundary: a row whose metadata.kind is a non-wake kind (here
-// "cron") is owned by the scheduled_tasks surface, NOT the wakes
-// surface, and must NOT be retire-able from mpm_wakes resolve.
-// Mixing the two surfaces would let an agent accidentally retire a
-// recurring schedule.
-func TestWakesResolve_RejectsScheduleTaskRows(t *testing.T) {
+// TestWakesResolve_RejectsSchedulerOwnedRows pins the ownership
+// boundary: a row whose metadata.kind is a SCHEDULER-owned kind (here
+// "cascade_summary", which the scheduler dispatches through a
+// registered handler) must NOT be retire-able from mpm_wakes resolve.
+//
+// 2026-11-04 (wake-ownership correction): this test used to use
+// "cron" and to assert that the refusal redirected the caller to
+// `delete_task`. Both halves were wrong: a cron wake is a
+// `scheduled_wakes` row the agent owns and may retire, and
+// `delete_task` is the surface for `scheduled_tasks` rows — a
+// different table entirely. The refusal now says what is actually
+// true: the row belongs to the scheduler, so the agent cannot retire
+// it.
+func TestWakesResolve_RejectsSchedulerOwnedRows(t *testing.T) {
 	dm := newTestSharedDM(t)
-	taskID := seedScheduleTaskOwnedRow(t, dm)
+	ownedID := seedSchedulerOwnedRow(t, dm)
 
 	res, err := handleResolveWake(dm, defaultACForPatch(), map[string]interface{}{
-		"wake_id": taskID,
+		"wake_id": ownedID,
 		"reason":  "superseded",
 	})
 	require.NoError(t, err)
@@ -276,17 +304,18 @@ func TestWakesResolve_RejectsScheduleTaskRows(t *testing.T) {
 	errMsg, ok := m["error"].(string)
 	require.True(t, ok,
 		"refusal envelope must carry a string \"error\" field; got %#v", m["error"])
-	assert.Contains(t, strings.ToLower(errMsg),
-		"scheduled task",
-		"refusal message must redirect operators to the scheduled-task surface")
+	assert.Contains(t, strings.ToLower(errMsg), "scheduler-owned",
+		"refusal message must say the row belongs to the scheduler")
+	assert.NotContains(t, strings.ToLower(errMsg), "delete_task",
+		"the refusal must not point at delete_task: a scheduler-owned wake is not a scheduled_tasks row")
 
-	// The schedule row must NOT have been flipped to fired=1.
+	// The row must NOT have been flipped to fired=1.
 	var fired int
 	require.NoError(t, dm.SQLDB().QueryRow(
-		`SELECT fired FROM scheduled_wakes WHERE id = ?`, taskID,
+		`SELECT fired FROM scheduled_wakes WHERE id = ?`, ownedID,
 	).Scan(&fired))
 	assert.Equal(t, 0, fired,
-		"schedule-task row must remain unfired after a refused resolve")
+		"a scheduler-owned row must remain unfired after a refused resolve")
 }
 
 // seedKindlessWake inserts a legacy wake row whose metadata carries no
@@ -372,6 +401,61 @@ func TestWakesResolve_KindlessRowsRemainResolvable(t *testing.T) {
 	}
 }
 
+// TestWakesResolve_RefusesCorruptMetadata pins the W4 corruption
+// policy at the agent-facing surface.
+//
+// A row whose metadata is present, non-empty and NOT a parseable JSON
+// document has an owner that cannot be determined: the truncated
+// prefix '{"kind": "snapshot"' names a snapshot row, and it cannot be
+// read back as one. Reading it as untagged would make it an
+// agent-owned notification wake the agent may retire — which would
+// suppress a scheduler handler that never ran.
+//
+// The resolver therefore refuses it with its own status,
+// "corrupt_metadata", and leaves the row untouched: the refusal is a
+// refusal, not a repair, so the original bytes survive for the
+// operator.
+func TestWakesResolve_RefusesCorruptMetadata(t *testing.T) {
+	dm := newTestSharedDM(t)
+
+	const corruptMetadata = `{"kind": "snapshot"`
+	wakeID := "corrupt-" + internal.GenerateID()
+	now := timeNowUnixForResolve()
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO scheduled_wakes
+			(id, target_time, reason, theory_id, recurring_rule, fired, fired_at, created_by, metadata)
+		VALUES (?, ?, ?, NULL, NULL, 0, NULL, 'legacy-test', ?)
+	`, wakeID, now, "corrupt metadata wake", corruptMetadata)
+	require.NoError(t, err)
+
+	res, err := handleResolveWake(dm, defaultACForPatch(), map[string]interface{}{
+		"wake_id": wakeID,
+		"reason":  "reconciled",
+	})
+	require.NoError(t, err)
+	m, ok := res.(map[string]interface{})
+	require.True(t, ok, "handler must return a result map; got %T", res)
+
+	assert.Equal(t, false, m["success"], "a corrupt row must not resolve")
+	assert.Equal(t, "corrupt_metadata", m["status"],
+		"a corrupt row must be refused with its own status, not not_a_wake")
+	errMsg, ok := m["error"].(string)
+	require.True(t, ok, "refusal envelope must carry a string \"error\" field; got %#v", m["error"])
+	assert.Contains(t, strings.ToLower(errMsg), "corrupt",
+		"the refusal message must name the corruption")
+
+	// THE ROW IS UNTOUCHED. Not retired, and its bytes intact.
+	var fired int
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT fired FROM scheduled_wakes WHERE id = ?`, wakeID).Scan(&fired))
+	assert.Equal(t, 0, fired, "a refused corrupt row must remain unfired")
+	var meta string
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT metadata FROM scheduled_wakes WHERE id = ?`, wakeID).Scan(&meta))
+	assert.Equal(t, corruptMetadata, meta,
+		"the corrupt row's original bytes must be preserved")
+}
+
 // TestWakesResolve_RejectionEnvelopeAlwaysCarriesError pins that every
 // refusal envelope is well-formed: a string "error" field naming the
 // cause. A refusal that omits its cause is a malformed result that
@@ -396,23 +480,23 @@ func TestWakesResolve_RejectionEnvelopeAlwaysCarriesError(t *testing.T) {
 	require.True(t, ok, "refusal envelope must carry a string error field; got %#v", m["error"])
 	assert.NotEmpty(t, errMsg, "refusal error must not be empty")
 
-	// not_a_wake — schedule-owned row.
-	taskID := seedScheduleTaskOwnedRow(t, dm)
+	// not_a_wake — a scheduler-owned row.
+	ownedID := seedSchedulerOwnedRow(t, dm)
 	res, err = handleResolveWake(dm, defaultACForPatch(), map[string]interface{}{
-		"wake_id": taskID,
+		"wake_id": ownedID,
 		"reason":  "superseded",
 	})
 	require.NoError(t, err)
 	m, ok = res.(map[string]interface{})
 	require.True(t, ok, "refusal must be a result map; got %T", res)
-	assert.Equal(t, false, m["success"], "schedule row must not report success")
+	assert.Equal(t, false, m["success"], "a scheduler-owned row must not report success")
 	assert.Equal(t, "not_a_wake", m["status"])
 	errMsg, ok = m["error"].(string)
 	require.True(t, ok, "refusal envelope must carry a string error field; got %#v", m["error"])
 	assert.NotEmpty(t, errMsg, "refusal error must not be empty")
-	// The refusal must point at the surface that actually owns the row.
-	assert.Contains(t, strings.ToLower(errMsg), "delete_task",
-		"refusal must redirect the operator to the scheduled-task surface")
+	// The refusal must say who owns the row.
+	assert.Contains(t, strings.ToLower(errMsg), "scheduler-owned",
+		"refusal must say the row belongs to the scheduler")
 }
 
 // TestWakesResolve_AllCanonicalReasonsAccepted pins the full reason

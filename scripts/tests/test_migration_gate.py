@@ -45,7 +45,18 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 INSTALL_SH = REPO_ROOT / "install.sh"
 
-BINARIES = ("mpm", "mpm-scheduler", "mpm-critic", "mpm-mcp", "mpm-telemetry")
+BINARIES = (
+    "mpm",
+    "mpm-scheduler",
+    "mpm-critic",
+    "mpm-mcp",
+    "mpm-telemetry",
+    # The standalone updater is part of a complete bundle (see
+    # RB_BINARIES in scripts/lib/runtime_bundle.sh). It is carried in
+    # bin/ so it validates and rolls back with the release, and copied
+    # to the data-root top level as the recovery executable.
+    "mpm-update",
+)
 
 # The commit the fake binaries claim to be built from.
 FAKE_COMMIT = "1a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d"
@@ -63,6 +74,7 @@ BUNDLE_STEPS = (
     "install",
     "activate",
     "convert",
+    "updater",
 )
 
 STRIP_PATTERNS = (

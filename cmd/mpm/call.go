@@ -88,9 +88,9 @@ read_handoff, which the registered mpm_context action enum does not
 contain.
 
 Friendly CLI commands follow the Unix convention directly: validation
-failures print a human message on stderr and exit non-zero. Bare
-unknown tokens are the one exception — they fall through to
-smart-recall search (exit 0 on empty results) by design.
+failures print a human message on stderr and exit non-zero. Unknown
+commands are rejected the same way — they never fall through to a
+search and never execute a neighbouring command.
 `)
 		return 1
 	}
@@ -251,7 +251,7 @@ smart-recall search (exit 0 on empty results) by design.
 	// Audit insert is best-effort and panic-isolated; failure here does
 	// NOT affect the call's exit code or downstream error handling. See
 	// audit_hook.go for the isolation guarantees.
-	recordToolInvocation(dm.SQLDB(), ac, resolvedName, payload,
+	recordToolInvocation(dm, ac, resolvedName, payload,
 		startedAt, completedAt, extractAction(payload), auditStatus(err), err)
 	if err != nil {
 		// Structured error envelope. Both success and error envelopes route
@@ -558,7 +558,7 @@ func runHandler(dm *mpminternal.DatabaseManager, name string, payload map[string
 	startedAt := time.Now()
 	result, err := tool.Handler(dm, ac, payload)
 	completedAt := time.Now()
-	recordToolInvocation(dm.SQLDB(), ac, name, payload,
+	recordToolInvocation(dm, ac, name, payload,
 		startedAt, completedAt, extractAction(payload), auditStatus(err), err)
 	return result, err
 }

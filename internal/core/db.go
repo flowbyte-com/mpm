@@ -605,8 +605,16 @@ func (dm *DatabaseManager) BusyRetryCount() uint64 {
 //   - page_count, freelist_count: from PRAGMA page_count / freelist_count
 //   - memories_active: count of non-deleted memories
 //   - theories_pending: count of pending theories
+//   - wakes_corrupt_metadata: count of scheduled_wakes rows whose metadata
+//     is present, non-empty and NOT a parseable JSON document. Such a row
+//     is owned by NO partition (issue #178, W4): it is never delivered,
+//     claimed, retired or resolved, and its original bytes are preserved
+//     because they are the only evidence of what it was. The counter is
+//     the always-available operator signal for "a row needs attention".
 //   - wakes_overdue: count of actionable unfired wakes whose target_time < now
-//     (notification, cascade, or untagged; cron-kind bookkeeping is
+//     (notification, cascade, or untagged; a corrupt row is NOT counted,
+//     because no surface will ever deliver it and the count would never
+//     fall; cron-kind bookkeeping is
 //     excluded — it is retained and boundedly swept by the cron
 //     retention sweep in internal/scheduler/wake_expiration.go)
 //   - busy_retries: lifetime SQLITE_BUSY retry counter (process-local)
@@ -709,7 +717,8 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 	}{
 		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND ` + DirectiveExclusionClause},
 		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > strftime('%s','now')) AND json_extract(metadata, '$.status') = 'pending'`},
-		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND (metadata IS NULL OR metadata = '' OR json_extract(metadata, '$.kind') IS NULL OR json_extract(metadata, '$.kind') = '' OR json_extract(metadata, '$.kind') IN ('notification','cascade'))`},
+		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND ` + WakeNotificationAndCascadeKindFilter + ` AND NOT ` + WakeMetadataIsCorrupt},
+		{"wakes_corrupt_metadata", `SELECT COUNT(*) FROM scheduled_wakes WHERE ` + WakeMetadataIsCorrupt},
 		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
 	}
 	now := time.Now().Unix()
@@ -739,7 +748,8 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 //
 // The map-shape is preserved for compatibility with the doctor
 // renderer, which reads fields by name (ok, page_count, freelist_count,
-// memories_active, theories_pending, wakes_overdue, evidence_total,
+// memories_active, theories_pending, wakes_overdue, wakes_corrupt_metadata,
+// evidence_total,
 // busy_retries, db_path, db_path_raw, shared_attached, shared_path).
 // New fields (`warnings`, `journal_mode`) are additive; existing
 // field semantics are unchanged.
@@ -852,7 +862,8 @@ func (dm *DatabaseManager) HealthCheckReadOnly() (ReadOnlyHealthCheck, error) {
 	}{
 		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND ` + DirectiveExclusionClause},
 		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > strftime('%s','now')) AND json_extract(metadata, '$.status') = 'pending'`},
-		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND (metadata IS NULL OR metadata = '' OR json_extract(metadata, '$.kind') IS NULL OR json_extract(metadata, '$.kind') = '' OR json_extract(metadata, '$.kind') IN ('notification','cascade'))`},
+		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND ` + WakeNotificationAndCascadeKindFilter + ` AND NOT ` + WakeMetadataIsCorrupt},
+		{"wakes_corrupt_metadata", `SELECT COUNT(*) FROM scheduled_wakes WHERE ` + WakeMetadataIsCorrupt},
 		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
 	}
 	now := time.Now().Unix()
@@ -2108,7 +2119,7 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 	// the plain filename (escape single quotes in the path) for maximum
 	// compatibility — the mattn/go-sqlite3 driver accepts both.
 	stmt := fmt.Sprintf("ATTACH DATABASE '%s' AS shared", strings.ReplaceAll(sharedPath, "'", "''"))
-	if _, err := dm.db.Exec(stmt); err != nil {
+	if _, err := dm.ExecTracked(stmt, 5); err != nil {
 		return fmt.Errorf("ATTACH: %w", err)
 	}
 
@@ -2136,7 +2147,7 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 		// Rewrite "CREATE TABLE foo" to "CREATE TABLE shared.foo". The
 		// FTS5 virtual tables and triggers remain in the local DB.
 		sharedDDL := rewriteTablePrefix(ddl, "shared.")
-		if _, err := dm.db.Exec(sharedDDL); err != nil {
+		if _, err := dm.ExecTracked(sharedDDL, 5); err != nil {
 			slog.Warn("shared table DDL failed",
 				"sql_prefix", sharedDDLTruncate(sharedDDL, 60), "error", err.Error())
 		}
@@ -2162,7 +2173,7 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 			continue
 		}
 		sharedDDL := rewriteIndexPrefix(ddl, "shared.")
-		if _, err := dm.db.Exec(sharedDDL); err != nil {
+		if _, err := dm.ExecTracked(sharedDDL, 5); err != nil {
 			slog.Warn("shared index DDL failed",
 				"sql_prefix", sharedDDLTruncate(sharedDDL, 60), "error", err.Error())
 		}
@@ -2189,7 +2200,7 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 	`).Scan(&hasOldSchema); err != nil {
 		slog.Warn("shared FTS5 migration: schema probe failed, skipping detection", "error", err.Error())
 	} else if hasOldSchema > 0 {
-		if _, err := dm.db.Exec(`DROP TABLE shared.memories_fts`); err != nil {
+		if _, err := dm.ExecTracked(`DROP TABLE shared.memories_fts`, 5); err != nil {
 			slog.Warn("shared FTS5 migration: failed to drop old contentless schema",
 				"error", err.Error())
 		} else {
@@ -2227,12 +2238,12 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 	// The AFTER INSERT/UPDATE/DELETE triggers below restore the
 	// structural invariant "if it is in shared.memories, it is
 	// searchable" — the only sane guarantee for autonomous agents.
-	if _, err := dm.db.Exec(`
+	if _, err := dm.ExecTracked(`
 		CREATE VIRTUAL TABLE IF NOT EXISTS shared.memories_fts USING fts5(
 			content, collection, session_id UNINDEXED, tags UNINDEXED,
 			tokenize='porter unicode61'
 		)
-	`); err != nil {
+	`, 5); err != nil {
 		slog.Warn("shared FTS5 virtual table creation failed", "error", err.Error())
 	}
 
@@ -2273,7 +2284,7 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 		END;`,
 	}
 	for _, t := range sharedTriggers {
-		if _, err := dm.db.Exec(t); err != nil {
+		if _, err := dm.ExecTracked(t, 5); err != nil {
 			slog.Warn("shared FTS trigger installation failed",
 				"sql_prefix", sharedDDLTruncate(t, 60), "error", err.Error())
 		}
@@ -2284,7 +2295,7 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 	// mirror.jsonl stays as the forensic detection trail; this table
 	// is the operational state machine that the resolve-contradictions
 	// command reads. The DDL is idempotent (CREATE TABLE IF NOT EXISTS).
-	if _, err := dm.db.Exec(SharedContradictionLogDDL); err != nil {
+	if _, err := dm.ExecTracked(SharedContradictionLogDDL, 5); err != nil {
 		slog.Warn("shared.contradiction_log DDL failed",
 			"error", err.Error())
 	}
@@ -2295,7 +2306,7 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 	// the fan-out surface itself; the agents cache is the cross-reboot
 	// identity stable enough to aggregate "how often does agent X
 	// broadcast" without collapsing session rows.
-	if _, err := dm.db.Exec(SharedBcastSessionsDDL); err != nil {
+	if _, err := dm.ExecTracked(SharedBcastSessionsDDL, 5); err != nil {
 		slog.Warn("shared.sessions DDL failed",
 			"error", err.Error())
 	}
@@ -2328,10 +2339,10 @@ func (dm *DatabaseManager) attachShared(sharedPath string) error {
 			continue
 		}
 		alter := fmt.Sprintf("ALTER TABLE shared.%s ADD COLUMN %s %s", m[0], m[1], m[2])
-		if _, err := dm.db.Exec(alter); err != nil {
-			if !isDuplicateColumnError(err) {
+		if out := execTracked(dm.db, alter, 5, func() { dm.busyRetries.Add(1) }); out.Err != nil {
+			if !isDuplicateColumnError(out.Err) {
 				slog.Warn("shared migration failed",
-					"table", m[0], "column", m[1], "error", err.Error())
+					"table", m[0], "column", m[1], "error", out.Err.Error())
 			}
 		}
 	}
@@ -2925,7 +2936,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 
 	// Use shared schema definitions from schema.go
 	for _, sqlQuery := range BaseTables {
-		if _, err := dm.db.Exec(sqlQuery); err != nil {
+		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
 			return fmt.Errorf("failed to execute SQL: %w\nSQL: %s", err, sqlQuery)
 		}
 	}
@@ -2935,27 +2946,50 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// on a DatabaseManager wrapping a tmpfile; there is no separate
 	// ReferenceDB type or connection to keep in sync.
 	for _, sqlQuery := range ReferenceTables {
-		if _, err := dm.db.Exec(sqlQuery); err != nil {
+		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
 			return fmt.Errorf("failed to execute reference schema: %w\nSQL: %s", err, sqlQuery)
 		}
 	}
 
 	// Blob storage table — MCP result spilling (Phase 1 pointer architecture).
 	for _, sqlQuery := range BlobsTable {
-		if _, err := dm.db.Exec(sqlQuery); err != nil {
+		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
 			return fmt.Errorf("failed to execute blob schema: %w\nSQL: %s", err, sqlQuery)
 		}
 	}
 
 	// Work items table
 	for _, sqlQuery := range WorkTables {
-		if _, err := dm.db.Exec(sqlQuery); err != nil {
+		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
 			return fmt.Errorf("failed to execute work schema: %w\nSQL: %s", err, sqlQuery)
 		}
 	}
 
+	// Skill Package storage — LOCAL-ONLY.
+	//
+	// This slice is deliberately NOT part of BaseTables: attachShared
+	// rewrites every `CREATE TABLE` in BaseTables to `shared.<name>` and
+	// runs it against the attached shared database, so a package table
+	// declared there would be created as `shared.skill_packages` in EVERY
+	// shared database. Package bytes live in the local substrate; the
+	// `.skill` archive is the transport, not the shared schema.
+	//
+	// The tables are created empty and stay empty: this is storage only.
+	// No reader, writer, importer or exporter for them exists yet — the
+	// import/export paths are later stages of the approved Skill Packages
+	// design (PR #222, §10).
+	//
+	// The slice is applied here, alongside ReferenceTables and WorkTables,
+	// and outside the attachShared loops. The invariant is pinned by
+	// TestSkillPackageTablesAreLocalOnly.
+	for _, sqlQuery := range SkillPackageTables {
+		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
+			return fmt.Errorf("failed to execute skill package schema: %w\nSQL: %s", err, sqlQuery)
+		}
+	}
+
 	for _, sqlQuery := range ReferenceIndexes {
-		if _, err := dm.db.Exec(sqlQuery); err != nil {
+		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
 			return fmt.Errorf("failed to execute reference index: %w\nSQL: %s", err, sqlQuery)
 		}
 	}
@@ -2968,9 +3002,9 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		if m[0] == "lessons" {
 			continue // lessons: handled by migrateLessonsToView before rename; skip here
 		}
-		if _, err := dm.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2])); err != nil {
-			if !isDuplicateColumnError(err) {
-				slog.Warn("migration failed", "table", m[0], "column", m[1], "error", err.Error())
+		if out := execTracked(dm.db, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", m[0], m[1], m[2]), 5, func() { dm.busyRetries.Add(1) }); out.Err != nil {
+			if !isDuplicateColumnError(out.Err) {
+				slog.Warn("migration failed", "table", m[0], "column", m[1], "error", out.Err.Error())
 			}
 		}
 	}
@@ -3015,8 +3049,12 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		return fmt.Errorf("migrateEvidenceWorkType: %w", err)
 	}
 
-	// Backfill: set updated_at = created_at for rows migrated without updated_at
-	dm.db.Exec(`UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL`)
+	// Backfill: set updated_at = created_at for rows migrated without updated_at.
+	// Best-effort (a later write sets updated_at anyway), but a persistent
+	// failure would leave NULLs behind, so it warns instead of vanishing.
+	if _, err := dm.ExecTracked(`UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL`, 5); err != nil {
+		slog.Warn("migration backfill failed", "table", "memories", "column", "updated_at", "error", err.Error())
+	}
 
 	// Use shared index definitions. Skip any index that targets a view — SQLite
 	// rejects indexed views and "views may not be indexed" errors would pollute stderr.
@@ -3132,6 +3170,29 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("scheduled_wakes dispatched_at migration failed: %w", err)
 	}
+	// 2026-11-04, issue #178 Stage A (M1): the delivery-state axis on
+	// scheduled_wakes — five nullable columns (delivery_state,
+	// lease_expires_at, claimed_by, claimed_at, delivered_at) and the
+	// partial index idx_sw_delivery_claim.
+	//
+	// STRICTLY ADDITIVE and BEHAVIOUR-NEUTRAL: no row is modified, no
+	// backfill runs, and no reader, writer or predicate changes. The
+	// axis is carried by columns nothing reads yet.
+	//
+	// It runs HERE, inside the FATAL migration transaction, and NOT in
+	// SafeMigrations: that loop is best-effort and silences errors (it
+	// only warns), and a silently-missing column is far worse than a
+	// failed open. A failure rolls the whole migration back and
+	// NewDatabaseManager returns an error.
+	//
+	// The base DDL is deliberately unchanged: dispatched_at and
+	// fired_by are migration-only columns too, so a fresh database and
+	// a migrated one have identical schemas produced by one code path.
+	// See migration_scheduled_wakes_delivery_state.go.
+	if err := MigrateScheduledWakesDeliveryState(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("scheduled_wakes delivery_state migration failed: %w", err)
+	}
 	// Positive-direction (constructive) cascade: polarity column on
 	// epistemic_provenance. Idempotent via the schema_migrations sentinel
 	// pattern. See migration_epistemic_provenance_polarity.go for the
@@ -3202,6 +3263,26 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("tags JSON normalize migration failed: %w", err)
 	}
+	// Project-Scoped Continuity, Stage 1 — the additive four-table
+	// storage: projects, project_names, continuity_threads,
+	// continuity_checkpoints. The DDL and the sentinel share THIS
+	// transaction, so a failure at either rolls the whole thing back
+	// and NewDatabaseManager returns an error rather than leaving a
+	// half-migrated database.
+	//
+	// The tables are NOT in BaseTables on purpose: BaseTables is the
+	// slice attachShared propagates into the cross-workspace `shared`
+	// schema (db.go:2132, db.go:2160), and project identity must stay
+	// inside one workspace. Idempotent via the
+	// continuity_project_model_v1 sentinel.
+	//
+	// See internal/core/migration_continuity_project_model.go for the
+	// DDL's provenance (it is byte-for-byte §4.1 of the approved
+	// architecture) and for why the sentinel is written last.
+	if err := MigrateContinuityProjectModel(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("continuity project model migration failed: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
 	}
@@ -3219,10 +3300,10 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// covers fresh DBs, and this ALTER covers existing databases
 	// whose lessons_base was created by an earlier boot. Idempotent
 	// via isDuplicateColumnError.
-	if _, err := dm.db.Exec(`ALTER TABLE lessons_base ADD COLUMN deleted_at INTEGER`); err != nil {
-		if !isDuplicateColumnError(err) {
+	if out := execTracked(dm.db, `ALTER TABLE lessons_base ADD COLUMN deleted_at INTEGER`, 5, func() { dm.busyRetries.Add(1) }); out.Err != nil {
+		if !isDuplicateColumnError(out.Err) {
 			slog.Warn("migrateLessonsToView: post-add deleted_at failed",
-				"error", err.Error())
+				"error", out.Err.Error())
 		}
 	}
 
@@ -3300,7 +3381,7 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// they reference a `confidence_recompute` SQL function that no longer
 	// exists and would fail every INSERT into `evidence`.
 	for _, name := range []string{"evidence_ai", "evidence_au", "evidence_ad"} {
-		if _, err := dm.SQLDB().Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, name)); err != nil {
+		if _, err := dm.ExecTracked(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, name), 5); err != nil {
 			return fmt.Errorf("drop ghost trigger %s: %w", name, err)
 		}
 	}
@@ -3603,7 +3684,9 @@ func (dm *DatabaseManager) migrateLessonsToView() {
 		// ALTER in initUnifiedSchema.
 		{"deleted_at", "INTEGER"},
 	} {
-		dm.db.Exec(fmt.Sprintf("ALTER TABLE lessons ADD COLUMN %s %s", col.name, col.def))
+		if out := execTracked(dm.db, fmt.Sprintf("ALTER TABLE lessons ADD COLUMN %s %s", col.name, col.def), 5, func() { dm.busyRetries.Add(1) }); out.Err != nil && !isDuplicateColumnError(out.Err) {
+			slog.Warn("migrateLessonsToView: inline add column failed", "column", col.name, "error", out.Err.Error())
+		}
 	}
 
 	// Steps 2–5 run inside ONE transaction. SQLite DDL is transactional,
@@ -3764,7 +3847,9 @@ func createLessonsViewAndTriggers(q execQuerier) error {
 //     lessons_base, drop the shadow table, and build the real view + triggers.
 func (dm *DatabaseManager) finishOrRepairLessonsView() {
 	for _, old := range []string{"lessons_ai", "lessons_ad", "lessons_au"} {
-		dm.db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, old))
+		if _, err := dm.ExecTracked(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, old), 5); err != nil {
+			slog.Warn("finishOrRepairLessonsView: drop legacy trigger failed", "trigger", old, "error", err.Error())
+		}
 	}
 
 	// 2026-09-10 lesson lifecycle fix: ensure deleted_at exists on
@@ -3773,10 +3858,10 @@ func (dm *DatabaseManager) finishOrRepairLessonsView() {
 	// branch covers the case where lessons_base already existed
 	// (and was renamed from `lessons` by a prior boot) without the
 	// tombstone. Idempotent via isDuplicateColumnError.
-	if _, err := dm.db.Exec(`ALTER TABLE lessons_base ADD COLUMN deleted_at INTEGER`); err != nil {
-		if !isDuplicateColumnError(err) {
+	if out := execTracked(dm.db, `ALTER TABLE lessons_base ADD COLUMN deleted_at INTEGER`, 5, func() { dm.busyRetries.Add(1) }); out.Err != nil {
+		if !isDuplicateColumnError(out.Err) {
 			slog.Warn("migrateLessonsToView: repair add deleted_at failed",
-				"error", err.Error())
+				"error", out.Err.Error())
 		}
 	}
 
@@ -3825,7 +3910,9 @@ func (dm *DatabaseManager) finishOrRepairLessonsView() {
 			slog.Warn("migrateLessonsToView: repair lessons_fts creation failed", "error", err.Error())
 		}
 		for _, trig := range []string{"lessons_instead_of_insert", "lessons_instead_of_update", "lessons_instead_of_delete"} {
-			dm.db.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, trig))
+			if _, err := dm.ExecTracked(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s`, trig), 5); err != nil {
+				slog.Warn("migrateLessonsToView: drop trigger for repair failed", "trigger", trig, "error", err.Error())
+			}
 		}
 		if err := createLessonsViewAndTriggers(dm.db); err != nil {
 			fmt.Fprintf(os.Stderr, "migrateLessonsToView: trigger repair failed: %v\n", err)
@@ -4058,12 +4145,13 @@ func (dm *DatabaseManager) initFTSTables() error {
 		// Drop the old FTS table. Triggers reference it and will
 		// re-fire on subsequent writes; backfill below catches
 		// existing rows.
-		if _, err := dm.db.Exec(`DROP TABLE memories_fts`); err != nil {
+		if _, err := dm.ExecTracked(`DROP TABLE memories_fts`, 5); err != nil {
 			slog.Warn("mpm: FTS5 migration failed to drop old table", "error", err.Error())
 		} else {
 			// Recreate with the new schema (tags indexed, no UNINDEXED).
-			if _, err := dm.db.Exec(
+			if _, err := dm.ExecTracked(
 				`CREATE VIRTUAL TABLE memories_fts USING fts5(content, collection, session_id UNINDEXED, tags, tokenize='porter unicode61')`,
+				5,
 			); err != nil {
 				slog.Warn("mpm: FTS5 migration failed to recreate", "error", err.Error())
 			} else {
@@ -4073,9 +4161,10 @@ func (dm *DatabaseManager) initFTSTables() error {
 				// memories table's rowid so the sync triggers' DELETE-by-rowid
 				// works. The previous `SELECT id` put a TEXT hex id into rowid,
 				// which coerced to 0 and aborted the statement on the second row.
-				if _, err := dm.db.Exec(
+				if _, err := dm.ExecTracked(
 					`INSERT INTO memories_fts(rowid, content, collection, session_id, tags)
 					 SELECT rowid, content, collection, session_id, tags FROM memories WHERE deleted_at IS NULL`,
+					5,
 				); err != nil {
 					slog.Warn("mpm: FTS5 migration backfill failed", "error", err.Error())
 				} else {
@@ -4107,7 +4196,7 @@ func (dm *DatabaseManager) initFTSTables() error {
 	}
 
 	for _, sqlQuery := range ftsStatements {
-		if _, err := dm.db.Exec(sqlQuery); err != nil {
+		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
 			// FTS5 init is best-effort: never let one failed CREATE block
 			// the others. Each statement targets a different FTS module
 			// and they don't depend on each other (the triggers fire on
@@ -8274,12 +8363,12 @@ func (dm *DatabaseManager) migrateWorkEvents() error {
 		`CREATE INDEX IF NOT EXISTS idx_work_events_invocation ON work_events(invocation_id);`,
 	}
 	for _, idx := range indexes {
-		if _, err := dm.db.Exec(idx); err != nil {
+		if _, err := dm.ExecTracked(idx, 5); err != nil {
 			return fmt.Errorf("create work_events index: %w", err)
 		}
 	}
 	// Drop legacy session index if column no longer exists (ignore error)
-	_, _ = dm.db.Exec(`DROP INDEX IF EXISTS idx_work_events_session`)
+	_, _ = dm.ExecTracked(`DROP INDEX IF EXISTS idx_work_events_session`, 5)
 
 	// Step 3: seed initial created events for existing works rows that have not
 	// yet been migrated. The migrated_at IS NULL predicate makes this idempotent,

@@ -37,7 +37,14 @@ func handleTopic(args []string) int {
 	case "list":
 		return handleTopicList(args[1:])
 	default:
-		return handleTopicHelp()
+		// An unrecognised subcommand is an error, not a help page.
+		// The router skips the first token for subcommand families
+		// so the dispatcher reports it (see cli_options_registry.go);
+		// printing help with exit 0 here swallowed the mistake, so
+		// `mpm topic --bogus` SUCCEEDED. Mirrors handleOps.
+		usererror.Error("mpm topic: unknown subcommand %q", subCmd)
+		handleTopicHelp()
+		return 1
 	}
 }
 

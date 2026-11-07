@@ -110,9 +110,10 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 	// created_at so the 7d rolling-window reset (see
 	// upsertClusterCounter) uses the same moment as the event.
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
-	if _, err := dm.db.Exec(
+	if _, err := dm.ExecTracked(
 		`INSERT INTO system_audit_log (id, level, component, message, stack_trace, context, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		5,
 		GenerateID(), string(level), component, message,
 		sql.NullString{String: truncateStack(stack, 4000), Valid: stack != ""},
 		ctxJSON, now,
@@ -190,12 +191,13 @@ func (dm *DatabaseManager) LogAuditForInvocation(
 		}
 	}
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
-	if _, err := dm.db.Exec(
+	if _, err := dm.ExecTracked(
 		`INSERT INTO system_audit_log
 		    (id, level, component, message, stack_trace, context, created_at,
 		     invocation_id, mpm_session_id, framework_name,
 		     framework_session_id, event_code)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		5,
 		GenerateID(), string(level), component, message,
 		sql.NullString{String: truncateStack(stack, 4000), Valid: true},
 		ctxJSON, now,
