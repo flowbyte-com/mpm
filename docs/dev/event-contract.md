@@ -739,7 +739,7 @@ placeholder** — only a capability-report entry (§5).
 |---|---|---|---|
 | `session.started` | an observable session-creation signal | a session was created | may legitimately carry a null `framework_session_id` if the host gives none — then it is a **degraded** observation and is flagged, not fabricated. **Startup race (measured):** the host creates the adapter's *own* first session *before* the adapter's iterator starts consuming, so that one creation event may never arrive. Its absence must **not** be read as "no session started", and it must **not** be inferred — `session.observed` is the unconditional base type. |
 | `session.observed` | any host event that carries a session id | the adapter saw an event for this session | the neutral alternative to `session.started` when the host exposes no creation signal |
-| `context.changed` | `experimental.chat.system.transform` | the system-prompt context was assembled | **already registered** by the plugin |
+| `context.changed` | `experimental.chat.system.transform` | the system-prompt context was assembled | the plugin registers this capability as `ctx.session.hook("context")` — `experimental.chat.system.transform` is the OpenCode **V1** hook name, which OpenCode 2 cannot load (see `docs/dev/session-c-host-findings.md` §4.1–§4.5) |
 | `tool.outcome` | a host tool-execution signal | a host tool call completed | distinct from MPM's own `tool_invocations` row: the former is the *host's* observation, the latter is *MPM's* audit of its own dispatch |
 | `task.boundary` | the `mpm_work` lifecycle | a tracked work item was created / completed / cancelled | `works` + `work_events` already exist |
 | `compaction.started` | a compaction hook | compaction began | highest-risk type; depends entirely on §5 |

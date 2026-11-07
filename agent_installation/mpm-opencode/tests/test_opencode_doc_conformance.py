@@ -64,6 +64,7 @@ RESOLVER_SOURCE = SCRIPT_DIR / "src" / "resolve-mpm-binary.ts"
 WORKSPACE_SOURCE = SCRIPT_DIR / "src" / "workspace.ts"
 PACKAGE_JSON = SCRIPT_DIR / "package.json"
 ADAPTER_README = SCRIPT_DIR / "README.md"
+SNIPPET = SCRIPT_DIR / "templates" / "AGENTS.md.snippet"
 INSTALL_DOC = AGENT_INSTALLATION / "INSTALL.md"
 BUNDLE_README = AGENT_INSTALLATION / "README.md"
 RENDERER = AGENT_INSTALLATION / "scripts" / "render_managed_blocks.py"
@@ -660,6 +661,296 @@ class DocumentationAgreesWithSource(unittest.TestCase):
         self.assertFalse(
             "There is no shell-based `install.sh` for this adapter" in self.adapter_readme,
             "the adapter README still denies that install.sh exists",
+        )
+
+
+def _strip_comments(text: str) -> str:
+    """Return the source with its comments removed.
+
+    Used where a guard must reason about what the code DOES rather
+    than about what the code SAYS about itself. A plugin header that
+    documents a hook name is not a registration of it.
+    """
+    out = []
+    in_block = False
+    for line in text.splitlines():
+        if in_block:
+            if "*/" in line:
+                line = line.split("*/", 1)[1]
+                in_block = False
+            else:
+                continue
+        while "/*" in line:
+            before, after = line.split("/*", 1)
+            if "*/" in after:
+                line = before + after.split("*/", 1)[1]
+            else:
+                line = before
+                in_block = True
+                break
+        idx = line.find("//")
+        if idx >= 0:
+            line = line[:idx]
+        out.append(line)
+    return "\n".join(out)
+
+
+class ManagedSnippetNamesTheLiveHook(unittest.TestCase):
+    """The managed snippet must name the hook the plugin ACTUALLY registers.
+
+    The managed block is delivered into EVERY agent's system prompt, on
+    every turn, forever. It used to name
+
+        experimental.chat.system.transform
+
+    — the OpenCode **V1** hook name. The V1 plugin is kept only as a
+    historical reference; OpenCode 2 cannot load it, and the loadable
+    plugin registers `ctx.session.hook("context")` instead. The snippet
+    therefore described a hook that does not exist, in the one surface
+    every agent reads.
+
+    The hook name is DERIVED from the plugin source rather than
+    hardcoded here, so a future change to the registered hook is caught
+    by this guard instead of silently diverging from the instructions.
+
+    The derivation reads the plugin's CODE, not its comments. The
+    plugin's own header comment carries an architectural mapping that
+    mentions `ctx.session.hook("context")` — a mention, not a
+    registration. Deriving from comments would let the guard pass
+    after the real registration was deleted.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.plugin = PLUGIN_SOURCE.read_text()
+        cls.plugin_code = _strip_comments(cls.plugin)
+        cls.snippet = SNIPPET.read_text()
+
+    def test_the_live_session_hook_is_named(self) -> None:
+        hooks = re.findall(
+            r'ctx\.session\.hook\(\s*"([^"]+)"', self.plugin_code
+        )
+        self.assertTrue(
+            hooks,
+            "no ctx.session.hook(\"...\") found in the plugin's CODE — the "
+            "hook's shape changed and this guard would pass vacuously",
+        )
+        for hook in hooks:
+            self.assertIn(
+                f'ctx.session.hook("{hook}")',
+                self.snippet,
+                "the rendered managed snippet does not name the session hook "
+                f"the plugin registers (ctx.session.hook(\"{hook}\"))",
+            )
+
+    def test_no_unlabelled_v1_hook_name_in_the_snippet(self) -> None:
+        # The V1 names may appear, but only where the text says they are
+        # historical — the same rule the adapter README and INSTALL.md
+        # already carry.
+        for v1 in ("experimental.chat.system.transform", "shell.env"):
+            for paragraph in _paragraphs(self.snippet):
+                if v1 not in paragraph:
+                    continue
+                self.assertRegex(
+                    paragraph,
+                    r"(?i)\bV1\b|historical|not loadable",
+                    f"the rendered managed snippet mentions the retired hook "
+                    f"'{v1}' without labelling it as historical: "
+                    f"{paragraph.strip()[:120]!r}",
+                )
+
+    def test_no_v1_hook_name_in_the_canonical_source(self) -> None:
+        # The canonical source is the operator-facing copy/paste
+        # procedure. It must not send an operator looking for a hook the
+        # shipped plugin does not register.
+        canonical = (AGENT_INSTALLATION / "MPM_AGENT_INTEGRATION_SNIPPETS.md").read_text()
+        section = _section(canonical, "OpenCode")
+        for v1 in ("experimental.chat.system.transform",):
+            self.assertNotIn(
+                v1,
+                section,
+                f"the canonical source's OpenCode section names the retired "
+                f"hook '{v1}' — the shipped plugin registers "
+                f"ctx.session.hook(\"context\")",
+            )
+
+
+class PluginWakesDescriptionNamesTheOwnershipRefusals(unittest.TestCase):
+    """The plugin's `mpm_wakes` description must name the same refusals
+    as the registry's.
+
+    WHY THIS EXISTS
+    ---------------
+    The registry's `mpm_wakes` description and the plugin's are two
+    copies of one contract, for two transports. The existing V1/V2
+    byte-identity rule keeps the two PLUGIN copies together; nothing
+    kept the plugin and the REGISTRY together.
+
+    That gap showed: the registry's description was corrected to name
+    the `corrupt_metadata` refusal, and the plugin's was corrected for
+    `corrupt_metadata` only — it still did not name `not_a_wake`, the
+    refusal an agent hits most often (the wake is scheduler-owned).
+    An OpenCode agent therefore got a different contract from a
+    `mpm call` agent, from the same substrate.
+
+    WHAT THIS PINS
+    --------------
+    The set of refusal statuses named in the registry's `mpm_wakes`
+    description and the set named in the plugin's are EQUAL, and
+    non-empty. The statuses are DERIVED from the two descriptions, so
+    a refusal added to one surface and forgotten on the other fails
+    here instead of drifting.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.registry_desc = cls._registry_description("mpm_wakes")
+        cls.plugin_desc = _tool_descriptions(PLUGIN_SOURCE).get("mpm_wakes", "")
+
+    @staticmethod
+    def _registry_description(tool: str) -> str:
+        """The registered description literal for one registry tool."""
+        src = REGISTRY_SOURCE.read_text()
+        m = re.search(r'\n\t\tName: "%s",' % re.escape(tool), src)
+        assert m, "the registry does not register %s" % tool
+        body = src[m.start():]
+        d = re.search(r"Description:\s*`([^`]*)`", body, re.S)
+        assert d, "the registry entry for %s has no description" % tool
+        return d.group(1)
+
+    @staticmethod
+    def _named_statuses(text: str) -> set[str]:
+        """The refusal statuses a description names.
+
+        The pattern is "status <name>". The prose also contains
+        "success=false with a status and leaves the row untouched", so
+        the English connective that follows a bare "status" is dropped
+        — otherwise it would be compared as if it were a status.
+        """
+        found = set(re.findall(r"status ([a-z_]+)", text))
+        found.discard("and")
+        return found
+
+    def test_the_registry_description_was_found(self) -> None:
+        self.assertTrue(
+            self.registry_desc.strip(),
+            "the registry's mpm_wakes description was not found",
+        )
+        self.assertTrue(
+            self.plugin_desc.strip(),
+            "the plugin's mpm_wakes description was not found",
+        )
+
+    def test_both_descriptions_name_the_same_refusals(self) -> None:
+        registry = self._named_statuses(self.registry_desc)
+        plugin = self._named_statuses(self.plugin_desc)
+        self.assertTrue(
+            registry,
+            "the registry's mpm_wakes description names no refusal status — "
+            "this guard would compare two empty sets and pass vacuously",
+        )
+        self.assertEqual(
+            registry,
+            plugin,
+            "the registry's mpm_wakes description names the refusal "
+            f"statuses {sorted(registry)}, but the plugin's names "
+            f"{sorted(plugin)}. The two surfaces teach different contracts "
+            f"for the same tool.",
+        )
+
+
+class PluginTheoriesDescriptionNamesTheOutcome(unittest.TestCase):
+    """The plugin's `mpm_theories` resolve line must name the OUTCOME param.
+
+    WHY THIS EXISTS
+    ---------------
+    The plugin's tool descriptions ARE the contract for an OpenCode
+    agent: the host publishes a generic passthrough envelope
+    (`params: {type: object, ...}`), so the prose is the only place the
+    required params and their vocabulary appear.
+
+    The resolve line used to read:
+
+        resolve — Resolve a pending theory. Required params.theoryId,
+        params.conclusion ("confirmed"|"disproven"). Optional:
+        params.newStatus ("proven"|"disproven"), params.winner_id.
+
+    That attaches the OUTCOME ENUM to `conclusion`. The handler has
+    always read `conclusion` as free text — what the evidence showed —
+    and taken the outcome from `status`. So an agent that followed the
+    line sent the outcome in the wrong field and was refused:
+
+        resolve theory: status is required and must be 'proven' or 'disproven'
+
+    The registry's published schema and the contract table were both
+    corrected to the handler's real requirements; this third surface
+    was not, so the plugin taught a call that fails.
+
+    WHAT THIS PINS
+    --------------
+    The plugin's resolve line names `params.status` as the outcome, and
+    does not attach an inline enum to `params.conclusion`. The canonical
+    `params.id` leads, with the alias named beside it, so the alias is
+    still discoverable.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.description = _tool_descriptions(PLUGIN_SOURCE).get("mpm_theories", "")
+
+    def _resolve_line(self) -> str:
+        m = re.search(r"^\s*resolve\s+—.*$", self.description, re.M)
+        self.assertIsNotNone(
+            m,
+            "the plugin's mpm_theories description has no resolve action line",
+        )
+        return m.group(0)
+
+    def test_the_description_was_found(self) -> None:
+        self.assertTrue(
+            self.description.strip(),
+            "the plugin's mpm_theories description was not found",
+        )
+
+    def test_the_resolve_line_names_the_identity_param(self) -> None:
+        line = self._resolve_line()
+        self.assertIn(
+            "params.id",
+            line,
+            "the plugin's mpm_theories resolve line does not name "
+            "params.id. The canonical identity param is `id`; the "
+            "handler reads `id` first, and only falls back to the "
+            "aliases.",
+        )
+        self.assertIn(
+            "params.theoryId",
+            line,
+            "the plugin's mpm_theories resolve line does not name the "
+            "params.theoryId alias. The alias is still supported by the "
+            "handler, so an agent that only knows the alias must not be "
+            "told it does not exist.",
+        )
+
+    def test_the_resolve_line_names_the_outcome_param(self) -> None:
+        line = self._resolve_line()
+        self.assertIn(
+            "params.status",
+            line,
+            "the plugin's mpm_theories resolve line does not name "
+            "params.status as the outcome. The handler reads the outcome "
+            "from `status`, so an agent that does not know about it sends "
+            "the outcome in the wrong field and is refused.",
+        )
+
+    def test_the_outcome_enum_is_not_attached_to_conclusion(self) -> None:
+        line = self._resolve_line()
+        self.assertIsNone(
+            re.search(r"conclusion\s*\(\s*\"", line),
+            "the plugin's mpm_theories resolve line attaches an inline enum "
+            "to params.conclusion. The handler reads `conclusion` as free "
+            "text and takes the outcome from `status`, so an enum on "
+            f"conclusion tells the agent to put the outcome in the wrong "
+            f"field: {line.strip()!r}",
         )
 
 

@@ -5466,7 +5466,9 @@ func handleHealthCheck(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 //     max_batches_reached, where work may remain.
 //   - batches_processed: count of batches that committed a lesson.
 //   - raw_processed: sum of compacted raw memories across all batches.
-//   - lessons_created: equal to batches_processed on success.
+//   - lessons_created: always 0. The compaction records its synthesis
+//     as lesson PROPOSALS, not trusted lessons, so the derived
+//     proposals_created / proposal_ids carry the count.
 //   - raw_remaining: live read of the pressure view after the loop.
 //     Counts every un-compacted memory, INCLUDING rows a refusal has
 //     deferred. It is the right number for "how much is in the pool"
@@ -6618,9 +6620,11 @@ func handleResolveWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 		// refusal machine-readable too.
 		//
 		// corrupt_metadata is the W4 refusal (issue #178): a row whose
-		// metadata is not a parseable JSON document has an owner that
-		// cannot be determined, so the agent may not retire it. The
-		// row is NOT written, so its original bytes survive.
+		// metadata is present, non-empty and not a parseable JSON
+		// document has an owner that cannot be determined, so the agent
+		// may not retire it. The row is NOT written, so its original
+		// bytes survive. Absent or empty metadata is NOT corrupt — it
+		// reads as untagged, which is agent-owned.
 		return map[string]interface{}{
 			"success": false,
 			"status":  status,
