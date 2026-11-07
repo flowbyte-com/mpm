@@ -76,6 +76,25 @@
 
 set -uo pipefail
 
+# ---------------------------------------------------------------- the helpers
+
+# The release-identity probe.
+#
+# The report below asks the mpm binary what revision it is. The probe is
+# the SAME one the release-identity check uses, and it is fail-closed: a
+# binary that prints a revision and then FAILS has not reported a
+# revision, and the report must not say otherwise. The pipeline that
+# stood here before ended in an awk `exit`, which closed the pipe at the
+# match — the shape issue #217 removed from the release-identity probe,
+# and the shape issue #221 found still standing here. (Issue #221.)
+#
+# The library is sourced, not copied: the probe's contract must be the
+# contract, and a second copy of it would be a second thing to keep in
+# step with the first.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/lib/runtime_bundle.sh
+. "$SCRIPT_DIR/lib/runtime_bundle.sh"
+
 # ---------------------------------------------------------------- defaults
 
 MPM_WORKSPACE="${MPM_WORKSPACE:-$HOME/.mpm}"
@@ -259,7 +278,18 @@ if has_table lesson_proposals; then
 fi
 echo "  schema        : ${SCHEMA_VERSION}"
 if [[ -x "$MPM_BIN" ]]; then
-	RUNTIME_REV="$("$MPM_BIN" version 2>/dev/null | awk '/^  commit:/ {print $2; exit}')"
+	# The probe is FAIL-CLOSED, and it is the same probe the release
+	# identity check uses (scripts/lib/runtime_bundle.sh): a binary that
+	# prints a revision and THEN FAILS has not reported a revision, and
+	# the report must not say otherwise. The old pipeline here ended in
+	# an awk `exit`, which closed the pipe at the match — the shape
+	# issue #217 removed from the release-identity probe. (Issue #221.)
+	RUNTIME_REV=""
+	RUNTIME_REV_RC=0
+	RUNTIME_REV="$(rb_reported_commit "$MPM_BIN")" || RUNTIME_REV_RC=$?
+	if [[ "$RUNTIME_REV_RC" -ne 0 ]]; then
+		gap "the mpm binary's version could not be read (exit $RUNTIME_REV_RC) — the revision of ${MPM_BIN} is unknown"
+	fi
 	echo "  mpm binary   : ${RUNTIME_REV:-unreported}  ($MPM_BIN)"
 	echo "                  (used for the wake reconstruction; the SCHEMA line"
 	echo "                   above describes the SNAPSHOT, not this binary)"

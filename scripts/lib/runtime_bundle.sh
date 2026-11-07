@@ -524,6 +524,109 @@ rb_reported_commit() {
     return 0
 }
 
+# rb_version_output <binary>
+#
+# The binary's own version output, fail-closed.
+#
+# WHY IT EXISTS
+# -------------
+# rb_reported_commit answers ONE question: what COMMIT does the binary
+# report? Some callers need a different answer. The rehearsal asserts
+# the IDENTITY FORMAT — "MPM 0.1.0-dev+g<short-commit>.t<build-epoch>" —
+# which is the FIRST LINE of the output and is not a field of the
+# commit. This helper returns the output itself, so the caller can take
+# what it needs from the captured string.
+#
+# WHY IT IS NOT A PIPELINE
+# -----------------------
+# rb_reported_commit is a pipeline because it PARSES while it reads.
+# This helper does not parse: it returns the output and lets the caller
+# take what it needs from the captured string afterwards. So there is no
+# pipe — and a pipe is where the SIGPIPE hazard lives (see
+# rb_reported_commit's header above). A parser that stops at the first
+# line closes the pipe, and a producer that still has output to write
+# is killed with SIGPIPE, exit 141.
+#
+# Reading the producer's output with a command substitution reads it to
+# EOF and cannot close the pipe early, so no parser can kill the
+# producer. And because the probe is a single COMMAND and not a
+# pipeline, its status IS the producer's status: there is no second
+# status to reconcile, and nothing depends on the caller's `pipefail`.
+#
+# THE CONTRACT, which is the same shape as rb_reported_commit's:
+#
+#   * 0 — the producer exited 0. The output is on stdout, and it is
+#     EMPTY if the producer reported nothing at all.
+#   * the PRODUCER's own status — the producer failed. Nothing is
+#     printed on stdout: a failed producer yields NO output.
+#
+# A caller must therefore CHECK the status, not only the value: the
+# value alone cannot distinguish "the binary reported nothing" from
+# "the binary failed to report anything at all".
+#
+# The producer's stderr is discarded, exactly as rb_reported_commit
+# discards it. A version probe reads the identity, and a diagnostic
+# line mixed into the captured output would corrupt it.
+rb_version_output() {
+    local binary="${1:-}"
+    [ -n "$binary" ] || return 1
+
+    # `out` and `status` are assigned SEPARATELY on purpose:
+    # `local out="$(...)"` would mask the command substitution's status
+    # behind `local`'s own, and the status is the whole point.
+    local out status=0
+    out="$("$binary" --version 2>/dev/null)" || status=$?
+    if [ "$status" -ne 0 ]; then
+        printf 'rb_version_output: %s --version failed (exit %s)\n' \
+            "$binary" "$status" >&2
+        return "$status"
+    fi
+    printf '%s\n' "$out"
+    return 0
+}
+
+# rb_version_first_line <binary>
+#
+# The binary's build identity — the FIRST line of its version output.
+#
+# Same contract as rb_version_output, and the same reason it exists:
+# the identity assertions match against the first line, and the first
+# line is taken from the CAPTURED output, never from a pipe. Nothing
+# closes the pipe early, so a producer that still has output to write
+# is never killed with SIGPIPE.
+#
+# For the mpm binaries the first line is the build identity:
+#
+#     MPM 0.1.0-dev+g06c029ba.t1792679720
+#
+# The telemetry sidecar prints its own heading first ("MPM · Telemetry ·
+# version"), so its first line is that heading and its build identity is
+# on a later line. That is a property of the sidecar's renderer, not of
+# this helper, and a caller that needs the sidecar's identity asks for
+# the COMMIT instead.
+rb_version_first_line() {
+    local binary="${1:-}"
+    [ -n "$binary" ] || return 1
+
+    # The probe itself is rb_version_output's, so the contract is
+    # defined once. Its diagnostic is suppressed here and replaced with
+    # one that names THIS helper — a caller that asked for the first
+    # line should not be told about rb_version_output.
+    local out status=0
+    out="$(rb_version_output "$binary" 2>/dev/null)" || status=$?
+    if [ "$status" -ne 0 ]; then
+        printf 'rb_version_first_line: %s --version failed (exit %s)\n' \
+            "$binary" "$status" >&2
+        return "$status"
+    fi
+    # The first line, taken from the captured string: everything up to
+    # the first newline. A command substitution strips trailing
+    # newlines, so a single-line output has no newline left and
+    # `%%` leaves it whole.
+    printf '%s\n' "${out%%$'\n'*}"
+    return 0
+}
+
 # rb_validate_bundle <bundle_dir> [expected_rev]
 #
 # Everything that must be true before a bundle is allowed to become the
