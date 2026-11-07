@@ -42,12 +42,11 @@ import (
 // wakeBlockOverheadAllowance is the slack the measured block size is
 // compared against on top of the three per-kind byte caps.
 //
-// The per-kind cap can be exceeded by at most ONE row per kind: the
-// budget always delivers a kind's first row, even if that row alone
-// exceeds the cap, because the budget must never make a wake
-// undeliverable. A normal wake renders to ~110 bytes, so 1024 bytes
-// is a generous allowance for those three floor rows plus the
-// block's fixed wrapper.
+// The per-kind byte cap is a TRUE bound: every rendered field is
+// itself bounded, so a single rendered row can never exceed the cap
+// and the cap is never exceeded at all. The allowance is the block's
+// fixed wrapper — the opening marker, the "Scheduled tasks now due:"
+// line and the closing marker — which is not charged to any kind.
 const wakeBlockOverheadAllowance = 1024
 
 // seedCronBacklog inserts n due cron-kind wakes, oldest first.
@@ -370,16 +369,9 @@ func TestCheckPendingWakes_ByteBudgetBoundsAnOversizedRow(t *testing.T) {
 
 	due, err := dm.CheckPendingWakes(now, nil)
 	require.NoError(t, err)
-	require.Len(t, due, 1,
-		"one oversized row consumes its kind's allowance; the rows behind it wait")
 
-	block := FormatWakeNotification(due)
-	// The block is the oversized row plus the block's wrapper — not
-	// one oversized row per delivered wake.
-	require.LessOrEqual(t, len(block), hugeDirective+512,
-		"the block must be the oversized row plus the wrapper: %d bytes", len(block))
-
-	// The oversized row was delivered, not starved.
+	// The oversized row is DELIVERED — the budget throttles the batch,
+	// it never makes a wake undeliverable.
 	ids := map[string]bool{}
 	for _, w := range due {
 		ids[w["id"].(string)] = true
@@ -388,13 +380,32 @@ func TestCheckPendingWakes_ByteBudgetBoundsAnOversizedRow(t *testing.T) {
 		"the oversized row must still be delivered: the budget throttles the batch, it "+
 			"never makes a wake undeliverable")
 
-	// The rows behind it were not lost: they are pending and the next
-	// call delivers them.
-	require.Equal(t, 10, pendingCronCount(t, dm))
-	second, err := dm.CheckPendingWakes(now, nil)
-	require.NoError(t, err)
-	require.Len(t, second, 10,
-		"the rows behind the oversized one must be delivered by the next call")
+	// AND THE ROWS BEHIND IT ARE DELIVERED IN THE SAME CALL.
+	//
+	// This is the property the field bounds bought. Before them, the
+	// oversized row consumed its kind's whole allowance, so the ten
+	// rows behind it were not delivered until the next call — one
+	// call of starvation, produced by the very row the budget was
+	// supposed to throttle. Now every rendered field is bounded, so
+	// the oversized row costs only its BOUNDED size against the
+	// budget and the healthy rows behind it fit alongside it.
+	require.Len(t, due, 11,
+		"the oversized row must not starve the ten rows behind it: they fit in the same call")
+	for i := 0; i < 10; i++ {
+		require.True(t, ids[fmt.Sprintf("wk-budget-small-%02d", i)],
+			"the healthy row %d must be delivered in the same call as the oversized one", i)
+	}
+
+	// The block is BOUNDED — the oversized row does not make it
+	// oversized, because the directive_id it carries is bounded.
+	block := FormatWakeNotification(due)
+	require.LessOrEqual(t, len(block), MaxWakeNotificationBytesPerKind+wakeBlockOverheadAllowance,
+		"the block must respect the per-kind byte cap: %d bytes", len(block))
+
+	// The cut is VISIBLE: the agent can tell the directive_id it was
+	// handed is not the whole one.
+	require.Contains(t, block, "truncated",
+		"a directive_id that was cut must say so")
 }
 
 // TestCheckPendingWakes_AgentInactiveReceivesABoundedBurst pins the

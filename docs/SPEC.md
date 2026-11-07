@@ -5065,11 +5065,45 @@ Nine pending cascade wakes drain over three `check_wakes` calls: 3, 3, 3.
 
 The cap applies to the default (no-`kinds`) `check_wakes` call as well as to an explicit `kinds=["cascade"]` request, because the default fold selects the agent-owned allowlist and therefore includes `cascade`. The wakes beyond the cap stay pending (`fired=0`) and are delivered by a later call.
 
-**The byte cap is the real bound.** A row cap alone cannot bound the agent-visible response: the `directive_id` in the rendered line is not length-bounded (it is an identifier the agent has to use, so truncating it would render it unusable), and the MCP adapter prepends the wake block to **every** tool response *after* the output-policy spill decision, so the spill mechanism does not bound it either. The budget is therefore measured in the bytes the agent actually receives, using the same renderer the block uses. Three kinds at 4096 bytes is ~12 KB, inside the MCP output policy's own 20 KB boundary (`internal/core/tools/output_policy.go`).
+**The byte cap is a real bound, because every rendered field is itself bounded.** A cap measured on a batch bounds the *response* only if every member of the batch is bounded, and the row cap does not bound the members: the `directive_id` is caller-supplied, so one wake could carry a 200 KB `directive_id` and make the block fifty times its own cap. Measured at the head that carried the byte cap but not the field bounds: one wake with a 204,800-byte `directive_id` rendered a **204,957-byte** block against a 4,096-byte per-kind cap, and the same wake's *structured* row was **205,020 bytes**.
+
+| bound | value | what it bounds |
+|---|---|---|
+| `MaxWakeRenderedIDBytes` | 8 | the rendered wake id |
+| `MaxWakeRenderedReasonBytes` | 80 | the rendered reason, in **bytes** |
+| `MaxWakeDirectiveIDBytes` | 256 | the rendered `directive_id`, in bytes |
+
+Every cut is made at a **character** boundary. A byte cut can land inside a multi-byte character; the renderer then escapes the orphan byte as `\xNN`, which mangles the text the agent reads and makes the line's byte cost unpredictable. The reason is therefore quoted as *up to 80 bytes*, not *up to 80 chars*.
+
+With those bounds in place a single rendered row is at most ~450 bytes, so **the per-kind byte cap is never exceeded** — not even by one row — and the block is bounded at `3 × 4096` bytes plus its fixed wrapper.
+
+**The structured payload is a separate surface, with a separate bound.** The rendered block is not the only thing the agent receives. A tool whose handler consumes due wakes itself returns them in its own envelope (`WakesPending` / `wakes_pending`), and that payload carries the same caller-supplied fields. It is bounded by the delivered-row bounds, not by the rendered block's byte cap:
+
+| bound | value | what it bounds |
+|---|---|---|
+| `MaxWakeDeliveredStringBytes` | 256 | each caller-supplied string in a delivered row — the reason, the `theory_id`, the `created_by`, and every string value in the metadata |
+| `MaxWakeDeliveredMetadataBytes` | 512 | the marshalled metadata document of a delivered row |
+| `MaxWakeDeliveredMetadataKeys` | 16 | the number of keys in a delivered row's metadata |
+| `MaxWakeDeliveredIDBytes` | 64 | the wake id in a delivered row (defensive — the id is substrate-generated) |
+
+A metadata key that did not fit is not silently lost: the delivered metadata carries a `_mpm_meta_truncated` marker naming how many keys were omitted. The **stored** row is not modified — the persisted value stays the source of truth and remains readable through `mpm_wakes list`. The bound is on the **delivered** view.
+
+**The accounting: three quantities, three bounds, and they do not share one budget.**
+
+| quantity | bound |
+|---|---|
+| the rendered wake block | `3 × MaxWakeNotificationBytesPerKind` + the block's fixed wrapper |
+| the structured `WakesPending` payload | the row caps × the per-row delivered bounds above |
+| the tool's own payload | the MCP output policy's own threshold, 20,480 bytes (`internal/core/tools/output_policy.go`) |
+| the MCP **envelope** | the block **plus** the tool's payload — it MAY exceed the policy's threshold, even when neither part does |
+
+The MCP adapter prepends the wake block to the tool's response **after** the output-policy spill decision, so the policy's threshold applies to the tool's payload **alone** and never bounded the wake block. The envelope is the sum of two independently bounded quantities. Measured over the real MCP transport: a 9,043-byte block beside a 54,965-byte tool payload — which the policy spilled on its own — is 1,393 bytes to the host.
+
+**The arming path refuses what it cannot render.** The `directive_id` is the identifier the agent passes back to `read_directives`, so a shortened one would name no directive: the wake would be unusable rather than merely truncated. `mpm_wakes schedule` therefore **refuses** a `directive_id` longer than `MaxWakeDirectiveIDBytes` and says that no wake was created. The refusal is at the agent-facing boundary, so the internal producers keep their capabilities. A wake that reached the table by another route — an older binary, direct SQL, a future producer — is still bounded on delivery, and a `directive_id` that was cut says so: the marker names the original byte length.
 
 **The budget is per kind, so no kind can starve another.** A single global budget applied in selection order would let the oldest kind consume the whole allowance on every call — with a 7-day notification backlog and a 1-hour cron backlog, the newer kind's share would be zero *forever*, which is a silent loss window. Per-kind limits give every kind an independent share, so every kind makes progress on every call.
 
-**The budget throttles; it never drops.** A wake that does not fit stays **pending** (`fired=0`) and remains eligible for the next call, exactly as a cascade wake above `MaxCascadeWakePerCheck` already behaves. The one exception is a single row larger than its kind's byte allowance: it is still delivered (the budget throttles the batch, it must never make a wake undeliverable), so a kind's usage may exceed its cap by at most that one row.
+**The budget throttles; it never drops.** A wake that does not fit stays **pending** (`fired=0`) and remains eligible for the next call, exactly as a cascade wake above `MaxCascadeWakePerCheck` already behaves. Nor can an oversized wake starve the wakes behind it: every rendered field is bounded, so an oversized wake costs only its *bounded* size against the budget, and the healthy wakes behind it are delivered in the **same** call. Before the field bounds, the oversized row consumed its kind's whole allowance and the ten rows behind it waited for the next call.
 
 **Why 16.** The budget has to keep up with production: one one-minute cron task produces 60 wakes/hour, so 16 wakes per call keeps up with an agent that issues one request every four minutes, and has 16× headroom for an agent that issues one per minute. It also has to be small enough not to swamp the agent's triage — the seeded directive `mpm-seed-wake-triage-policy` tells the agent to alert the user for every entry with `overdue_secs <= 86400`, so a burst of 60 identical cron entries is 60 identical alerts. 16 is a page, not a wall.
 
