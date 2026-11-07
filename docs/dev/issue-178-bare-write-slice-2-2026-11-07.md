@@ -808,7 +808,7 @@ through M8 in §8.
 | `make release-gate` (`test-race` + `test-release`) | ✅ **exit 0** on the re-run and on the F1 remediation's head; the first attempt is §11.2 |
 | `go run ./cmd/mpm-lint --gate` | ✅ PASS (go, mutex, sql, fd, imports thresholds all at or under their ceilings) |
 | `make docs-check` | ✅ 13 checks, 0 review items, 0 errors |
-| the CI on this branch | ✅ 3/3 on every head that carries this tree — *Full test suite*, *Build + core tests*, *Release gate (cross-agent continuity + public-CLI subprocess suite)*. The Go tree is byte-identical across the slice's heads; the F1 remediation's head changes only the guard (a test file) and this record |
+| the CI on this branch | ✅ 3/3 on the F1 remediation's head on the **re-run** (run `42396294587`); the **first** attempt at that same head hit the documented 10-minute per-package cliff and failed — see §11.2.1. The slice's own heads were 3/3 on every attempt. The Go tree is byte-identical across the slice's heads; the F1 remediation's head changes only the guard (a test file) and this record |
 
 ### 11.1.1 The F1 remediation's own gates
 
@@ -912,6 +912,52 @@ it, and it passed end to end (§11.1.1).
 
 It is recorded here because the record's §11.2 exists to report failures
 rather than hide them, and this one is mine.
+
+### 11.2.2 The cliff, reached on the CI runner too
+
+**The first CI attempt on the F1 remediation's head `f0b4ff77` FAILED**,
+and the failure is the same timeout as §11.2 — not an assertion:
+
+```
+panic: test timed out after 10m0s
+	running tests:
+		TestPurge_ForcedDeletesTheFullSet (0s)
+FAIL	github.com/flowbyte-com/mpm-core	600.076s
+```
+
+**The same commit was then re-run, on the same runner pool, and it
+passed** — run `42396294587`, 3/3 green, with the `internal/core` -race
+package at **394.934 s**.
+
+| The same commit `f0b4ff77`, on the CI | `internal/core` under `-race` |
+|---|---|
+| the first attempt | **600.076 s** — the cap, hit |
+| the re-run | **394.934 s** — 66 % of the cap |
+
+That is a **>50 % run-to-run spread on identical code**, so the cliff is
+the runner's load and the Makefile's missing `-timeout`, not the change.
+The test that was running when the alarm fired — `TestPurge_ForcedDeletesTheFullSet`
+— is a work-purge test that touches none of this slice's code.
+
+The local measurement on the same head puts `internal/core` at **451.913 s**
+(§11.1.1), i.e. **75 % of the cap on a 12-core machine**, while the CI
+runner is materially slower and noisier.
+
+**The recommendation in §11.2 is therefore not advisory any more — it is
+the fix for a cliff that has now been reached on the CI runner itself.**
+The `test-race` recipe already sets `-timeout $(CMD_TEST_TIMEOUT)` (20 m
+by default) for `./cmd/...`; the `internal/core` step omits it and
+inherits Go's 10-minute per-package default:
+
+```make
+cd internal/core && … $(GO) test -race -tags fts5 -v ./...
+```
+
+Adding `-timeout $(CMD_TEST_TIMEOUT)` to that one line would remove the
+cliff. It is a **Makefile change**, it is **outside this slice's scope**,
+and it is deliberately **not** made here — this remediation is narrow, and
+the record recommends the change rather than smuggling it in. It is
+escalated as MPM work.
 
 ---
 
