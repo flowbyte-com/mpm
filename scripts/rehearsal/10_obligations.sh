@@ -110,7 +110,9 @@ reh_head "+  the installation has no dependency on .git"
 # never shells out to git.
 HIDDEN="$SIM_WS/.git.hidden.$$"
 if [ -d "$SIM_WS/.git" ]; then mv "$SIM_WS/.git" "$HIDDEN"; fi
-V1="$(cd / && "$SIM_WS/bin/mpm" --version 2>&1 | head -1)"
+V1=""
+V1_RC=0
+V1="$(cd / && rb_version_first_line "$SIM_WS/bin/mpm")" || V1_RC=$?
 GITEXEC=0
 if command -v strace >/dev/null 2>&1; then
   strace -f -qq -e trace=execve -o "$REH_WORK/nogit.strace" \
@@ -122,7 +124,16 @@ fi
 [ "$GITEXEC" = "0" ]; reh_assert $? "the runtime executes git zero times (observed: $GITEXEC)"
 case "$V1" in
   *"+g${REV}"*) reh_pass "the runtime reports its revision with .git absent ($V1)" ;;
-  *) reh_fail "the runtime's identity changed when .git was hidden: $V1" ;;
+  *)
+    # The probe is fail-closed: a runtime that FAILED reports no
+    # identity, and this obligation must not be satisfied by a runtime
+    # that could not say what it was. (Issue #221.)
+    if [ "$V1_RC" -ne 0 ]; then
+      reh_fail "the runtime's identity with .git absent could not be read (exit $V1_RC) — it is unknown, not changed"
+    else
+      reh_fail "the runtime's identity changed when .git was hidden: $V1"
+    fi
+    ;;
 esac
 
 # ═══ 2. the persistent state is preserved ════════════════════════════════
@@ -154,7 +165,16 @@ reh_head "3  the accepted OpenCode-only release is installed"
 for b in mpm mpm-mcp mpm-critic mpm-scheduler mpm-telemetry; do
   [ -x "$SIM_WS/bin/$b" ]; reh_assert $? "bin/$b is installed and executable"
 done
-INSTALLED_COMMIT="$("$SIM_WS/bin/mpm" --version 2>&1 | awk '/commit:/{print $2}')"
+INSTALLED_COMMIT=""
+INSTALLED_COMMIT_RC=0
+INSTALLED_COMMIT="$(rb_reported_commit "$SIM_WS/bin/mpm")" || INSTALLED_COMMIT_RC=$?
+if [ "$INSTALLED_COMMIT_RC" -ne 0 ]; then
+  # The probe is fail-closed: a binary that FAILED reports no commit,
+  # so it is not proven to be the accepted revision. The obligation
+  # below fails too — it compares against an empty value. (Issue #221.)
+  reh_fail "the installed binary's version could not be read (exit $INSTALLED_COMMIT_RC) — it is not proven to be the accepted revision"
+  INSTALLED_COMMIT=""
+fi
 [ "$INSTALLED_COMMIT" = "$EXPECT_COMMIT" ]; reh_assert $? "the installed binary is the accepted revision ($INSTALLED_COMMIT)"
 ADAPTERS="$(ls "$SIM_WS/current/agent_installation/" 2>/dev/null | grep -cE '^mpm-(opencode|memory-openclaw|claude-code|pi|hermes|auto-mode)' || true)"
 [ "${ADAPTERS:-0}" -le 1 ]; reh_assert $? "the bundle carries only the OpenCode adapter (found $ADAPTERS)"
@@ -335,8 +355,18 @@ reh_assert $? "the systemd unit was NOT rewritten"
 
 # ═══ 9. the build version is reported correctly ══════════════════════════
 reh_head "9  the installed build version is reported correctly"
-VOUT="$("$SIM_WS/bin/mpm" --version 2>&1)"
+VOUT=""
+VOUT_RC=0
+VOUT="$(rb_version_output "$SIM_WS/bin/mpm")" || VOUT_RC=$?
 reh_note "$(echo "$VOUT" | tr '\n' '|')"
+if [ "$VOUT_RC" -ne 0 ]; then
+  # The probe is fail-closed: a binary that FAILED reports no identity
+  # at all, so the identity format cannot be checked and the commit
+  # cannot be read. The two assertions below fail too — they are
+  # checked against an empty value. (Issue #221.)
+  reh_fail "the installed binary's version could not be read (exit $VOUT_RC) — it reports no identity"
+  VOUT=""
+fi
 # The identity format is
 #
 #     <version>+g<short-commit>[.dirty].t<build-epoch>
@@ -364,15 +394,40 @@ else
 fi
 echo "$VOUT" | grep -q "$EXPECT_COMMIT"; reh_assert $? "the full commit is reported"
 SAME=0
+SAME_WHY=""
 for b in mpm mpm-mcp mpm-critic mpm-scheduler; do
-  "$SIM_WS/bin/$b" --version 2>&1 | head -1 | grep -q "g${REV}" || SAME=1
+  BINREV=""
+  BINREV_RC=0
+  BINREV="$(rb_version_first_line "$SIM_WS/bin/$b")" || BINREV_RC=$?
+  if [ "$BINREV_RC" -ne 0 ]; then
+    # The probe is fail-closed: a binary that FAILED reports no
+    # revision, so it cannot be shown to report the same one.
+    # (Issue #221.)
+    SAME=1
+    SAME_WHY="$b's version could not be read (exit $BINREV_RC)"
+    continue
+  fi
+  case "$BINREV" in
+    *"g${REV}"*) : ;;
+    *) SAME=1; SAME_WHY="$b reports '$BINREV'" ;;
+  esac
 done
-[ "$SAME" = "0" ]; reh_assert $? "all four buildinfo binaries report the same revision"
-TV="$("$SIM_WS/bin/mpm-telemetry" --version 2>&1 | head -1)"
-case "$TV" in
-  *"g${REV}"*) reh_pass "mpm-telemetry reports the same revision too" ;;
-  *) reh_note "mpm-telemetry uses its own version renderer and does NOT carry the build metadata: $TV" ;;
-esac
+[ "$SAME" = "0" ]; reh_assert $? "all four buildinfo binaries report the same revision${SAME_WHY:+ — $SAME_WHY}"
+TV=""
+TV_RC=0
+TV="$(rb_version_first_line "$SIM_WS/bin/mpm-telemetry")" || TV_RC=$?
+if [ "$TV_RC" -ne 0 ]; then
+  # The telemetry sidecar's revision is NOT an obligation — it has its
+  # own version renderer — so a probe that fails is a note, not a
+  # failure. But it must not be reported as "reports the same revision
+  # too" either: the probe failed, so nothing was reported.
+  reh_note "mpm-telemetry's version could not be read (exit $TV_RC) — its revision is unknown"
+else
+  case "$TV" in
+    *"g${REV}"*) reh_pass "mpm-telemetry reports the same revision too" ;;
+    *) reh_note "mpm-telemetry uses its own version renderer and does NOT carry the build metadata: $TV" ;;
+  esac
+fi
 [ -f "$SIM_WS/current/RELEASE.json" ]; reh_assert $? "the bundle carries RELEASE.json"
 RCOMMIT="$(python3 -c "import json;print(json.load(open('$SIM_WS/current/RELEASE.json'))['commit'])" 2>/dev/null)"
 [ "$RCOMMIT" = "$EXPECT_COMMIT" ]; reh_assert $? "RELEASE.json names the revision ($RCOMMIT)"
