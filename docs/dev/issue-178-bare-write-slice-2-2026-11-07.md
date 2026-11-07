@@ -292,6 +292,48 @@ sites still produce their established messages:
 `DeleteHandoff`'s `RowsAffected` and `RemoveMemoryFromTopic`'s `rows > 0`
 are both preserved, and both remain truthful under a retry (§5.1).
 
+### 5.2.1 The one place the budget is paid twice — `DeleteHandoff`'s failure path
+
+`DeleteHandoff` is the only one of the eight with a **second** write on its
+failure path: when the DELETE fails it calls `dm.LogAudit(AuditWarn,
+"handoff", "DeleteHandoff failed: …")`, and `LogAudit` writes an audit row
+through `dm.ExecTracked(..., 5, ...)` of its own. So a failed shred spends
+the statement-level budget **twice**.
+
+Three things about that, all measured rather than argued:
+
+**The original error survives.** `LogAudit` returns nothing; on its own
+failure it prints to stderr and returns. It cannot mask or replace the
+caller's error, and `DeleteHandoff` returns
+`fmt.Errorf("DeleteHandoff: %w", err)` with the DELETE's own error. Both
+trees return exactly `DeleteHandoff: database is locked` for the same
+contention.
+
+**The shape is pre-existing.** `internal/core/audit.go` is **not touched by
+this slice**, and `LogAudit` was already budgeted at the base commit
+(`dm.ExecTracked(…, 5, …)`, `internal/core/audit.go:113`). The base tree
+therefore already spends one budget on a failure path; this slice adds the
+second.
+
+**The cost is latency, and it is the cost of the whole policy.** Measured
+against a held write lock with the harness's 100 ms busy window:
+
+| Tree | `DeleteHandoff`'s failure path |
+|---|---|
+| the base `056ce449` (bare DELETE) | **3.811 s** — the DELETE fails in ~100 ms, `LogAudit` spends the rest |
+| this tree (budgeted DELETE) | **7.417 s** — the DELETE spends a budget, `LogAudit` spends another |
+
+Both return `DeleteHandoff: database is locked` with `rows=0`. The base's
+3.811 s is almost entirely the audit's own budget; this slice's 7.417 s is
+two budgets. With the **production** 5000 ms busy window the same shape is
+~5 s + ~33 s before and ~33 s + ~33 s after.
+
+That is the trade this issue asks for, made visible: a failed shred now
+takes longer to fail, and in exchange a shred that only lost to contention
+**lands**. The audit row — the record that the shred failed — becomes more
+likely to be written, not less, because it now has the same tolerance as
+the operation it describes.
+
 ### 5.3 Transaction semantics
 
 None of the eight sites is lexically inside a `WithTx` callback, and none
@@ -606,7 +648,7 @@ through M8 in §8.
 | `make release-gate` (`test-race` + `test-release`) | ✅ **exit 0** on the re-run; the first attempt is §11.2 |
 | `go run ./cmd/mpm-lint --gate` | ✅ PASS (go, mutex, sql, fd, imports thresholds all at or under their ceilings) |
 | `make docs-check` | ✅ 13 checks, 0 review items, 0 errors |
-| the CI on the PR head (`904bc9ee`) | ✅ 3/3 — *Full test suite*, *Build + core tests*, *Release gate (cross-agent continuity + public-CLI subprocess suite)* |
+| the CI on this branch | ✅ 3/3 on every head that carries this tree — *Full test suite*, *Build + core tests*, *Release gate (cross-agent continuity + public-CLI subprocess suite)*. The Go tree is byte-identical across the branch's heads; the later ones differ only in this record and in commit-message trailers |
 
 ### 11.2 One pre-existing failure, and one transient timeout
 
@@ -680,12 +722,72 @@ slice's scope, and it is left as a recommendation rather than smuggled in.
 This work has **not** been independently reviewed. It is published for
 review, and it stops there.
 
-The first slice's record §12 is explicit about the difference between a
-self-review and an independent one, and this slice has had only the former:
-the work was checked against the tree, against the mutation demonstration
-and against the base commit's behaviour, by the agent that wrote it.
+### 12.1 The review that was run, and what it cannot be
 
-The review should focus on:
+The substrate's own `mpm_request_review` was run against the **production
+diff itself**, with a prompt that asked for verdicts on nine specific
+questions rather than for a summary. The first run — against the
+production diff alone — **declined to give verdicts**, on the ground that
+the artifact did not establish the retry/ID behaviour, the guard
+implementation, the live-caller inventory or the five-live/three-uncalled
+split. That was a correct refusal: the artifact was incomplete. The full
+evidence was then assembled (production diff + guard diff + the per-site
+analysis + the caller inventory + the reproduction + the mutation
+demonstration) and the review was re-run against it.
+
+Its verdicts:
+
+| Question | Verdict |
+|---|---|
+| 1. Double-apply — can a retry apply any of the eight twice? | **PASS** for all eight; no argument contradicted by the statements |
+| 2. Row-count truth | **PASS** — a busy attempt removes no row, so the count that comes back is the count actually removed |
+| 3. Error surface | **CONCERN** — the `LogAudit`/`ExecTracked` interaction on the failure path was not settled by the artifact |
+| 4. Transaction semantics | **PASS** — the analysis holds |
+| 5. Connection ownership | **PASS** — same pool; and no converted statement depends on connection-scoped state (unlike the `ATTACH` case) |
+| 6. The missing column | **CONCERN** — defensible as remediation, but the slice cannot claim an end-to-end production benefit for that site |
+| 7. The classification fix | **CONCERN** — materially more falsifiable, but bypasses remain |
+| 8. Scope honesty | **PASS** — converting the uncalled public surface is reasonable, and the slice does not misrepresent the impact |
+| 9. What is missing | **CONCERN** — the missing column, and the unsettled `LogAudit` interaction |
+
+**Overall: CONCERN** — "the eight conversions and retry safety are sound,
+but the missing sessions.summary schema change remains and the LogAudit
+retry interaction and classification bypasses are not fully resolved by the
+artifacts."
+
+### 12.2 What was done with the concerns
+
+**Concern 3 — the `LogAudit` interaction — is settled, by measurement.**
+§5.2.1: `LogAudit` was **already** budgeted at the base commit and
+`internal/core/audit.go` is not touched by this slice; `LogAudit` returns
+nothing and cannot mask the caller's error (both trees return exactly
+`DeleteHandoff: database is locked`); and the cost is measured — the
+failure path goes from 3.811 s to 7.417 s under the harness's 100 ms busy
+window, which is the price of the budget and buys a shred that lands.
+
+**Concerns 6 and 9 — the missing column — were already disclosed** (§4.3,
+§10), are filed as their own follow-up (MPM work `abf57027de5654de`), and
+the review agrees the framing is honest rather than a way of making the
+numbers look good.
+
+**Concern 7 — the classification bypasses — are already stated in §6.2.**
+The guard closes the misfiling hole it was built for; it does not and
+cannot verify that a migration is idempotent, and a user-path function
+whose name carries a migration verb could still be misfiled. The review's
+assessment agrees: "useful and over-reporting is safer than silent
+under-reporting, but it does not completely close the classification
+hole." That is the honest scope of the fix, stated the same way in the
+record.
+
+### 12.3 What this is NOT
+
+The first slice's record §12 is explicit about the difference between a
+self-review and an independent one, and this slice has had only the
+former: the work was checked against the tree, against the mutation
+demonstration, against the base commit's behaviour and by the substrate's
+own review components — all by the agent that wrote it.
+
+**An independent reviewer should still read this PR.** The review should
+focus on:
 
 1. **The eight conversions** — the retry-safety arguments in §5.1, and the
    error-surface and transaction-semantics arguments in §5.2–§5.3.
@@ -696,3 +798,6 @@ The review should focus on:
    caller today (§4.3), and the slice converted them anyway.
 4. **The `sessions.summary` finding** — whether the missing column should
    be fixed in this slice after all, or filed separately as §10 proposes.
+5. **The double budget on `DeleteHandoff`'s failure path** (§5.2.1) —
+   whether paying it twice is acceptable, and whether `LogAudit`'s own
+   budget should be spent on a path that is already failing.
