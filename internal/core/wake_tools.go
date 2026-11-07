@@ -85,10 +85,99 @@ import (
 	"time"
 )
 
+// ── THE PER-CALL DELIVERY BUDGET ─────────────────────────────────────
+//
+// The opportunistic fold is the agent's delivery path and it runs on
+// EVERY agent request. It must therefore deliver a BOUNDED amount
+// per call.
+//
+// Two limits, both per call:
+//
+//   - A ROW cap, per kind. It bounds the scan, the settlement, and
+//     the JSON envelope the tools-module handler puts the delivered
+//     rows into (WakesPending).
+//   - A BYTE cap on the rendered <system_wake_notification> block,
+//     per kind. The byte cap is the real guarantee, because the
+//     rendered line length is NOT bounded by the row cap alone: the
+//     directive_id is rendered verbatim and can be arbitrarily long.
+//
+// WHY THE BUDGET IS PER KIND, NOT GLOBAL.
+//
+// A global budget applied in selection order lets the oldest kind
+// starve the others permanently. With a 7-day notification backlog
+// and a 1-hour cron backlog, a global cap spent on the oldest rows
+// would give the newer kind a zero share on every call, forever —
+// which is a silent loss window, the exact thing a budget must not
+// create. Per-kind caps give every kind an independent share, so
+// every kind makes progress on every call and no kind is starved by
+// another's backlog.
+//
+// WHY THESE NUMBERS.
+//
+//   - MaxNotificationWakePerCheck / MaxCronWakePerCheck = 16. The
+//     budget must keep up with PRODUCTION. One one-minute cron task
+//     produces 60 wakes/hour, so 16 wakes per call keeps up with an
+//     agent that issues one request every four minutes, and has 16x
+//     headroom for an agent that issues one per minute. It must also
+//     not swamp the agent's triage: the seeded directive
+//     mpm-seed-wake-triage-policy tells the agent to alert the user
+//     for every entry with overdue_secs <= 86400, so a burst of 60
+//     identical cron entries produces 60 identical alerts. 16 is a
+//     page, not a wall.
+//
+//   - MaxCascadeWakePerCheck = 3 is UNCHANGED. It was already the
+//     per-call bound for cascade delivery, and the cascade kind keeps
+//     its own cap.
+//
+//   - MaxWakeNotificationBytesPerKind = 4096. The rendered line of a
+//     normal wake is ~105 bytes, so 4096 bytes is ~39 lines: under
+//     the 16-row cap for ordinary rows, which means the row cap binds
+//     in normal operation and the byte cap is the BACKSTOP for the
+//     one field with no length bound. Three kinds at 4096 bytes is
+//     ~12 KB, which sits inside the MCP output policy's own 20 KB
+//     boundary (internal/core/tools/output_policy.go) so the wake
+//     block and the tool's own payload share one response budget.
+//
+// WHAT THE BUDGET DOES NOT DO.
+//
+// It does not drop anything. A wake that does not fit the budget
+// stays PENDING (fired = 0) and remains eligible for the next call,
+// exactly as a cascade wake above MaxCascadeWakePerCheck already
+// behaves. The budget is a THROTTLE, not a loss window: an eligible
+// wake stays eligible until its own retention window closes.
+//
+// The one exception is a SINGLE row larger than its kind's byte
+// allowance. Such a row is still delivered — the byte cap throttles
+// the batch, it never drops a wake — so the cap is exceeded by at
+// most one row per kind.
+const (
+	// MaxNotificationWakePerCheck bounds notification-kind (and
+	// untagged) wake delivery per CheckPendingWakes call. Rows above
+	// the cap are left pending for the next call.
+	MaxNotificationWakePerCheck = 16
+
+	// MaxCronWakePerCheck bounds cron-kind wake delivery per
+	// CheckPendingWakes call. Rows above the cap are left pending for
+	// the next call.
+	MaxCronWakePerCheck = 16
+
+	// MaxWakeNotificationBytesPerKind bounds the rendered
+	// <system_wake_notification> block contributed by ONE kind in one
+	// call. It is a backstop for rows whose rendered length is not
+	// bounded by the row cap (the directive_id is rendered verbatim).
+	MaxWakeNotificationBytesPerKind = 4096
+)
+
 // MaxCascadeWakePerCheck bounds cascade wake delivery per CheckPendingWakes
 // call. Cascade wakes (metadata.kind == "cascade") above this cap are left
-// unfired (pending) for the next call. Notification and cron wakes are
-// unaffected by this cap. Default value: 3.
+// unfired (pending) for the next call. Default value: 3.
+//
+// The cap bounds the BATCH, not the OBLIGATION. It does not
+// deduplicate: two cascade wakes carrying the same theory_id and the
+// same invalidation_event_id are one obligation that the reconciler
+// duplicated, and both are delivered if both are pending (2 <= 3).
+// See internal/core/cascade_materializer.go for why that duplication
+// arises and what the durable fix is.
 const MaxCascadeWakePerCheck = 3
 
 // ScheduleCascadeSummaryWake persists a typed `cascade_summary` wake that
@@ -290,6 +379,17 @@ func BlockedWakeKindError(kind string) error {
 //     ad-hoc claim excludes them (dispatchClaimNextAdHocWake) and the
 //     fold is their delivery path: the row carries the directive_id
 //     the agent has to consult.
+//
+// Every one of these three is delivered by the DEFAULT fold — the
+// no-kinds branch that every CLI and MCP request runs. A kind that is
+// agent-owned but delivered only by an explicit kinds=["..."] request
+// is delivered to nobody in practice: the agent does not know to ask,
+// and the retention sweep eventually retires the row. The producer
+// writes the directive_id into the cron wake's metadata precisely so
+// the agent can read it "at wake-time without an extra lookup"
+// (internal/core/scheduled_tasks.go), and FormatWakeNotification
+// renders it into the <system_wake_notification> block — an affordance
+// that is dead code unless the default fold delivers the row.
 //
 // Everything else — snapshot, critic_audit, gc, broadcast,
 // cascade_summary, drill, and any kind a future binary introduces — is
@@ -1017,9 +1117,10 @@ func isValidWakeResolveReason(reason string) bool {
 	return false
 }
 
-// CheckPendingWakes returns every wake where fired=0 AND target_time <= now,
-// marks them fired=1 with fired_at=now, and returns them in chronological
-// order. Returns an empty slice when nothing is due (NOT an error).
+// CheckPendingWakes returns the DUE, AGENT-OWNED wakes that fit this
+// call's DELIVERY BUDGET, marks them fired=1 with fired_at=now, and
+// returns them in chronological order. Returns an empty slice when
+// nothing is due (NOT an error).
 //
 // The caller (the handler) is expected to fold the result into a
 // "WakesPending" block on the outgoing response so the agent sees the
@@ -1032,9 +1133,13 @@ func isValidWakeResolveReason(reason string) bool {
 //
 // Kinds filter:
 //
-//   - kinds nil/empty: backward-compatible default. Surfaces notification
-//     wakes (kind='notification' or kind absent on metadata). Cron-injected
-//     and other system-kind wakes are excluded.
+//   - kinds nil/empty: the DEFAULT delivery path — every AGENT-OWNED
+//     pending wake, whatever its kind. This is the same predicate as
+//     the "*" branch below, and it must stay the same predicate: the
+//     fold is the delivery path for every kind the agent owns, so a
+//     default that is narrower than the allowlist silently starves the
+//     kinds it omits. See AgentOwnedWakeKinds for the membership and
+//     the per-kind reason.
 //   - kinds contains "*": surface every AGENT-OWNED pending wake
 //     regardless of kind. The scheduler's kinds are NOT crossed into:
 //     a wake the scheduler owns must reach its handler, and a fold
@@ -1044,12 +1149,18 @@ func isValidWakeResolveReason(reason string) bool {
 //     no kind set are excluded by this branch. A requested kind the
 //     scheduler owns matches nothing.
 //
-// Cascade wake cap:
+// The per-call delivery budget:
 //
-//	When kinds includes "cascade" (or is "*"), cascade wakes
-//	(metadata.kind == "cascade") are limited to MaxCascadeWakePerCheck per
-//	call. Notification and cron wakes are unaffected. Uncapped cascade
-//	wakes remain pending for the next call.
+//	Every agent-owned kind has its own row cap and its own byte cap
+//	on the rendered <system_wake_notification> block. Rows that do
+//	not fit stay PENDING (fired = 0) and are delivered by a later
+//	call, exactly as a cascade wake above MaxCascadeWakePerCheck
+//	already behaves. The budget throttles the batch; it never drops
+//	a wake and it never settles one it does not deliver.
+//
+//	The budget is PER KIND so that a backlog of one kind cannot
+//	starve another. See the constants above for the numbers and the
+//	reasoning.
 func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]map[string]interface{}, error) {
 	nowUnix := now.Unix()
 	tx, err := dm.db.Begin()
@@ -1058,14 +1169,28 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 	}
 	defer tx.Rollback()
 
-	// Build the kind-filter clause. Three branches:
+	// Resolve the delivery buckets — one per agent-owned kind this
+	// call may deliver.
+	//
+	// Three branches:
 	//   "*" anywhere  -> every AGENT-OWNED wake, whatever its kind
-	//   specific list -> IN filter on the wake's kind, narrowed to
-	//                    the agent-owned requested kinds
-	//   nil / empty   -> backward-compat default (notification only)
-	whereExtra := ""
-	args := []interface{}{nowUnix}
-
+	//   specific list -> only the requested agent-owned kinds
+	//   nil / empty   -> every AGENT-OWNED wake (the default path)
+	//
+	// The default and the wildcard are the SAME predicate. They were
+	// not, and the difference was a defect: the default branch
+	// matched only notification wakes, so the two kinds the fold owns
+	// but the default omitted — cron and cascade — were never
+	// delivered. A cron wake was injected, became due, was invisible
+	// to every agent, and was retired by the cron retention sweep
+	// with its directive_id undelivered. A cascade wake was never
+	// delivered either, although its producer documents "immediate
+	// delivery on next check_wakes" and check_wakes without a kinds
+	// argument uses this branch.
+	//
+	// One predicate for "what the fold delivers" is the whole point
+	// of AgentOwnedWakeKinds: a kind the agent owns is delivered by
+	// the fold, and a kind the scheduler owns never is.
 	includeAll := false
 	for _, k := range kinds {
 		if k == "*" {
@@ -1074,13 +1199,12 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 		}
 	}
 
+	var buckets []wakeDeliveryBucket
 	switch {
-	case includeAll:
-		// Every AGENT-OWNED pending wake, whatever its kind. The
-		// scheduler's kinds are excluded here: the fold retires a wake
-		// it delivers, and a scheduler-owned wake must reach its
-		// handler instead.
-		whereExtra = ` AND (` + wakeKindSQL(AgentOwnedWakeKinds, true) + `)`
+	case includeAll, len(kinds) == 0:
+		// The default and the wildcard treat an UNTAGGED wake as a
+		// notification wake (WakeNotificationKindFilter).
+		buckets = agentOwnedWakeBuckets(true)
 	case len(kinds) > 0:
 		// Only the requested kinds, and only the ones that are the
 		// agent's. A request that names only scheduler-owned kinds
@@ -1089,88 +1213,69 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 		if len(allowed) == 0 {
 			return []map[string]interface{}{}, nil
 		}
-		whereExtra = ` AND (` + wakeKindSQL(allowed, false) + `)`
-	default:
-		// Backward-compat default: only notification-kind wakes.
-		whereExtra = ` AND (` + wakeKindSQL([]string{"notification"}, true) + `)`
+		// An EXPLICIT request matches the named kinds exactly: an
+		// untagged wake is not a "notification" wake to
+		// json_extract(...)= 'notification'. This has always been the
+		// explicit branch's semantics and it is unchanged.
+		buckets = agentOwnedWakeBuckets(false)
+		buckets = filterWakeBuckets(buckets, allowed)
 	}
 
+	// Select and budget each bucket.
+	//
 	// A CORRUPT ROW IS NEVER FOLDED. The fold RETIRES what it
 	// delivers, so folding a row whose owner cannot be determined
 	// would deliver scheduler-owned work to the agent as an ordinary
 	// notification AND retire it — the partition shift the W4 policy
 	// forbids. The exclusion is the canonical predicate, so it cannot
 	// drift from the one the claim and the sweeps use.
-	rows, err := tx.Query(
-		`SELECT id, target_time, reason, theory_id, created_by, metadata, created_at
-		 FROM scheduled_wakes
-		 WHERE fired = 0 AND target_time <= ?`+whereExtra+`
-		   AND NOT `+WakeMetadataIsCorrupt+`
-		 ORDER BY target_time ASC`,
-		args...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("select pending wakes: %w", err)
-	}
-	defer rows.Close()
-	type pending struct {
-		id         string
-		targetTime int64
-		reason     string
-		theoryID   *string
-		createdBy  string
-		metadata   *string
-		createdAt  string
-	}
-	var batch []pending
-	for rows.Next() {
-		var p pending
-		if err := rows.Scan(&p.id, &p.targetTime, &p.reason, &p.theoryID, &p.createdBy, &p.metadata, &p.createdAt); err != nil {
-			return nil, fmt.Errorf("scan wake row: %w", err)
-		}
-		batch = append(batch, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate wake rows: %w", err)
-	}
-	rows.Close()
-
-	// Separate cascade from non-cascade rows so we can apply the per-check
-	// cap only to cascade wakes. This preserves full delivery of notification
-	// and cron wakes regardless of how many cascade wakes are queued.
-	var cascadeBatch, nonCascadeBatch []pending
-	for _, p := range batch {
-		if p.metadata != nil && strings.Contains(*p.metadata, `"kind":"cascade"`) {
-			cascadeBatch = append(cascadeBatch, p)
-		} else {
-			nonCascadeBatch = append(nonCascadeBatch, p)
-		}
-	}
-
-	// Apply cascade cap. Rows beyond the cap are left in the DB (not marked
-	// fired) so a subsequent call will deliver them.
-	if len(cascadeBatch) > MaxCascadeWakePerCheck {
-		cascadeBatch = cascadeBatch[:MaxCascadeWakePerCheck]
-	}
-
-	// Interleave: non-cascade first (chronological), then capped cascade.
-	// ORDER BY target_time ASC over the full batch already placed them in
-	// chronological order; splitting and re-combining preserves that order.
-	out := make([]map[string]interface{}, 0, len(nonCascadeBatch)+len(cascadeBatch))
-	for _, p := range nonCascadeBatch {
-		out = append(out, dm.wakeRowToMap(p, nowUnix))
-	}
-	for _, p := range cascadeBatch {
-		out = append(out, dm.wakeRowToMap(p, nowUnix))
-	}
-
-	// Mark all selected rows fired in a single batch.
-	for _, p := range append(nonCascadeBatch, cascadeBatch...) {
-		_, err := tx.Exec(
-			`UPDATE scheduled_wakes SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0`,
-			nowUnix, p.id,
+	//
+	// The SELECT carries the bucket's ROW CAP as its LIMIT, so the
+	// scan is bounded too: a backlog of 10,080 cron wakes costs the
+	// same read as a backlog of 16.
+	selected := make(map[string][]selectedWake, len(buckets))
+	for _, b := range buckets {
+		rows, err := tx.Query(
+			`SELECT id, target_time, reason, theory_id, created_by, metadata, created_at
+			 FROM scheduled_wakes
+			 WHERE fired = 0 AND target_time <= ? AND (`+b.predicate+`)
+			   AND NOT `+WakeMetadataIsCorrupt+`
+			 ORDER BY target_time ASC, id ASC
+			 LIMIT ?`,
+			nowUnix, b.rowCap,
 		)
 		if err != nil {
+			return nil, fmt.Errorf("select pending %s wakes: %w", b.label, err)
+		}
+		candidates, scanErr := scanPendingWakes(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan pending %s wakes: %w", b.label, scanErr)
+		}
+		selected[b.label] = budgetWakeBucket(dm, b, candidates, nowUnix)
+	}
+
+	// Order the delivered set.
+	//
+	// The historical order is preserved: the non-cascade kinds merged
+	// chronologically, then the capped cascade batch. The cascade
+	// kind is appended rather than merged because it has always been
+	// delivered after the non-cascade batch, and the cap truncates
+	// the OLDEST end of its own bucket (the SELECT's ORDER BY).
+	nonCascade := mergeSelectedWakes(selected["notification"], selected["cron"])
+	delivered := make([]selectedWake, 0, len(nonCascade)+len(selected["cascade"]))
+	delivered = append(delivered, nonCascade...)
+	delivered = append(delivered, selected["cascade"]...)
+
+	// Mark EXACTLY the delivered rows fired, in one batch.
+	//
+	// A row that was read but excluded by the budget is NOT marked:
+	// it stays pending and a later call delivers it. The fold never
+	// retires a wake it did not deliver.
+	for _, w := range delivered {
+		if _, err := tx.Exec(
+			`UPDATE scheduled_wakes SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0`,
+			nowUnix, w.id,
+		); err != nil {
 			return nil, fmt.Errorf("mark wake fired: %w", err)
 		}
 	}
@@ -1178,12 +1283,85 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit wake tx: %w", err)
 	}
+
+	out := make([]map[string]interface{}, 0, len(delivered))
+	for _, w := range delivered {
+		out = append(out, w.out)
+	}
 	return out, nil
 }
 
-// wakeRowToMap converts a pending wake row to the map format returned by
-// CheckPendingWakes, without any database side effects.
-func (dm *DatabaseManager) wakeRowToMap(p struct {
+// wakeDeliveryBucket is one agent-owned kind's share of a call's
+// delivery budget.
+//
+// The kind's rows are selected with the canonical kind predicate —
+// the same JSON-safe expression the claim and the sweeps use — so the
+// classification cannot drift from the substrate's, and a row whose
+// metadata is written with different whitespace is classified the same
+// way as one written compactly.
+type wakeDeliveryBucket struct {
+	// label identifies the bucket in error messages and in the
+	// selection map.
+	label string
+	// predicate is the canonical SQL predicate for this bucket's rows.
+	predicate string
+	// rowCap is the maximum number of rows of this kind delivered in
+	// one call. Rows above it stay pending.
+	rowCap int
+	// byteCap is the maximum number of bytes this kind may contribute
+	// to the rendered <system_wake_notification> block in one call.
+	byteCap int
+}
+
+// agentOwnedWakeBuckets returns the delivery buckets for the
+// agent-owned kinds.
+//
+// untaggedMatches selects the semantics of the notification bucket:
+// the default and wildcard folds treat an untagged wake as a
+// notification wake, while an explicit kinds=["notification"] request
+// matches the named kinds exactly.
+func agentOwnedWakeBuckets(untaggedMatches bool) []wakeDeliveryBucket {
+	return []wakeDeliveryBucket{
+		{
+			label:     "notification",
+			predicate: wakeKindSQL([]string{"notification"}, untaggedMatches),
+			rowCap:    MaxNotificationWakePerCheck,
+			byteCap:   MaxWakeNotificationBytesPerKind,
+		},
+		{
+			label:     "cron",
+			predicate: wakeKindSQL([]string{"cron"}, false),
+			rowCap:    MaxCronWakePerCheck,
+			byteCap:   MaxWakeNotificationBytesPerKind,
+		},
+		{
+			label:     "cascade",
+			predicate: wakeKindSQL([]string{"cascade"}, false),
+			rowCap:    MaxCascadeWakePerCheck,
+			byteCap:   MaxWakeNotificationBytesPerKind,
+		},
+	}
+}
+
+// filterWakeBuckets keeps only the buckets whose label is in allowed.
+// A requested kind the agent does not own has no bucket, and the
+// scheduler's kinds are never in the bucket list at all.
+func filterWakeBuckets(buckets []wakeDeliveryBucket, allowed []string) []wakeDeliveryBucket {
+	permitted := make(map[string]bool, len(allowed))
+	for _, k := range allowed {
+		permitted[k] = true
+	}
+	out := make([]wakeDeliveryBucket, 0, len(buckets))
+	for _, b := range buckets {
+		if permitted[b.label] {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// pendingWake is a candidate row read from the wake table by the fold.
+type pendingWake struct {
 	id         string
 	targetTime int64
 	reason     string
@@ -1191,7 +1369,94 @@ func (dm *DatabaseManager) wakeRowToMap(p struct {
 	createdBy  string
 	metadata   *string
 	createdAt  string
-}, nowUnix int64) map[string]interface{} {
+}
+
+// selectedWake is a candidate the fold selected for delivery: the
+// rendered row the agent will see, plus the identity the settlement
+// needs.
+type selectedWake struct {
+	id         string
+	targetTime int64
+	out        map[string]interface{}
+}
+
+// scanPendingWakes reads the candidate rows out of a bucket's result
+// set. The rows are closed before it returns.
+func scanPendingWakes(rows *sql.Rows) ([]pendingWake, error) {
+	defer rows.Close()
+	var out []pendingWake
+	for rows.Next() {
+		var p pendingWake
+		if err := rows.Scan(&p.id, &p.targetTime, &p.reason, &p.theoryID, &p.createdBy, &p.metadata, &p.createdAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// budgetWakeBucket applies the bucket's BYTE cap to its candidates and
+// returns the ones this call delivers.
+//
+// The byte cap is measured on the bytes the agent actually receives:
+// the rendered <system_wake_notification> line for the row, produced
+// by the same function the renderer uses. A row cap alone cannot bound
+// the block, because the directive_id is rendered verbatim and can be
+// arbitrarily long.
+//
+// A candidate that does not fit is SKIPPED, not truncated and not
+// dropped: it stays pending, and the candidates behind it are still
+// considered.
+//
+// The bucket's FIRST row is always delivered even if it exceeds the
+// cap on its own — the budget throttles the batch, it must never make
+// a wake undeliverable. The consequence is that a kind's byte usage
+// may exceed its cap by at most that one row, and that the rows
+// behind an oversized row wait for the next call. They are not lost:
+// they stay pending and the next call delivers them.
+func budgetWakeBucket(dm *DatabaseManager, b wakeDeliveryBucket, candidates []pendingWake, nowUnix int64) []selectedWake {
+	out := make([]selectedWake, 0, len(candidates))
+	used := 0
+	for _, p := range candidates {
+		row := dm.wakeRowToMap(p, nowUnix)
+		size := len(formatWakeNotificationRow(row))
+		if len(out) > 0 && used+size > b.byteCap {
+			// Over budget: this row stays pending for a later call.
+			continue
+		}
+		used += size
+		out = append(out, selectedWake{id: p.id, targetTime: p.targetTime, out: row})
+	}
+	return out
+}
+
+// mergeSelectedWaves merges two chronologically ordered selections into
+// one chronological selection. The tie-break is the wake id, so the
+// order is deterministic.
+func mergeSelectedWakes(a, b []selectedWake) []selectedWake {
+	out := make([]selectedWake, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i].targetTime < b[j].targetTime ||
+			(a[i].targetTime == b[j].targetTime && a[i].id <= b[j].id) {
+			out = append(out, a[i])
+			i++
+			continue
+		}
+		out = append(out, b[j])
+		j++
+	}
+	out = append(out, a[i:]...)
+	out = append(out, b[j:]...)
+	return out
+}
+
+// wakeRowToMap converts a pending wake row to the map format returned by
+// CheckPendingWakes, without any database side effects.
+func (dm *DatabaseManager) wakeRowToMap(p pendingWake, nowUnix int64) map[string]interface{} {
 	row := map[string]interface{}{
 		"id":           p.id,
 		"target_time":  p.targetTime,
@@ -1633,33 +1898,50 @@ func FormatWakeNotification(wakes []map[string]interface{}) string {
 	b.WriteString("Scheduled tasks now due:")
 	b.WriteString("\n")
 	for _, w := range wakes {
-		id := maxRunes(w["id"].(string), 8)
-		reason := ""
-		if r, ok := w["reason"].(string); ok {
-			reason = maxRunes(r, 80)
-		}
-		overdueSecs := int64(0)
-		if o, ok := w["overdue_secs"].(int64); ok {
-			overdueSecs = o
-		} else if o, ok := w["overdue_secs"].(float64); ok {
-			overdueSecs = int64(o)
-		}
-		// Extract directive_id from the parsed metadata map, if
-		// present. Defensive against both nil metadata and
-		// non-string directive_id (e.g. null) — the field is omitted
-		// rather than rendered as "directive_id=null" which would
-		// confuse the LLM triage path.
-		directiveID := extractDirectiveID(w)
-		if directiveID != "" {
-			b.WriteString(fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d | directive_id=%q\n",
-				id, reason, overdueSecs, directiveID))
-		} else {
-			b.WriteString(fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d\n",
-				id, reason, overdueSecs))
-		}
+		b.WriteString(formatWakeNotificationRow(w))
 	}
 	b.WriteString("</system_wake_notification>\n")
 	return b.String()
+}
+
+// formatWakeNotificationRow renders ONE wake as the notification
+// block's line.
+//
+// It is the single source of the block's per-wake cost: the fold's
+// byte budget (MaxWakeNotificationBytesPerKind) measures the bytes
+// this function produces, so the budget is expressed in the units the
+// agent actually receives rather than in a proxy (a row count) that
+// does not bound the output.
+//
+// The rendered line is bounded in every field EXCEPT the directive_id,
+// which is rendered verbatim: a directive id is an identifier the
+// agent has to use, so truncating it would render it unusable. That
+// unbounded field is why the fold's budget is a byte budget and not
+// only a row budget.
+func formatWakeNotificationRow(w map[string]interface{}) string {
+	id := maxRunes(w["id"].(string), 8)
+	reason := ""
+	if r, ok := w["reason"].(string); ok {
+		reason = maxRunes(r, 80)
+	}
+	overdueSecs := int64(0)
+	if o, ok := w["overdue_secs"].(int64); ok {
+		overdueSecs = o
+	} else if o, ok := w["overdue_secs"].(float64); ok {
+		overdueSecs = int64(o)
+	}
+	// Extract directive_id from the parsed metadata map, if
+	// present. Defensive against both nil metadata and
+	// non-string directive_id (e.g. null) — the field is omitted
+	// rather than rendered as "directive_id=null" which would
+	// confuse the LLM triage path.
+	directiveID := extractDirectiveID(w)
+	if directiveID != "" {
+		return fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d | directive_id=%q\n",
+			id, reason, overdueSecs, directiveID)
+	}
+	return fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d\n",
+		id, reason, overdueSecs)
 }
 
 // extractDirectiveID pulls the directive_id string out of a wake row

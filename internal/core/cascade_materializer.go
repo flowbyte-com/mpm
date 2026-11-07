@@ -945,9 +945,29 @@ func (cm *CascadeMaterializer) scheduleCascadeWake(intentID, theoryID, invalidat
 	if markErr := cm.markWakeScheduled(intentID); markErr != nil {
 		// ScheduleWake succeeded but the bookkeeping update failed.
 		// Surface the error so the caller logs it; reconcile will pick
-		// up the unscheduled row and re-schedule. We do NOT delete the
-		// wake — the wake is a valid delivery signal; the duplication
-		// risk is bounded by the per-check delivery cap.
+		// up the unscheduled row and re-schedule.
+		//
+		// We do NOT delete the wake. The wake is a valid delivery
+		// signal, and deleting it would destroy the only record that
+		// this obligation reached the queue.
+		//
+		// AN EARLIER VERSION OF THIS COMMENT SAID "the duplication risk
+		// is bounded by the per-check delivery cap". THAT WAS FALSE.
+		// The cap bounds the BATCH, not the OBLIGATION: two cascade
+		// wakes carrying the same theory_id and the same
+		// invalidation_event_id are ONE obligation that the reconciler
+		// duplicated, and the cap (3) does not stop both being delivered
+		// in a single call.
+		//
+		// The consequence is that the same obligation can reach the
+		// agent TWICE. That is a real (narrow) duplicate, it is
+		// VISIBLE — the reconciler logs it when it cannot reclaim a
+		// wake the fold already settled — and its durable fix is a
+		// claim with a lease, which belongs to the delivery-state work
+		// (Stage B/C). It is not fixed here, and no deduplication is
+		// attempted: a wake row carries no obligation key the substrate
+		// could dedupe on without a new column, and adding one is
+		// outside this change's scope.
 		return fmt.Errorf("scheduleCascadeWake markWakeScheduled for intent=%s: %w", intentID, markErr)
 	}
 	return nil
