@@ -80,15 +80,227 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+)
+
+// ── THE PER-CALL DELIVERY BUDGET ─────────────────────────────────────
+//
+// The opportunistic fold is the agent's delivery path and it runs on
+// EVERY agent request. It must therefore deliver a BOUNDED amount
+// per call.
+//
+// Three limits, all per call:
+//
+//   - A ROW cap, per kind. It bounds the scan, the settlement, and
+//     the JSON envelope the tools-module handler puts the delivered
+//     rows into (WakesPending).
+//   - A BYTE cap on the rendered <system_wake_notification> block,
+//     per kind.
+//   - A BYTE bound on every RENDERED FIELD, and on every
+//     caller-supplied string in a delivered row. This is the
+//     foundation the byte cap rests on.
+//
+// WHY THE FIELD BOUNDS ARE THE FOUNDATION.
+//
+// A byte cap measured on a BATCH is only a bound on the RESPONSE if
+// every member of the batch is itself bounded — and the members were
+// not. The directive_id is caller-supplied and was rendered verbatim,
+// so ONE wake could carry a 200 KB directive_id and the block would
+// be 200 KB: fifty times the per-kind cap. Measured at the head that
+// carried the byte cap:
+//
+//   - one wake with a 204,800-byte directive_id rendered a 204,957-byte
+//     block against a 4,096-byte per-kind cap;
+//   - the same wake's STRUCTURED row — the WakesPending payload the
+//     core tool handlers and `mpm call` return — was 205,020 bytes,
+//     because the delivered row carried the caller's metadata
+//     verbatim. Bounding only the rendered XML block would NOT have
+//     closed the hole: `mpm call` returns the structured row, not the
+//     rendered one;
+//   - the agent-facing arming path accepted a 102,400-byte
+//     directive_id and stored it, so one ordinary `mpm_wakes
+//     schedule` call was enough to arm the oversized wake.
+//
+// So the budget is now built from the field bounds up:
+//
+//   - every field the renderer emits is bounded in BYTES and cut at a
+//     CHARACTER boundary. A byte cut can split a multi-byte
+//     character; the renderer then escaped the orphan byte as \xNN,
+//     which mangles the text the agent reads and inflates the byte
+//     cost unpredictably;
+//   - every caller-supplied string in a delivered row is bounded, so
+//     the STRUCTURED payload is bounded too;
+//   - the arming path REFUSES a directive_id too long to render,
+//     because a truncated identifier is unusable and a silently
+//     mangled one is worse than an explicit refusal.
+//
+// WHAT IS ACCOUNTED FOR SEPARATELY.
+//
+// Four quantities, four bounds. They do NOT share one budget, and the
+// envelope is the SUM of two of them:
+//
+//	| quantity                          | bound                          |
+//	|-----------------------------------|--------------------------------|
+//	| rendered block, per kind          | MaxWakeNotificationBytesPerKind |
+//	| rendered block, all kinds         | 3 x the above                  |
+//	| structured WakesPending payload   | row caps x per-row delivered bound |
+//	| the tool's own payload            | the output policy's own threshold |
+//	| the MCP envelope                  | block + payload: MAY exceed the |
+//	|                                   | output policy's threshold       |
+//
+// The MCP adapter prepends the wake block to the tool's response AFTER
+// the output-policy spill decision, so the policy's threshold applies to
+// the tool's payload ALONE and never bounded the wake block. The two
+// are bounded independently and the envelope is their sum.
+//
+// WHY THE BUDGET IS PER KIND, NOT GLOBAL.
+//
+// A global budget applied in selection order lets the oldest kind
+// starve the others permanently. With a 7-day notification backlog
+// and a 1-hour cron backlog, a global cap spent on the oldest rows
+// would give the newer kind a zero share on every call, forever —
+// which is a silent loss window, the exact thing a budget must not
+// create. Per-kind caps give every kind an independent share, so
+// every kind makes progress on every call and no kind is starved by
+// another's backlog.
+//
+// WHY THESE NUMBERS.
+//
+//   - MaxNotificationWakePerCheck / MaxCronWakePerCheck = 16. The
+//     budget must keep up with PRODUCTION. One one-minute cron task
+//     produces 60 wakes/hour, so 16 wakes per call keeps up with an
+//     agent that issues one request every four minutes, and has 16x
+//     headroom for an agent that issues one per minute. It must also
+//     not swamp the agent's triage: the seeded directive
+//     mpm-seed-wake-triage-policy tells the agent to alert the user
+//     for every entry with overdue_secs <= 86400, so a burst of 60
+//     identical cron entries produces 60 identical alerts. 16 is a
+//     page, not a wall.
+//
+//   - MaxCascadeWakePerCheck = 3 is UNCHANGED. It was already the
+//     per-call bound for cascade delivery, and the cascade kind keeps
+//     its own cap.
+//
+//   - MaxWakeNotificationBytesPerKind = 4096. The rendered line of a
+//     normal wake is ~105 bytes, so 4096 bytes is ~39 lines: under
+//     the 16-row cap for ordinary rows, which means the row cap binds
+//     in normal operation and the byte cap is the BACKSTOP for rows
+//     whose rendered length is larger. With every rendered field now
+//     bounded (see the field bounds below), a single rendered row is at
+//     most ~450 bytes, so the cap can NEVER be exceeded by one row —
+//     the "one row may exceed the cap" exception this budget used to
+//     carry is GONE, and the cap is a true bound.
+//
+// WHAT THE BUDGET DOES NOT DO.
+//
+// It does not drop anything. A wake that does not fit the budget
+// stays PENDING (fired = 0) and remains eligible for the next call,
+// exactly as a cascade wake above MaxCascadeWakePerCheck already
+// behaves. The budget is a THROTTLE, not a loss window: an eligible
+// wake stays eligible until its own retention window closes.
+//
+// It also does not make a wake undeliverable. Because every rendered
+// field is bounded, an oversized wake costs at most its bounded size
+// against the budget, so the healthy wakes behind it are delivered in
+// the SAME call. An oversized row cannot starve the rows behind it.
+const (
+	// MaxNotificationWakePerCheck bounds notification-kind (and
+	// untagged) wake delivery per CheckPendingWakes call. Rows above
+	// the cap are left pending for the next call.
+	MaxNotificationWakePerCheck = 16
+
+	// MaxCronWakePerCheck bounds cron-kind wake delivery per
+	// CheckPendingWakes call. Rows above the cap are left pending for
+	// the next call.
+	MaxCronWakePerCheck = 16
+
+	// MaxWakeNotificationBytesPerKind bounds the rendered
+	// <system_wake_notification> block contributed by ONE kind in one
+	// call. It is a TRUE bound: every rendered field is itself bounded
+	// (MaxWakeRenderedIDBytes, MaxWakeRenderedReasonBytes,
+	// MaxWakeDirectiveIDBytes), so a single rendered row can never
+	// exceed it and the cap is never exceeded at all.
+	MaxWakeNotificationBytesPerKind = 4096
+)
+
+// ── THE FIELD BOUNDS ─────────────────────────────────────────────────
+//
+// The per-kind byte cap is only as strong as the rows it measures.
+// These bounds are what make it a bound on the agent-visible RESPONSE
+// rather than a bound on the batch.
+//
+// Every bound is in BYTES, because the budget is measured in bytes and
+// a budget quoted in characters is not the budget the agent receives.
+// Every cut is made at a CHARACTER boundary, because a byte cut that
+// splits a multi-byte character both mangles what the agent reads and
+// makes the byte cost unpredictable (the orphan byte is escaped as
+// \xNN, which is four bytes of output for one byte of input).
+//
+// The bounds fall into two families:
+//
+//   - RENDERED bounds (MaxWakeRenderedIDBytes,
+//     MaxWakeRenderedReasonBytes, MaxWakeDirectiveIDBytes) size what
+//     the agent reads in the <system_wake_notification> block.
+//
+//   - DELIVERED bounds (MaxWakeDeliveredStringBytes,
+//     MaxWakeDeliveredMetadataBytes, MaxWakeDeliveredMetadataKeys,
+//     MaxWakeDeliveredIDBytes) size what the agent reads in the
+//     STRUCTURED WakesPending payload. That payload is a DIFFERENT
+//     surface with a DIFFERENT bound, and it is accounted for
+//     separately.
+const (
+	// MaxWakeRenderedIDBytes bounds the rendered wake id. The id is
+	// substrate-generated (ScheduleWake mints it), so this is a display
+	// bound; the full id is in the structured payload.
+	MaxWakeRenderedIDBytes = 8
+
+	// MaxWakeRenderedReasonBytes bounds the rendered reason, in bytes.
+	// The reason is prose: it is cut with an ellipsis, and the ellipsis
+	// is the signal that it was cut.
+	MaxWakeRenderedReasonBytes = 80
+
+	// MaxWakeDirectiveIDBytes bounds a rendered directive_id, in bytes.
+	// A directive id is an IDENTIFIER the agent passes back to
+	// read_directives, so a truncated one is unusable: the arming path
+	// refuses a longer value outright (see handleScheduleWake) and the
+	// renderer marks a value that was already persisted.
+	MaxWakeDirectiveIDBytes = 256
+
+	// MaxWakeDeliveredStringBytes bounds each caller-supplied string in
+	// a delivered row: the reason, the theory_id, the created_by, and
+	// every string value in the metadata.
+	MaxWakeDeliveredStringBytes = 256
+
+	// MaxWakeDeliveredMetadataBytes bounds the marshalled metadata
+	// document of a delivered row.
+	MaxWakeDeliveredMetadataBytes = 512
+
+	// MaxWakeDeliveredMetadataKeys bounds the number of keys in a
+	// delivered row's metadata.
+	MaxWakeDeliveredMetadataKeys = 16
+
+	// MaxWakeDeliveredIDBytes bounds the wake id in a delivered row.
+	// The id is substrate-generated, so this bound is DEFENSIVE: it
+	// exists so that a row written by an older binary, by direct SQL,
+	// or by a future producer cannot make the structured payload
+	// unbounded.
+	MaxWakeDeliveredIDBytes = 64
 )
 
 // MaxCascadeWakePerCheck bounds cascade wake delivery per CheckPendingWakes
 // call. Cascade wakes (metadata.kind == "cascade") above this cap are left
-// unfired (pending) for the next call. Notification and cron wakes are
-// unaffected by this cap. Default value: 3.
+// unfired (pending) for the next call. Default value: 3.
+//
+// The cap bounds the BATCH, not the OBLIGATION. It does not
+// deduplicate: two cascade wakes carrying the same theory_id and the
+// same invalidation_event_id are one obligation that the reconciler
+// duplicated, and both are delivered if both are pending (2 <= 3).
+// See internal/core/cascade_materializer.go for why that duplication
+// arises and what the durable fix is.
 const MaxCascadeWakePerCheck = 3
 
 // ScheduleCascadeSummaryWake persists a typed `cascade_summary` wake that
@@ -290,6 +502,17 @@ func BlockedWakeKindError(kind string) error {
 //     ad-hoc claim excludes them (dispatchClaimNextAdHocWake) and the
 //     fold is their delivery path: the row carries the directive_id
 //     the agent has to consult.
+//
+// Every one of these three is delivered by the DEFAULT fold — the
+// no-kinds branch that every CLI and MCP request runs. A kind that is
+// agent-owned but delivered only by an explicit kinds=["..."] request
+// is delivered to nobody in practice: the agent does not know to ask,
+// and the retention sweep eventually retires the row. The producer
+// writes the directive_id into the cron wake's metadata precisely so
+// the agent can read it "at wake-time without an extra lookup"
+// (internal/core/scheduled_tasks.go), and FormatWakeNotification
+// renders it into the <system_wake_notification> block — an affordance
+// that is dead code unless the default fold delivers the row.
 //
 // Everything else — snapshot, critic_audit, gc, broadcast,
 // cascade_summary, drill, and any kind a future binary introduces — is
@@ -511,8 +734,8 @@ func WakeMetadataIsCorruptValue(metadata sql.NullString) bool {
 
 // WakeKindExpr is the always-valid expression for a wake's `kind`.
 //
-// It evaluates to the kind string, or '' when the document carries no
-// usable kind. A malformed document reads as UNTAGGED (''), exactly
+// It evaluates to the kind string, or ” when the document carries no
+// usable kind. A malformed document reads as UNTAGGED (”), exactly
 // like a NULL or empty one — which is the same reading Wake.Kind()
 // takes, and the same reading the fold's untagged branch already used.
 //
@@ -1017,9 +1240,10 @@ func isValidWakeResolveReason(reason string) bool {
 	return false
 }
 
-// CheckPendingWakes returns every wake where fired=0 AND target_time <= now,
-// marks them fired=1 with fired_at=now, and returns them in chronological
-// order. Returns an empty slice when nothing is due (NOT an error).
+// CheckPendingWakes returns the DUE, AGENT-OWNED wakes that fit this
+// call's DELIVERY BUDGET, marks them fired=1 with fired_at=now, and
+// returns them in chronological order. Returns an empty slice when
+// nothing is due (NOT an error).
 //
 // The caller (the handler) is expected to fold the result into a
 // "WakesPending" block on the outgoing response so the agent sees the
@@ -1032,9 +1256,13 @@ func isValidWakeResolveReason(reason string) bool {
 //
 // Kinds filter:
 //
-//   - kinds nil/empty: backward-compatible default. Surfaces notification
-//     wakes (kind='notification' or kind absent on metadata). Cron-injected
-//     and other system-kind wakes are excluded.
+//   - kinds nil/empty: the DEFAULT delivery path — every AGENT-OWNED
+//     pending wake, whatever its kind. This is the same predicate as
+//     the "*" branch below, and it must stay the same predicate: the
+//     fold is the delivery path for every kind the agent owns, so a
+//     default that is narrower than the allowlist silently starves the
+//     kinds it omits. See AgentOwnedWakeKinds for the membership and
+//     the per-kind reason.
 //   - kinds contains "*": surface every AGENT-OWNED pending wake
 //     regardless of kind. The scheduler's kinds are NOT crossed into:
 //     a wake the scheduler owns must reach its handler, and a fold
@@ -1044,12 +1272,18 @@ func isValidWakeResolveReason(reason string) bool {
 //     no kind set are excluded by this branch. A requested kind the
 //     scheduler owns matches nothing.
 //
-// Cascade wake cap:
+// The per-call delivery budget:
 //
-//	When kinds includes "cascade" (or is "*"), cascade wakes
-//	(metadata.kind == "cascade") are limited to MaxCascadeWakePerCheck per
-//	call. Notification and cron wakes are unaffected. Uncapped cascade
-//	wakes remain pending for the next call.
+//	Every agent-owned kind has its own row cap and its own byte cap
+//	on the rendered <system_wake_notification> block. Rows that do
+//	not fit stay PENDING (fired = 0) and are delivered by a later
+//	call, exactly as a cascade wake above MaxCascadeWakePerCheck
+//	already behaves. The budget throttles the batch; it never drops
+//	a wake and it never settles one it does not deliver.
+//
+//	The budget is PER KIND so that a backlog of one kind cannot
+//	starve another. See the constants above for the numbers and the
+//	reasoning.
 func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]map[string]interface{}, error) {
 	nowUnix := now.Unix()
 	tx, err := dm.db.Begin()
@@ -1058,14 +1292,28 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 	}
 	defer tx.Rollback()
 
-	// Build the kind-filter clause. Three branches:
+	// Resolve the delivery buckets — one per agent-owned kind this
+	// call may deliver.
+	//
+	// Three branches:
 	//   "*" anywhere  -> every AGENT-OWNED wake, whatever its kind
-	//   specific list -> IN filter on the wake's kind, narrowed to
-	//                    the agent-owned requested kinds
-	//   nil / empty   -> backward-compat default (notification only)
-	whereExtra := ""
-	args := []interface{}{nowUnix}
-
+	//   specific list -> only the requested agent-owned kinds
+	//   nil / empty   -> every AGENT-OWNED wake (the default path)
+	//
+	// The default and the wildcard are the SAME predicate. They were
+	// not, and the difference was a defect: the default branch
+	// matched only notification wakes, so the two kinds the fold owns
+	// but the default omitted — cron and cascade — were never
+	// delivered. A cron wake was injected, became due, was invisible
+	// to every agent, and was retired by the cron retention sweep
+	// with its directive_id undelivered. A cascade wake was never
+	// delivered either, although its producer documents "immediate
+	// delivery on next check_wakes" and check_wakes without a kinds
+	// argument uses this branch.
+	//
+	// One predicate for "what the fold delivers" is the whole point
+	// of AgentOwnedWakeKinds: a kind the agent owns is delivered by
+	// the fold, and a kind the scheduler owns never is.
 	includeAll := false
 	for _, k := range kinds {
 		if k == "*" {
@@ -1074,13 +1322,12 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 		}
 	}
 
+	var buckets []wakeDeliveryBucket
 	switch {
-	case includeAll:
-		// Every AGENT-OWNED pending wake, whatever its kind. The
-		// scheduler's kinds are excluded here: the fold retires a wake
-		// it delivers, and a scheduler-owned wake must reach its
-		// handler instead.
-		whereExtra = ` AND (` + wakeKindSQL(AgentOwnedWakeKinds, true) + `)`
+	case includeAll, len(kinds) == 0:
+		// The default and the wildcard treat an UNTAGGED wake as a
+		// notification wake (WakeNotificationKindFilter).
+		buckets = agentOwnedWakeBuckets(true)
 	case len(kinds) > 0:
 		// Only the requested kinds, and only the ones that are the
 		// agent's. A request that names only scheduler-owned kinds
@@ -1089,88 +1336,69 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 		if len(allowed) == 0 {
 			return []map[string]interface{}{}, nil
 		}
-		whereExtra = ` AND (` + wakeKindSQL(allowed, false) + `)`
-	default:
-		// Backward-compat default: only notification-kind wakes.
-		whereExtra = ` AND (` + wakeKindSQL([]string{"notification"}, true) + `)`
+		// An EXPLICIT request matches the named kinds exactly: an
+		// untagged wake is not a "notification" wake to
+		// json_extract(...)= 'notification'. This has always been the
+		// explicit branch's semantics and it is unchanged.
+		buckets = agentOwnedWakeBuckets(false)
+		buckets = filterWakeBuckets(buckets, allowed)
 	}
 
+	// Select and budget each bucket.
+	//
 	// A CORRUPT ROW IS NEVER FOLDED. The fold RETIRES what it
 	// delivers, so folding a row whose owner cannot be determined
 	// would deliver scheduler-owned work to the agent as an ordinary
 	// notification AND retire it — the partition shift the W4 policy
 	// forbids. The exclusion is the canonical predicate, so it cannot
 	// drift from the one the claim and the sweeps use.
-	rows, err := tx.Query(
-		`SELECT id, target_time, reason, theory_id, created_by, metadata, created_at
-		 FROM scheduled_wakes
-		 WHERE fired = 0 AND target_time <= ?`+whereExtra+`
-		   AND NOT `+WakeMetadataIsCorrupt+`
-		 ORDER BY target_time ASC`,
-		args...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("select pending wakes: %w", err)
-	}
-	defer rows.Close()
-	type pending struct {
-		id         string
-		targetTime int64
-		reason     string
-		theoryID   *string
-		createdBy  string
-		metadata   *string
-		createdAt  string
-	}
-	var batch []pending
-	for rows.Next() {
-		var p pending
-		if err := rows.Scan(&p.id, &p.targetTime, &p.reason, &p.theoryID, &p.createdBy, &p.metadata, &p.createdAt); err != nil {
-			return nil, fmt.Errorf("scan wake row: %w", err)
-		}
-		batch = append(batch, p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate wake rows: %w", err)
-	}
-	rows.Close()
-
-	// Separate cascade from non-cascade rows so we can apply the per-check
-	// cap only to cascade wakes. This preserves full delivery of notification
-	// and cron wakes regardless of how many cascade wakes are queued.
-	var cascadeBatch, nonCascadeBatch []pending
-	for _, p := range batch {
-		if p.metadata != nil && strings.Contains(*p.metadata, `"kind":"cascade"`) {
-			cascadeBatch = append(cascadeBatch, p)
-		} else {
-			nonCascadeBatch = append(nonCascadeBatch, p)
-		}
-	}
-
-	// Apply cascade cap. Rows beyond the cap are left in the DB (not marked
-	// fired) so a subsequent call will deliver them.
-	if len(cascadeBatch) > MaxCascadeWakePerCheck {
-		cascadeBatch = cascadeBatch[:MaxCascadeWakePerCheck]
-	}
-
-	// Interleave: non-cascade first (chronological), then capped cascade.
-	// ORDER BY target_time ASC over the full batch already placed them in
-	// chronological order; splitting and re-combining preserves that order.
-	out := make([]map[string]interface{}, 0, len(nonCascadeBatch)+len(cascadeBatch))
-	for _, p := range nonCascadeBatch {
-		out = append(out, dm.wakeRowToMap(p, nowUnix))
-	}
-	for _, p := range cascadeBatch {
-		out = append(out, dm.wakeRowToMap(p, nowUnix))
-	}
-
-	// Mark all selected rows fired in a single batch.
-	for _, p := range append(nonCascadeBatch, cascadeBatch...) {
-		_, err := tx.Exec(
-			`UPDATE scheduled_wakes SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0`,
-			nowUnix, p.id,
+	//
+	// The SELECT carries the bucket's ROW CAP as its LIMIT, so the
+	// scan is bounded too: a backlog of 10,080 cron wakes costs the
+	// same read as a backlog of 16.
+	selected := make(map[string][]selectedWake, len(buckets))
+	for _, b := range buckets {
+		rows, err := tx.Query(
+			`SELECT id, target_time, reason, theory_id, created_by, metadata, created_at
+			 FROM scheduled_wakes
+			 WHERE fired = 0 AND target_time <= ? AND (`+b.predicate+`)
+			   AND NOT `+WakeMetadataIsCorrupt+`
+			 ORDER BY target_time ASC, id ASC
+			 LIMIT ?`,
+			nowUnix, b.rowCap,
 		)
 		if err != nil {
+			return nil, fmt.Errorf("select pending %s wakes: %w", b.label, err)
+		}
+		candidates, scanErr := scanPendingWakes(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan pending %s wakes: %w", b.label, scanErr)
+		}
+		selected[b.label] = budgetWakeBucket(dm, b, candidates, nowUnix)
+	}
+
+	// Order the delivered set.
+	//
+	// The historical order is preserved: the non-cascade kinds merged
+	// chronologically, then the capped cascade batch. The cascade
+	// kind is appended rather than merged because it has always been
+	// delivered after the non-cascade batch, and the cap truncates
+	// the OLDEST end of its own bucket (the SELECT's ORDER BY).
+	nonCascade := mergeSelectedWakes(selected["notification"], selected["cron"])
+	delivered := make([]selectedWake, 0, len(nonCascade)+len(selected["cascade"]))
+	delivered = append(delivered, nonCascade...)
+	delivered = append(delivered, selected["cascade"]...)
+
+	// Mark EXACTLY the delivered rows fired, in one batch.
+	//
+	// A row that was read but excluded by the budget is NOT marked:
+	// it stays pending and a later call delivers it. The fold never
+	// retires a wake it did not deliver.
+	for _, w := range delivered {
+		if _, err := tx.Exec(
+			`UPDATE scheduled_wakes SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0`,
+			nowUnix, w.id,
+		); err != nil {
 			return nil, fmt.Errorf("mark wake fired: %w", err)
 		}
 	}
@@ -1178,12 +1406,85 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit wake tx: %w", err)
 	}
+
+	out := make([]map[string]interface{}, 0, len(delivered))
+	for _, w := range delivered {
+		out = append(out, w.out)
+	}
 	return out, nil
 }
 
-// wakeRowToMap converts a pending wake row to the map format returned by
-// CheckPendingWakes, without any database side effects.
-func (dm *DatabaseManager) wakeRowToMap(p struct {
+// wakeDeliveryBucket is one agent-owned kind's share of a call's
+// delivery budget.
+//
+// The kind's rows are selected with the canonical kind predicate —
+// the same JSON-safe expression the claim and the sweeps use — so the
+// classification cannot drift from the substrate's, and a row whose
+// metadata is written with different whitespace is classified the same
+// way as one written compactly.
+type wakeDeliveryBucket struct {
+	// label identifies the bucket in error messages and in the
+	// selection map.
+	label string
+	// predicate is the canonical SQL predicate for this bucket's rows.
+	predicate string
+	// rowCap is the maximum number of rows of this kind delivered in
+	// one call. Rows above it stay pending.
+	rowCap int
+	// byteCap is the maximum number of bytes this kind may contribute
+	// to the rendered <system_wake_notification> block in one call.
+	byteCap int
+}
+
+// agentOwnedWakeBuckets returns the delivery buckets for the
+// agent-owned kinds.
+//
+// untaggedMatches selects the semantics of the notification bucket:
+// the default and wildcard folds treat an untagged wake as a
+// notification wake, while an explicit kinds=["notification"] request
+// matches the named kinds exactly.
+func agentOwnedWakeBuckets(untaggedMatches bool) []wakeDeliveryBucket {
+	return []wakeDeliveryBucket{
+		{
+			label:     "notification",
+			predicate: wakeKindSQL([]string{"notification"}, untaggedMatches),
+			rowCap:    MaxNotificationWakePerCheck,
+			byteCap:   MaxWakeNotificationBytesPerKind,
+		},
+		{
+			label:     "cron",
+			predicate: wakeKindSQL([]string{"cron"}, false),
+			rowCap:    MaxCronWakePerCheck,
+			byteCap:   MaxWakeNotificationBytesPerKind,
+		},
+		{
+			label:     "cascade",
+			predicate: wakeKindSQL([]string{"cascade"}, false),
+			rowCap:    MaxCascadeWakePerCheck,
+			byteCap:   MaxWakeNotificationBytesPerKind,
+		},
+	}
+}
+
+// filterWakeBuckets keeps only the buckets whose label is in allowed.
+// A requested kind the agent does not own has no bucket, and the
+// scheduler's kinds are never in the bucket list at all.
+func filterWakeBuckets(buckets []wakeDeliveryBucket, allowed []string) []wakeDeliveryBucket {
+	permitted := make(map[string]bool, len(allowed))
+	for _, k := range allowed {
+		permitted[k] = true
+	}
+	out := make([]wakeDeliveryBucket, 0, len(buckets))
+	for _, b := range buckets {
+		if permitted[b.label] {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// pendingWake is a candidate row read from the wake table by the fold.
+type pendingWake struct {
 	id         string
 	targetTime int64
 	reason     string
@@ -1191,24 +1492,240 @@ func (dm *DatabaseManager) wakeRowToMap(p struct {
 	createdBy  string
 	metadata   *string
 	createdAt  string
-}, nowUnix int64) map[string]interface{} {
+}
+
+// selectedWake is a candidate the fold selected for delivery: the
+// rendered row the agent will see, plus the identity the settlement
+// needs.
+type selectedWake struct {
+	id         string
+	targetTime int64
+	out        map[string]interface{}
+}
+
+// scanPendingWakes reads the candidate rows out of a bucket's result
+// set. The rows are closed before it returns.
+func scanPendingWakes(rows *sql.Rows) ([]pendingWake, error) {
+	defer rows.Close()
+	var out []pendingWake
+	for rows.Next() {
+		var p pendingWake
+		if err := rows.Scan(&p.id, &p.targetTime, &p.reason, &p.theoryID, &p.createdBy, &p.metadata, &p.createdAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// budgetWakeBucket applies the bucket's BYTE cap to its candidates and
+// returns the ones this call delivers.
+//
+// The byte cap is measured on the bytes the agent actually receives:
+// the rendered <system_wake_notification> line for the row, produced
+// by the same function the renderer uses. A row cap alone cannot bound
+// the block, because the directive_id is caller-supplied and can be
+// arbitrarily long — which is why every rendered field is bounded
+// before it is measured.
+//
+// A candidate that does not fit is SKIPPED, not truncated and not
+// dropped: it stays pending, and the candidates behind it are still
+// considered.
+//
+// THERE IS NO "FIRST ROW IS ALWAYS DELIVERED" EXEMPTION.
+//
+// The exemption existed because a row's rendered length was not
+// bounded: an oversized first row consumed the whole kind budget, and
+// the healthy wakes behind it were not delivered in that call. Now
+// that every rendered field is bounded, a single rendered row is at
+// most ~450 bytes — well inside the 4,096-byte cap — so the cap can
+// never be exceeded and the exemption could only ever have been
+// exercised by the unbounded rows the field bounds removed.
+//
+// The consequence is the property that matters: an oversized wake
+// costs at most its BOUNDED size against the budget, so the healthy
+// wakes behind it are delivered in the SAME call. An oversized row
+// cannot starve the rows behind it.
+func budgetWakeBucket(dm *DatabaseManager, b wakeDeliveryBucket, candidates []pendingWake, nowUnix int64) []selectedWake {
+	out := make([]selectedWake, 0, len(candidates))
+	used := 0
+	for _, p := range candidates {
+		row := dm.wakeRowToMap(p, nowUnix)
+		size := len(formatWakeNotificationRow(row))
+		if used+size > b.byteCap {
+			// Over budget: this row stays pending for a later call.
+			continue
+		}
+		used += size
+		out = append(out, selectedWake{id: p.id, targetTime: p.targetTime, out: row})
+	}
+	return out
+}
+
+// mergeSelectedWaves merges two chronologically ordered selections into
+// one chronological selection. The tie-break is the wake id, so the
+// order is deterministic.
+func mergeSelectedWakes(a, b []selectedWake) []selectedWake {
+	out := make([]selectedWake, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i].targetTime < b[j].targetTime ||
+			(a[i].targetTime == b[j].targetTime && a[i].id <= b[j].id) {
+			out = append(out, a[i])
+			i++
+			continue
+		}
+		out = append(out, b[j])
+		j++
+	}
+	out = append(out, a[i:]...)
+	out = append(out, b[j:]...)
+	return out
+}
+
+// wakeRowToMap converts a pending wake row to the map format returned by
+// CheckPendingWakes, without any database side effects.
+//
+// THE ROW IS A BOUNDED PROJECTION, not the row as stored.
+//
+// This map is the STRUCTURED payload the agent receives: the core tool
+// handlers put it in the response as `WakesPending`, and `mpm call`
+// puts it in the tool's own result. The stored row's caller-supplied
+// fields — the reason, the theory_id, the created_by, and every string
+// in the metadata — are unbounded in the database, and an unbounded
+// string in this map makes the agent-visible response unbounded: one
+// wake with a 204,800-byte directive_id produced a 205,020-byte
+// structured row at the head that carried the delivery budget.
+//
+// So every caller-supplied string in the row is bounded here, and the
+// metadata is bounded as a whole. The stored row is untouched — the
+// persisted value stays the source of truth and remains readable
+// through `mpm_wakes list`; this is the DELIVERED view.
+//
+// The rendered block is bounded separately, by the renderer's own
+// field bounds. The two surfaces are accounted for separately.
+func (dm *DatabaseManager) wakeRowToMap(p pendingWake, nowUnix int64) map[string]interface{} {
+	reason, _ := truncateBytes(p.reason, MaxWakeDeliveredStringBytes)
+	createdBy, _ := truncateBytes(p.createdBy, MaxWakeDeliveredStringBytes)
+	createdAt, _ := truncateBytes(p.createdAt, MaxWakeDeliveredStringBytes)
+	var theoryID interface{}
+	if p.theoryID != nil {
+		truncated, _ := truncateBytes(*p.theoryID, MaxWakeDeliveredStringBytes)
+		theoryID = truncated
+	}
 	row := map[string]interface{}{
-		"id":           p.id,
+		"id":           truncateString(p.id, MaxWakeDeliveredIDBytes),
 		"target_time":  p.targetTime,
-		"reason":       p.reason,
-		"theory_id":    nullableString(p.theoryID),
-		"created_by":   p.createdBy,
-		"created_at":   p.createdAt,
+		"reason":       reason,
+		"theory_id":    theoryID,
+		"created_by":   createdBy,
+		"created_at":   createdAt,
 		"fired_at":     nowUnix,
 		"overdue_secs": nowUnix - p.targetTime,
 	}
 	if p.metadata != nil && *p.metadata != "" {
 		var meta map[string]interface{}
 		if json.Unmarshal([]byte(*p.metadata), &meta) == nil {
-			row["metadata"] = meta
+			row["metadata"] = boundWakeMetadata(meta)
 		}
 	}
 	return row
+}
+
+// truncateString bounds s to max bytes, marking the cut. It is the
+// string form of truncateBytes for the call sites that do not need the
+// "was it cut" answer.
+func truncateString(s string, max int) string {
+	out, _ := truncateBytes(s, max)
+	return out
+}
+
+// wakeMetadataMarkerAllowance is the room reserved inside
+// MaxWakeDeliveredMetadataBytes for the truncation marker, so the
+// marker can never push the marshalled document over the bound.
+//
+// The reservation is generous on purpose: the marker names how many
+// keys were omitted, so its length grows with the count, and the
+// bound must hold for every count.
+const wakeMetadataMarkerAllowance = 96
+
+// boundWakeMetadata returns a bounded projection of a wake's metadata.
+//
+// THE METADATA IS CALLER-SUPPLIED, so this is what keeps the
+// STRUCTURED WakesPending payload bounded.
+//
+// The projection keeps the two fields the substrate's own delivery
+// contract depends on:
+//
+//   - `kind`, which decides OWNERSHIP — a wake whose kind cannot be
+//     read is a wake nobody may deliver; and
+//   - `directive_id`, the agent's lookup seam.
+//
+// The remaining keys are kept in lexicographic order, so the projection
+// is deterministic, and only as many of them as fit. Every string
+// value is bounded, and a value that was cut says so.
+//
+// A key that did not fit is not silently lost: the projection carries
+// a marker naming how many keys were omitted.
+func boundWakeMetadata(meta map[string]interface{}) map[string]interface{} {
+	if len(meta) == 0 {
+		return meta
+	}
+
+	// Deterministic key order: the protected keys first, then the rest
+	// in lexicographic order.
+	keys := make([]string, 0, len(meta))
+	seen := make(map[string]bool, 2)
+	for _, k := range []string{"kind", "directive_id"} {
+		if _, ok := meta[k]; ok {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	rest := make([]string, 0, len(meta))
+	for k := range meta {
+		if !seen[k] {
+			rest = append(rest, k)
+		}
+	}
+	sort.Strings(rest)
+	keys = append(keys, rest...)
+
+	out := make(map[string]interface{}, len(keys))
+	used := 0
+	dropped := 0
+	for i, k := range keys {
+		if i >= MaxWakeDeliveredMetadataKeys {
+			dropped++
+			continue
+		}
+		val := meta[k]
+		if s, ok := val.(string); ok {
+			s, _ = truncateBytes(s, MaxWakeDeliveredStringBytes)
+			val = s
+		}
+		encoded, err := json.Marshal(val)
+		if err != nil {
+			dropped++
+			continue
+		}
+		// +1 for the comma between entries.
+		if used+len(encoded)+1 > MaxWakeDeliveredMetadataBytes-wakeMetadataMarkerAllowance {
+			dropped++
+			continue
+		}
+		out[k] = val
+		used += len(encoded) + 1
+	}
+	if dropped > 0 {
+		out["_mpm_meta_truncated"] = fmt.Sprintf(
+			"%d key(s) omitted (metadata > %d bytes)",
+			dropped, MaxWakeDeliveredMetadataBytes)
+	}
+	return out
 }
 
 // ListScheduledWakes returns wakes filtered by fired state. Defaults to
@@ -1609,14 +2126,18 @@ func nullableInt64(p *int64) interface{} {
 // visually distinct from the tool's actual output without requiring custom
 // per-client annotation parsing.
 //
-// Each wake entry includes: id (truncated), reason (up to 80 chars),
-// overdue_secs, and (when present) directive_id — the latter extracted
-// from the wake's metadata so the agent can identify which prime
-// directive to consult without a follow-up lookup. The directive_id
-// field is the canonical seam between the substrate (which delivers
-// the wake) and the agent (which reads the directive and acts). For
-// cron-injected wakes from seed.SeedScheduledTasks, this is the
-// stable id the agent should pass to read_directives.
+// Each wake entry includes: id (truncated to MaxWakeRenderedIDBytes),
+// reason (up to MaxWakeRenderedReasonBytes BYTES, cut at a character
+// boundary), overdue_secs, and (when present) directive_id — the latter
+// extracted from the wake's metadata so the agent can identify which
+// prime directive to consult without a follow-up lookup. The
+// directive_id field is the canonical seam between the substrate
+// (which delivers the wake) and the agent (which reads the directive
+// and acts). For cron-injected wakes from seed.SeedScheduledTasks,
+// this is the stable id the agent should pass to read_directives.
+//
+// Every field is bounded in bytes, so the block is bounded: see
+// formatWakeNotificationRow.
 //
 // Fields omitted when not applicable:
 //
@@ -1633,33 +2154,67 @@ func FormatWakeNotification(wakes []map[string]interface{}) string {
 	b.WriteString("Scheduled tasks now due:")
 	b.WriteString("\n")
 	for _, w := range wakes {
-		id := maxRunes(w["id"].(string), 8)
-		reason := ""
-		if r, ok := w["reason"].(string); ok {
-			reason = maxRunes(r, 80)
-		}
-		overdueSecs := int64(0)
-		if o, ok := w["overdue_secs"].(int64); ok {
-			overdueSecs = o
-		} else if o, ok := w["overdue_secs"].(float64); ok {
-			overdueSecs = int64(o)
-		}
-		// Extract directive_id from the parsed metadata map, if
-		// present. Defensive against both nil metadata and
-		// non-string directive_id (e.g. null) — the field is omitted
-		// rather than rendered as "directive_id=null" which would
-		// confuse the LLM triage path.
-		directiveID := extractDirectiveID(w)
-		if directiveID != "" {
-			b.WriteString(fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d | directive_id=%q\n",
-				id, reason, overdueSecs, directiveID))
-		} else {
-			b.WriteString(fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d\n",
-				id, reason, overdueSecs))
-		}
+		b.WriteString(formatWakeNotificationRow(w))
 	}
 	b.WriteString("</system_wake_notification>\n")
 	return b.String()
+}
+
+// formatWakeNotificationRow renders ONE wake as the notification
+// block's line.
+//
+// It is the single source of the block's per-wake cost: the fold's
+// byte budget (MaxWakeNotificationBytesPerKind) measures the bytes
+// this function produces, so the budget is expressed in the units the
+// agent actually receives rather than in a proxy (a row count) that
+// does not bound the output.
+//
+// EVERY FIELD IS BOUNDED, IN BYTES.
+//
+//   - the id is cut to MaxWakeRenderedIDBytes;
+//   - the reason is cut to MaxWakeRenderedReasonBytes;
+//   - the directive_id is bounded to MaxWakeDirectiveIDBytes.
+//
+// The directive_id was the one field that was NOT bounded, and it was
+// the whole hole: it is caller-supplied and was rendered verbatim, so
+// one wake could carry a 200 KB directive_id and make the block fifty
+// times its own budget. It is now bounded, and a value that was cut
+// says so — the marker names the original byte length, because a
+// directive id is an identifier the agent passes back to
+// read_directives and a silently shortened one would be worse than an
+// obviously shortened one.
+//
+// The function bounds defensively as well as faithfully: it is
+// exported and can be called with a row map this package did not
+// build, so the bounds cannot be assumed to have been applied already.
+func formatWakeNotificationRow(w map[string]interface{}) string {
+	id := ""
+	if s, ok := w["id"].(string); ok {
+		id = truncateRunes(s, MaxWakeRenderedIDBytes)
+	}
+	reason := ""
+	if r, ok := w["reason"].(string); ok {
+		reason = truncateRunes(r, MaxWakeRenderedReasonBytes)
+	}
+	overdueSecs := int64(0)
+	if o, ok := w["overdue_secs"].(int64); ok {
+		overdueSecs = o
+	} else if o, ok := w["overdue_secs"].(float64); ok {
+		overdueSecs = int64(o)
+	}
+	// Extract directive_id from the parsed metadata map, if
+	// present. Defensive against both nil metadata and
+	// non-string directive_id (e.g. null) — the field is omitted
+	// rather than rendered as "directive_id=null" which would
+	// confuse the LLM triage path.
+	directiveID := extractDirectiveID(w)
+	if directiveID != "" {
+		directiveID, _ = truncateBytes(directiveID, MaxWakeDirectiveIDBytes)
+		return fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d | directive_id=%q\n",
+			id, reason, overdueSecs, directiveID)
+	}
+	return fmt.Sprintf("  • id=%s | reason=%q | overdue_secs=%d\n",
+		id, reason, overdueSecs)
 }
 
 // extractDirectiveID pulls the directive_id string out of a wake row
@@ -1690,11 +2245,77 @@ func extractDirectiveID(w map[string]interface{}) string {
 	return ""
 }
 
-// maxBytes truncates s to max rune count, appending U+2026 if trimmed.
-func maxRunes(s string, max int) string {
-	// runes: count in actual characters, not bytes
+// truncateRunes cuts s to at most max BYTES of content at a character
+// boundary, and appends the ellipsis when it had to cut.
+//
+// The cut is at a CHARACTER boundary, not a byte boundary. A byte cut
+// can land in the middle of a multi-byte character, and the orphan
+// byte is then escaped as \xNN by the renderer: the agent reads a
+// mangled character, and the line's byte cost becomes unpredictable
+// (four bytes of output for one byte of input).
+//
+// The result is at most max+3 bytes — the ellipsis is three bytes.
+//
+// This is the DISPLAY cut: the ellipsis is the signal that the value
+// was cut. It is used for the id and the reason, both of which are
+// prose the agent reads rather than values it passes back.
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	cut, _ := cutAtCharBoundary(s, max)
+	return cut + "…"
+}
+
+// truncateBytes bounds s to at most max bytes TOTAL, cut at a
+// character boundary, and reports whether it had to cut.
+//
+// The marker names the ORIGINAL byte length, so the agent can tell
+// exactly how much was withheld instead of guessing from an ellipsis.
+// The marker is charged to the budget: the returned string is at most
+// max bytes, marker included.
+//
+// This is the EXACT cut: it is used for values the agent passes back
+// to the substrate, where a silent shortening would be a correctness
+// problem rather than a cosmetic one.
+func truncateBytes(s string, max int) (string, bool) {
+	if max <= 0 {
+		return "", s != ""
+	}
+	if len(s) <= max {
+		return s, false
+	}
+	marker := "…[truncated " + strconv.Itoa(len(s)) + " bytes]"
+	room := max - len(marker)
+	if room < 0 {
+		// The marker alone does not fit in the budget. Cut as far as
+		// the budget allows and say only that the value was cut.
+		if max >= 3 {
+			cut, _ := cutAtCharBoundary(s, max-3)
+			return cut + "…", true
+		}
+		cut, _ := cutAtCharBoundary(s, max)
+		return cut, true
+	}
+	cut, _ := cutAtCharBoundary(s, room)
+	return cut + marker, true
+}
+
+// cutAtCharBoundary cuts s to at most max bytes without splitting a
+// multi-byte character. It reports whether anything was cut.
+func cutAtCharBoundary(s string, max int) (string, bool) {
+	if len(s) <= max {
+		return s, false
+	}
+	if max <= 0 {
+		return "", true
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut], true
 }

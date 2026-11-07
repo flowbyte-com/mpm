@@ -204,17 +204,29 @@ func TestCheckPendingWakes_WildcardStillDeliversTheAgentOwnedKinds(t *testing.T)
 		"the wildcard must deliver exactly the agent-owned wakes and nothing else")
 }
 
-// TestCheckPendingWakes_DefaultBranchStillDeliversOnlyNotificationKinds
-// pins the backward-compatible default.
+// TestCheckPendingWakes_DefaultBranchDeliversOnlyAgentOwnedKinds
+// pins the default branch's contract.
 //
-// The default (no kinds) branch is the notification-only path the CLI
-// and MCP fold use on every request. It must not change.
-func TestCheckPendingWakes_DefaultBranchStillDeliversOnlyNotificationKinds(t *testing.T) {
+// The default (no kinds) branch is the path the CLI and MCP fold use
+// on every request. It must deliver every AGENT-OWNED kind — the
+// allowlist is the whole contract — and it must not deliver a
+// scheduler-owned kind.
+//
+// The test was named "StillDeliversOnlyNotificationKinds" while the
+// default branch matched notification wakes only. That left the two
+// agent-owned kinds the default omitted (cron and cascade) delivered
+// to nobody: a cron wake became due, was invisible to every agent, and
+// was retired by the cron retention sweep with its directive_id
+// undelivered. The ownership INVARIANT this test protects — the
+// scheduler's kinds are never folded — is unchanged.
+func TestCheckPendingWakes_DefaultBranchDeliversOnlyAgentOwnedKinds(t *testing.T) {
 	dm := NewTestDM(t)
 	now := time.Now()
 
 	seedOwnershipWake(t, dm, "wk-ownership-default-notification", now.Add(-time.Minute), "notification")
 	seedOwnershipWake(t, dm, "wk-ownership-default-untagged", now.Add(-time.Minute), "")
+	seedOwnershipWake(t, dm, "wk-ownership-default-cron", now.Add(-time.Minute), "cron")
+	seedOwnershipWake(t, dm, "wk-ownership-default-cascade", now.Add(-time.Minute), "cascade")
 	seedOwnershipWake(t, dm, "wk-ownership-default-drill", now.Add(-time.Minute), schedulerOwnedKind)
 
 	due, err := dm.CheckPendingWakes(now, nil)
@@ -225,6 +237,12 @@ func TestCheckPendingWakes_DefaultBranchStillDeliversOnlyNotificationKinds(t *te
 		"the default branch must still deliver a notification wake")
 	require.True(t, delivered["wk-ownership-default-untagged"],
 		"the default branch must still deliver an untagged wake")
+	require.True(t, delivered["wk-ownership-default-cron"],
+		"the default branch must deliver a cron wake: it is agent-owned and the fold "+
+			"is its delivery path")
+	require.True(t, delivered["wk-ownership-default-cascade"],
+		"the default branch must deliver a cascade wake: it is agent-owned and the fold "+
+			"delivers it under the per-call cap")
 	require.False(t, delivered["wk-ownership-default-drill"],
 		"the default branch must not deliver a scheduler-owned wake")
 	require.Equal(t, 0, ownershipWakeFired(t, dm, "wk-ownership-default-drill"),
