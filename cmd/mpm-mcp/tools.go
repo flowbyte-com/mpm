@@ -609,13 +609,22 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		completedAt := time.Now()
 		// Audit insert is best-effort; audit failures must not propagate
 		// to the MCP client (see audit_hook.go for isolation contract).
+		//
+		// issue #178 (F2): the insert is DEFERRED. It used to be paid
+		// inline, with the substrate's full durable-write retry budget:
+		// under a held write lock it delayed the MCP response by ~33 s
+		// for a row the client never sees, and then lost the row
+		// anyway. Deferred, the obligation is retried until it lands
+		// and the response is not delayed.
 		auditAC := callAC
 		auditStatus := "success"
 		if err != nil {
 			auditStatus = "error"
 		}
-		recordToolInvocation(dm, auditAC, req.Params.Name, payload,
-			startedAt, completedAt, extractAction(payload), auditStatus, err)
+		core.DeferDurableWrite("tool_invocations", func() error {
+			return recordToolInvocation(dm, auditAC, req.Params.Name, payload,
+				startedAt, completedAt, extractAction(payload), auditStatus, err)
+		})
 		if err != nil {
 			// Partial-diagnostic preservation. A handler may return a
 			// structured result together with the error (compact does on a

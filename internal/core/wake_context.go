@@ -657,7 +657,15 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 		// Non-fatal: log the handoff read failure to audit but continue
 		// with wake context. The handoff is bootstrap data; the agent
 		// can still wake up without it.
-		dm.LogAudit(AuditWarn, "wake_context", "handoff read failed: "+herr.Error(), "", AuditContext{})
+		//
+		// The audit write is DEFERRED (issue #178, F2). It used to be
+		// paid inline, with the substrate's full durable-write budget:
+		// under a held write lock the mark-read burned ~33 s failing,
+		// and this audit write then burned ANOTHER ~33 s failing for
+		// the same reason — and lost the evidence as well. Deferring
+		// costs the caller nothing and makes the evidence STRONGER: the
+		// obligation is retried until it lands.
+		dm.LogAuditDeferred(AuditWarn, "wake_context", "handoff read failed: "+herr.Error(), "", AuditContext{})
 	}
 	if h != nil {
 		data.LastHandoff = h

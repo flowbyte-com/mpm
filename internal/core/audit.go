@@ -39,6 +39,7 @@ package internal
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime/debug"
@@ -88,12 +89,38 @@ type AuditContext map[string]interface{}
 // empty string to skip capture (useful for hot-path warns where stack
 // capture is too expensive).
 func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack string, ctx AuditContext) {
+	if err := dm.LogAuditErr(level, component, message, stack, ctx); err != nil {
+		if errors.Is(err, errAuditInvalidLevel) {
+			// The invalid-level report is LogAuditErr's own; it is not an
+			// insert failure and must not be reported as one.
+			return
+		}
+		fmt.Fprintf(os.Stderr, "audit insert failed: %v (level=%s component=%s)\n", err, level, component)
+	}
+}
+
+// errAuditInvalidLevel marks an audit call whose level is outside the
+// closed vocabulary. It is not an insert failure.
+var errAuditInvalidLevel = errors.New("audit: invalid level")
+
+// LogAuditErr is LogAudit with the raw event insert's error RETURNED
+// rather than reported to stderr.
+//
+// It exists so that a caller which must not lose the evidence can hand
+// the write to the deferred queue (see deferred_write.go): the queue
+// needs to know whether the write landed, and a function that swallows
+// the error cannot tell it.
+//
+// The cluster-counter upsert stays best-effort and is never returned as
+// an error — the raw event is the evidence, and observation must not
+// back-pressure the failing path.
+func (dm *DatabaseManager) LogAuditErr(level AuditLevel, component, message, stack string, ctx AuditContext) error {
 	if dm == nil || dm.db == nil {
-		return
+		return nil
 	}
 	if level != AuditInfo && level != AuditWarn && level != AuditError && level != AuditFatal && level != AuditCritical {
 		fmt.Fprintf(os.Stderr, "audit: invalid level %q, skipping\n", level)
-		return
+		return fmt.Errorf("%w: %q", errAuditInvalidLevel, level)
 	}
 	if stack == "" {
 		stack = string(debug.Stack())
@@ -118,8 +145,7 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 		sql.NullString{String: truncateStack(stack, 4000), Valid: stack != ""},
 		ctxJSON, now,
 	); err != nil {
-		fmt.Fprintf(os.Stderr, "audit insert failed: %v (level=%s component=%s)\n", err, level, component)
-		return
+		return err
 	}
 
 	// SECONDARY: cluster counter (anomalies only). Best-effort aggregation.
@@ -141,6 +167,7 @@ func (dm *DatabaseManager) LogAudit(level AuditLevel, component, message, stack 
 			fmt.Fprintf(os.Stderr, "audit cluster upsert failed: %v (component=%s) — raw event preserved; will retry on next event\n", err, component)
 		}
 	}
+	return nil
 }
 
 // LogAuditForInvocation is the tool-originated correlator. It writes
