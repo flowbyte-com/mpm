@@ -11,11 +11,19 @@
 // The fix routes `kinds` through readKindsParam (already used by
 // handleCheckWakes for the same schema field) and post-filters the
 // ListScheduledWakes result set by metadata.kind. The same semantics
-// as CheckPendingWakes are preserved: nil/empty → no filter
-// (backward-compat default in CheckPendingWakes is "notification only",
-// but for handleListWakes the absence of `kinds` historically meant
-// "all wakes" — see TestHandleListWakes_DefaultsAndFilters, which
-// counts 2 with no kinds and would break if we changed the default).
+// as CheckPendingWakes are preserved for the EXPLICIT list (a named
+// kind matches that kind); the two surfaces DIFFER in their default,
+// and always have:
+//
+//	CheckPendingWakes (the fold): nil/empty → the agent-owned
+//	    allowlist (notification, cascade, cron). The fold retires what
+//	    it delivers, so it may only ever touch wakes the agent owns.
+//	handleListWakes (a read): nil/empty → no filter, i.e. ALL wakes,
+//	    including the scheduler-owned ones. An operator must be able
+//	    to list the scheduler's wakes.
+//
+// (See TestHandleListWakes_DefaultsAndFilters, which counts 2 with no
+// kinds and would break if the list default changed.)
 package tools
 
 import (

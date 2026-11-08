@@ -16,12 +16,21 @@
 // What this file does NOT do:
 //   - It does not execute a wake handler. The scheduler's Tick loop
 //     dispatches system kinds (snapshot, gc, etc.). Notification kinds
-//     have no in-process handler — they surface via read_wake_context
-//     and the agent decides what to do on the next MCP call.
-//   - It does not call MarkFired. The UPDATE inside the claim is itself
-//     the fired-flip, so a successful claim means fired=1.
+//     have no in-process handler — they are delivered to the agent by
+//     the opportunistic fold (CheckPendingWakes), and the agent decides
+//     what to do with them on the next MCP call.
+//   - It does not call MarkFired, and it does NOT flip fired=1. The
+//     claim's UPDATE stamps dispatched_at and metadata.dispatched_by;
+//     the row stays fired=0, which is what leaves it visible to the
+//     fold that will actually deliver it. The claim records "the
+//     scheduler took this row", not "the agent received this row".
+//     An earlier version of this comment claimed the UPDATE was
+//     itself the fired-flip; that was wrong, and it was wrong in the
+//     file that holds the keystone delivery invariant.
+//     docs/dev/session-b-audit.md records the observed behaviour: the
+//     claim "deliberately leaves fired=0".
 //
-// The Substrate Defense Triad applies: the write here is the firing
+// The Substrate Defense Triad applies: the write here is the claim
 // mutation, so we read it back implicitly via RETURNING (the row we
 // just claimed is the one we got back).
 package scheduler
