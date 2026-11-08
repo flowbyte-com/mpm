@@ -81,8 +81,18 @@ func (s *latencyStderr) String() string {
 // completes the MCP handshake.
 func newLatencyClient(t *testing.T, ws string) *latencyClient {
 	t.Helper()
+	return newLatencyClientWithBin(t, ws, mcpCmd(t))
+}
 
-	bin := mcpCmd(t)
+// newLatencyClientWithBin is newLatencyClient with an explicit
+// binary.
+//
+// A scenario that runs SEVERAL clients against one workspace builds the
+// binary once and shares it: the binary is stateless, and the
+// workspace in the environment is what isolates a client.
+func newLatencyClientWithBin(t *testing.T, ws string, bin string) *latencyClient {
+	t.Helper()
+
 	dbPath := filepath.Join(ws, "src", "db", "mpm.db")
 
 	cmd := exec.Command(bin)
@@ -209,6 +219,55 @@ func (c *latencyClient) call(method string, params map[string]interface{}, deadl
 	return nil, 0
 }
 
+// callRaw is call without the test-fatal behaviour.
+//
+// It exists for the scenarios that drive a request from a goroutine or
+// abandon one on purpose: calling t.Fatalf off the test's own
+// goroutine is not allowed, and an abandoned request must not fail the
+// test.
+func (c *latencyClient) callRaw(method string, params map[string]interface{}, deadline time.Duration) (map[string]interface{}, time.Duration, error) {
+	c.mu.Lock()
+	c.nextID++
+	id := c.nextID
+	c.mu.Unlock()
+
+	payload := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  method,
+	}
+	if params != nil {
+		payload["params"] = params
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal request: %w", err)
+	}
+
+	start := time.Now()
+	if _, err := c.stdin.Write(append(b, '\n')); err != nil {
+		return nil, time.Since(start), fmt.Errorf("write request: %w", err)
+	}
+
+	limit := start.Add(deadline)
+	for time.Now().Before(limit) {
+		c.mu.Lock()
+		for _, resp := range c.responses {
+			if gotID, ok := resp["id"].(float64); ok && int(gotID) == id {
+				c.mu.Unlock()
+				if errObj, ok := resp["error"]; ok {
+					return nil, time.Since(start), fmt.Errorf("jsonrpc error for %s: %v", method, errObj)
+				}
+				result, _ := resp["result"].(map[string]interface{})
+				return result, time.Since(start), nil
+			}
+		}
+		c.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+	return nil, time.Since(start), fmt.Errorf("timed out after %s waiting for a response to %s", deadline, method)
+}
+
 // holdWriteLock opens a competing connection and takes the SQLite write
 // lock, holding it until the returned release function is called.
 //
@@ -263,8 +322,16 @@ func holdWriteLock(t *testing.T, dbPath string, holdFor time.Duration) (release 
 // (and worse) request than the one an agent actually makes.
 func seedWorkspaceContent(t *testing.T, c *latencyClient, ws string) {
 	t.Helper()
+	seedModeAndPersonaFiles(t, ws)
+	seedHandoff(t, c)
+	seedMemories(t, c, 3)
+}
 
-	// The active-state resolver reads these from the MPM dir.
+// seedModeAndPersonaFiles writes the files the active-state resolver
+// reads, so the resolver takes its normal path instead of logging a
+// diagnostic AuditInfo row on the read path.
+func seedModeAndPersonaFiles(t *testing.T, ws string) {
+	t.Helper()
 	for _, rel := range []string{"mode/default.md", "persona/default.md"} {
 		path := filepath.Join(ws, rel)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -274,12 +341,16 @@ func seedWorkspaceContent(t *testing.T, c *latencyClient, ws string) {
 			t.Fatalf("write %s: %v", path, err)
 		}
 	}
+}
 
-	// An UNREAD handoff, so the wake context's mark-read write fires.
-	//
-	// The MCP tools take their action-specific fields in a `params`
-	// envelope (see the mpm_handoff schema in registry_list.go) — the
-	// top-level shape is {"action": ..., "params": {...}}.
+// seedHandoff writes an UNREAD handoff, so the wake context's
+// mark-read write fires.
+//
+// The MCP tools take their action-specific fields in a `params`
+// envelope (see the mpm_handoff schema in registry_list.go) — the
+// top-level shape is {"action": ..., "params": {...}}.
+func seedHandoff(t *testing.T, c *latencyClient) {
+	t.Helper()
 	c.call("tools/call", map[string]interface{}{
 		"name": "mpm_handoff",
 		"arguments": map[string]interface{}{
@@ -290,9 +361,13 @@ func seedWorkspaceContent(t *testing.T, c *latencyClient, ws string) {
 			},
 		},
 	}, 60*time.Second)
+}
 
-	// Memories, so the wake context's retrieval-telemetry writes fire.
-	for i := 0; i < 3; i++ {
+// seedMemories saves memories, so the wake context's retrieval
+// telemetry writes fire.
+func seedMemories(t *testing.T, c *latencyClient, count int) {
+	t.Helper()
+	for i := 0; i < count; i++ {
 		c.call("tools/call", map[string]interface{}{
 			"name": "mpm_memory",
 			"arguments": map[string]interface{}{

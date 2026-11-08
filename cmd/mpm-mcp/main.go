@@ -191,6 +191,10 @@ func main() {
 		log.Fatalf("mpm-mcp: open database: %v", err)
 	}
 	defer dm.Close()
+	// The deferred durable-write queue shares this manager's pool, so
+	// it must be drained BEFORE the database is closed. Registered
+	// after dm.Close's defer, so it runs FIRST.
+	defer flushDeferredWritesOnShutdown()
 
 	// Integration invariant: every mpm-mcp boot must check the live
 	// db_path against a host-pinned expected path before serving any
@@ -280,6 +284,37 @@ func main() {
 		log.Fatalf("mpm-mcp: serve stdio: %v", err)
 	}
 	_ = ctx
+}
+
+// deferredWriteFlushBudget is how long the shutdown path waits for the
+// substrate's deferred durable-write queue to land what it accepted.
+//
+// The queue holds OBSERVATIONAL obligations — retrieval telemetry, the
+// failure-path audit row, the per-invocation audit row. They are
+// written off the caller's goroutine (issue #178, F2), so a host that
+// stops the server has to give the worker a moment to land them.
+//
+// The wait is BOUNDED: a held write lock makes each obligation cost up
+// to the substrate's full durable-write budget, and a shutdown must not
+// hang on a contended database. Whatever is still pending when the
+// budget expires is reported, not silently swallowed.
+const deferredWriteFlushBudget = 5 * time.Second
+
+// flushDeferredWritesOnShutdown drains the deferred durable-write queue
+// before the database is closed.
+//
+// It runs BEFORE dm.Close() (Go runs deferred calls in LIFO order, and
+// this defer is registered after dm.Close's). Closing the database
+// first would make every pending obligation fail with "database is
+// closed" and be dropped — the observational evidence the queue
+// accepted would be lost on every clean shutdown.
+func flushDeferredWritesOnShutdown() {
+	ctx, cancel := context.WithTimeout(context.Background(), deferredWriteFlushBudget)
+	defer cancel()
+	if err := core.FlushDeferredWrites(ctx); err != nil {
+		slog.Warn("mpm-mcp: deferred writes did not all land before shutdown",
+			"err", err.Error(), "budget", deferredWriteFlushBudget.String())
+	}
 }
 
 // buildMCPServer constructs the production MCP server with every
