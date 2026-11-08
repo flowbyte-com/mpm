@@ -300,6 +300,17 @@ func main() {
 // budget expires is reported, not silently swallowed.
 const deferredWriteFlushBudget = 5 * time.Second
 
+// deferredWriteShutdownDeps is the seam the shutdown path is tested
+// through.
+//
+// The production path supplies the process-wide queue. A test supplies
+// its own, because the process-wide queue cannot be closed in a test —
+// every later test in the package would lose it.
+type deferredWriteShutdownDeps struct {
+	flush func(context.Context) error
+	close func() core.DeferredWriteStats
+}
+
 // flushDeferredWritesOnShutdown drains the deferred durable-write queue
 // before the database is closed.
 //
@@ -328,9 +339,18 @@ const deferredWriteFlushBudget = 5 * time.Second
 // every pending obligation with no report at all. The queue is
 // MEMORY-ONLY and is NOT crash-durable; see docs/SPEC.md §10.
 func flushDeferredWritesOnShutdown() {
+	deferredWriteShutdown(deferredWriteShutdownDeps{
+		flush: core.FlushDeferredWrites,
+		close: core.CloseDeferredWrites,
+	})
+}
+
+// deferredWriteShutdown drains the deferred queue and closes it,
+// reporting what it could not land.
+func deferredWriteShutdown(deps deferredWriteShutdownDeps) {
 	ctx, cancel := context.WithTimeout(context.Background(), deferredWriteFlushBudget)
 	defer cancel()
-	flushErr := core.FlushDeferredWrites(ctx)
+	flushErr := deps.flush(ctx)
 	if flushErr != nil {
 		slog.Warn("mpm-mcp: deferred writes did not all land before shutdown",
 			"err", flushErr.Error(), "budget", deferredWriteFlushBudget.String())
@@ -343,11 +363,13 @@ func flushDeferredWritesOnShutdown() {
 	// (correctly) classified non-retryable, and is dropped with a
 	// warning. That is safe, but it cannot tell the operator HOW MUCH
 	// was lost, and the counting API was otherwise dead in production.
-	stats := core.CloseDeferredWrites()
+	stats := deps.close()
 	if stats.Pending > 0 || stats.Lost() > 0 {
 		slog.Error("mpm-mcp: deferred write obligations were LOST at shutdown",
 			"discarded_at_close", stats.Pending,
 			"lost_total", stats.Lost(),
+			"lost_evidence", stats.LostEvidence,
+			"lost_telemetry", stats.LostTelemetry,
 			"accepted", stats.Accepted,
 			"landed", stats.Landed,
 			"rejected_full", stats.RejectedFull,

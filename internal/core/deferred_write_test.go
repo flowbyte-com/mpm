@@ -738,6 +738,68 @@ func TestDeferredWriteQueue_RetryDiagnosticMatchesTheActualOutcome(t *testing.T)
 	}
 }
 
+// TestDeferredWriteQueue_ShutdownTimeoutIsCounted reproduces the
+// shutdown-flush failure.
+//
+// The MCP server drains the deferred queue before it closes the
+// database, with a bounded budget. When the budget expires, the
+// obligations that did not land are DISCARDED — and the count must be
+// reported, not merely mentioned.
+//
+// Before the remediation the shutdown logged a message with no number,
+// and the one API that could report the count was never called in
+// production.
+func TestDeferredWriteQueue_ShutdownTimeoutIsCounted(t *testing.T) {
+	q := newTestDeferredQueue(t)
+
+	block := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(block) }) }
+	t.Cleanup(release)
+
+	started := make(chan struct{})
+	if !q.deferWrite(DeferredWriteEvidence, "test:stuck", func() error {
+		close(started)
+		<-block
+		return nil
+	}) {
+		t.Fatal("obligation was not accepted")
+	}
+	<-started
+
+	// A second obligation that is pending and cannot land.
+	if !q.deferWrite(DeferredWriteEvidence, "test:pending", func() error {
+		<-block
+		return nil
+	}) {
+		t.Fatal("obligation was not accepted")
+	}
+
+	// The flush budget expires: the queue cannot drain.
+	shortCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	err := q.flush(shortCtx)
+	if err == nil {
+		t.Fatal("the flush reported success, but the queue could not drain")
+	}
+	if !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("the flush error does not report the timeout: %v", err)
+	}
+
+	// The shutdown then closes the queue, and the discarded obligations
+	// are COUNTED.
+	stats := q.close()
+	if stats.Pending < 1 {
+		t.Fatalf("close reported %d discarded obligation(s), want at least 1", stats.Pending)
+	}
+	if stats.DroppedClosed < 1 {
+		t.Fatalf("close reported %d dropped obligation(s), want at least 1", stats.DroppedClosed)
+	}
+	if stats.LostEvidence < 1 {
+		t.Fatalf("close reported %d lost EVIDENCE obligation(s), want at least 1", stats.LostEvidence)
+	}
+}
+
 // TestDeferDurableWrite_GlobalQueueAcceptsAndFlushes pins the
 // package-level entry point, which is what the substrate's callers use.
 func TestDeferDurableWrite_GlobalQueueAcceptsAndFlushes(t *testing.T) {

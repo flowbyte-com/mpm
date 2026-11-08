@@ -152,6 +152,17 @@ const deferredWriteQueueCapacity = 256
 // telemetry cannot crowd out the audit evidence the queue exists to
 // protect. 192 + 64 = 256.
 //
+// The sizes come from the wake path's own arithmetic. One wake request
+// produces FIVE telemetry rows (one per surfaced node) and at most TWO
+// evidence rows (the per-invocation row, plus the failure-path audit
+// row when the mark-read failed). So:
+//
+//   - 192 telemetry slots ≈ 38 wake requests' worth of telemetry;
+//   - 64 evidence slots ≈ 64 wake requests' worth of evidence.
+//
+// The reserve is therefore never the binding constraint on a request
+// that is not already queueing evidence far faster than it can land.
+//
 // The reserve is a promise about ADMISSION, not a hard ceiling on the
 // telemetry count: an obligation that was already accepted keeps its
 // slot through its retries. The ceiling on the telemetry count is
@@ -508,7 +519,11 @@ func (q *deferredWriteQueue) attempt(item deferredWriteItem) {
 
 	var (
 		requeued bool
-		dropped  bool
+		// dropReason is captured INSIDE the lock, so the diagnostic
+		// cannot mislabel a terminal failure as a close-time drop (or
+		// the other way round) because the queue was closed between
+		// the attempt and the log line.
+		dropReason string
 	)
 	q.mu.Lock()
 	q.inflight--
@@ -522,7 +537,7 @@ func (q *deferredWriteQueue) attempt(item deferredWriteItem) {
 		// counted as one.
 		q.counts.DroppedClosed++
 		q.recordLossLocked(item.class)
-		dropped = true
+		dropReason = "closed"
 	case isRetryableDeferredError(err):
 		// THE RE-QUEUE ALWAYS SUCCEEDS.
 		//
@@ -547,7 +562,7 @@ func (q *deferredWriteQueue) attempt(item deferredWriteItem) {
 		// behind it would strand every later obligation.
 		q.counts.DroppedTerminal++
 		q.recordLossLocked(item.class)
-		dropped = true
+		dropReason = "terminal"
 	}
 	q.mu.Unlock()
 
@@ -558,7 +573,7 @@ func (q *deferredWriteQueue) attempt(item deferredWriteItem) {
 		slog.Debug("deferred write contended; a retry is scheduled",
 			"kind", item.kind, "class", item.class.String(),
 			"attempts", item.attempts, "err", err.Error())
-	case dropped && q.isClosed():
+	case dropReason == "closed":
 		slog.Warn("deferred write dropped: the queue was closed before it could be retried",
 			"kind", item.kind, "class", item.class.String(),
 			"attempts", item.attempts, "err", err.Error())
@@ -597,13 +612,6 @@ func (q *deferredWriteQueue) recordLossLocked(class DeferredWriteClass) {
 		return
 	}
 	q.counts.LostTelemetry++
-}
-
-// isClosed reports whether the queue has been closed.
-func (q *deferredWriteQueue) isClosed() bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.closed
 }
 
 // isRetryableDeferredError reports whether an error is the CLEARABLE

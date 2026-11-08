@@ -151,19 +151,29 @@ that is stated in the file's own header:
 1. **The caller never waits.** The obligation moves to a background
    worker; the caller's latency stops depending on how long the write
    lock is held.
-2. **The obligation is retried until it lands.** A deferred write is
-   not a dropped write. The worker re-invokes the *unchanged* substrate
-   call — retry budget included — until it returns nil.
+2. **An accepted obligation is retried until it lands.** A deferred
+   write is not a dropped write. The worker re-invokes the *unchanged*
+   substrate call — retry budget included — until it returns nil. The
+   capacity accounting counts the obligation *being written* as well as
+   the ones waiting, so the slot an in-flight obligation needs for its
+   retry is reserved while it is in flight.
 3. **Only the clearable class is retried.** Ordinary `SQLITE_BUSY` is a
    wait, and waiting clears it. A constraint violation or a closed
-   database is not a wait; those are dropped, loudly.
-4. **The queue is bounded** (256). An unbounded queue turns a write-lock
-   stall into a memory leak.
+   database is not a wait; those are dropped, loudly, and counted.
+4. **The queue is bounded** (256 pending and in-flight together), and a
+   slice of that (64) is reserved for audit evidence — telemetry is
+   losable by contract, audit evidence is not.
 5. **A failed obligation does not monopolise the queue.** A contended
    item is put back with a later next-attempt time, so the obligations
    behind it get their turn.
 6. **The worker lives as long as the queue does.** It idles when there
    is nothing to do; it exits only when the queue is closed.
+
+> This six-point contract was **corrected** by the remediation in §4:
+> the original point 2 said "the obligation is retried until it lands"
+> while the capacity accounting could silently discard an accepted
+> obligation. The wording and the implementation now agree, and §4.1
+> carries the reproduction.
 
 **This is stronger than the inline behaviour, not weaker.** The inline
 writes had a bounded budget and then lost the row. The failure-path
@@ -203,12 +213,311 @@ slice exists to remove.
 
 ---
 
-## 4. Two defects found while validating the correction
+## 4. The remediation — the independent review's blocking finding
+
+An independent review of this PR (C, 2026-11-08) returned **REQUEST
+CHANGES** with one blocking finding and three companions, all of the
+same class: *the deferred queue's durability contract was not actually
+guaranteed, and the guarantee was published in `docs/SPEC.md`.*
+
+This section records the remediation. Every disposition below is
+reproducible.
+
+### 4.1 F1 (blocking) — an accepted obligation was silently discarded
+
+**The defect.** `internal/core/deferred_write.go`, in `attempt()`:
+
+```go
+if len(q.items) < deferredWriteQueueCapacity {   // the capacity guard
+    q.items = append(q.items, item)              // the ONLY place it goes
+}
+```
+
+When the queue was at its capacity and an **in-flight** obligation
+failed with the clearable class, the re-queue was skipped and the
+obligation was **gone**. The queue had accepted it, told the caller it
+was accepted, and then dropped it — with no warning, no count and no
+report.
+
+**The cause.** The capacity check counted only the *pending*
+obligations. The obligation *being written* was not counted, so a new
+producer could take the slot the in-flight obligation needed for its
+retry. The queue therefore held `capacity + 1` obligations, and the
+guard fired.
+
+**The fix.** The capacity accounting now counts pending **and**
+in-flight obligations together. The in-flight slot is **reserved** for
+that obligation's own retry; a producer that wants it is refused,
+loudly, and counted. The re-queue is unconditional, because the
+invariant guarantees it has somewhere to go.
+
+**The reproduction** is a standalone probe that compiles against both
+the pre-fix and the remediated queue:
+
+| tree | probe result |
+|---|---|
+| pre-fix (`3b5f9eec`) | `FAIL — the ACCEPTED obligation was LOST: it ran 1 time(s) and was never retried` |
+| remediated | `PASS` |
+| pre-fix, accounting probe | `FAIL — the queue is holding 257 obligation(s) (256 pending + 1 in flight), past its capacity of 256` |
+| remediated, accounting probe | `PASS` |
+
+The committed tests are
+`TestDeferredWriteQueue_AcceptedObligationIsNotLostWhenTheQueueIsFull`
+and
+`TestDeferredWriteQueue_ProducersCannotConsumeCapacityReservedForInFlightRetries`.
+Both use channels, never a timing-dependent sleep.
+
+**How to reproduce the red.** The two tests use the pre-fix queue's
+`deferWrite(kind, fn)` signature, and the remediated one takes a class
+as well, so the *same probe file* cannot compile against both without a
+one-line shim. The reproduction is therefore:
+
+```bash
+# 1. a worktree at the pre-fix head
+git worktree add /tmp/pre 3b5f9eec
+
+# 2. copy the probe into it, with a one-line shim for the old signature
+#    (q.deferWrite(kind, fn) instead of q.deferWrite(class, kind, fn))
+
+# 3. run it there — RED
+(cd /tmp/pre/internal/core && go test -tags fts5 -run 'TestProbe_' -v .)
+
+# 4. run it on this branch — GREEN
+(cd internal/core && go test -tags fts5 -run 'TestProbe_' -v .)
+```
+
+The pre-fix run reports:
+
+```
+--- FAIL: TestProbe_AcceptedObligationIsNotLostWhenTheQueueIsFull
+    the ACCEPTED obligation was LOST: it ran 1 time(s) and was never retried
+--- FAIL: TestProbe_ProducersCannotConsumeCapacityReservedForInFlightRetries
+    the queue is holding 257 obligation(s) (256 pending + 1 in flight),
+    past its capacity of 256 — a producer consumed the slot reserved for
+    an in-flight retry
+--- FAIL: TestProbe_RetryDiagnosticNeverPromisesAnUnscheduledRetry
+    the queue promised a retry it did not schedule;
+    captured: [deferred write contended; will retry]
+```
+
+and the remediated run passes all three.
+
+### 4.2 The classes — evidence and telemetry are not the same thing
+
+The review was right that the PR published one promise for two very
+different writes. It is now two.
+
+| class | writes | loss is |
+|---|---|---|
+| **evidence** | the failure-path `system_audit_log` row, the per-invocation `tool_invocations` row | a broken promise |
+| **telemetry** | the `retrieval_metadata` reuse counters | allowed by the telemetry contract |
+
+Every obligation carries its class, and the queue's capacity accounting
+**reserves 64 of its 256 slots for evidence**: telemetry may not
+consume them, so a burst of telemetry — five rows per wake request —
+cannot starve the records the queue exists to protect.
+
+### 4.3 F2 — the three call sites that discarded the refusal
+
+`DeferDurableWrite` returns `false` when the obligation could not be
+accepted, and its own documentation says "the caller owns the failure".
+Three production call sites ignored it:
+
+| call site | the write | before |
+|---|---|---|
+| `internal/core/wake_context.go` | the failure-path `system_audit_log` row | discarded |
+| `internal/core/tools/retrieval_telemetry.go` | the `retrieval_metadata` counters | discarded |
+| `cmd/mpm-mcp/tools.go` | the per-invocation `tool_invocations` row | discarded |
+
+All three now handle it. **None of them falls back to a synchronous
+write**, deliberately: under the saturation that causes a refusal, a
+synchronous write would pay the full busy-handler wait on the caller's
+critical path and would fail for the same reason. The loss is reported
+instead — at `ERROR` for evidence, at `DEBUG` for telemetry.
+
+`internal/core/deferred_write_callers_test.go` pins the invariant at the
+source level, so the defect cannot be reintroduced by accident. It is
+RED on the pre-fix head — it names exactly the three call sites above —
+and GREEN here.
+
+### 4.4 F3 — the shutdown path counted nothing
+
+`CloseDeferredWrites()` — the only API that reports discarded
+obligations — was **never called outside the test file**. The shutdown
+path now calls it, after the flush and before the database closes, and
+reports the counts at `ERROR` when anything was lost:
+
+```
+mpm-mcp: deferred write obligations were LOST at shutdown
+  discarded_at_close=… lost_total=… accepted=… landed=…
+  rejected_full=… rejected_closed=… dropped_terminal=… dropped_closed=…
+  durability="the deferred queue is memory-only and is not crash-durable"
+```
+
+The test file now calls the **production** `close()` method rather than
+a local copy of it, so the counting API that production uses is the one
+under test.
+
+The shutdown path is exercised through a small seam —
+`deferredWriteShutdownDeps` — because the process-wide queue cannot be
+closed in a test: every later test in the package would lose it.
+`cmd/mpm-mcp/deferred_write_shutdown_test.go` pins the two behaviours
+that matter:
+
+| behaviour | test |
+|---|---|
+| the queue is **always** closed, drained or not | `TestDeferredWriteShutdown_ClosesTheQueueAndCountsWhatItLost` |
+| a loss is reported **with the numbers**, at ERROR | the same test |
+| a clean drain reports **nothing** | `TestDeferredWriteShutdown_CleanDrainReportsNothing` |
+| the flush budget is bounded — a shutdown cannot hang on a contended database | `TestDeferredWriteShutdown_FlushBudgetIsBounded` |
+
+The five-second shutdown-flush failure is reproduced at the queue level
+by `TestDeferredWriteQueue_ShutdownTimeoutIsCounted`: the budget
+expires, and the discarded obligations are counted rather than merely
+mentioned.
+
+### 4.5 F4 — the flush's signal
+
+A `FlushDeferredWrites` that returned `nil` while an accepted
+obligation had been lost was telling a caller "the row is there" about
+a row that was never written. Now:
+
+- a **lost evidence** obligation makes the flush return an error, so the
+  signal cannot be a falsehood;
+- a **lost telemetry** obligation does not — telemetry is losable by
+  contract, and a caller waiting for audit evidence must not be failed
+  by a lost reuse counter;
+- a **refused** obligation is not reported by the flush at all: it was
+  never accepted, it was reported to the caller at the moment of
+  refusal, and it is counted in the queue's statistics.
+
+### 4.6 F7 — the diagnostic that promised a retry that never happened
+
+The retryable-and-closed case fell through to the `Debug` branch and
+logged *"will retry"* for an obligation the queue then dropped. Each
+outcome now has its own message, and a "a retry is scheduled" line is
+emitted **only** when a retry has actually been scheduled:
+
+| outcome | message | level |
+|---|---|---|
+| retry scheduled | `deferred write contended; a retry is scheduled` | DEBUG |
+| terminal failure | `deferred write failed and will not be retried` | WARN |
+| dropped at close | `deferred write dropped: the queue was closed before it could be retried` | WARN |
+| refused at enqueue | `deferred write rejected: the queue is full` / `… the queue is closed` / `… the telemetry capacity is reached` | WARN |
+
+The red-to-green pair: the same probe file logs
+`[deferred write contended; will retry]` on the pre-fix head and
+`FAIL`s; it passes here.
+
+### 4.7 F8 — the `:memory:` fixture that was missed
+
+The PR's own diff documented the hazard — *a bare `":memory:"` gives
+every pooled connection its own private database* — and converted one
+fixture for it. It left the second `:memory:` fixture in the same file
+(`TestMCPQueryAndWake_DoNotMutateMemoryOrContradictionQueue`), which
+calls `handleReadWakeContext` and is exposed to exactly the same
+hazard. The independent review hit the resulting flake in a
+full-package `-race` run and in a `-count=20` run; pristine `main`
+produced 0 failures over the same 10 runs.
+
+That fixture is now file-backed, and
+`internal/core/tools/retrieval_metadata_pool_isolation_test.go` pins
+the hazard **deterministically** rather than as a flake rate: it forces
+the pool to open a second *physical* connection and asserts that the
+second connection sees the same schema. With a `":memory:"` DSN that
+assertion fails every time.
+
+### 4.8 The durability contract, stated honestly
+
+| state | what survives | what is reported |
+|---|---|---|
+| normal drain | every accepted obligation lands | the counters |
+| graceful shutdown | everything the 5 s flush budget covers lands | the flush result, and the close counts |
+| shutdown timeout | whatever landed stays landed; the pending remainder is discarded | `ERROR` with the count |
+| queue closure | nothing pending survives | `ERROR` with the count |
+| **SIGKILL** | **nothing survives — the queue is memory-only** | **nothing at all** |
+| process restart | nothing pending survives | nothing at all |
+
+**The queue is memory-only and is not crash-durable.** That is
+acceptable for telemetry, which is losable by contract. It is **not**
+acceptable for the two audit rows, and this record does not claim
+otherwise.
+
+**The proposal for closing that gap** — deliberately *not* implemented
+here, because it is a different mechanism and not a queue improvement:
+
+- A **durable outbox table** would have to be written to the same
+  contended database, so it would contend identically. For a purely
+  observational write there is no authoritative transaction to co-write
+  it with — that is what makes the write observational — so an
+  outbox-in-the-same-transaction shape is unavailable.
+- A **file-backed spool** using the substrate's existing atomic
+  state-swap pattern (write `.tmp`, then `os.Rename`) would survive a
+  SIGKILL and would not touch the database at all. It is the shape the
+  substrate already uses for cross-process files. It is a **separate
+  mechanism**, it needs its own crash-consistency argument, and it is
+  out of scope for a latency remediation.
+- The trade-off, stated up front: a file spool adds a durability write
+  to the agent's critical path (one `fsync` per obligation), which is
+  cheap compared to a 33 s busy-handler wait but is not free, and it
+  introduces a second persistence format beside the database. It should
+  be a **separate PR**, with its own measurement.
+
+### 4.9 R1 — the published figure was specific to one configuration
+
+`read_wake_context` calls the wake fold on **every** request. With no
+pending wake the fold's `SELECT` returns nothing, so the fold's
+settlement `UPDATE` — which carries the new `wakeFoldWriteRetries = 5`
+budget — never runs. The 33.16 s figure therefore describes a request
+that does not exercise the whole wake path.
+
+| configuration | measured on `main` + #234 + this branch | baseline | reduction |
+|---|---|---|---|
+| no pending wake | **33.16 s** | 124.47 s | 73% |
+| with a pending wake | **39.42 s** | 124.46 s | 68% |
+
+The independent review measured 39.37 s for the same configuration;
+this slice measures 39.42 s — a 0.05 s difference across two
+independent harnesses.
+
+The watchdog attributes the pending-wake request exactly:
+
+```
+error  sql_error  33180ms retries=5  UPDATE session_handoffs SET read_at = ?, read_by = ? WHERE id = ? AND read_at IS NULL
+error  sql_error   3104ms retries=5  UPDATE scheduled_wakes SET fired = ?, fired_at = ? WHERE id = ? AND fired = ?
+error  sql_error   3104ms retries=5  UPDATE scheduled_wakes SET fired = ?, fired_at = ? WHERE id = ? AND fired = ?
+```
+
+The durable mark-read is unchanged at 33.18 s. The fold's settlement
+adds ~6.2 s, because it meets the **stale-snapshot** class, which
+SQLite does not service with the busy handler and therefore fails fast
+rather than burning a 33 s budget.
+
+The observable consequence, and the important one: the wake is
+**delayed, not lost**. It stays pending (`fired = 0`, `fired_at` null)
+and a later call delivers it. It is never falsely settled.
+`TestAcceptance_SustainedContentionWithPendingWake` asserts that.
+
+### 4.10 F5, F6 — two smaller findings
+
+- **F5** — `RecordRetrievalDeferred` was exported with no production
+  caller, and the live path used `DeferDurableWrite` directly: two
+  nearly-identical APIs, one of them dead. The method is now on the
+  `CoreDB` interface and **is** the live path, so there is one API and
+  the class decision lives with the telemetry code.
+- **F6** — the closure's snapshot of the payload is a copy of the map
+  *reference*, not of the map's contents. The map is not mutated on
+  that path, so the code was correct; the wording was not. The
+  specification now describes it accurately.
+
+---
+
+## 5. Two defects found while validating the correction
 Both were found by running the suites against the new mechanism, and
 both are recorded here because they are the kind of thing that a
 "looks right" implementation ships.
 
-### 4.1 The worker died with the queue
+### 5.1 The worker died with the queue
 
 The first implementation of the queue's worker returned from its loop
 the moment the queue was empty. That killed it **permanently**:
@@ -231,7 +540,7 @@ Regression test: `internal/core/deferred_write_test.go`
 **Mutation control:** re-introducing the original defect makes that
 test fail with a 30 s flush timeout; restoring the fix makes it pass.
 
-### 4.2 The wake fold lost its settlement to a concurrent writer
+### 5.2 The wake fold lost its settlement to a concurrent writer
 
 Deferring the per-invocation audit row introduced a second writer on
 the shared pool. That exposed a latent defect in `CheckPendingWakes`:
@@ -264,7 +573,7 @@ ordinary contention is the same defect class #178 exists to close.
 (`internal/core/db.go`, `internal/core/handoff.go`), so this does not
 overlap #234.
 
-### 4.3 A data race the closure introduced
+### 5.3 A data race the closure introduced
 
 The race detector found it, and it is the classic Go closure trap.
 
@@ -292,7 +601,7 @@ as it was. The other three deferred closures capture only parameters
 that are never written after the closure is created, so they were never
 exposed to this.
 
-### 4.4 The measurement harness needed two corrections
+### 5.4 The measurement harness needed two corrections
 Worth recording, because both would have made the measurement wrong in
 a way that flattered the result:
 
@@ -305,7 +614,7 @@ a way that flattered the result:
   (`{"action": …, "params": {…}}`). Seeding without it silently wrote
   no handoff, and the mark-read never fired.
 
-### 4.5 Two PRE-EXISTING defects the CI run exposed
+### 5.5 Two PRE-EXISTING defects the CI run exposed
 
 The first CI run of this branch failed the Release gate. Both causes
 were pre-existing, and both were reproduced on **pristine `main`** with
@@ -364,14 +673,14 @@ run.
 
 ---
 
-## 5. Phase 4 — the acceptance evidence
+## 6. Phase 4 — the acceptance evidence
 
 The suite is `cmd/mpm-mcp/mcp_contention_acceptance_test.go`. It
 measures the **complete MCP request wall clock** — not an individual
 statement — over the real stdio transport, against a disposable
 workspace.
 
-### 5.1 The ceiling
+### 6.1 The ceiling
 
 | bound | value | why |
 |---|---|---|
@@ -380,7 +689,7 @@ workspace.
 | no-contention ceiling | 15 s | an uncontended request must stay uncontended-fast |
 | observational-only ceiling | 20 s | the pre-fix cost of that request was 58.20 s |
 
-### 5.2 The results
+### 6.2 The results
 
 Measured on **`main` + #234 + this branch** — the composition that the
 mission's baseline describes.
@@ -394,18 +703,22 @@ mission's baseline describes.
 | lock released after 12 s | 12.06 s | 90% |
 | lock released after 20 s | 20.07 s | 84% |
 | **sustained contention** | **33.17 s** | **73%** |
+| **sustained contention, with a pending wake** | **39.42 s** | **68%** |
 | four concurrent requests | 33.16–33.18 s each | 73% |
 | only observational writes | 0.02 s | 100% |
 | cancellation mid-request | no corruption | — |
 | failure-audit + telemetry failure paths | evidence lands | — |
 | persistent state after restart | survives | — |
 
+The pending-wake row is the one the published 33.17 s figure did not
+cover; §4.9 has the measurement and the attribution.
+
 The recoverable-window behaviour is the important one: **the request
 returns at the moment the lock is released.** The durable mark-read's
 retry budget is long enough to absorb a 20 s window, so a recoverable
 window costs the caller the window and nothing more.
 
-### 5.3 Red-to-green and mutation controls
+### 6.3 Red-to-green and mutation controls
 
 **The measurement itself.** Reverting the three observational writes to
 inline — the pre-fix behaviour — on the target tree:
@@ -420,11 +733,22 @@ The pre-fix sustained figure of 124.48 s reproduces the 124.47 s
 baseline to within 0.01 s, which is the strongest available evidence
 that the measurement is the same measurement.
 
-**The queue's worker lifetime.** Re-introducing the §4.1 defect makes
+**The queue's worker lifetime.** Re-introducing the §5.1 defect makes
 `TestDeferredWriteQueue_WorkerSurvivesAnEmptyQueue` fail with a 30 s
 flush timeout; restoring the fix makes it pass.
 
-### 5.4 The evidence that is stronger, not weaker
+**The queue's capacity accounting.** The §4.1 probe file is a single
+file that compiles against both the pre-fix and the remediated queue.
+On the pre-fix head it reports three failures — the lost accepted
+obligation, the over-capacity hold, and the diagnostic that promised a
+retry it did not schedule. On the remediated tree all three pass.
+
+**The call sites' refusal handling.** The source-level invariant test
+(`TestDeferredWriteCallers_HandleTheRefusal`) names exactly the three
+production call sites that discarded the refusal on the pre-fix head,
+and passes here.
+
+### 6.4 The evidence that is stronger, not weaker
 
 `TestAcceptance_DeferredEvidenceLands` reproduces the failure path —
 the lock is held, so the durable mark-read fails — and then asserts the
@@ -442,7 +766,7 @@ row. This slice makes that evidence land.
 
 ---
 
-## 6. The remaining worst case, and why it stays
+## 7. The remaining worst case, and why it stays
 
 **33.16 s**, and it is one write: the durable mark-read.
 
@@ -472,7 +796,7 @@ path.
 
 ---
 
-## 7. Gates
+## 8. Gates
 
 | gate | result |
 |---|---|
@@ -488,7 +812,7 @@ path.
 
 ---
 
-## 8. Relationship to #234, and what this slice does not do
+## 9. Relationship to #234, and what this slice does not do
 
 **#234 is still open** (`f769ed9b`, MERGEABLE/CLEAN against `main`).
 Its production files are `internal/core/db.go` and `internal/core/handoff.go`.
@@ -520,24 +844,29 @@ thing on either tree.
 
 ---
 
-## 9. Files
+## 10. Files
 
 | file | what |
 |---|---|
 | `internal/core/deferred_write.go` | the deferred durable-write queue |
-| `internal/core/deferred_write_test.go` | its unit tests, including the §4.1 regression test |
+| `internal/core/deferred_write_test.go` | its unit tests, including the §5.1 regression test |
+| `internal/core/deferred_write_callers_test.go` | the source-level invariant that every call site handles the refusal (§4.3) |
 | `internal/core/audit.go` | `LogAudit` split into `LogAuditErr` + wrapper |
 | `internal/core/audit_deferred.go` | `LogAuditDeferred` |
 | `internal/core/retrieval_metadata_deferred.go` | `RecordRetrievalDeferred` |
-| `internal/core/wake_context.go` | the failure-path audit is deferred |
+| `internal/core/core.go` | `RecordRetrievalDeferred` on the `CoreDB` interface (§4.10) |
+| `internal/core/wake_context.go` | the failure-path audit is deferred, and its refusal is handled |
 | `internal/core/tools/retrieval_telemetry.go` | `recordRetrievalAsync` |
 | `internal/core/tools/handlers.go` | the two wake-path telemetry sites |
-| `internal/core/wake_tools.go` | `CheckPendingWakes` moved to `dm.WithTx` (§4.2) |
+| `internal/core/tools/retrieval_metadata_pool_isolation_test.go` | the deterministic form of the `:memory:` hazard (§4.7) |
+| `internal/core/tools/retrieval_metadata_writes_test.go` | the second fixture, converted to a file-backed database (§4.7) |
+| `internal/core/wake_tools.go` | `CheckPendingWakes` moved to `dm.WithTx` (§5.2) |
 | `cmd/mpm-mcp/audit_hook.go` | `recordToolInvocation` returns its error |
-| `cmd/mpm-mcp/tools.go` | the per-invocation row is deferred |
-| `cmd/mpm-mcp/main.go` | the shutdown flush (§3.4) |
+| `cmd/mpm-mcp/tools.go` | the per-invocation row is deferred, and its refusal is handled |
+| `cmd/mpm-mcp/main.go` | the shutdown flush and the close count (§3.4, §4.4) |
+| `cmd/mpm-mcp/deferred_write_shutdown_test.go` | the shutdown path's reporting (§4.4) |
 | `cmd/mpm-mcp/mcp_contention_latency_test.go` | the measurement harness |
 | `cmd/mpm-mcp/mcp_contention_acceptance_test.go` | the acceptance suite |
-| `internal/core/migration_continuity_project_model_test.go` | the §4.5 flake fix (pre-existing) |
-| `Makefile` | the §4.5 timeout fix for the `internal/core` race pack (pre-existing) |
+| `internal/core/migration_continuity_project_model_test.go` | the §5.5 flake fix (pre-existing) |
+| `Makefile` | the §5.5 timeout fix for the `internal/core` race pack (pre-existing) |
 | `docs/SPEC.md` | §10, "Observational writes do not block the agent" |
