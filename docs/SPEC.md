@@ -4219,6 +4219,68 @@ mpm call read_wake_context
 #    - Active Clusters (Unknown):\n  * [security] 4 events since 2026-07-02 (ID: security:...)"
 ```
 
+### Observational writes do not block the agent
+
+Every write MPM makes falls into one of four classes, and the class
+decides **when** the write happens:
+
+| class | examples | when |
+|---|---|---|
+| durable user state | the wake context's mark-read (`session_handoffs.read_at`), a memory save, a handoff write | **inline**, on the caller's goroutine, with the statement-level retry budget |
+| essential audit evidence | the per-invocation `tool_invocations` row, the failure-path `system_audit_log` row | **deferred** (below) |
+| best-effort telemetry | the `retrieval_metadata` reuse counters | **deferred** (below) |
+| caller-visible failure | a handler's returned error | inline, and reported to the caller |
+
+The rule is that a write which only *observes* — it records what
+happened, it does not make it happen — must not be on the agent's
+critical path. A contended SQLite write costs the substrate's busy
+timeout on every attempt, so paying an observational write inline costs
+the agent seconds it has no use for.
+
+**Deferred does not mean dropped.** A deferred write is handed to the
+substrate's deferred durable-write queue, which retries it until it
+lands. The obligation stays pending until it does, and the caller is
+never told the write succeeded before it did. Only the *clearable* class
+of failure is retried — ordinary `SQLITE_BUSY` is a wait, and waiting
+clears it; a constraint violation or a closed database is not a wait,
+and retrying it forever would strand every other obligation behind it.
+Those are dropped, loudly.
+
+This is **stronger** than the inline behaviour it replaces, not weaker.
+The inline writes had a bounded retry budget and then lost the row:
+under a held write lock the failure-path audit row cost ~33 s and
+produced **no row at all**, and the telemetry rows cost ~25 s and
+produced no rows. Deferred, they are retried until they land.
+
+| write | inline cost under a held lock | deferred |
+|---|---|---|
+| retrieval telemetry (5 rows) | ~25 s, then lost | off the caller's goroutine, retried until it lands |
+| failure-path audit row | ~33 s, then lost | off the caller's goroutine, retried until it lands |
+| per-invocation audit row | ~33 s, then lost | off the caller's goroutine, retried until it lands |
+| mark-read (durable user state) | ~33 s, durable | **unchanged** — inline and durable |
+
+**What stays inline, and why.** The mark-read records that a handoff
+has been delivered. The handoff is delivered exactly once, so the mark
+must be durable before the agent is told the handoff was delivered, and
+several substrate contracts assert the mark synchronously. It also
+carries the substrate's documented write budget, so a recoverable
+contention window of up to ~20 s is absorbed rather than lost.
+
+**Measured effect.** One MCP wake request against a held SQLite write
+lock: **124.47 s → 33.16 s** (73% reduction), with the remainder being
+the durable mark-read and nothing else. The full measurement, the
+acceptance thresholds, and the mutation controls are in
+[`docs/dev/issue-178-observational-write-latency-2026-11-08.md`](dev/issue-178-observational-write-latency-2026-11-08.md).
+
+**A deferred write still needs a transaction to be restart-tolerant.**
+Introducing a second writer on the shared pool means any transaction
+that reads and then writes can meet a stale snapshot
+(`SQLITE_BUSY_SNAPSHOT`), which no statement-level retry can clear.
+Such a transaction must run under `dm.WithTx`, which restarts it against
+a fresh snapshot. A bare `dm.db.Begin()` plus a raw `tx.Exec` loses the
+write — see `ResolveWake` and `CheckPendingWakes`, which are the two
+places in the substrate that had that shape and now do not.
+
 ### Dispatch outcome classification
 
 Every tool dispatch writes a row to `tool_invocations`. Alongside

@@ -621,9 +621,27 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		if err != nil {
 			auditStatus = "error"
 		}
+		// SNAPSHOT THE CLOSURE'S INPUTS.
+		//
+		// The closure below runs on the deferred queue's worker
+		// goroutine, long after this function has returned. A Go
+		// closure captures the VARIABLE, not its value, so capturing
+		// `err` directly would have the worker read a variable this
+		// scope keeps writing — the output-policy check below
+		// reassigns `err` — which is a data race (and a wrong audit
+		// row: the worker could read the policy error instead of the
+		// handler's).
+		//
+		// Every value the closure needs is therefore copied into a
+		// local that is never written again, so the worker sees a
+		// snapshot of the dispatch as it was.
+		auditErr := err
+		auditToolName := req.Params.Name
+		auditPayload := payload
+		auditAction := extractAction(payload)
 		core.DeferDurableWrite("tool_invocations", func() error {
-			return recordToolInvocation(dm, auditAC, req.Params.Name, payload,
-				startedAt, completedAt, extractAction(payload), auditStatus, err)
+			return recordToolInvocation(dm, auditAC, auditToolName, auditPayload,
+				startedAt, completedAt, auditAction, auditStatus, auditErr)
 		})
 		if err != nil {
 			// Partial-diagnostic preservation. A handler may return a
