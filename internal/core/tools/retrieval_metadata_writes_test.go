@@ -36,7 +36,6 @@ package tools
 import (
 	"context"
 	"database/sql"
-	"path/filepath"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -246,16 +245,10 @@ func TestHandleReadWakeContext_RecordsRetrievalMetadataForSurfacedMemories(t *te
 	// is refused with SQLITE_LOCKED until the reader finishes). A
 	// file-backed WAL database is what production runs on, and in WAL
 	// mode a reader never blocks a writer.
-	dbPath := filepath.Join(t.TempDir(), "mpm.db")
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	dm := internal.NewDatabaseManagerForDB(db)
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
+	//
+	// See retrieval_metadata_pool_isolation_test.go for the
+	// deterministic form of that hazard.
+	_, dm := openRetrievalMetadataDB(t)
 
 	// Seed two memories and one milestone, with recent created_at so
 	// the wake-context gather includes them. The gather uses
@@ -377,15 +370,30 @@ func TestHandleReadWakeContext_RecordsRetrievalMetadataForSurfacedMemories(t *te
 // writes is not over-claimed.
 func TestMCPQueryAndWake_DoNotMutateMemoryOrContradictionQueue(t *testing.T) {
 	internal.PinIsolatedWorkspace(t)
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open in-memory db: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	dm := internal.NewDatabaseManagerForDB(db)
-	if err := dm.InitSchema(); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
+	// A FILE-BACKED database, not an in-memory one.
+	//
+	// issue #178 (F2 remediation): this test calls handleReadWakeContext,
+	// whose retrieval telemetry is written through the substrate's
+	// DEFERRED durable-write queue. The deferred write runs on a
+	// DIFFERENT goroutine — and therefore on a different pooled
+	// connection — while the handler is still running.
+	//
+	// A bare ":memory:" gives every pooled connection its own PRIVATE
+	// database, so the deferred write lands in an empty, schema-less one,
+	// and `database/sql` hands connections out without affinity — the
+	// test's next query may draw the empty one and fail with
+	// "no such table: retrieval_metadata". That is a real flake in this
+	// repository's own suite (observed in a full-package -race run and
+	// in a -count=20 run).
+	//
+	// The sibling fixture in this file —
+	// TestHandleReadWakeContext_RecordsRetrievalMetadataForSurfacedMemories
+	// — was converted to a file-backed WAL database for exactly this
+	// reason. This fixture had the same shape and was missed.
+	//
+	// See retrieval_metadata_pool_isolation_test.go for the
+	// deterministic form of that hazard.
+	_, dm := openRetrievalMetadataDB(t)
 
 	if _, err := dm.SQLDB().Exec(`
 		INSERT INTO memories (id, collection, content, weight, deleted_at, created_at, updated_at)

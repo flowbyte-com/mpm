@@ -665,7 +665,27 @@ func (dm *DatabaseManager) gatherWakeContext(markHandoffRead bool) (WakeContextD
 		// the same reason — and lost the evidence as well. Deferring
 		// costs the caller nothing and makes the evidence STRONGER: the
 		// obligation is retried until it lands.
-		dm.LogAuditDeferred(AuditWarn, "wake_context", "handoff read failed: "+herr.Error(), "", AuditContext{})
+		//
+		// The refusal is HANDLED, not discarded (issue #178, F2
+		// remediation). A false return means the evidence was NOT
+		// queued — the queue was full or closed, and the write will
+		// not happen at all.
+		//
+		// The fallback is deliberately NOT a synchronous write. Under
+		// the condition that makes the queue refuse (a saturated queue
+		// means a sustained write-lock stall), a synchronous write
+		// would pay the full busy-handler wait on the agent's
+		// critical path and would most likely fail for the same
+		// reason. So the loss is REPORTED — loudly, with a count —
+		// rather than paid for in the agent's wall clock and then
+		// lost anyway.
+		if !dm.LogAuditDeferred(AuditWarn, "wake_context", "handoff read failed: "+herr.Error(), "", AuditContext{}) {
+			slog.Error("the failure-path audit row was REFUSED by the deferred queue; this evidence was not recorded",
+				"component", "wake_context",
+				"class", "evidence",
+				"cause", herr.Error(),
+				"consequence", "the handoff read failure is not in the audit trail")
+		}
 	}
 	if h != nil {
 		data.LastHandoff = h

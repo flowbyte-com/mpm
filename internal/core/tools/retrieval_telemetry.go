@@ -32,21 +32,41 @@
 package tools
 
 import (
+	"log/slog"
+
 	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // recordRetrievalAsync queues the retrieval-telemetry write for a node
 // the wake context surfaced, without blocking the caller.
 //
-// The obligation stays pending until the worker lands it. A dropped
-// obligation (queue full) is reported by the queue itself; the wake
-// payload is not affected either way, because telemetry never gates
-// the retrieval.
+// The obligation stays pending until the worker lands it.
+//
+// The refusal is HANDLED, not discarded (issue #178, F2 remediation). A
+// false return means the write was NOT queued — the queue was full or
+// closed — and it will not happen at all.
+//
+// Telemetry is BEST-EFFORT BY CONTRACT: the retrieval layer's own
+// header says the user-facing retrieval must not fail because a
+// telemetry write failed. So a refusal is logged and the retrieval
+// carries on. It is not reported as a success, and it is not papered
+// over with a synchronous write — under the saturation that causes the
+// refusal, a synchronous write would cost the agent a full busy-handler
+// wait and would fail for the same reason.
+//
+// The caller is not told, because a caller of a fire-and-forget
+// telemetry write has nothing to do with the outcome; the refusal is
+// counted by the queue and reported in its statistics.
 func recordRetrievalAsync(dm mpminternal.CoreDB, nodeID, nodeType string) {
 	if dm == nil || nodeID == "" {
 		return
 	}
-	mpminternal.DeferDurableWrite("retrieval_metadata", func() error {
-		return dm.RecordRetrieval(nodeID, nodeType)
-	})
+	accepted := dm.RecordRetrievalDeferred(nodeID, nodeType)
+	if !accepted {
+		slog.Debug("the retrieval telemetry write was refused by the deferred queue",
+			"node_id", nodeID,
+			"node_type", nodeType,
+			"class", "telemetry",
+			"consequence", "the retrieval is not counted; telemetry is best-effort by contract")
+	}
 }

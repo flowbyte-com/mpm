@@ -251,6 +251,70 @@ func TestAcceptance_SustainedContention(t *testing.T) {
 	}
 }
 
+// TestAcceptance_SustainedContentionWithPendingWake measures the SAME
+// scenario as TestAcceptance_SustainedContention, but with a PENDING
+// WAKE in the workspace.
+//
+// WHY THIS SCENARIO EXISTS (issue #178, F2 remediation, R1).
+//
+// read_wake_context calls CheckPendingWakes on EVERY request. With no
+// pending wake the fold's SELECT returns nothing, so the fold's
+// SETTLEMENT write — the "mark fired" UPDATE, which carries the
+// substrate's statement-level retry budget — never runs. The request
+// therefore does not exercise the whole wake path, and the published
+// figure describes only the no-pending-wake configuration.
+//
+// With a pending wake the fold selects it, delivers it, and tries to
+// settle it. The settlement meets the STALE-SNAPSHOT class, which
+// SQLite does not service with the busy handler, so it fails fast
+// rather than burning a 33 s budget.
+//
+// The observable consequence, and the important one: the wake is
+// DELAYED, not lost. It stays pending (fired = 0) and a later call
+// delivers it. The wake is never falsely settled.
+//
+// The ceiling is the same 60 s the other sustained-contention scenario
+// uses: the request stays well inside it, and the reduction from the
+// baseline holds.
+func TestAcceptance_SustainedContentionWithPendingWake(t *testing.T) {
+	if testing.Short() {
+		t.Skip("contention acceptance suite is not a short test")
+	}
+	ws := t.TempDir()
+	c := newLatencyClient(t, ws)
+	seedWorkspaceContent(t, c, ws)
+	wakeID := seedPendingWake(t, ws)
+
+	release := holdWriteLock(t, workspaceDBPath(ws), 0)
+	defer release()
+
+	result, elapsed := c.call("tools/call", wakeCtxArgs(), 5*time.Minute)
+	assertUnderCeiling(t, "MCP wake request under sustained contention with a pending wake", elapsed, acceptanceCeiling)
+
+	if !wakeContextReturned(result) {
+		t.Fatalf("the wake request did not return a wake context under sustained contention: %v", result)
+	}
+
+	// The wake must not be FALSELY settled. Under sustained contention
+	// the fold's settlement loses its snapshot, so the wake stays
+	// pending — delayed, not lost, and never silently marked delivered.
+	db := openWorkspaceDB(t, ws)
+	var fired int
+	var firedAt sql.NullInt64
+	if err := db.QueryRow(
+		`SELECT fired, fired_at FROM scheduled_wakes WHERE id = ?`, wakeID,
+	).Scan(&fired, &firedAt); err != nil {
+		t.Fatalf("read the pending wake: %v", err)
+	}
+	if fired != 0 {
+		t.Errorf("the wake was marked fired = %d under sustained contention; a wake that was not "+
+			"settled must never be reported as delivered", fired)
+	}
+	if firedAt.Valid {
+		t.Errorf("the wake was stamped fired_at = %d without being settled", firedAt.Int64)
+	}
+}
+
 // TestAcceptance_ObservationalCostIsOffTheCriticalPath measures the
 // cost of the OBSERVATIONAL writes alone.
 //

@@ -50,7 +50,14 @@ func (dm *DatabaseManager) LogAuditDeferred(level AuditLevel, component, message
 	if stack == "" {
 		stack = string(debug.Stack())
 	}
-	return DeferDurableWrite("audit:"+component, func() error {
+	// The class is EVIDENCE, not telemetry.
+	//
+	// An audit row is the record of what happened. The queue reserves
+	// capacity for evidence so that a burst of retrieval telemetry
+	// cannot starve it, and the queue's own accounting treats a lost
+	// evidence row as a loss of a promise rather than an accepted
+	// risk.
+	return DeferDurableWrite(DeferredWriteEvidence, "audit:"+component, func() error {
 		return dm.LogAuditErr(level, component, message, stack, ctx)
 	})
 }

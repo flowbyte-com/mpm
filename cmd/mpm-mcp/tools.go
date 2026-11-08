@@ -639,10 +639,36 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		auditToolName := req.Params.Name
 		auditPayload := payload
 		auditAction := extractAction(payload)
-		core.DeferDurableWrite("tool_invocations", func() error {
+		//
+		// The class is EVIDENCE, not telemetry.
+		//
+		// The per-invocation row is read by the drill scorer, the
+		// recent-activity feed and the citation resolver, so its loss
+		// is a loss of a record of what the agent did — not a lost
+		// counter. The queue reserves capacity for evidence so that a
+		// burst of retrieval telemetry cannot crowd it out.
+		//
+		// The refusal is HANDLED (issue #178, F2 remediation). A false
+		// return means the row was NOT queued and will not be written
+		// at all. The fallback is deliberately NOT a synchronous write:
+		// under the saturation that causes a refusal, a synchronous
+		// write would pay the full busy-handler wait on the MCP
+		// response path and would most likely fail for the same
+		// reason. The loss is REPORTED — loudly, with a count —
+		// rather than paid for in the client's wall clock and then
+		// lost anyway.
+		accepted := core.DeferDurableWrite(core.DeferredWriteEvidence, "tool_invocations", func() error {
 			return recordToolInvocation(dm, auditAC, auditToolName, auditPayload,
 				startedAt, completedAt, auditAction, auditStatus, auditErr)
 		})
+		if !accepted {
+			slog.Error("the per-invocation audit row was REFUSED by the deferred queue; this invocation was not recorded",
+				"tool", auditToolName,
+				"action", auditAction,
+				"status", auditStatus,
+				"class", "evidence",
+				"consequence", "the invocation is not in tool_invocations")
+		}
 		if err != nil {
 			// Partial-diagnostic preservation. A handler may return a
 			// structured result together with the error (compact does on a

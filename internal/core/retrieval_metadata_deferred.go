@@ -52,17 +52,23 @@ package internal
 // blocking the caller.
 //
 // It returns true when the obligation was accepted by the deferred
-// queue. A false return means the write was NOT queued and the caller
-// owns that failure.
+// queue. A false return means the write was NOT queued — the queue was
+// full or closed — and it will not happen at all. The caller owns that
+// failure.
 //
 // The obligation is pending until the worker lands it.
+//
+// The class is TELEMETRY, not evidence: the retrieval counters are
+// best-effort by their own contract, so they are refused first when
+// the queue is under pressure and the queue's capacity is reserved for
+// the audit evidence that is not.
 func (dm *DatabaseManager) RecordRetrievalDeferred(nodeID, nodeType string) bool {
 	if nodeID == "" || nodeType == "" {
 		// Same contract as RecordRetrieval: an empty id or type is a
 		// caller error, not a telemetry event. Report it the same way.
 		return false
 	}
-	return DeferDurableWrite("retrieval_metadata", func() error {
+	return DeferDurableWrite(DeferredWriteTelemetry, "retrieval_metadata", func() error {
 		return dm.RecordRetrieval(nodeID, nodeType)
 	})
 }

@@ -552,6 +552,18 @@ type CoreDB interface {
 	// fail the user-facing path.
 	RecordRetrieval(nodeID, nodeType string) error
 	RecordRetrievalSuccess(nodeID, nodeType string) error
+	// RecordRetrievalDeferred records the retrieval WITHOUT blocking the
+	// caller.
+	//
+	// It returns true when the obligation was accepted by the deferred
+	// durable-write queue and false when it was not (the queue is full
+	// or closed). A false return means the write was NOT queued and will
+	// not happen at all — the caller owns that outcome.
+	//
+	// The obligation is pending until the worker lands it, so a caller
+	// must not report the retrieval as recorded before the queue
+	// accepts it.
+	RecordRetrievalDeferred(nodeID, nodeType string) bool
 	IncrementSuccess(nodeID, nodeType string) error
 	GetRetrievalMetadata(nodeID string) (RetrievalMetadata, error)
 

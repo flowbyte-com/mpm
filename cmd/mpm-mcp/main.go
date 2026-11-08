@@ -308,12 +308,53 @@ const deferredWriteFlushBudget = 5 * time.Second
 // first would make every pending obligation fail with "database is
 // closed" and be dropped — the observational evidence the queue
 // accepted would be lost on every clean shutdown.
+//
+// The shutdown path REPORTS what it lost, with a NUMBER (issue #178, F2
+// remediation). Three outcomes are distinguished:
+//
+//   - The queue drained: every accepted obligation landed. Nothing is
+//     lost and nothing is reported as lost.
+//   - The flush budget expired: the pending obligations did not land in
+//     time. The count is reported, and the queue is then closed so the
+//     worker stops.
+//   - The queue is closed: whatever was still pending is DISCARDED, and
+//     the count of discarded obligations is reported.
+//
+// Nothing is swallowed: an accepted obligation that does not land is
+// counted and logged at ERROR level, because it breaks the queue's
+// published promise.
+//
+// A SIGKILL — or any death that does not run this function — loses
+// every pending obligation with no report at all. The queue is
+// MEMORY-ONLY and is NOT crash-durable; see docs/SPEC.md §10.
 func flushDeferredWritesOnShutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), deferredWriteFlushBudget)
 	defer cancel()
-	if err := core.FlushDeferredWrites(ctx); err != nil {
+	flushErr := core.FlushDeferredWrites(ctx)
+	if flushErr != nil {
 		slog.Warn("mpm-mcp: deferred writes did not all land before shutdown",
-			"err", err.Error(), "budget", deferredWriteFlushBudget.String())
+			"err", flushErr.Error(), "budget", deferredWriteFlushBudget.String())
+	}
+
+	// CLOSE THE QUEUE AND COUNT WHAT IT COULD NOT LAND.
+	//
+	// Without this the worker keeps running after dm.Close() — every
+	// pending obligation then fails with "database is closed", is
+	// (correctly) classified non-retryable, and is dropped with a
+	// warning. That is safe, but it cannot tell the operator HOW MUCH
+	// was lost, and the counting API was otherwise dead in production.
+	stats := core.CloseDeferredWrites()
+	if stats.Pending > 0 || stats.Lost() > 0 {
+		slog.Error("mpm-mcp: deferred write obligations were LOST at shutdown",
+			"discarded_at_close", stats.Pending,
+			"lost_total", stats.Lost(),
+			"accepted", stats.Accepted,
+			"landed", stats.Landed,
+			"rejected_full", stats.RejectedFull,
+			"rejected_closed", stats.RejectedClosed,
+			"dropped_terminal", stats.DroppedTerminal,
+			"dropped_closed", stats.DroppedClosed,
+			"durability", "the deferred queue is memory-only and is not crash-durable")
 	}
 }
 

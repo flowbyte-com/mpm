@@ -380,6 +380,48 @@ func seedMemories(t *testing.T, c *latencyClient, count int) {
 	}
 }
 
+// seedPendingWake inserts a DUE, agent-owned, unfired wake, so the wake
+// fold has something to deliver AND to settle.
+//
+// The wake is seeded directly into the database rather than through a
+// tool call, because the harness must control its target_time exactly:
+// a due wake is one the fold will pick up on the next request.
+//
+// WHY THIS MATTERS (issue #178, F2 remediation, R1).
+//
+// The wake fold's SETTLEMENT write — the "mark fired" UPDATE — carries
+// the substrate's statement-level retry budget. Without a pending wake
+// the fold's SELECT returns nothing, that UPDATE never runs, and the
+// budget is never exercised by the measurement.
+//
+// So the "no pending wake" configuration and the "with a pending wake"
+// configuration are DIFFERENT requests, and only the second one measures
+// the whole wake path. The published figure must say which one it is.
+//
+// The kind is "notification" — one of the agent-owned kinds the fold
+// delivers (AgentOwnedWakeKinds = {notification, cascade, cron}).
+func seedPendingWake(t *testing.T, ws string) string {
+	t.Helper()
+	id := fmt.Sprintf("wk-pending-%d", time.Now().UnixNano())
+	db, err := sql.Open("sqlite3", core.SqliteWriteDSN(filepath.Join(ws, "src", "db", "mpm.db")))
+	if err != nil {
+		t.Fatalf("open workspace db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(
+		`INSERT INTO scheduled_wakes (id, target_time, reason, fired, created_by, metadata)
+		 VALUES (?, ?, ?, 0, ?, ?)`,
+		id,
+		time.Now().Unix()-60, // already due
+		"acceptance pending wake",
+		"acceptance-fixture",
+		`{"kind":"notification"}`,
+	); err != nil {
+		t.Fatalf("seed the pending wake: %v", err)
+	}
+	return id
+}
+
 // TestMeasure_MCPWakeRequestUnderSustainedContention is the BASELINE
 // measurement: one MCP wake request, with a competing writer holding
 // the write lock for the whole request.
@@ -412,6 +454,56 @@ func TestMeasure_MCPWakeRequestUnderSustainedContention(t *testing.T) {
 			t.Logf("  server stderr: %s", strings.TrimSpace(line))
 		}
 	}
+}
+
+// TestMeasure_MCPWakeRequestUnderSustainedContentionWithPendingWake is
+// the same measurement, with a PENDING WAKE in the workspace.
+//
+// It exists because the two configurations are DIFFERENT requests
+// (issue #178, F2 remediation, R1). Without a pending wake the wake
+// fold's settlement write never runs, so the request does not exercise
+// the whole wake path.
+//
+// The watchdog attribution is printed for the same reason: it shows
+// WHICH statements the request actually paid for.
+func TestMeasure_MCPWakeRequestUnderSustainedContentionWithPendingWake(t *testing.T) {
+	if testing.Short() {
+		t.Skip("contention latency measurement is not a short test")
+	}
+	ws := t.TempDir()
+	c := newLatencyClient(t, ws)
+	seedWorkspaceContent(t, c, ws)
+	wakeID := seedPendingWake(t, ws)
+
+	dbPath := filepath.Join(ws, "src", "db", "mpm.db")
+	release := holdWriteLock(t, dbPath, 0)
+	defer release()
+
+	_, elapsed := c.call("tools/call", map[string]interface{}{
+		"name":      "mpm_context",
+		"arguments": map[string]interface{}{"action": "read_wake_context"},
+	}, 15*time.Minute)
+
+	t.Logf("WALL CLOCK: %.2fs for one MCP wake request under sustained contention WITH A PENDING WAKE", elapsed.Seconds())
+	dumpWatchdogAttribution(t, filepath.Join(filepath.Dir(dbPath), "watchdog.jsonl"))
+
+	// The wake must not be FALSELY settled: under sustained contention
+	// the fold's settlement loses its snapshot, so the wake stays
+	// pending — delayed, not lost.
+	db, err := sql.Open("sqlite3", core.SqliteWriteDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open workspace db: %v", err)
+	}
+	defer db.Close()
+	var fired int
+	var firedAt sql.NullInt64
+	if err := db.QueryRow(
+		`SELECT fired, fired_at FROM scheduled_wakes WHERE id = ?`, wakeID,
+	).Scan(&fired, &firedAt); err != nil {
+		t.Fatalf("read the pending wake: %v", err)
+	}
+	t.Logf("  the wake's settlement state: fired=%d fired_at=%v (a wake that was not settled must stay pending)",
+		fired, firedAt)
 }
 
 // dumpWatchdogAttribution prints the substrate's own per-statement
