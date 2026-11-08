@@ -40,9 +40,17 @@
 //     is dropped with a warning, exactly as the synthesis pool drops a
 //     task when it is full (ErrSynthesisPoolFull).
 //
-//  5. A contended obligation does NOT block the others. Each pending
-//     obligation carries its own next-attempt time, so one write stuck
-//     behind a held lock never strands the obligations queued behind it.
+//  5. A FAILED obligation does not monopolise the queue. A contended
+//     item is put back with a later next-attempt time, so the
+//     obligations behind it get their turn instead of being stranded
+//     behind its retries. An attempt that is IN FLIGHT does hold the
+//     queue — but every deferred write is bounded by the substrate's
+//     own busy-timeout and retry budget (~5 s for a bare write, ~33 s
+//     for a budgeted one), so no obligation can wedge the queue.
+//
+//  6. The worker LIVES as long as the queue does. It idles when there
+//     is nothing to do and it is woken by the next obligation. It exits
+//     only when the queue is closed.
 //
 // WHAT THIS IS NOT.
 //
@@ -98,19 +106,23 @@ type deferredWriteItem struct {
 // start and drain it — a coupling this mechanism does not need.
 //
 // A single worker processes items in order of their next-attempt time.
-// That is deliberate: two workers would contend with each other for
-// the same write lock and turn one stall into two.
+// That is deliberate: two workers would contend with each other for the
+// same write lock and turn one stall into two.
 type deferredWriteQueue struct {
 	mu      sync.Mutex
 	items   []deferredWriteItem
 	closed  bool
 	started bool
-	busy    bool
-	wake    chan struct{}
+	// inflight counts the obligations currently being written. The
+	// queue is not drained until it is zero AND no item is pending.
+	inflight int
+	// notify is closed and replaced whenever the queue changes, so a
+	// wake-up that arrives while the worker is busy is never lost.
+	notify chan struct{}
 }
 
 var deferredWrites = &deferredWriteQueue{
-	wake: make(chan struct{}, 1),
+	notify: make(chan struct{}),
 }
 
 // DeferDurableWrite hands a durable write to the background worker and
@@ -127,35 +139,51 @@ func DeferDurableWrite(kind string, fn func() error) bool {
 	if fn == nil {
 		return false
 	}
-	deferredWrites.mu.Lock()
-	if deferredWrites.closed || len(deferredWrites.items) >= deferredWriteQueueCapacity {
-		deferredWrites.mu.Unlock()
+	return deferredWrites.deferWrite(kind, fn)
+}
+
+// deferWrite is DeferDurableWrite for one specific queue.
+//
+// The package-level function is a thin wrapper over this one, so a test
+// can exercise a private queue instead of the process-wide one — the
+// process-wide queue is shared by every test in the package, and a
+// test that closes it would break the tests that follow.
+func (q *deferredWriteQueue) deferWrite(kind string, fn func() error) bool {
+	q.mu.Lock()
+	if q.closed || len(q.items) >= deferredWriteQueueCapacity {
+		q.mu.Unlock()
 		slog.Warn("deferred write dropped: queue full", "kind", kind, "capacity", deferredWriteQueueCapacity)
 		return false
 	}
-	deferredWrites.items = append(deferredWrites.items, deferredWriteItem{
+	q.items = append(q.items, deferredWriteItem{
 		kind:        kind,
 		fn:          fn,
 		nextAttempt: time.Now(),
 	})
-	deferredWrites.mu.Unlock()
-	deferredWrites.start()
-	deferredWrites.signal()
+	q.signalLocked()
+	q.mu.Unlock()
+	q.start()
 	return true
 }
 
-// signal nudges the worker without blocking.
-func (q *deferredWriteQueue) signal() {
-	select {
-	case q.wake <- struct{}{}:
-	default:
-	}
+// signalLocked wakes the worker. The caller must hold q.mu.
+//
+// The notify channel is closed and REPLACED rather than sent to. A
+// buffered send would drop the wake-up when the worker was busy, and
+// the worker would then sleep through an obligation it was supposed to
+// be waiting for.
+func (q *deferredWriteQueue) signalLocked() {
+	close(q.notify)
+	q.notify = make(chan struct{})
 }
 
 // start launches the worker exactly once.
+//
+// It is safe to call after the worker has idled: the worker only exits
+// when the queue is closed, and a closed queue refuses new work.
 func (q *deferredWriteQueue) start() {
 	q.mu.Lock()
-	if q.started {
+	if q.started || q.closed {
 		q.mu.Unlock()
 		return
 	}
@@ -169,9 +197,16 @@ func (q *deferredWriteQueue) start() {
 // Items are attempted in next-attempt order. A contended item is put
 // back with a later next-attempt time, so the obligations behind it
 // are not stranded behind its retries.
+//
+// The loop exits ONLY when the queue is closed. An empty queue is an
+// IDLE state, not a terminal one: the worker waits for the next
+// obligation. (An earlier revision returned from run() on an empty
+// queue, which killed the worker permanently the first time the queue
+// drained — every later obligation was then queued but never written,
+// and any flush waited for it until its deadline.)
 func (q *deferredWriteQueue) run() {
 	for {
-		item, wait, ok := q.next()
+		item, wait, notify, ok := q.next()
 		if !ok {
 			return
 		}
@@ -179,7 +214,7 @@ func (q *deferredWriteQueue) run() {
 			timer := time.NewTimer(wait)
 			select {
 			case <-timer.C:
-			case <-q.wake:
+			case <-notify:
 				timer.Stop()
 			}
 			continue
@@ -190,15 +225,19 @@ func (q *deferredWriteQueue) run() {
 
 // next picks the item that is due, or reports how long to wait for the
 // next one.
-func (q *deferredWriteQueue) next() (deferredWriteItem, time.Duration, bool) {
+//
+// The returned channel is the queue's current notify channel: it is
+// closed when the queue changes, so the caller can wait on it without
+// missing a wake-up that raced with the wait.
+func (q *deferredWriteQueue) next() (deferredWriteItem, time.Duration, <-chan struct{}, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.closed {
-		return deferredWriteItem{}, 0, false
+		return deferredWriteItem{}, 0, nil, false
 	}
 	if len(q.items) == 0 {
-		q.busy = false
-		return deferredWriteItem{}, 0, false
+		// Nothing pending: idle until the next obligation arrives.
+		return deferredWriteItem{}, time.Hour, q.notify, true
 	}
 	now := time.Now()
 	best := -1
@@ -222,26 +261,38 @@ func (q *deferredWriteQueue) next() (deferredWriteItem, time.Duration, bool) {
 		if wait < time.Millisecond {
 			wait = time.Millisecond
 		}
-		return deferredWriteItem{}, wait, true
+		return deferredWriteItem{}, wait, q.notify, true
 	}
 	item := q.items[best]
 	q.items = append(q.items[:best], q.items[best+1:]...)
-	q.busy = true
-	return item, 0, true
+	q.inflight++
+	return item, 0, q.notify, true
 }
 
 // attempt performs one obligation once and re-queues it when the
 // failure is the clearable class.
 func (q *deferredWriteQueue) attempt(item deferredWriteItem) {
+	item.attempts++
+	err := item.fn()
+
 	q.mu.Lock()
-	if q.closed {
-		q.mu.Unlock()
-		return
+	q.inflight--
+	if err != nil && isRetryableDeferredError(err) && !q.closed {
+		backoff := deferredWriteInitialBackoff
+		for i := 1; i < item.attempts && backoff < deferredWriteMaxBackoff; i++ {
+			backoff *= 2
+		}
+		if backoff > deferredWriteMaxBackoff {
+			backoff = deferredWriteMaxBackoff
+		}
+		item.nextAttempt = time.Now().Add(backoff)
+		if len(q.items) < deferredWriteQueueCapacity {
+			q.items = append(q.items, item)
+		}
+		q.signalLocked()
 	}
 	q.mu.Unlock()
 
-	item.attempts++
-	err := item.fn()
 	if err == nil {
 		return
 	}
@@ -254,26 +305,6 @@ func (q *deferredWriteQueue) attempt(item deferredWriteItem) {
 	}
 	slog.Debug("deferred write contended; will retry",
 		"kind", item.kind, "attempts", item.attempts, "err", err.Error())
-
-	backoff := deferredWriteInitialBackoff
-	for i := 1; i < item.attempts && backoff < deferredWriteMaxBackoff; i++ {
-		backoff *= 2
-	}
-	if backoff > deferredWriteMaxBackoff {
-		backoff = deferredWriteMaxBackoff
-	}
-	item.nextAttempt = time.Now().Add(backoff)
-
-	q.mu.Lock()
-	if q.closed {
-		q.mu.Unlock()
-		return
-	}
-	if len(q.items) < deferredWriteQueueCapacity {
-		q.items = append(q.items, item)
-	}
-	q.mu.Unlock()
-	q.signal()
 }
 
 // isRetryableDeferredError reports whether an error is the CLEARABLE
@@ -307,12 +338,18 @@ func isRetryableDeferredError(err error) bool {
 // asserting that a deferred row has landed, and a process that is
 // about to exit and must not lose the obligation it accepted.
 func FlushDeferredWrites(ctx context.Context) error {
-	deferredWrites.start()
+	return deferredWrites.flush(ctx)
+}
+
+// flush waits until this queue is empty and no attempt is in flight, or
+// the context expires.
+func (q *deferredWriteQueue) flush(ctx context.Context) error {
+	q.start()
 	for {
-		deferredWrites.mu.Lock()
-		empty := len(deferredWrites.items) == 0 && !deferredWrites.busy
-		deferredWrites.mu.Unlock()
-		if empty {
+		q.mu.Lock()
+		drained := len(q.items) == 0 && q.inflight == 0
+		q.mu.Unlock()
+		if drained {
 			return nil
 		}
 		select {
@@ -338,7 +375,7 @@ func CloseDeferredWrites() int {
 	deferredWrites.closed = true
 	pending := len(deferredWrites.items)
 	deferredWrites.items = nil
+	deferredWrites.signalLocked()
 	deferredWrites.mu.Unlock()
-	deferredWrites.signal()
 	return pending
 }

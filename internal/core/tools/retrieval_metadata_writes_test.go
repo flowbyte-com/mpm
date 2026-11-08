@@ -34,11 +34,14 @@
 package tools
 
 import (
+	"context"
 	"database/sql"
+	"path/filepath"
 	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/flowbyte-com/mpm-core"
 )
@@ -229,9 +232,24 @@ func TestHandleQueryLongTermMemory_RecordsRetrievalMetadataForEachResult(t *test
 // asserts it explicitly.
 func TestHandleReadWakeContext_RecordsRetrievalMetadataForSurfacedMemories(t *testing.T) {
 	internal.PinIsolatedWorkspace(t)
-	db, err := sql.Open("sqlite3", ":memory:")
+	// A FILE-BACKED database, not an in-memory one.
+	//
+	// issue #178 (F2): the wake surface's retrieval telemetry is written
+	// through the substrate's deferred queue, so the write runs on a
+	// DIFFERENT goroutine — and therefore on a different pooled
+	// connection — while the handler is still running.
+	//
+	// That breaks both in-memory shapes: a bare ":memory:" gives every
+	// pooled connection its own private database (so the deferred write
+	// would land in an empty one), and `cache=shared` serialises
+	// writers against the caller's own open read (so the deferred write
+	// is refused with SQLITE_LOCKED until the reader finishes). A
+	// file-backed WAL database is what production runs on, and in WAL
+	// mode a reader never blocks a writer.
+	dbPath := filepath.Join(t.TempDir(), "mpm.db")
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		t.Fatalf("open in-memory db: %v", err)
+		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	dm := internal.NewDatabaseManagerForDB(db)
@@ -268,6 +286,20 @@ func TestHandleReadWakeContext_RecordsRetrievalMetadataForSurfacedMemories(t *te
 	// otherwise the rest of the test is asserting on the wrong data.
 	if len(recentMem)+len(recentMil) == 0 {
 		t.Fatalf("wake surface returned no memories or milestones; seeds must be present to validate the contract")
+	}
+
+	// issue #178 (F2): the wake surface records its retrieval telemetry
+	// through the substrate's DEFERRED durable-write queue, so the row
+	// lands asynchronously instead of before the handler returns.
+	//
+	// The contract is "every surfaced node is recorded", not "the row is
+	// already written when the handler returns" — the wake payload must
+	// not wait ~5 s per telemetry write on the shared pool's busy-handler
+	// timeout. Flush the queue and assert the contract that holds.
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelFlush()
+	if err := internal.FlushDeferredWrites(flushCtx); err != nil {
+		t.Fatalf("flush deferred writes: %v", err)
 	}
 
 	// Every surfaced memory id (in either list) must have a
