@@ -204,7 +204,6 @@ slice exists to remove.
 ---
 
 ## 4. Two defects found while validating the correction
-
 Both were found by running the suites against the new mechanism, and
 both are recorded here because they are the kind of thing that a
 "looks right" implementation ships.
@@ -294,7 +293,6 @@ that are never written after the closure is created, so they were never
 exposed to this.
 
 ### 4.4 The measurement harness needed two corrections
-
 Worth recording, because both would have made the measurement wrong in
 a way that flattered the result:
 
@@ -306,6 +304,63 @@ a way that flattered the result:
 - **The MCP tools take a `params` envelope**
   (`{"action": …, "params": {…}}`). Seeding without it silently wrote
   no handoff, and the mark-read never fired.
+
+### 4.5 Two PRE-EXISTING defects the CI run exposed
+
+The first CI run of this branch failed the Release gate. Both causes
+were pre-existing, and both were reproduced on **pristine `main`** with
+the same rate — neither was caused by this slice. They are fixed here
+because they make the gate red for this PR, and both are in separate,
+clearly-labelled commits a reviewer can drop if they prefer them
+separately.
+
+**A ~4% flake in the Continuity sentinel recovery test.** The test
+deleted `schema_migrations` from its two snapshot maps *after* it had
+already compared them:
+
+```go
+changed := continuityDiffSnapshots(before, after)   // includes schema_migrations
+…
+delete(before, "schema_migrations")                 // too late
+delete(after, "schema_migrations")
+```
+
+The deletion was clearly meant to exclude `schema_migrations` from the
+full comparison — the sentinel's row is the one permitted difference,
+and it is compared separately with the sentinel stripped from both
+sides. The exclusion simply happened after the comparison it was meant
+to govern.
+
+The consequence: the recovery re-applies the migration, so the sentinel
+is re-recorded with a **new `applied_at`**. Whenever the recovery
+landed in a different *second* than the first application, that
+timestamp was reported as a changed pre-existing row. The row sets
+were always identical.
+
+| tree | flake rate before the fix | after |
+|---|---|---|
+| pristine `main` | 7 / 150 | — |
+| this branch | 7 / 150 | **0 / 250** |
+
+**The `internal/core` race pack ran under Go's default 10-minute
+timeout.** It is the only pack in `test-race` that does not pass
+`-timeout` explicitly, and it is the largest one: ~7m20s under `-race`
+on a developer host, and a CI runner is ~1.5× slower. The pack died
+with `panic: test timed out after 10m0s` — a **timeout, not a test
+failure**, and one that takes the whole pack's results with it, so
+every other test in the pack was reported as unrun.
+
+Measured to confirm this branch did not cause it:
+
+| tree | `internal/core` under `-race` |
+|---|---|
+| pristine `main` | 447 s |
+| this branch | 441 s |
+
+The fix gives the pack the project's own `CMD_TEST_TIMEOUT` budget
+(20m), which the `./cmd/...` pack in the same target already had. No
+test's behaviour changes — only the ceiling under which the pack may
+run.
 
 ---
 
@@ -483,4 +538,6 @@ thing on either tree.
 | `cmd/mpm-mcp/main.go` | the shutdown flush (§3.4) |
 | `cmd/mpm-mcp/mcp_contention_latency_test.go` | the measurement harness |
 | `cmd/mpm-mcp/mcp_contention_acceptance_test.go` | the acceptance suite |
+| `internal/core/migration_continuity_project_model_test.go` | the §4.5 flake fix (pre-existing) |
+| `Makefile` | the §4.5 timeout fix for the `internal/core` race pack (pre-existing) |
 | `docs/SPEC.md` | §10, "Observational writes do not block the agent" |
