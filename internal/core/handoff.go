@@ -517,10 +517,15 @@ func (dm *DatabaseManager) MarkHandoffRead(id, readBy string) error {
 		return fmt.Errorf("MarkHandoffRead: db not initialized")
 	}
 	now := time.Now().UTC().Unix()
-	_, err := dm.db.Exec(`
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The statement is guarded by `read_at IS NULL`, so it
+	// is idempotent: a retry against an already-read handoff updates
+	// nothing. `now` is computed once above, so the retry carries the
+	// same timestamp rather than a later one.
+	_, err := dm.ExecTracked(`
 		UPDATE session_handoffs
 		SET read_at = ?, read_by = ?
-		WHERE id = ? AND read_at IS NULL`, now, readBy, id)
+		WHERE id = ? AND read_at IS NULL`, 5, now, readBy, id)
 	if err != nil {
 		return fmt.Errorf("MarkHandoffRead: %w", err)
 	}
@@ -622,7 +627,12 @@ func (dm *DatabaseManager) DeleteHandoff(id string) (int64, error) {
 	if id == "" {
 		return 0, fmt.Errorf("DeleteHandoff: id is required")
 	}
-	result, err := dm.db.Exec(`DELETE FROM session_handoffs WHERE id = ?`, id)
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The DELETE is idempotent — a retry removes nothing
+	// more — and the row count stays truthful: a SQLITE_BUSY attempt
+	// removed no row, so the count that comes back with the successful
+	// attempt is the count of rows actually shredded.
+	result, err := dm.ExecTracked(`DELETE FROM session_handoffs WHERE id = ?`, 5, id)
 	if err != nil {
 		dm.LogAudit(AuditWarn, "handoff", "DeleteHandoff failed: "+err.Error(), "", AuditContext{
 			"handoff_id": id,

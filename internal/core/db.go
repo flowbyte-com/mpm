@@ -4357,8 +4357,12 @@ func (dm *DatabaseManager) MaterializeCascadeIntentsFor(
 
 // UpdateSessionSummary upserts the LLM-generated summary for a session.
 // Uses the session_id as the unique key.
+//
+// retries=5 (issue #178): the substrate's documented statement-level write
+// budget. The write is a plain overwrite of one column, so a retry is
+// idempotent — it lands the same value it landed the first time.
 func (dm *DatabaseManager) UpdateSessionSummary(sessionID, summary string) error {
-	_, err := dm.db.Exec(`UPDATE sessions SET summary = ? WHERE session_id = ?`, summary, sessionID)
+	_, err := dm.ExecTracked(`UPDATE sessions SET summary = ? WHERE session_id = ?`, 5, summary, sessionID)
 	return err
 }
 
@@ -5590,8 +5594,13 @@ func (dm *DatabaseManager) AddMemoryToTopic(memoryID, topicID, role string) erro
 	}
 
 	now := time.Now().Unix()
-	_, err = dm.db.Exec(`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
-		memoryID, topicID, now, role)
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The statement is INSERT OR IGNORE, so it is
+	// duplicate-tolerant by construction — a retry cannot create a second
+	// membership, and the timestamp is computed once above so the retry
+	// carries the same value.
+	_, err = dm.ExecTracked(`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
+		5, memoryID, topicID, now, role)
 	return err
 }
 
@@ -5663,7 +5672,12 @@ func (dm *DatabaseManager) RemoveMemoryFromTopic(memoryID, topicID string) (bool
 	if topicID == "" {
 		return false, fmt.Errorf("topic_id is required")
 	}
-	res, err := dm.db.Exec(`DELETE FROM topic_memberships WHERE memory_id = ? AND topic_id = ?`, memoryID, topicID)
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The DELETE is idempotent — a retry deletes nothing
+	// more — and RowsAffected stays truthful: a SQLITE_BUSY attempt
+	// removed no row, so the count that comes back with the successful
+	// attempt is the count of rows actually removed.
+	res, err := dm.ExecTracked(`DELETE FROM topic_memberships WHERE memory_id = ? AND topic_id = ?`, 5, memoryID, topicID)
 	if err != nil {
 		return false, fmt.Errorf("remove membership: %w", err)
 	}
@@ -6688,10 +6702,14 @@ func (dm *DatabaseManager) AddWork(title, content, sessionID string) (*Work, err
 		sessionIDArg = sessionID
 	}
 
-	_, err := dm.db.Exec(`
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The id is generated BEFORE the call, so a retry
+	// re-uses it rather than inserting a second work item — the same
+	// argument addWorkTx makes for the transactional twin.
+	_, err := dm.ExecTracked(`
 		INSERT INTO works (id, title, content, status, created_at, updated_at, session_id, migrated_at)
 		VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
-	`, id, title, content, now, now, sessionIDArg, now)
+	`, 5, id, title, content, now, now, sessionIDArg, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert work: %w", err)
 	}
@@ -7173,9 +7191,15 @@ func (dm *DatabaseManager) updateWorkStatus(id string, status WorkStatus) (*Work
 			ErrInvalidWorkTransition, current, status, id)
 	}
 
-	res, err := dm.db.Exec(`
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The statement writes ABSOLUTE values (not
+	// increments), so a retry is idempotent. The transition itself was
+	// validated by the read above, which is deliberately OUTSIDE the
+	// write: a retry re-runs the same statement against the same
+	// already-validated transition.
+	res, err := dm.ExecTracked(`
 		UPDATE works SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?
-	`, status, now, completedAt, id)
+	`, 5, status, now, completedAt, id)
 	if err != nil {
 		return nil, fmt.Errorf("update work status: %w", err)
 	}
@@ -7803,7 +7827,13 @@ func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerificati
 	}
 
 	// Persist the derived value to the works row.
-	_, err = dm.db.Exec(`UPDATE works SET verification = ? WHERE id = ?`, string(verification), workID)
+	//
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The statement writes an ABSOLUTE derived value, so a
+	// retry is idempotent — the column ends up holding the value the
+	// derivation computed, whether the first attempt or a later one
+	// landed it.
+	_, err = dm.ExecTracked(`UPDATE works SET verification = ? WHERE id = ?`, 5, string(verification), workID)
 	if err != nil {
 		return WorkVerificationUnverified, fmt.Errorf("derive verification: persist: %w", err)
 	}
