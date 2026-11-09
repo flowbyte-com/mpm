@@ -609,13 +609,66 @@ func mcpAdapter(dm *core.DatabaseManager, ac core.ActiveContext, handler tools.H
 		completedAt := time.Now()
 		// Audit insert is best-effort; audit failures must not propagate
 		// to the MCP client (see audit_hook.go for isolation contract).
+		//
+		// issue #178 (F2): the insert is DEFERRED. It used to be paid
+		// inline, with the substrate's full durable-write retry budget:
+		// under a held write lock it delayed the MCP response by ~33 s
+		// for a row the client never sees, and then lost the row
+		// anyway. Deferred, the obligation is retried until it lands
+		// and the response is not delayed.
 		auditAC := callAC
 		auditStatus := "success"
 		if err != nil {
 			auditStatus = "error"
 		}
-		recordToolInvocation(dm, auditAC, req.Params.Name, payload,
-			startedAt, completedAt, extractAction(payload), auditStatus, err)
+		// SNAPSHOT THE CLOSURE'S INPUTS.
+		//
+		// The closure below runs on the deferred queue's worker
+		// goroutine, long after this function has returned. A Go
+		// closure captures the VARIABLE, not its value, so capturing
+		// `err` directly would have the worker read a variable this
+		// scope keeps writing — the output-policy check below
+		// reassigns `err` — which is a data race (and a wrong audit
+		// row: the worker could read the policy error instead of the
+		// handler's).
+		//
+		// Every value the closure needs is therefore copied into a
+		// local that is never written again, so the worker sees a
+		// snapshot of the dispatch as it was.
+		auditErr := err
+		auditToolName := req.Params.Name
+		auditPayload := payload
+		auditAction := extractAction(payload)
+		//
+		// The class is EVIDENCE, not telemetry.
+		//
+		// The per-invocation row is read by the drill scorer, the
+		// recent-activity feed and the citation resolver, so its loss
+		// is a loss of a record of what the agent did — not a lost
+		// counter. The queue reserves capacity for evidence so that a
+		// burst of retrieval telemetry cannot crowd it out.
+		//
+		// The refusal is HANDLED (issue #178, F2 remediation). A false
+		// return means the row was NOT queued and will not be written
+		// at all. The fallback is deliberately NOT a synchronous write:
+		// under the saturation that causes a refusal, a synchronous
+		// write would pay the full busy-handler wait on the MCP
+		// response path and would most likely fail for the same
+		// reason. The loss is REPORTED — loudly, with a count —
+		// rather than paid for in the client's wall clock and then
+		// lost anyway.
+		accepted := core.DeferDurableWrite(core.DeferredWriteEvidence, "tool_invocations", func() error {
+			return recordToolInvocation(dm, auditAC, auditToolName, auditPayload,
+				startedAt, completedAt, auditAction, auditStatus, auditErr)
+		})
+		if !accepted {
+			slog.Error("the per-invocation audit row was REFUSED by the deferred queue; this invocation was not recorded",
+				"tool", auditToolName,
+				"action", auditAction,
+				"status", auditStatus,
+				"class", "evidence",
+				"consequence", "the invocation is not in tool_invocations")
+		}
 		if err != nil {
 			// Partial-diagnostic preservation. A handler may return a
 			// structured result together with the error (compact does on a

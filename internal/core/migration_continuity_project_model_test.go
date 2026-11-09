@@ -316,8 +316,36 @@ func continuityRowSnapshot(t *testing.T, db *sql.DB) map[string][]string {
 		for _, c := range cols {
 			quoted = append(quoted, "quote("+continuityQuoteIdent(c)+")")
 		}
-		q := "SELECT " + strings.Join(quoted, " || ' | ' || ") +
-			" FROM " + continuityQuoteIdent(table)
+		// ORDER BY the rendered row.
+		//
+		// SQL does not promise an order for a SELECT without ORDER BY,
+		// and SQLite's query planner is free to satisfy this one from
+		// the PRIMARY KEY index instead of the table — which is what
+		// makes the row order a plan artefact rather than a property
+		// of the data.
+		//
+		// The snapshot is compared INDEX-WISE (continuityDiffSnapshots
+		// walks the slice pairwise), so two snapshots of the SAME row
+		// SET can compare unequal purely because SQLite chose a
+		// different plan for the second query. That is not a
+		// migration defect; it is an unordered comparison of an
+		// unordered result.
+		//
+		// Ordering by the rendered row makes the order a pure function
+		// of the row set, so the comparison answers the question the
+		// test actually asks: did the recovery change a pre-existing
+		// row?
+		//
+		// The sentinel's own row moves when it is deleted and
+		// re-inserted (a new rowid lands at the end of the table),
+		// which is exactly the kind of reordering this pins down. The
+		// sentinel is stripped before the comparison, so its move is
+		// not what this fixes — the fix is that the OTHER rows keep
+		// their relative order across both snapshots.
+		renderedExpr := strings.Join(quoted, " || ' | ' || ")
+		q := "SELECT " + renderedExpr +
+			" FROM " + continuityQuoteIdent(table) +
+			" ORDER BY " + renderedExpr
 		rrows, err := db.Query(q)
 		if err != nil {
 			t.Fatalf("read %s: %v", table, err)
@@ -1759,15 +1787,30 @@ func TestContinuityLostSentinelRecoversWithoutDataLoss(t *testing.T) {
 	// The rows survived — the migration did not drop and recreate the
 	// tables.
 	after := continuityRowSnapshot(t, db)
-	changed := continuityDiffSnapshots(before, after)
 	// The sentinel row is the one permitted difference.
 	beforeMigrations, _ := continuityStripSentinel(before["schema_migrations"])
 	afterMigrations, afterHadSentinel := continuityStripSentinel(after["schema_migrations"])
 	if !afterHadSentinel {
 		t.Error("the Continuity sentinel is missing after the recovery open")
 	}
+	// schema_migrations is EXCLUDED from the full comparison BEFORE it
+	// is made.
+	//
+	// The recovery re-applies the migration, so the sentinel is
+	// re-recorded with a NEW applied_at. That is the expected, permitted
+	// difference — and it is compared separately, below, with the
+	// sentinel stripped from BOTH sides.
+	//
+	// The exclusion has to happen before the full comparison, not
+	// after. Comparing first and deleting afterwards reported the
+	// sentinel's new applied_at as a changed pre-existing row, which
+	// made this test fail whenever the recovery landed in a different
+	// second than the first application — a ~4% flake that had nothing
+	// to do with the migration's behaviour.
 	delete(before, "schema_migrations")
 	delete(after, "schema_migrations")
+
+	changed := continuityDiffSnapshots(before, after)
 	changed = append(changed, continuityDiffSnapshots(
 		map[string][]string{"schema_migrations": beforeMigrations},
 		map[string][]string{"schema_migrations": afterMigrations},

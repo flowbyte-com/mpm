@@ -4335,6 +4335,132 @@ mpm call read_wake_context
 #    - Active Clusters (Unknown):\n  * [security] 4 events since 2026-07-02 (ID: security:...)"
 ```
 
+### Observational writes do not block the agent
+
+Every write MPM makes falls into one of four classes, and the class
+decides **when** the write happens:
+
+| class | examples | when |
+|---|---|---|
+| durable user state | the wake context's mark-read (`session_handoffs.read_at`), a memory save, a handoff write | **inline**, on the caller's goroutine, with the statement-level retry budget |
+| essential audit evidence | the per-invocation `tool_invocations` row, the failure-path `system_audit_log` row | **deferred** (below) |
+| best-effort telemetry | the `retrieval_metadata` reuse counters | **deferred** (below) |
+| caller-visible failure | a handler's returned error | inline, and reported to the caller |
+
+The rule is that a write which only *observes* — it records what
+happened, it does not make it happen — must not be on the agent's
+critical path. A contended SQLite write costs the substrate's busy
+timeout on every attempt, so paying an observational write inline costs
+the agent seconds it has no use for.
+
+**Deferred does not mean dropped — and this is the precise contract.**
+
+A deferred write is handed to the substrate's deferred durable-write
+queue. The obligation stays pending until it lands, and the caller is
+never told the write succeeded before it did. The queue's promise has
+four parts, and each part is enforced by a test:
+
+1. **An ACCEPTED obligation is retried until it lands.** The queue
+   counts the obligation *being written* as well as the ones waiting, so
+   the slot an in-flight obligation needs for its retry is **reserved**
+   while it is in flight. A producer that wants that slot is refused,
+   loudly, rather than taking it. Without this reservation a saturated
+   queue silently discarded accepted obligations — the failure this
+   contract exists to rule out.
+2. **Only the *clearable* class of failure is retried.** Ordinary
+   `SQLITE_BUSY` is a wait, and waiting clears it; a constraint
+   violation or a closed database is not a wait, and retrying it forever
+   would strand every other obligation behind it. Those are dropped,
+   loudly, and **counted**.
+3. **A REFUSED obligation was never accepted.** When the queue is full
+   or closed it returns `false`, the write is **not** made, and the
+   caller is told at the moment of refusal. A caller that ignores that
+   result is claiming a write was queued when it was not; the substrate
+   does not allow that to go unremarked.
+4. **The queue is bounded.** 256 obligations, pending and in-flight
+   together. A slice of that (64) is **reserved for audit evidence**:
+   telemetry is losable by its own contract, audit evidence is not, so
+   telemetry may not consume the reserve.
+
+**The queue is memory-only, and is NOT crash-durable.** Nothing is
+persisted, so a `SIGKILL` — or any death that does not run the shutdown
+path — loses every pending obligation, with no report. That is
+acceptable for telemetry and is **not** acceptable for audit evidence,
+and this contract does not pretend otherwise. Closing that gap needs a
+*different* mechanism (a durable obligation record), not a better
+promise from this one; see
+[`docs/dev/issue-178-observational-write-latency-2026-11-08.md`](dev/issue-178-observational-write-latency-2026-11-08.md)
+§4.8 for what that mechanism would have to be, and why it is not part of
+this slice.
+
+**What is reported, and where.** The four outcomes are distinct and are
+counted separately:
+
+| outcome | meaning | reported by |
+|---|---|---|
+| **landed** | written successfully | the queue's counters |
+| **accepted** | the queue took responsibility; still pending | the queue's counters |
+| **rejected** | never accepted — the queue was full or closed | the caller is told at the refusal; a `WARN` line; the queue's counters |
+| **lost** | accepted and then lost — a terminal failure, or the queue closing underneath it | a `WARN` line at the loss; the next `FlushDeferredWrites` reports it; the shutdown path reports the count at `ERROR` |
+
+A lost **evidence** obligation is reported by the next
+`FlushDeferredWrites` — a caller that treats a nil flush as "the audit
+record is there" is not told a falsehood. A lost **telemetry**
+obligation is counted and logged but does not fail that flush: telemetry
+is losable by contract, and a caller waiting for audit evidence must not
+be failed by a lost reuse counter.
+
+This is **stronger** than the inline behaviour it replaces, not weaker.
+The inline writes had a bounded retry budget and then lost the row:
+under a held write lock the failure-path audit row cost ~33 s and
+produced **no row at all**, and the telemetry rows cost ~25 s and
+produced no rows. Deferred, they are retried until they land.
+
+| write | inline cost under a held lock | deferred |
+|---|---|---|
+| retrieval telemetry (5 rows) | ~25 s, then lost | off the caller's goroutine, retried until it lands |
+| failure-path audit row | ~33 s, then lost | off the caller's goroutine, retried until it lands |
+| per-invocation audit row | ~33 s, then lost | off the caller's goroutine, retried until it lands |
+| mark-read (durable user state) | ~33 s, durable | **unchanged** — inline and durable |
+
+**What stays inline, and why.** The mark-read records that a handoff
+has been delivered. The handoff is delivered exactly once, so the mark
+must be durable before the agent is told the handoff was delivered, and
+several substrate contracts assert the mark synchronously. It also
+carries the substrate's documented write budget, so a recoverable
+contention window of up to ~20 s is absorbed rather than lost.
+
+**Measured effect.** One MCP wake request against a held SQLite write
+lock: **124.47 s → 33.16 s** (73% reduction). The remainder is the
+durable mark-read and nothing else.
+
+That figure is for the **no-pending-wake** configuration, and the
+configuration matters: `read_wake_context` calls the wake fold on every
+request, and with no pending wake the fold's settlement write never
+runs. With a pending wake the same request measures **39.42 s** — an
+extra ~6.2 s for the fold's settlement, which meets the stale-snapshot
+class and therefore fails fast instead of burning a full budget. The
+wake is **delayed, not lost**: it stays pending (`fired = 0`) and a
+later call delivers it, and it is never falsely settled.
+
+| configuration | wall clock | vs. the 124.47 s baseline |
+|---|---|---|
+| no pending wake | 33.16 s | −73% |
+| with a pending wake | 39.42 s | −68% |
+
+The full measurement, the acceptance thresholds, and the mutation
+controls are in
+[`docs/dev/issue-178-observational-write-latency-2026-11-08.md`](dev/issue-178-observational-write-latency-2026-11-08.md).
+
+**A deferred write still needs a transaction to be restart-tolerant.**
+Introducing a second writer on the shared pool means any transaction
+that reads and then writes can meet a stale snapshot
+(`SQLITE_BUSY_SNAPSHOT`), which no statement-level retry can clear.
+Such a transaction must run under `dm.WithTx`, which restarts it against
+a fresh snapshot. A bare `dm.db.Begin()` plus a raw `tx.Exec` loses the
+write — see `ResolveWake` and `CheckPendingWakes`, which are the two
+places in the substrate that had that shape and now do not.
+
 ### Dispatch outcome classification
 
 Every tool dispatch writes a row to `tool_invocations`. Alongside
