@@ -64,6 +64,7 @@ driven through its OWN validate block, extracted from its own source, so
 this suite cannot drift away from the script it covers.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -217,6 +218,39 @@ OPTION_SETS = (
     ("set -eu", "-eu"),
     ("set -euo pipefail", "-euo pipefail"),
 )
+
+
+def add_host_assets(bundle: Path) -> None:
+    """Give the bundle the release-scoped host assets, declared.
+
+    A bundle that omits them installs an installation whose own
+    managed block points at files that do not exist, so the validator
+    refuses one. The fixture therefore has to be a WELL-FORMED bundle,
+    and "well-formed" now includes the declaration the validator reads
+    (config/runtime-assets.json) and the payload declaration that
+    travels beside the assets.
+    """
+    assets = {
+        "agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md": "# canonical\n",
+        "agent_installation/mpm-agent-protocol.md": "# protocol\n",
+        "agent_installation/scripts/block_provenance.py": "# shared\n",
+    }
+    declaration = {}
+    for rel, body in assets.items():
+        p = bundle / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        declaration[rel] = {"sha256": digest}
+    payload_decl = bundle / "agent_installation" / "runtime_payloads.json"
+    payload_decl.parent.mkdir(parents=True, exist_ok=True)
+    payload_decl.write_text(
+        json.dumps({"version": 1, "payloads": []}, indent=2) + "\n")
+    manifest = bundle / "config" / "runtime-assets.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps({"version": 1, "assets": declaration}, indent=2,
+                   sort_keys=True) + "\n")
 
 
 class ProbeFixture(unittest.TestCase):
@@ -466,6 +500,7 @@ class ProbeFixture(unittest.TestCase):
             "built_at": "2026-11-04T00:00:00Z",
             "bundle_layout": "versioned-bundle/1",
         }))
+        add_host_assets(bundle)
         return bundle
 
     # ------------------------------------------------------------------
