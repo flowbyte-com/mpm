@@ -25,6 +25,22 @@ import shutil
 import sys
 from pathlib import Path
 
+# DO NOT WRITE BYTECODE INTO THE RUNTIME.
+#
+# This script runs FROM INSIDE an installed release directory
+# (~/.mpm/agent_installation/...), and a release directory is versioned
+# and immutable: it is what a rollback gives back, and it is validated
+# against its own declaration. A bytecode cache written into it is a
+# file no declaration names, so the release that was just promoted
+# would fail its own validation — the promotion would install a
+# runtime it then refuses.
+#
+# sys.dont_write_bytecode is set BEFORE the local import below, and
+# that is the part that matters: the import system compiles and caches
+# the sibling module the moment it is imported, so the flag has to be
+# in place before the import statement runs, not after.
+sys.dont_write_bytecode = True
+
 # The shared build-provenance mechanism. It lives in
 # agent_installation/scripts/ alongside the renderer and the reconciler,
 # and is imported by path rather than by package name because every
