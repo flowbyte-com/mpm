@@ -241,7 +241,12 @@ residual is real and it lasts until the daemons are restarted:
 
 ```bash
 # what the running daemons are actually executing
-systemctl status mpm-scheduler mpm-telemetry | grep -E "ExecStart|Active"
+#
+# The units are USER-level (they are installed with `systemctl --user`),
+# so the plain `systemctl` reports "inactive" for them and means
+# nothing. Use --user.
+systemctl --user status mpm-scheduler mpm-telemetry \
+  | grep -E "ExecStart|Active"
 ```
 
 Two ways to close it, in the operator's order of preference:
