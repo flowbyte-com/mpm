@@ -86,6 +86,43 @@ agent_installation/mpm-opencode/dist/{index.v2,wake-context,event-envelope,
 
 The repair **adds** to the release. It never replaces a payload file.
 
+### 2.1 What the installed releases carry that no declaration names
+
+Two files, in the older releases. They are not omissions — they are
+files the runtime wrote into the release directory after it was
+installed:
+
+```
+agent_installation/scripts/__pycache__/block_provenance.cpython-314.pyc
+agent_installation/mpm-opencode/dist/mpm-build-provenance.json
+```
+
+The first is Python's bytecode cache: the instruction refresher runs
+from inside the release and imports `block_provenance` from it. The
+second is the adapter's build-provenance sidecar, written by the
+adapter's own `install.sh` into the canonical adapter directory.
+
+They are the reason the bundle validators have TWO scopes. A bundle
+being **assembled** must account for every file it carries; a bundle
+that was **already installed** is checked for integrity, because a
+release directory accumulates files after installation and refusing it
+for those would push the operator towards deleting an immutable
+rollback target. The exact rule is in
+[`bundle-validation-scopes.md`](bundle-validation-scopes.md).
+
+Since the fix, the runtime no longer writes the bytecode cache into a
+release at all: the two tools that import a sibling module set
+`sys.dont_write_bytecode = True` before the import. The tolerance
+remains, because the caches are already on disk in the releases that
+were installed before the change.
+
+**The active release `4a870c8a…` carries neither a declaration nor a
+schema preflight.** It was promoted by the defective builder, so it
+is genuinely incomplete. It is still a valid rollback target — a
+rollback moves the pointer and does not validate — but it must not be
+re-promoted: the repair is a promotion of a revision that carries the
+assets, not a re-activation of this one.
+
 ## 3. The repair: promote a release built by the fixed builder
 
 The clean repair is a promotion, not an in-place edit. A release is
@@ -133,6 +170,18 @@ operator runs, so it is the one that must be replaced — and the old
 copy is kept, because it is the recovery tool for the runtime that is
 running *now*.
 
+**It is a REGULAR FILE, not a symlink.** `installStableUpdater`
+(`internal/update/activate.go`) writes it through a temporary file and
+a rename(2), so it never resolves into a release directory. That is
+why replacing it cannot mutate an immutable release — the very thing
+this document warns against elsewhere — and it is why `install -m
+0755` is safe here. Confirm it before replacing it:
+
+```bash
+test -L ~/.mpm/mpm-update && echo "symlink — stop and investigate" \
+                      || echo "regular file — safe to replace"
+```
+
 ```bash
 # from a checkout of the fixed branch
 go build -tags fts5 -o /tmp/mpm-update-fixed ./cmd/mpm-update
@@ -178,6 +227,41 @@ The promotion now provisions the host assets into the candidate, the
 candidate declares them, the validator checks the declaration against
 the candidate's own contents, and only then is the release installed
 and `current` repointed.
+
+**The daemons are NOT restarted by this command.** `mpm-update` stops
+and restarts the managed units only when it is given
+`--restart-services`, and this procedure does not: a service restart
+is an operational act with its own authorisation, and this document
+does not assume one.
+
+So after the promotion, `mpm-scheduler` and `mpm-telemetry` are still
+running the **previous** revision's executables, while the CLI on
+`PATH` and the managed block's provenance line name the new one. The
+residual is real and it lasts until the daemons are restarted:
+
+```bash
+# what the running daemons are actually executing
+systemctl status mpm-scheduler mpm-telemetry | grep -E "ExecStart|Active"
+```
+
+Two ways to close it, in the operator's order of preference:
+
+1. **restart the daemons explicitly**, once the operator has decided
+   that is acceptable:
+
+   ```bash
+   ~/.mpm/mpm-update --commit <fixed-commit> --restart-services
+   ```
+
+   or, equivalently, restart the units by hand.
+
+2. **leave them running** and accept the residual until the next
+   reboot or the next service restart. The daemons are long-lived
+   schedulers; they do not pick up the new binaries on their own.
+
+What this residual does NOT affect: the CLI, the managed block's
+provenance line, and the recovery executable all name the new revision
+immediately after the promotion. Only the two daemons lag.
 
 **Stop** if the promotion reports a failure, or if the new release does
 not carry `agent_installation/mpm-agent-protocol.md`.
@@ -269,16 +353,107 @@ name `ctx.session.hook("context")`.
   instead.
 - **Do not restore the Nov-2 backup.** `~/.mpm/backups/upgrade-20261102T161236Z`
   is a **stale historical** recovery point: it holds the database as it
-  was on 2026-11-02 (179 memories against the live 335, 18 schema
-  migrations against the live 20). Restoring it would silently roll the
-  database back five days. The real pre-update recovery point is
-  `~/.mpm/backups/upgrade-20261107T201536Z`.
+  was on 2026-11-02 — a *different and older* database than the live
+  one, and restoring it would silently roll the data back by the
+  distance between those two points in time. The live database has
+  moved on since; the counts are in §5.1, and they are the reason.
+  The pre-update recovery point is
+  `~/.mpm/backups/upgrade-20261107T201536Z` — and it must be VERIFIED
+  before it is relied upon. See §5.1.
 - **Do not copy the assets from the old release `77738cfd…` into the
-  new one.** They belong to a different revision; the declaration's
-  digests would not match and the validator would refuse the bundle.
+  new one.** They belong to a different revision, and a bundle's
+  declaration is a COMPLETE description: it records the digest of every
+  asset it names. Copying an asset from another revision means either
+  a digest that does not match the declaration (and the bundle is
+  refused) or a declaration rewritten to match the copy (and the
+  declaration no longer describes what the authority provisioned).
+
+  Measured: nine of the twelve assets are byte-identical between
+  `77738cfd…` and the fixed revision — only
+  `MPM_AGENT_INTEGRATION_SNIPPETS.md`, `AGENTS.md.snippet` and
+  `render_managed_blocks.py` differ. A PARTIAL copy of the other nine
+  would therefore be accepted by the validator, which is exactly why
+  the rule is a rule and not a technicality: the validator cannot tell
+  a deliberate partial copy from a complete one.
 - **Do not hand-edit the managed block.** The refresher writes the
   provenance stamp; a hand-edit loses it and the next refresh cannot
   tell a current block from an edited one.
+
+### 5.1 Verify the recovery point before you rely on it
+
+`~/.mpm/backups/upgrade-<timestamp>/` is created BEFORE the backup is
+taken, and it is NOT removed when the backup fails. So the DIRECTORY's
+existence proves nothing: a failed backup leaves an empty directory
+behind, and restoring from it is restoring nothing.
+
+Verify the named recovery point before you depend on it:
+
+```bash
+BK=~/.mpm/backups/upgrade-20261107T201536Z
+
+# 1. the database is there, and it is not empty
+ls -l "$BK/mpm.db"
+
+# 2. it opens, and it is a real database with the expected tables
+python3 - "$BK/mpm.db" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+tables = [r[0] for r in db.execute(
+    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+print("tables:", len(tables))
+print("memories:", db.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
+migrations = 0
+if "schema_migrations" in tables:
+    migrations = db.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
+print("schema_migrations:", migrations)
+db.execute("PRAGMA integrity_check").fetchone()
+print("integrity:", db.execute("PRAGMA integrity_check").fetchone()[0])
+PY
+```
+
+**Every line must succeed.** `integrity_check` must print `ok`, and
+`memories` and `schema_migrations` must be plausible for the moment
+the backup was taken.
+
+**3. And it must correspond to the intended recovery point.** The
+update history records what each promotion did:
+
+```bash
+cat ~/.mpm/update-history.jsonl
+```
+
+The record for the promotion you are recovering from names the
+`backup` directory it took. That is the directory to verify — not one
+that merely exists.
+
+For the record at the time of writing, the numbers are:
+
+| point | memories | schema migrations |
+|---|---|---|
+| `upgrade-20261102T161236Z` (the Nov-2 backup) | 179 | 18 |
+| `upgrade-20261107T201536Z` (the pre-update recovery point) | 320 | 20 |
+
+The LIVE count is deliberately not written down here: it grows every
+time the installation is used, so a number in a document is a number
+that is wrong by the time it is read. Measure it instead — the same
+script above, pointed at the live database:
+
+```bash
+python3 - ~/.mpm/src/db/mpm.db <<'PY'
+import sqlite3, sys
+db = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+print("memories:", db.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
+print("schema_migrations:", db.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0])
+PY
+```
+
+The point of the table is the RATIO: the Nov-2 backup is an order of
+magnitude behind the live database, and the Nov-7 backup is the one
+that matches the promotion being recovered from.
+
+If the verification fails, the backup is not a recovery point. Do not
+restore it. Find another, or accept that the promotion is a
+forward-only operation for this installation.
 
 ## 6. Cross-references
 
@@ -290,4 +465,6 @@ name `ctx.session.hook("context")`.
 - the installer policy for operator-edited assets: cases A–G in
   `scripts/install_runtime_assets.py`;
 - the migration policy for the managed block: §4.1 above, implemented by
-  `agent_installation/mpm-opencode/scripts/install_agents_instructions.py`.
+  `agent_installation/mpm-opencode/scripts/install_agents_instructions.py`;
+- the two validation scopes (candidate vs installed) and the exact
+  compatibility rule: [`bundle-validation-scopes.md`](bundle-validation-scopes.md).
