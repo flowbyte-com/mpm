@@ -2806,7 +2806,14 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		// Observability Layer: every node pulled into the boot prompt
 		// is "retrieved". Fire-and-forget; telemetry must not block
 		// the wake surface. Errors are swallowed.
-		_ = dm.RecordRetrieval(m.ID, "memory")
+		//
+		// issue #178 (F2): the write is DEFERRED, not inline. It used
+		// to be issued on this goroutine, where the shared pool's 5 s
+		// busy-handler timeout made each telemetry write cost the agent
+		// ~5 s under a held write lock — five of them cost 25.04 s of
+		// a 124.47 s request, and none of them landed. The deferred
+		// write is retried until it lands.
+		recordRetrievalAsync(dm, m.ID, "memory")
 	}
 
 	milestoneRefs := make([]map[string]interface{}, 0, len(data.RecentMilestones))
@@ -2817,7 +2824,8 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 			"pointer":    m.Pointer,
 			"created_at": m.CreatedAt,
 		})
-		_ = dm.RecordRetrieval(m.ID, "memory")
+		// issue #178 (F2): deferred, as above.
+		recordRetrievalAsync(dm, m.ID, "memory")
 	}
 
 	// Overdue-wakes surface (added 2026-08-13). Pure read — does NOT

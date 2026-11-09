@@ -25,8 +25,23 @@ import (
 )
 
 // recordToolInvocation inserts an audit row capturing the dispatch
-// metadata required by the drill scorer. Best-effort: errors are logged
-// at warn but never propagated to the caller.
+// metadata required by the drill scorer.
+//
+// Best-effort: the error is RETURNED to the caller, which decides what
+// to do with it. The MCP adapter hands the write to the substrate's
+// deferred queue (issue #178, F2), so the row is written off the
+// caller's goroutine and is retried until it lands.
+//
+// WHY IT IS DEFERRED, AND WHY THAT IS NOT A WEAKENING.
+//
+// The row is the substrate's record of the invocation. It is built by
+// the drill scorer and the recent-activity feed, so it must land — and
+// it used to be paid INLINE, with the full durable-write retry budget:
+// under a held write lock the MCP response was delayed ~33 s by a row
+// the caller never sees, and the row was then LOST anyway.
+//
+// Deferred, the row is retried until it lands. The obligation stays
+// pending; the caller is not blocked.
 func recordToolInvocation(
 	dm *core.DatabaseManager,
 	ac core.ActiveContext,
@@ -37,9 +52,9 @@ func recordToolInvocation(
 	action string,
 	resultStatus string,
 	err error,
-) {
+) error {
 	if dm == nil {
-		return
+		return nil
 	}
 	defer func() {
 		if r := recover(); r != nil {
@@ -116,6 +131,7 @@ func recordToolInvocation(
 	if auditErr != nil {
 		slog.Warn("audit insert failed", "tool", toolName, "err", auditErr.Error())
 	}
+	return auditErr
 }
 
 // computeToolOutcome mirrors cmd/mpm/audit_hook.go::computeToolOutcome

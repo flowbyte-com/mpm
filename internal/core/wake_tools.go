@@ -1206,6 +1206,22 @@ func (dm *DatabaseManager) ResolveWake(wakeID, reason string, resultReference st
 // The ENCLOSING transaction (dm.WithTx) is what restarts it.
 const wakeResolveWriteRetries = 5
 
+// wakeFoldWriteRetries is the statement-level retry budget for the
+// fold's "mark fired" UPDATE.
+//
+// It has the same shape and the same rationale as
+// wakeResolveWriteRetries: it covers ORDINARY contention (another
+// connection holding the write lock), and it does NOT cover
+// SQLITE_BUSY_SNAPSHOT — that class belongs to the enclosing dm.WithTx,
+// which restarts the fold against a fresh snapshot.
+//
+// The fold's UPDATE is the SETTLEMENT of the delivery obligation: it
+// is what stops the fold from delivering the same wake twice. A
+// settlement write that loses its artifact to ordinary contention is
+// the same defect class issue #178 exists to close, so it carries the
+// substrate's documented write budget rather than none.
+const wakeFoldWriteRetries = 5
+
 // wakeResolveStatusError carries the resolver's public status alongside the
 // underlying error.
 //
@@ -1254,6 +1270,37 @@ func isValidWakeResolveReason(reason string) bool {
 // same wake twice. Two callers racing for the same wake will see one
 // winner and the other an empty list.
 //
+// THE TRANSACTION IS dm.WithTx, NOT A BARE dm.db.Begin().
+//
+// This fold's read-then-write pair can lose a delivery to a stale
+// snapshot. SQLITE_BUSY_SNAPSHOT is NOT ordinary contention: it shares
+// its primary code (SQLITE_BUSY) and its message ("database is locked")
+// with it, so the two are indistinguishable by text — only the EXTENDED
+// code tells them apart. It is also never serviced by the busy handler,
+// so busy_timeout is never consulted (the error returns in microseconds),
+// and a statement-level retry can NEVER clear it: the snapshot belongs
+// to the transaction, and the transaction's snapshot does not change
+// between attempts.
+//
+// The remedy is a TRANSACTION RESTART against a fresh snapshot, which
+// is what dm.WithTx does (bounded by TxSnapshotMaxAttempts). The
+// pre-fix code bypassed BOTH retry layers — it opened its own deferred
+// transaction with dm.db.Begin() and wrote with a raw tx.Exec — so a
+// concurrent write by another connection could lose the fold's
+// settlement with "mark wake fired: database is locked", and the agent
+// would silently miss the wake it was owed.
+//
+// This is the same defect class, and the same fix, as ResolveWake in
+// this file: a bare dm.db.Begin() plus a raw tx.Exec is the shape that
+// loses a settlement to ordinary contention. ResolveWake was converted
+// to dm.WithTx for that reason; this fold had the same shape and was
+// missed.
+//
+// The transactional body is replay-safe: every side effect it produces
+// lives inside the transaction (so an abandoned attempt's writes roll
+// back with it), and the UPDATE is guarded by `fired = 0` (so a re-run
+// cannot double-deliver).
+//
 // Kinds filter:
 //
 //   - kinds nil/empty: the DEFAULT delivery path — every AGENT-OWNED
@@ -1286,11 +1333,6 @@ func isValidWakeResolveReason(reason string) bool {
 //	reasoning.
 func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]map[string]interface{}, error) {
 	nowUnix := now.Unix()
-	tx, err := dm.db.Begin()
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback()
 
 	// Resolve the delivery buckets — one per agent-owned kind this
 	// call may deliver.
@@ -1344,67 +1386,87 @@ func (dm *DatabaseManager) CheckPendingWakes(now time.Time, kinds []string) ([]m
 		buckets = filterWakeBuckets(buckets, allowed)
 	}
 
-	// Select and budget each bucket.
+	// Select, budget, and retire the delivered rows in ONE transaction.
 	//
-	// A CORRUPT ROW IS NEVER FOLDED. The fold RETIRES what it
-	// delivers, so folding a row whose owner cannot be determined
-	// would deliver scheduler-owned work to the agent as an ordinary
-	// notification AND retire it — the partition shift the W4 policy
-	// forbids. The exclusion is the canonical predicate, so it cannot
-	// drift from the one the claim and the sweeps use.
+	// The transaction is opened by dm.WithTx, not by a bare
+	// dm.db.Begin(), because the fold's read-then-write pair needs the
+	// TRANSACTION-level restart on a stale snapshot — see the method
+	// doc. WithTx owns that budget; the body below must not open its
+	// own transaction, and must not retry its own statements around it.
 	//
-	// The SELECT carries the bucket's ROW CAP as its LIMIT, so the
-	// scan is bounded too: a backlog of 10,080 cron wakes costs the
-	// same read as a backlog of 16.
-	selected := make(map[string][]selectedWake, len(buckets))
-	for _, b := range buckets {
-		rows, err := tx.Query(
-			`SELECT id, target_time, reason, theory_id, created_by, metadata, created_at
-			 FROM scheduled_wakes
-			 WHERE fired = 0 AND target_time <= ? AND (`+b.predicate+`)
-			   AND NOT `+WakeMetadataIsCorrupt+`
-			 ORDER BY target_time ASC, id ASC
-			 LIMIT ?`,
-			nowUnix, b.rowCap,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("select pending %s wakes: %w", b.label, err)
-		}
-		candidates, scanErr := scanPendingWakes(rows)
-		if scanErr != nil {
-			return nil, fmt.Errorf("scan pending %s wakes: %w", b.label, scanErr)
-		}
-		selected[b.label] = budgetWakeBucket(dm, b, candidates, nowUnix)
-	}
+	// The transactional body is replay-safe: every side effect it
+	// produces lives inside the transaction (so an abandoned attempt's
+	// writes roll back with it), and the UPDATE is guarded by
+	// `fired = 0` (so a re-run cannot double-deliver).
+	var delivered []selectedWake
+	txErr := dm.WithTx(func(node DBNode) error {
+		// Per-attempt state. WithTx re-runs this callback against a
+		// FRESH transaction when the previous attempt's snapshot went
+		// stale, so the captured state must be RESET, not accumulated.
+		delivered = nil
 
-	// Order the delivered set.
-	//
-	// The historical order is preserved: the non-cascade kinds merged
-	// chronologically, then the capped cascade batch. The cascade
-	// kind is appended rather than merged because it has always been
-	// delivered after the non-cascade batch, and the cap truncates
-	// the OLDEST end of its own bucket (the SELECT's ORDER BY).
-	nonCascade := mergeSelectedWakes(selected["notification"], selected["cron"])
-	delivered := make([]selectedWake, 0, len(nonCascade)+len(selected["cascade"]))
-	delivered = append(delivered, nonCascade...)
-	delivered = append(delivered, selected["cascade"]...)
-
-	// Mark EXACTLY the delivered rows fired, in one batch.
-	//
-	// A row that was read but excluded by the budget is NOT marked:
-	// it stays pending and a later call delivers it. The fold never
-	// retires a wake it did not deliver.
-	for _, w := range delivered {
-		if _, err := tx.Exec(
-			`UPDATE scheduled_wakes SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0`,
-			nowUnix, w.id,
-		); err != nil {
-			return nil, fmt.Errorf("mark wake fired: %w", err)
+		// Select and budget each bucket.
+		//
+		// A CORRUPT ROW IS NEVER FOLDED. The fold RETIRES what it
+		// delivers, so folding a row whose owner cannot be determined
+		// would deliver scheduler-owned work to the agent as an
+		// ordinary notification AND retire it — the partition shift the
+		// W4 policy forbids. The exclusion is the canonical predicate,
+		// so it cannot drift from the one the claim and the sweeps use.
+		//
+		// The SELECT carries the bucket's ROW CAP as its LIMIT, so the
+		// scan is bounded too: a backlog of 10,080 cron wakes costs the
+		// same read as a backlog of 16.
+		selected := make(map[string][]selectedWake, len(buckets))
+		for _, b := range buckets {
+			rows, err := node.QueryTracked(
+				`SELECT id, target_time, reason, theory_id, created_by, metadata, created_at
+				 FROM scheduled_wakes
+				 WHERE fired = 0 AND target_time <= ? AND (`+b.predicate+`)
+				   AND NOT `+WakeMetadataIsCorrupt+`
+				 ORDER BY target_time ASC, id ASC
+				 LIMIT ?`,
+				nowUnix, b.rowCap,
+			)
+			if err != nil {
+				return fmt.Errorf("select pending %s wakes: %w", b.label, err)
+			}
+			candidates, scanErr := scanPendingWakes(rows)
+			if scanErr != nil {
+				return fmt.Errorf("scan pending %s wakes: %w", b.label, scanErr)
+			}
+			selected[b.label] = budgetWakeBucket(dm, b, candidates, nowUnix)
 		}
-	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit wake tx: %w", err)
+		// Order the delivered set.
+		//
+		// The historical order is preserved: the non-cascade kinds merged
+		// chronologically, then the capped cascade batch. The cascade
+		// kind is appended rather than merged because it has always been
+		// delivered after the non-cascade batch, and the cap truncates
+		// the OLDEST end of its own bucket (the SELECT's ORDER BY).
+		nonCascade := mergeSelectedWakes(selected["notification"], selected["cron"])
+		delivered = make([]selectedWake, 0, len(nonCascade)+len(selected["cascade"]))
+		delivered = append(delivered, nonCascade...)
+		delivered = append(delivered, selected["cascade"]...)
+
+		// Mark EXACTLY the delivered rows fired, in one batch.
+		//
+		// A row that was read but excluded by the budget is NOT marked:
+		// it stays pending and a later call delivers it. The fold never
+		// retires a wake it did not deliver.
+		for _, w := range delivered {
+			if _, err := node.ExecTracked(
+				`UPDATE scheduled_wakes SET fired = 1, fired_at = ? WHERE id = ? AND fired = 0`,
+				wakeFoldWriteRetries, nowUnix, w.id,
+			); err != nil {
+				return fmt.Errorf("mark wake fired: %w", err)
+			}
+		}
+		return nil
+	})
+	if txErr != nil {
+		return nil, txErr
 	}
 
 	out := make([]map[string]interface{}, 0, len(delivered))
