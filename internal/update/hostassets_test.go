@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -405,8 +406,44 @@ func TestTheStablePathResolvesIntoTheActiveReleaseAndIntoThePreviousOneAfterARol
 	}
 }
 
-// --- helpers ------------------------------------------------------------------
+// TestTheDryRunReportNamesTheHostAssets backs the operator-visible
+// claim in the recovery procedure: the dry-run report carries a
+// `host-assets` line, and that line is the proof that the candidate
+// carries the integration assets.
+//
+// The recovery procedure tells the operator to look for exactly that
+// line and to STOP if it is absent. A dry-run report that did not name
+// the check would make that instruction a guess.
+func TestTheDryRunReportNamesTheHostAssets(t *testing.T) {
+	dir := testBundleDir(t)
+	rep := ValidateBundle(dir, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	if !rep.Valid {
+		t.Fatalf("the fixture bundle does not validate: %v", rep.ValidationError())
+	}
+	report := dryRunReport("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Source{Kind: SourceGit, Rev: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, rep)
+	if !strings.Contains(report, "[ok] host-assets") {
+		t.Errorf("the dry-run report does not name the host-assets check:\n%s", report)
+	}
 
+	// And a bundle WITHOUT the assets must not produce an "[ok]"
+	// host-assets line: the operator's stop condition depends on the
+	// line being absent, not on the report merely omitting it.
+	if err := os.Remove(filepath.Join(dir, filepath.FromSlash(HostAssetManifestRelPath))); err != nil {
+		t.Fatal(err)
+	}
+	bad := ValidateBundle(dir, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	badReport := dryRunReport("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Source{Kind: SourceGit, Rev: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}, bad)
+	if strings.Contains(badReport, "[ok] host-assets") {
+		t.Errorf("the dry-run report claims the host assets are present when they are not:\n%s", badReport)
+	}
+	if !strings.Contains(badReport, "[FAIL] host-assets") {
+		t.Errorf("the dry-run report does not mark the host-assets check as failed:\n%s", badReport)
+	}
+}
+
+// --- helpers ------------------------------------------------------------------
 // promoteOnce runs one promotion in a disposable root and returns the
 // root and the new revision.
 func promoteOnce(t *testing.T) (string, string) {

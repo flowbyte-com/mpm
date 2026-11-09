@@ -110,12 +110,28 @@ resolves into them with no change to the symlink itself.
 
 **Step 1 — build the fixed updater, out of tree.**
 
-The installed `mpm-update` is the *old* build: it omits the host assets
-and has no check for them. It cannot be used to produce a correct
-bundle. The stable recovery executable at `~/.mpm/mpm-update` is the
-one the operator runs, so it is the one that must be replaced — and the
-old copy is kept, because it is the recovery tool for the runtime that
-is running *now*.
+The installed `mpm-update` **is the build from the promoted revision**
+`4a870c8a…` — the promotion replaced the stable recovery executable
+with the promoted release's own updater, as
+`internal/update/orchestrate.go` (`installStableUpdater`) does. So it
+is not an older build: it is *this* build, and this is the build that
+omits the host assets and has no check for them. It cannot produce a
+correct bundle.
+
+Confirm that before going further:
+
+```bash
+strings ~/.mpm/mpm-update | grep -oE '\b[0-9a-f]{40}\b' | sort | uniq -c | sort -rn | head -1
+```
+
+The commit it names must be one that predates the fix. If it names a
+commit that already contains the fix, the recovery executable is
+already current and Step 2 is unnecessary.
+
+The stable recovery executable at `~/.mpm/mpm-update` is the one the
+operator runs, so it is the one that must be replaced — and the old
+copy is kept, because it is the recovery tool for the runtime that is
+running *now*.
 
 ```bash
 # from a checkout of the fixed branch

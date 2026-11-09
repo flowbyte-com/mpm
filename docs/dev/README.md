@@ -25,6 +25,7 @@
 | J | **Runtime migration — the plan** | [`runtime-migration-plan.md`](runtime-migration-plan.md) | **Complete — design accepted (D1–D7); the live migration is a separate approval gate** |
 | K | **Runtime migration — the evidence** | [`runtime-migration-evidence.md`](runtime-migration-evidence.md) | **Complete — 135 rehearsal assertions, 0 failures, reproducible with `make rehearsal`** |
 | L | **Compact managed instruction block (contract 4.0.0)** | [`session-c-compact-managed-block.md`](session-c-compact-managed-block.md) | **Reviewed — MERGE WITH CORRECTIONS; corrections applied, not merged, not deployed** |
+| M | **Updater host-asset remediation — the defect and the recovery procedure** | [`updater-host-assets-recovery.md`](updater-host-assets-recovery.md) | **PR #236 open — awaiting independent review; the procedure has NOT been executed** |
 
 **Row L is a Session C proposal, not a Session A deliverable.** Session A
 reviewed it on 2026-10-28 and recommended merging with one non-blocking
