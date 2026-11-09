@@ -22,6 +22,7 @@ package internal
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -394,5 +395,205 @@ func TestDatabaseManagerRunSelfMaintenance_SuccessOmitsErrorsKey(t *testing.T) {
 	}
 	if _, present := out["errors"]; present {
 		t.Errorf("the success payload grew an errors key: %#v", out)
+	}
+}
+
+// ── consolidation COUNT correctness ─────────────────────────────────────────
+//
+// The count reported by ConsolidateMemories must be the number of rows the run
+// ACTUALLY soft-deleted. A statement that succeeds and changes nothing (0 rows
+// affected) is not a consolidation.
+//
+// SQLite reports a statement that matches no rows as a SUCCESS with
+// RowsAffected() == 0, so checking only the error is not enough. These tests
+// exercise that path deterministically; none of them uses RAISE(ABORT), which
+// produces an error and therefore cannot reach it.
+
+// seedCluster inserts n memories that ConsolidateMemories will cluster:
+// same collection, identical embeddings (cosine 1.0), weight > 1, and RECENT
+// so neither decay nor prune touches them. created_at decreases with the index,
+// so the SELECT's `ORDER BY collection, created_at DESC` gives a deterministic
+// order: index 0 first.
+func seedConsolidationCluster(t *testing.T, db *sql.DB, prefix string, n int, weight0 float64, weightRest float64) []string {
+	t.Helper()
+	now := time.Now().UTC().Unix()
+	emb, err := json.Marshal([]float32{1, 0, 0})
+	if err != nil {
+		t.Fatalf("marshal embedding: %v", err)
+	}
+	ids := make([]string, n)
+	var rows []maintSeedRow
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("%s-%02d", prefix, i)
+		ids[i] = id
+		w := weightRest
+		if i == 0 {
+			w = weight0 // the best score, so index 0 is the survivor
+		}
+		rows = append(rows, maintSeedRow{
+			id:           id,
+			weight:       w,
+			lastAccessed: sql.NullInt64{Int64: now, Valid: true},
+			createdAt:    now - int64(i),
+			updatedAt:    now,
+			embedding:    string(emb),
+		})
+	}
+	seedMaintRows(t, db, rows)
+	return ids
+}
+
+// liveRows counts the fixtures that are still not soft-deleted.
+func liveRows(t *testing.T, db *sql.DB, prefix string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM memories WHERE id LIKE ? AND deleted_at IS NULL`,
+		prefix+"%").Scan(&n); err != nil {
+		t.Fatalf("count live rows: %v", err)
+	}
+	return n
+}
+
+// deletedAtOf returns the raw deleted_at of one row.
+func deletedAtOf(t *testing.T, db *sql.DB, id string) sql.NullInt64 {
+	t.Helper()
+	var v sql.NullInt64
+	if err := db.QueryRow(`SELECT deleted_at FROM memories WHERE id = ?`, id).Scan(&v); err != nil {
+		t.Fatalf("read deleted_at of %s: %v", id, err)
+	}
+	return v
+}
+
+// TestConsolidate_SuccessfulZeroRowUpdateIsNotCounted is Charlie's F1.
+//
+// RAISE(IGNORE) makes the soft-delete SUCCEED and change nothing — the same
+// outcome as a row that vanished between the SELECT and the UPDATE. The
+// statement returns no error, so the only way to know nothing happened is
+// RowsAffected().
+func TestConsolidate_SuccessfulZeroRowUpdateIsNotCounted(t *testing.T) {
+	_, store, db := newMaintTestStore(t)
+	ids := seedConsolidationCluster(t, db, "zero", 3, 10, 5)
+
+	if _, err := db.Exec(`CREATE TRIGGER t_zero_row BEFORE UPDATE OF deleted_at ON memories
+		BEGIN SELECT RAISE(IGNORE); END;`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	n, err := store.ConsolidateMemories(0.85, 1)
+	if err != nil {
+		t.Fatalf("a zero-row soft-delete returned an error (%v); it is a routine outcome, not a failure", err)
+	}
+	if n != 0 {
+		t.Fatalf("reported %d consolidations, want 0: every soft-delete succeeded and changed NO row", n)
+	}
+	if live := liveRows(t, db, "zero"); live != len(ids) {
+		t.Fatalf("%d of %d rows are live after the sweep, want all %d (nothing was consolidated)",
+			live, len(ids), len(ids))
+	}
+}
+
+// TestConsolidate_AlreadyDeletedRowIsNotCounted pins the `AND deleted_at IS
+// NULL` guard.
+//
+// A member is soft-deleted by another writer mid-sweep. Without the guard the
+// UPDATE still MATCHES the row (it exists), so RowsAffected() is 1: the row
+// would be counted AND its original deletion timestamp overwritten.
+func TestConsolidate_AlreadyDeletedRowIsNotCounted(t *testing.T) {
+	_, store, db := newMaintTestStore(t)
+	ids := seedConsolidationCluster(t, db, "already", 3, 10, 5)
+
+	const sentinel = 424242
+	// When the sweep deletes index 01, another writer soft-deletes index 02.
+	if _, err := db.Exec(fmt.Sprintf(`CREATE TRIGGER t_already_deleted BEFORE UPDATE OF deleted_at ON memories
+		WHEN OLD.id = '%s'
+		BEGIN UPDATE memories SET deleted_at = %d WHERE id = '%s'; END;`, ids[1], sentinel, ids[2])); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	n, err := store.ConsolidateMemories(0.85, 1)
+	if err != nil {
+		t.Fatalf("consolidate: %v", err)
+	}
+	// index 0 is the survivor; index 1 was soft-deleted by the sweep; index 2
+	// was soft-deleted concurrently, so the sweep changed nothing there.
+	if n != 1 {
+		t.Fatalf("reported %d consolidations, want 1 (index 1 only; index 2 was already deleted)", n)
+	}
+	if got := deletedAtOf(t, db, ids[2]); !got.Valid || got.Int64 != sentinel {
+		t.Fatalf("index 2 deleted_at = %v, want the concurrent writer's %d — the sweep overwrote a "+
+			"deletion it did not perform", got, sentinel)
+	}
+	if got := deletedAtOf(t, db, ids[1]); !got.Valid || got.Int64 == sentinel {
+		t.Fatalf("index 1 deleted_at = %v, want the sweep's own timestamp", got)
+	}
+}
+
+// TestConsolidate_ConcurrentlyHardDeletedRowIsNotCounted is the same shape
+// with a HARD delete: the row is gone when the UPDATE arrives.
+func TestConsolidate_ConcurrentlyHardDeletedRowIsNotCounted(t *testing.T) {
+	_, store, db := newMaintTestStore(t)
+	ids := seedConsolidationCluster(t, db, "gone", 3, 10, 5)
+
+	if _, err := db.Exec(fmt.Sprintf(`CREATE TRIGGER t_hard_deleted BEFORE UPDATE OF deleted_at ON memories
+		WHEN OLD.id = '%s'
+		BEGIN DELETE FROM memories WHERE id = '%s'; END;`, ids[1], ids[2])); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	n, err := store.ConsolidateMemories(0.85, 1)
+	if err != nil {
+		t.Fatalf("consolidate: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reported %d consolidations, want 1 (index 1 only; index 2 was hard-deleted concurrently)", n)
+	}
+}
+
+// TestConsolidate_NormalConsolidationStillCounts is the positive control: when
+// every soft-delete really lands, the count is exactly the number of rows
+// removed from the live set.
+func TestConsolidate_NormalConsolidationStillCounts(t *testing.T) {
+	_, store, db := newMaintTestStore(t)
+	const members = 5
+	ids := seedConsolidationCluster(t, db, "normal", members, 10, 5)
+
+	before := liveRows(t, db, "normal")
+	n, err := store.ConsolidateMemories(0.85, 1)
+	if err != nil {
+		t.Fatalf("consolidate: %v", err)
+	}
+	after := liveRows(t, db, "normal")
+	if n != before-after {
+		t.Fatalf("reported %d consolidations, but %d rows left the live set", n, before-after)
+	}
+	if n != members-1 {
+		t.Fatalf("reported %d consolidations, want %d (all but the survivor)", n, members-1)
+	}
+	// The survivor is index 0 (highest weight) and must still be live.
+	if got := deletedAtOf(t, db, ids[0]); got.Valid {
+		t.Fatalf("the survivor %s was soft-deleted", ids[0])
+	}
+}
+
+// TestRunSelfMaintenance_ZeroRowConsolidationIsReportedAsZero checks the
+// statistic the operator sees, through the real sweep.
+func TestRunSelfMaintenance_ZeroRowConsolidationIsReportedAsZero(t *testing.T) {
+	_, store, db := newMaintTestStore(t)
+	// RunSelfMaintenance calls ConsolidateMemories(0.85, 50), so the cluster
+	// must exceed its maxPerTopic of 50 or the consolidation never runs and
+	// this test would pass vacuously.
+	seedConsolidationCluster(t, db, "stat", 52, 10, 5)
+
+	if _, err := db.Exec(`CREATE TRIGGER t_zero_row BEFORE UPDATE OF deleted_at ON memories
+		BEGIN SELECT RAISE(IGNORE); END;`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	stats, err := store.RunSelfMaintenance()
+	if err != nil {
+		t.Fatalf("a zero-row consolidation must not fail the sweep: %v", err)
+	}
+	if stats.Consolidated != 0 {
+		t.Fatalf("stats.Consolidated = %d, want 0", stats.Consolidated)
 	}
 }

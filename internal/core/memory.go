@@ -2010,16 +2010,43 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 
 			// Delete all except the best.
 			//
-			// The failure is RECORDED and the row is NOT counted. This used
-			// to discard the execTracked result and increment `consolidated`
-			// unconditionally, so a failed soft-delete was reported as a
-			// consolidation that had happened.
+			// The count is the number of rows this run ACTUALLY soft-deleted,
+			// established from RowsAffected(), not from "the statement did not
+			// return an error". A statement that succeeds and changes nothing
+			// is not a consolidation:
+			//
+			//   - the row vanished between the SELECT and the UPDATE (a
+			//     concurrent `prune --older-than` hard-delete or shred), or
+			//   - the row was already soft-deleted by another writer.
+			//
+			// The `AND deleted_at IS NULL` guard is what makes the second case
+			// distinguishable: without it SQLite still matches an
+			// already-deleted row, so RowsAffected() would be 1 and the row
+			// would be counted (and its original deletion timestamp
+			// overwritten). With it, both cases report 0 rows and are skipped.
+			//
+			// A zero-row result is NOT added to errs: losing a race to a
+			// concurrent delete is routine, and it must not make
+			// `mpm ops maintain` exit non-zero. A failed statement and a failed
+			// row count ARE errors and are reported.
 			for k := 0; k < len(cluster); k++ {
 				if k == bestIdx {
 					continue
 				}
-				if _, cErr := s.execTracked(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?`, 0, cluster[k]); cErr != nil {
+				res, cErr := s.execTracked(`
+					UPDATE memories
+					SET deleted_at = CAST(strftime('%s','now') AS INTEGER)
+					WHERE id = ? AND deleted_at IS NULL`, 0, cluster[k])
+				if cErr != nil {
 					errs = append(errs, fmt.Errorf("consolidate %s: %w", cluster[k], cErr))
+					continue
+				}
+				rows, rErr := res.RowsAffected()
+				if rErr != nil {
+					errs = append(errs, fmt.Errorf("consolidate %s: cannot confirm the row count: %w", cluster[k], rErr))
+					continue
+				}
+				if rows == 0 {
 					continue
 				}
 				consolidated++
@@ -2028,7 +2055,8 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 		}
 	}
 
-	// The count is what actually landed; the error names what did not.
+	// consolidated counts only rows a soft-delete actually changed; the error
+	// names the statements and row counts that could not be established.
 	return consolidated, errors.Join(errs...)
 }
 

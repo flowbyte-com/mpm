@@ -2695,13 +2695,19 @@ mpm ops topic|lesson|session|reference|memory|wake|gateway
 ```
 
 **`mpm ops maintain` reports what actually happened.** It runs decay,
-pruning and consolidation, and prints the statistics each one produced. If an
-operation fails, the statistics are still printed — the work that DID happen is
-real — but the run is marked `completed WITH ERRORS`, the failed operations are
-named, and the process **exits non-zero**. A clean run prints
-`Self-maintenance complete` and exits 0. A caller that treats the exit status
-as the signal therefore cannot mistake a partial or failed sweep for a
-successful one.
+pruning and consolidation, and prints the statistics each one produced. Each
+count is the work the run **actually changed**, not the work it attempted: a
+soft-delete that matches no row — because another process removed or already
+deleted it — is not counted as a consolidation.
+
+If an operation **fails**, the statistics are still printed — the work that DID
+happen is real — but the run is marked `completed WITH ERRORS`, the failed
+operations are named, and the process **exits non-zero**. A clean run prints
+`Self-maintenance complete` and exits 0.
+
+The two signals are therefore separate and both truthful: the **counts** say
+what was changed, and the **exit status** says whether every operation ran. A
+routine race with a concurrent writer changes a count; it does not fail the run.
 
 ### `debug` — Low-Level Inspection
 

@@ -16,6 +16,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,5 +130,107 @@ func TestMaintain_FailedDecayExitsNonZeroAndKeepsTheReport(t *testing.T) {
 		if !strings.Contains(out, stat) {
 			t.Errorf("the partial report is missing %q:\n%s", stat, out)
 		}
+	}
+}
+
+// seedConsolidationCluster inserts n identical-embedding memories, so the
+// consolidation's cluster exceeds its maxPerTopic of 50 and the sweep actually
+// attempts the soft-deletes. They are RECENT, so decay and prune ignore them.
+func seedConsolidationCluster(t *testing.T, dbPath, prefix string, n int) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open workspace db: %v", err)
+	}
+	defer db.Close()
+
+	var now int64
+	if err := db.QueryRow(`SELECT CAST(strftime('%s','now') AS INTEGER)`).Scan(&now); err != nil {
+		t.Fatalf("now: %v", err)
+	}
+	emb := `[1,0,0]`
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	stmt, err := tx.Prepare(`
+		INSERT INTO memories (id, collection, content, tags, weight, metadata, embedding,
+		 is_long_term, reinforcement_count, last_accessed_at, created_at, updated_at)
+		VALUES (?, 'memories', ?, '[]', 10, '{}', ?, 0, 0, ?, ?, ?)`)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		if _, err := stmt.Exec(fmt.Sprintf("%s-%03d", prefix, i), "cluster member "+prefix,
+			emb, now, now-int64(i), now); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+	stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+// TestMaintain_ZeroRowConsolidationReportsZeroAndExitsZero is the operator
+// surface for Charlie's F1.
+//
+// Every consolidation soft-delete SUCCEEDS and changes no row (RAISE(IGNORE),
+// the same outcome as a row that vanished between the SELECT and the UPDATE).
+// The command must report 0 consolidations — not the size of the cluster it
+// tried to delete — and, because nothing failed, still exit 0.
+func TestMaintain_ZeroRowConsolidationReportsZeroAndExitsZero(t *testing.T) {
+	dbPath := maintWorkspace(t)
+	seedConsolidationCluster(t, dbPath, "cli-cluster", 52)
+
+	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open workspace db: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER cli_zero_row BEFORE UPDATE OF deleted_at ON memories
+		BEGIN SELECT RAISE(IGNORE); END;`); err != nil {
+		db.Close()
+		t.Fatalf("create the trigger: %v", err)
+	}
+	db.Close()
+
+	var code int
+	var out string
+	userOut := captureUserError(t, func() int {
+		code, out = runCLI(t, "ops", "maintain")
+		return code
+	})
+	out += userOut
+
+	if code != 0 {
+		t.Fatalf("a zero-row consolidation is not a failure; exited %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "Self-maintenance complete") {
+		t.Errorf("the success banner is missing:\n%s", out)
+	}
+	// The reported number must be zero, not the size of the cluster it tried
+	// to delete. The line is "   Consolidated:         %d".
+	if !strings.Contains(out, "Consolidated:") {
+		t.Fatalf("the consolidation statistic is missing:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Consolidated:") {
+			if !strings.HasSuffix(strings.TrimSpace(line), "0") {
+				t.Fatalf("the consolidation count is not zero: %q\n%s", line, out)
+			}
+		}
+	}
+	// And the cluster really is untouched.
+	var live int
+	db2, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db2.Close()
+	if err := db2.QueryRow(`SELECT COUNT(*) FROM memories WHERE id LIKE 'cli-cluster-%' AND deleted_at IS NULL`).Scan(&live); err != nil {
+		t.Fatalf("count live: %v", err)
+	}
+	if live != 52 {
+		t.Fatalf("%d of 52 cluster rows are live, want all 52 (no consolidation happened)", live)
 	}
 }

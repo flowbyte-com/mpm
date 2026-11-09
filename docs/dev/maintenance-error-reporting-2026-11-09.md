@@ -74,7 +74,7 @@ failed prune as success. All three arms now record their error, keep running
 (a failed arm does not stop the other two), and return
 `errors.Join(...)` with the partial count.
 
-### F2 — `ConsolidateMemories` discarded the write result and inflated the count — **fixed**
+### F2 — `ConsolidateMemories` counted soft-deletes that changed no row — **fixed in two steps**
 
 ```go
 s.execTracked(`UPDATE memories SET deleted_at = … WHERE id = ?`, 0, cluster[k])
@@ -82,12 +82,30 @@ consolidated++
 ```
 
 The result was not assigned at all, and `consolidated` was incremented
-**unconditionally**. A failed soft-delete was therefore reported as a
-consolidation that had happened — a second, independent way of reporting
-success for work that did not occur.
+**unconditionally**, so a *failed* soft-delete was counted as a consolidation.
 
-Now the error is recorded and the row is **not** counted. The loop continues so
-one bad row does not abandon the rest of the cluster.
+**The first correction (PR #237, first head) was incomplete**, and review
+finding F1 caught it: it read the statement's **error** but never its **row
+count**. SQLite reports a statement that matches no rows as a **success** with
+`RowsAffected() == 0`, so a soft-delete that changed nothing — the row vanished
+between the SELECT and the UPDATE, or another writer had already soft-deleted
+it — was still counted, with no error and no diagnostic. Measured on that head:
+59 reported, 0 actually consolidated.
+
+Both cases are now closed:
+
+* the error is recorded and the row is **not** counted;
+* `RowsAffected()` is read, and a **zero-row** result is not counted either;
+* the UPDATE carries `AND deleted_at IS NULL`. That guard is load-bearing: a
+  soft-deleted row still *exists*, so without it SQLite matches it,
+  `RowsAffected()` returns 1, the row is counted, **and its original deletion
+  timestamp is overwritten**. With the guard both races report 0 rows.
+
+A zero-row result is **not** added to `errs`: losing a race to a concurrent
+delete is routine and must not make `mpm ops maintain` exit non-zero. A failed
+statement and a failed row count *are* errors and are reported.
+
+The loop continues so one bad row does not abandon the rest of the cluster.
 
 ### F3 — `ConsolidateMemories` cannot scan a NULL `tags` column — **not fixed, reported**
 
@@ -101,9 +119,21 @@ with a scan error. This is the "defensive SQL aggregates" invariant from
 `AGENTS.md` (bind to `sql.Null*` or `COALESCE`), applied to a plain column.
 
 Reachability: `addMemoryDirect` marshals a `[]string` and always writes JSON
-(`[]` or `"null"`), never SQL NULL — so **normal saves are not affected**. The
-rows at risk are ones created by direct SQL: imports (`ops ingest`),
-`restore-db`, and any legacy schema state.
+(`[]` or `"null"`), never SQL NULL — so **normal saves are not affected**.
+
+Two production INSERT paths *do* omit the column and create `NULL tags` rows —
+`cmd/mpm/handlers_challenge.go` (the challenged theory) and
+`cmd/mpm/self_heal.go` (the self-heal marker) — but both write
+`weight = 1, reinforcement_count = 0, is_long_term = 0`, and the consolidation's
+selection predicate (`is_long_term = 1 OR reinforcement_count > 0 OR weight > 1`)
+**excludes them**, so they cannot reach the scan.
+
+`mpm ops ingest` is **not** a vector: it stages into `raw_memories`, not
+`memories`, and there is no promotion path from `raw_memories` into `memories`
+in the current code.
+
+So the reachable vectors are: **`restore-db`** replaying a dump that contains a
+`NULL tags` row, **direct SQL** by an operator, and **legacy schema state**.
 
 It is deliberately **not fixed here**: the fix (`COALESCE(tags,'[]')` or
 `sql.NullString`) changes consolidation's behaviour for those rows from "aborts"
@@ -120,10 +150,24 @@ real latent bug visible**, which is the point of the change.
 json.Unmarshal(embeddingJSON, &m.embedding)   // error discarded
 ```
 
-A row whose `embedding` column is not valid JSON is silently treated as having
-no embedding, so it never participates in similarity. Low impact (it degrades
-consolidation, it does not corrupt anything), but it is the same class of
-silent suppression. Not fixed here to keep the change to reporting.
+The error is discarded. **The consequence is worse than "the row is ignored"**,
+and the first version of this record said that — incorrectly.
+
+Go's `json.Unmarshal` records a **type** error and *keeps decoding*, leaving a
+complete, usable vector behind with the bad element silently zeroed:
+
+```
+json.Unmarshal([1.0,"x",0.0]) -> err, and the slice it leaves behind is [1 0 0]
+```
+
+So a row with well-formed JSON of the wrong element type **does** participate in
+similarity, on a corrupted vector, and can be **soft-deleted on that basis**.
+Only *syntax*-invalid JSON (`[1.0,`, `not json at all`, ``) leaves an empty
+slice and is genuinely excluded.
+
+Reachability is the same as F3's: the normal save path writes a JSON float
+array, so a malformed value needs direct SQL, a restore, or a partial write.
+Not fixed here to keep the change to reporting.
 
 ### F5 — a failed `incremental_vacuum` is only a log line — **not fixed, reported**
 
@@ -246,36 +290,75 @@ an operator or a cron wrapper keys off:
 | `TestMaintain_SuccessExitsZero` | clean workspace → exit 0, success banner, no error banner |
 | `TestMaintain_FailedDecayExitsNonZeroAndKeepsTheReport` | injected decay failure → **exit 1**, `WITH ERRORS`, `decay_weights` named, the cause surfaced, and the partial statistics still printed |
 
+### Consolidation COUNT correctness (review finding F1)
+
+A soft-delete that **succeeds and changes no row** is not a consolidation.
+These tests reach that path deterministically; **none uses `RAISE(ABORT)`**,
+which produces an error and therefore cannot exercise it.
+
+| test | pins |
+|---|---|
+| `TestConsolidate_SuccessfulZeroRowUpdateIsNotCounted` | `RAISE(IGNORE)` — every soft-delete succeeds and changes nothing → reported **0**, all rows still live, and **no error** (a routine outcome, not a failure) |
+| `TestConsolidate_AlreadyDeletedRowIsNotCounted` | another writer soft-deletes a member mid-sweep → reported **1**, and the member's original `deleted_at` sentinel is **not overwritten** (this is what the `AND deleted_at IS NULL` guard buys) |
+| `TestConsolidate_ConcurrentlyHardDeletedRowIsNotCounted` | another writer hard-deletes a member mid-sweep → reported **1**, not 2 |
+| `TestConsolidate_NormalConsolidationStillCounts` | the positive control: reported == rows that left the live set, and the survivor is untouched |
+| `TestRunSelfMaintenance_ZeroRowConsolidationIsReportedAsZero` | through the real sweep: `stats.Consolidated == 0` and `err == nil`. The fixture is **52 members**, above `maxPerTopic` 50, so the consolidation actually runs — an earlier 3-member version of this test passed vacuously |
+
+The trigger simulates the concurrent writer (`WHEN OLD.id = …`), and distinct
+`created_at` values make the SELECT's `ORDER BY collection, created_at DESC`
+deterministic, so the interleaving is reproducible.
+
+### `cmd/mpm/maintain_error_reporting_test.go` — operator surface
+
+| test | pins |
+|---|---|
+| `TestMaintain_ZeroRowConsolidationReportsZeroAndExitsZero` | 52-row cluster, every soft-delete ignored → `Consolidated: 0`, success banner, **exit 0**, and all 52 rows still live |
+
 ### Red-to-green
 
 | tree | probe | result |
 |---|---|---|
-| pre-change (`origin/main` `34b93019`) | `store.RunSelfMaintenance()` after an injected decay failure | **`FAIL — a FAILED decay returned a nil error — the failure is reported as success`** |
-| pre-change | `mpm ops maintain` after an injected decay failure | **`FAIL — a failed maintenance exited 0, want 1`** |
-| this change | both | **PASS** — `decay_weights: weight decay failed …: injected …` |
+| pre-fix (`origin/main` `34b93019`) | `store.RunSelfMaintenance()` after an injected decay failure | **`FAIL — a FAILED decay returned a nil error — the failure is reported as success`** |
+| pre-fix | `mpm ops maintain` after an injected decay failure | **`FAIL — a failed maintenance exited 0, want 1`** |
+| first head (`e3e9d15e`) | zero-row soft-delete | **`FAIL — reported 2 consolidations, want 0`** |
+| first head | already-soft-deleted member | **`FAIL — reported 2, want 1`** |
+| first head | concurrently hard-deleted member | **`FAIL — reported 2, want 1`** |
+| first head | `mpm ops maintain`, 52-row cluster, ignored soft-deletes | **`FAIL — the consolidation count is not zero: "Consolidated: 51"`** |
+| first head | normal consolidation (positive control) | PASS — the control is not vacuous on either tree |
+| this change | all of the above | **PASS** |
 
-The probe for the first row asserts only the returned error, so it compiles
-against both trees; it is a behavioural red, not a compile error.
+The first two rows assert only the returned error, so they compile against both
+trees; they are behavioural reds, not compile errors.
 
 ---
 
 ## 6. Gates
 
+Run on the merged tree (`main` `710f9ebd`, which now contains #234, plus this
+branch).
+
 | gate | result |
 |---|---|
 | `make build` (all modules, real binary) | pass |
 | `go vet -tags fts5 ./...` (root, `internal/core`, `internal/core/tools`) | pass |
-| `go test -tags fts5 ./...` — `internal/core` | see §7 |
-| `go test -tags fts5 ./...` — root (`cmd/mpm` included) | see §7 |
-| `go test -tags fts5 ./...` — `internal/core/tools` | see §7 |
-| `go test -race` on the maintenance and `cmd/mpm` packages | see §7 |
+| `go test -tags fts5 ./...` — `internal/core` | **0 failures** (387 s) |
+| `go test -tags fts5 ./...` — root (`cmd/mpm` included) | **0 failures** (`cmd/mpm` 454 s) |
+| `go test -tags fts5 ./...` — `internal/core/tools` | **0 failures** |
+| `go test -race` on the maintenance and `cmd/mpm` packages | **0 failures, 0 data races** |
 | `mpm-lint --gate` | **PASS** |
-| `make docs-check` | **OK** (13 checks, 0 errors) |
+| `make docs-check --base origin/main` | **OK** (13 checks, 0 review items, 0 errors) |
 | CI on the exact head | see the PR |
 
 The targeted pre-existing suites for the touched operations —
 `TestSelfMaintenance*`, `TestDecayFloor*`, `TestDirective*`, `TestRunGC*`,
 `Decay`, `Consolidat*`, `Prune*` — pass unchanged.
+
+**Integration with #234.** `main` advanced to `710f9ebd` with #234 merged while
+this PR was under review, so the branch was merged up. The merge is
+conflict-free, and #234's two production files (`internal/core/db.go`,
+`internal/core/handoff.go`) are **byte-identical to `main`** afterwards; its
+eight durable-write conversions are present, and the bare-pool-write ratchet and
+`TestBuildConfig_*` gates pass (27 tests).
 
 ---
 
