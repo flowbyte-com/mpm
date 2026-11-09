@@ -601,23 +601,30 @@ PY
 
 # rb_validate_schema_preflight checks the bundle's schema preflight.
 #
-# WHY IT IS CHECKED. The schema-collision preflight compares the live
-# table against the DDL the substrate itself would apply. A bundle that
-# does not carry that DDL degrades the check to a no-op, silently — the
-# check reports success because it compared the live table against
-# nothing.
+# WHY IT IS CHECKED, AND WHY IT IS CHECKED THIS HARD. The
+# schema-collision preflight COMPILES the candidate's reference DDL: it
+# runs the file against an in-memory database and compares the shape it
+# produces with the live table's. So the file is EXECUTED, and its
+# content is a security boundary. A file that merely CONTAINS a
+# "CREATE TABLE lifecycle_events (...)" is not a reference DDL — it may
+# also carry a DROP, a DELETE, or an ATTACH that writes a file outside
+# the database.
+#
+# So the file must be EXACTLY ONE statement: one CREATE TABLE for
+# lifecycle_events, and nothing else. The rule is the same one
+# internal/update/ddl.go applies (preflightStatementProblems), and the
+# parity test
+# (TestTheSchemaPreflightRuleIsTheSameInGoAndInTheShell) runs both
+# over the same matrix and requires the same verdict.
 #
 # REQUIRED for a candidate. OPTIONAL for an installed release: a release
 # promoted before the preflight travelled with the bundle may not carry
 # one, which is a documented historic gap rather than a corruption. If
-# the file IS there it must be valid in both scopes.
-#
-# The rule is the same one internal/update/ddl.go applies, so the two
-# validators cannot disagree about what counts as a preflight.
+# the file IS there it must satisfy the same rule in both scopes.
 rb_validate_schema_preflight() {
     local bundle="$1" required="${2:-1}"
     python3 - "$bundle" "$required" "$RB_SCHEMA_PREFLIGHT_REL" <<'PY'
-import os, re, sys
+import os, sys
 
 bundle = sys.argv[1]
 required = sys.argv[2] != "0"
@@ -647,17 +654,207 @@ if not text.strip():
         "would have nothing to compare the live table against\n")
     sys.exit(1)
 
-if not re.search(r"CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?lifecycle_events\b",
-                 text, re.IGNORECASE):
-    sys.stderr.write(
-        f"the bundle's schema preflight ({rel}) does not declare the lifecycle_events "
-        "table; it must carry the substrate's own CREATE TABLE for it\n")
+
+def is_sql_space(c):
+    return c in " \t\n\r\f\v"
+
+
+def is_sql_word_char(c):
+    return c == "_" or c.isdigit() or ("a" <= c <= "z") or ("A" <= c <= "Z")
+
+
+def scan_preflight(text):
+    """The lexical pass. Mirrors internal/update/ddl.go:scanPreflight.
+
+    It is comment- and string-aware, and it has to be: the substrate's
+    own DDL contains a ';' inside a line comment, so a rule that counts
+    semicolons without looking at comments would reject the canonical
+    output. It is string-aware because a ';' inside a string literal
+    does not end a statement.
+
+    It never executes anything.
+    """
+    out = []
+    statements = 0
+    ends = []
+    balance = 0
+    min_balance = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "-" and i + 1 < n and text[i + 1] == "-":
+            while i < n and text[i] != "\n":
+                i += 1
+            out.append(" ")
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            if i + 1 < n:
+                i += 2
+            else:
+                i = n
+            out.append(" ")
+            continue
+        if c in ("'", '"', "`"):
+            quote = c
+            out.append(c)
+            i += 1
+            while i < n:
+                if text[i] == quote:
+                    if i + 1 < n and text[i + 1] == quote:
+                        out.append(quote)
+                        out.append(quote)
+                        i += 2
+                        continue
+                    out.append(quote)
+                    i += 1
+                    break
+                out.append(text[i])
+                i += 1
+            continue
+        if c == ";":
+            statements += 1
+            ends.append(len("".join(out)))
+            out.append(c)
+            i += 1
+            continue
+        if c == "(":
+            balance += 1
+            if balance < min_balance:
+                min_balance = balance
+            out.append(c)
+            i += 1
+            continue
+        if c == ")":
+            balance -= 1
+            if balance < min_balance:
+                min_balance = balance
+            out.append(c)
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out), statements, ends, balance, min_balance
+
+
+def read_sql_identifier(s, p):
+    """Mirror internal/update/ddl.go:readSQLIdentifier."""
+    if p[0] >= len(s):
+        return None
+    c = s[p[0]]
+    if c in ('"', "`"):
+        start = p[0] + 1
+        i = start
+        while i < len(s):
+            if s[i] == c:
+                if i + 1 < len(s) and s[i + 1] == c:
+                    i += 2
+                    continue
+                p[0] = i + 1
+                return s[start:i]
+            i += 1
+        return None
+    if c == "[":
+        start = p[0] + 1
+        i = start
+        while i < len(s):
+            if s[i] == "]":
+                p[0] = i + 1
+                return s[start:i]
+            i += 1
+        return None
+    start = p[0]
+    while p[0] < len(s) and is_sql_word_char(s[p[0]]):
+        p[0] += 1
+    if p[0] == start:
+        return None
+    return s[start:p[0]]
+
+
+def head_problem(stmt):
+    """Mirror internal/update/ddl.go:preflightHeadProblem."""
+    p = [0]
+
+    def skip_space():
+        while p[0] < len(stmt) and is_sql_space(stmt[p[0]]):
+            p[0] += 1
+
+    def word():
+        start = p[0]
+        while p[0] < len(stmt) and is_sql_word_char(stmt[p[0]]):
+            p[0] += 1
+        return stmt[start:p[0]]
+
+    skip_space()
+    if word().upper() != "CREATE":
+        return "the statement does not begin with CREATE TABLE"
+    skip_space()
+    if word().upper() != "TABLE":
+        return "the statement does not begin with CREATE TABLE"
+    mark = p[0]
+    skip_space()
+    if word().upper() == "IF":
+        skip_space()
+        if word().upper() != "NOT":
+            return "the statement does not begin with CREATE TABLE"
+        skip_space()
+        if word().upper() != "EXISTS":
+            return "the statement does not begin with CREATE TABLE"
+    else:
+        p[0] = mark
+    skip_space()
+    name = read_sql_identifier(stmt, p)
+    if name is None:
+        return "the statement does not name a table"
+    if name.upper() != "LIFECYCLE_EVENTS":
+        return f"the statement declares the table {name!r}, not lifecycle_events"
+    skip_space()
+    if p[0] >= len(stmt) or stmt[p[0]] != "(":
+        return "the statement does not open a column list"
+    return ""
+
+
+def statement_problems(text):
+    """Mirror internal/update/ddl.go:preflightStatementProblems."""
+    problems = []
+    code, statements, ends, balance, min_balance = scan_preflight(text)
+    if statements != 1:
+        problems.append(f"the file must hold exactly one statement; it holds {statements}")
+    stmt = ""
+    if ends:
+        idx = ends[0]
+        stmt = code[:idx].strip()
+        if code[idx + 1:].strip():
+            problems.append(
+                "the file carries SQL after the declaration; the preflight must be the "
+                "declaration and nothing else")
+    if not stmt:
+        problems.append("the file holds no statement")
+        return problems
+    why = head_problem(stmt)
+    if why:
+        problems.append(why)
+    if not stmt.endswith(")"):
+        problems.append("the statement does not end with the closing parenthesis of its column list")
+    if balance != 0 or min_balance < 0:
+        problems.append("the statement's parentheses do not balance")
+    return problems
+
+
+problems = statement_problems(text)
+if problems:
+    for why in problems:
+        sys.stderr.write(
+            f"the bundle's schema preflight ({rel}) is not one supported CREATE TABLE "
+            f"lifecycle_events statement: {why}\n")
     sys.exit(1)
 
 sys.exit(0)
 PY
 }
-
 
 # ---------- validation ----------
 

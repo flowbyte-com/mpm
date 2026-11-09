@@ -249,7 +249,18 @@ func validateBundle(bundleDir, expectedRev string, scope BundleScope) BundleRepo
 			check("schema-preflight", p, false)
 		}
 	} else {
-		detail := "the bundle carries the substrate's lifecycle_events DDL for the schema-collision preflight"
+		// WHAT THIS MESSAGE MAY AND MAY NOT SAY.
+		//
+		// It may say the file IS one CREATE TABLE lifecycle_events
+		// statement: that was checked.
+		//
+		// It may NOT say the file IS the substrate's DDL: that was NOT
+		// checked and cannot be. The bundle asserts it; nothing in the
+		// release format can prove it (SchemaIdentityIsUnproven). A
+		// validator whose success message overstates what it
+		// established is worse than one that says less, because the
+		// operator reads the message as a guarantee.
+		detail := "the bundle carries one CREATE TABLE lifecycle_events statement for the schema-collision preflight (the bundle asserts it is the substrate's DDL; the release format cannot prove that)"
 		if !scope.Strict() {
 			detail = "the bundle carries no schema preflight (a release promoted before the preflight travelled with the bundle; reported, not refused)"
 		}

@@ -938,6 +938,86 @@ class TestBundleContractNegativeControls(BundleFixture):
         self.assertIn("rc=1", r.stdout, r.stderr)
         self.assertIn("does not carry it", r.stderr)
 
+    def test_a_preflight_that_is_not_one_statement_is_refused(self):
+        # THE RULE. The schema-collision preflight COMPILES the
+        # candidate's reference DDL: it runs the file against an
+        # in-memory database and compares the shape it produces with
+        # the live table's. So the file is EXECUTED, and what it
+        # contains is a security boundary.
+        #
+        # A file that merely CONTAINS a "CREATE TABLE lifecycle_events"
+        # is not a reference DDL. Each case below would either do
+        # something else entirely (the ATTACH writes a file outside
+        # the database) or defeat the collision check the preflight
+        # exists for (a statement crafted to match the live table).
+        #
+        # The Go validator applies the same rule; the parity test is
+        # TestTheSchemaPreflightRuleIsTheSameInGoAndInTheShell in
+        # internal/update/preflight_rule_test.go.
+        cases = {
+            "a valid CREATE followed by a DROP":
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL);\n"
+                "DROP TABLE lifecycle_events;\n",
+            "a valid CREATE followed by a DELETE":
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL);\n"
+                "DELETE FROM memories;\n",
+            "a DROP before a valid CREATE":
+                "DROP TABLE lifecycle_events;\n"
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL);\n",
+            "an unterminated CREATE":
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY",
+            "a comment containing the expected phrase":
+                "-- 'CREATE TABLE lifecycle_events (x)'\n",
+            "unexpected SQL before the declaration":
+                "SELECT 1;\n"
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL);\n",
+            "unexpected SQL after the declaration":
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL);\n"
+                "SELECT 1;\n",
+            "an ATTACH that writes a file outside the database":
+                "ATTACH DATABASE '/tmp/mpm-preflight-side-effect.db' AS side;\n"
+                "CREATE TABLE side.payload(x);\n",
+            "a statement for a different table":
+                "CREATE TABLE memories (id TEXT PRIMARY KEY NOT NULL);\n",
+            "unbalanced parentheses":
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL));\n",
+            "a destructive statement only":
+                "DROP TABLE lifecycle_events;\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                bundle = self.make_bundle()
+                (bundle / "schema" / "lifecycle_events.sql").write_text(text)
+                r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+                self.assertIn("rc=1", r.stdout, r.stderr)
+                self.assertIn("schema preflight", r.stderr)
+
+    def test_the_canonical_extractors_output_is_accepted(self):
+        # THE POSITIVE CONTROL. The exact output of the canonical
+        # extractor must be accepted, byte for byte. A rule that only
+        # happens to accept the substrate's current DDL is not a rule.
+        canonical = self._canonical_preflight()
+        bundle = self.make_bundle()
+        (bundle / "schema" / "lifecycle_events.sql").write_text(canonical)
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=0", r.stdout, r.stderr)
+
+    def _canonical_preflight(self) -> str:
+        """The substrate's own DDL, extracted by the canonical extractor."""
+        repo = Path(__file__).resolve().parent.parent.parent
+        helper = repo / "scripts" / "lib" / "schema_preflight.py"
+        if not helper.is_file():
+            self.skipTest("the canonical extractor is not available")
+        out = self._tmp / "canonical-lifecycle_events.sql"
+        r = subprocess.run(
+            ["python3", str(helper), "extract",
+             "--go", str(repo / "internal" / "core" / "schema.go"),
+             "--table", "lifecycle_events",
+             "--out", str(out)],
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return out.read_text()
+
     def test_a_bundle_without_a_schema_preflight_is_refused(self):
         # The schema-collision preflight compares the live table against
         # the DDL the substrate itself would apply. A bundle that does
