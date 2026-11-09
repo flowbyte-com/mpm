@@ -342,16 +342,6 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 	if err != nil {
 		return failAfterStop("activate", err)
 	}
-	// The stable paths are established right after the pointer moves,
-	// because they resolve through it. They are created only when they
-	// are ABSENT: a path that already exists is the operator's
-	// arrangement, and the updater does not move it aside the way the
-	// installer does. Anything unexpected is reported rather than
-	// changed.
-	stableWarnings, err := ensureStablePaths(dataRoot)
-	if err != nil {
-		return failAfterStop("stable-paths", err)
-	}
 	// A failure after the pointer moved either falls back or stops
 	// degraded (see below). A failure before needs no rollback:
 	// nothing was changed.
@@ -428,6 +418,23 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 			return compatChanged
 		}
 		return compatUnchanged
+	}
+	// The stable paths are established now that the pointer has moved,
+	// because they resolve through it. They are created only when they
+	// are ABSENT: a path that already exists is the operator's
+	// arrangement, and the updater does not move it aside the way the
+	// installer does. Anything unexpected is reported rather than
+	// changed.
+	//
+	// A failure here is a failure AFTER the activation, so it falls
+	// back exactly like every other one — the pointer is restored, and
+	// the stable paths (which resolve through it) follow.
+	stableWarnings, err := ensureStablePaths(dataRoot)
+	if err != nil {
+		return failAfterActivate("", compatUnchanged, err)
+	}
+	if err := failPoint(o.failAt(), "stable-paths"); err != nil {
+		return failAfterActivate("", compatUnchanged, err)
 	}
 	if err := failPoint(o.failAt(), "activate"); err != nil {
 		return failAfterActivate("", compatUnchanged, err)

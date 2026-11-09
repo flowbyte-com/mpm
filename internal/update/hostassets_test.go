@@ -443,6 +443,33 @@ func TestTheDryRunReportNamesTheHostAssets(t *testing.T) {
 	}
 }
 
+// TestAFailureWhileEstablishingTheStablePathsFallsBack proves the
+// stable-path step is treated as what it is: a step that runs AFTER
+// the pointer moved.
+//
+// A failure here must restore the pointer, exactly like every other
+// failure after the activation. Reporting "failed" while the new
+// release is still active — and without the stable updater having been
+// replaced — would leave the installation in a state no other failure
+// can produce.
+func TestAFailureWhileEstablishingTheStablePathsFallsBack(t *testing.T) {
+	oldRev := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	root := testLayout(t, oldRev)
+	srcDir := t.TempDir()
+	mustGit(t, srcDir)
+	o := Options{
+		DataRoot: root, WantLocal: srcDir,
+		Builder: fakeBuilder{commit: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+		FailAt:  "stable-paths",
+	}
+	if _, err := Update(context.Background(), o); err == nil {
+		t.Fatal("expected injected failure")
+	}
+	if _, got, _ := CurrentReleaseTarget(root); got != oldRev {
+		t.Fatalf("pointer = %q, want restored %q", got, oldRev)
+	}
+}
+
 // --- helpers ------------------------------------------------------------------
 // promoteOnce runs one promotion in a disposable root and returns the
 // root and the new revision.
