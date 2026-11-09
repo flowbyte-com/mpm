@@ -361,20 +361,38 @@ func handleMaintain(args []string) int {
 
 	fmt.Println("\n🧠 Running self-maintenance...")
 
-	// Run full self-maintenance
+	// Run full self-maintenance.
+	//
+	// The statistics and the error are NOT exclusive. A failed operation does
+	// not make the numbers that DID succeed useless, so the partial statistics
+	// are printed either way and the EXIT CODE carries the failure. This used
+	// to print "complete" and exit 0 while decay, pruning or consolidation had
+	// not run at all.
 	stats, err := dm.RunSelfMaintenance()
-	if err != nil {
-		usererror.Error("%v", err)
-		return 1
+
+	if err != nil && stats == nil {
+		return usererror.Error("self-maintenance failed: %v", err)
 	}
 
-	fmt.Println("\n✅ Self-maintenance complete:")
+	if err != nil {
+		fmt.Println("\n⚠ Self-maintenance completed WITH ERRORS:")
+	} else {
+		fmt.Println("\n✅ Self-maintenance complete:")
+	}
 	fmt.Printf("   Decayed weights:      %d\n", stats["decayed_weights"])
 	fmt.Printf("   Pruned total:        %d\n", stats["pruned_total"])
 	fmt.Printf("   Consolidated:         %d\n", stats["consolidated"])
 	fmt.Printf("   Never accessed:      %d\n", stats["never_accessed"])
 	fmt.Printf("   Low weight:          %d\n", stats["low_weight"])
 	fmt.Printf("   For review:          %d\n", stats["for_spaced_reinforcement"])
+
+	if err != nil {
+		if failed, ok := stats["errors"].([]string); ok && len(failed) > 0 {
+			fmt.Printf("   Failed operations:   %s\n", strings.Join(failed, ", "))
+		}
+		fmt.Println()
+		return usererror.Error("self-maintenance failed: %v", err)
+	}
 
 	// Deferred VACUUM: reclaim space from hard deletes during idle maintenance
 	var deletedCount int

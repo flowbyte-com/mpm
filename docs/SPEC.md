@@ -2694,6 +2694,15 @@ mpm resolve_theory <id> <conclusion> --winner=<id>     # Arc 1 closure: arbitrat
 mpm ops topic|lesson|session|reference|memory|wake|gateway
 ```
 
+**`mpm ops maintain` reports what actually happened.** It runs decay,
+pruning and consolidation, and prints the statistics each one produced. If an
+operation fails, the statistics are still printed — the work that DID happen is
+real — but the run is marked `completed WITH ERRORS`, the failed operations are
+named, and the process **exits non-zero**. A clean run prints
+`Self-maintenance complete` and exits 0. A caller that treats the exit status
+as the signal therefore cannot mistake a partial or failed sweep for a
+successful one.
+
 ### `debug` — Low-Level Inspection
 
 ```bash
