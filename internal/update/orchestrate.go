@@ -273,21 +273,33 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 		return out, err
 	}
 
-	if err := preflight(candidateDir(cand), dataRoot); err != nil {
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
-		return out, err
-	}
-	if err := failPoint(o.failAt(), "preflight"); err != nil {
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
-		return out, err
-	}
-
+	// THE BUNDLE IS PROVED BEFORE IT IS EXECUTED.
+	//
+	// The preflight COMPILES the candidate's reference DDL — it runs
+	// the file against an in-memory database and compares the shape it
+	// produces with the live table's. So the preflight is an
+	// execution of the candidate's own content, and it must not happen
+	// before the content has been proved to be a single CREATE TABLE
+	// statement and nothing else.
+	//
+	// The order is the fix: validation first, execution second. A
+	// bundle whose preflight carries an ATTACH, a DROP or a second
+	// statement is refused before anything in it is run.
 	rep := ValidateBundle(candidateDir(cand), src.Rev)
 	if !rep.Valid {
 		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", rep.ValidationError().Error())
 		return out, rep.ValidationError()
 	}
 	if err := failPoint(o.failAt(), "validate"); err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
+		return out, err
+	}
+
+	if err := preflight(candidateDir(cand), dataRoot); err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
+		return out, err
+	}
+	if err := failPoint(o.failAt(), "preflight"); err != nil {
 		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
 		return out, err
 	}
@@ -565,12 +577,16 @@ func dryRunUpdate(ctx context.Context, o Options, dataRoot string, src Source, o
 	if err != nil {
 		return *out, err
 	}
-	if err := preflight(candidateDir(cand), dataRoot); err != nil {
-		return *out, err
-	}
+	// The dry run proves the bundle before it executes anything, in
+	// the same order as the promotion: the preflight COMPILES the
+	// candidate's reference DDL, so it must not run before the file's
+	// content has been checked.
 	rep := ValidateBundle(candidateDir(cand), src.Rev)
 	if !rep.Valid {
 		return *out, rep.ValidationError()
+	}
+	if err := preflight(candidateDir(cand), dataRoot); err != nil {
+		return *out, err
 	}
 	out.Report = dryRunReport(out.FromRev, src, rep)
 	return *out, nil
