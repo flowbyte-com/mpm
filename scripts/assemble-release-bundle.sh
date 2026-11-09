@@ -111,9 +111,18 @@ if ! rb_validate_bundle "$CANDIDATE" "$TAG"; then
   rm -rf "$WORK"; exit 1
 fi
 
+# The archive carries every top-level entry of the bundle. The list
+# MUST cover them all: the host-asset declaration lives in config/, and
+# an archive that drops it publishes a bundle the updater's own
+# validator refuses — the assets would be in the tarball and the
+# declaration that proves them would not.
+#
+# The check that the tar list is complete lives in
+# scripts/tests/test_release_bundle_layout.py, so a future entry cannot
+# be added to the bundle without being added here.
 ARCHIVE="mpm_${TAG}_${PLAT}.tar.gz"
-tar -C "$CANDIDATE" -czf "$OUT/$ARCHIVE" bin agent_installation RELEASE.json schema 2>/dev/null || \
-tar -C "$CANDIDATE" -czf "$OUT/$ARCHIVE" bin agent_installation RELEASE.json || { rm -rf "$WORK"; exit 1; }
+tar -C "$CANDIDATE" -czf "$OUT/$ARCHIVE" bin agent_installation config RELEASE.json schema 2>/dev/null || \
+tar -C "$CANDIDATE" -czf "$OUT/$ARCHIVE" bin agent_installation config RELEASE.json || { rm -rf "$WORK"; exit 1; }
 (cd "$OUT" && sha256sum "$ARCHIVE" > SHA256SUMS)
 
 echo "wrote $OUT/$ARCHIVE"
