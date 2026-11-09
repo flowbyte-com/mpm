@@ -175,7 +175,48 @@ func ValidateBundle(bundleDir, expectedRev string) BundleReport {
 		check("updater", "mpm-update is absent (a release built before the updater existed; reported, not refused)", true)
 	}
 
+	// 8. The release-scoped host assets.
+	//
+	// FAIL-CLOSED, and deliberately so. The installed managed block
+	// advertises ~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md
+	// and ~/.mpm/agent_installation/mpm-agent-protocol.md, and the
+	// per-adapter installers import the shared scripts under
+	// agent_installation/scripts/ by path. A bundle that omits them
+	// installs an installation whose own instructions point at files
+	// that do not exist — and the omission is invisible until an agent
+	// follows the pointer.
+	//
+	// The bundle declares its assets (config/runtime-assets.json) and
+	// the check is against that declaration, so the validator needs no
+	// source tree and the declaration is produced by the authority that
+	// provisions the assets, not by a second list that could drift.
+	if problems := hostAssetProblems(bundleDir); len(problems) > 0 {
+		for _, p := range problems {
+			check("host-assets", p, false)
+		}
+	} else {
+		check("host-assets", "the bundle declares and carries its host integration assets", true)
+	}
+
 	return rep
+}
+
+// failedCheckNames renders the names of the checks a report failed, so
+// a refusal names WHICH property the bundle lacks.
+func failedCheckNames(rep BundleReport) string {
+	var failed []string
+	seen := map[string]bool{}
+	for _, c := range rep.Checks {
+		if c.OK || seen[c.Name] {
+			continue
+		}
+		seen[c.Name] = true
+		failed = append(failed, c.Name)
+	}
+	if len(failed) == 0 {
+		return "no named check failed"
+	}
+	return strings.Join(failed, ", ")
 }
 
 // ValidationError renders a failed report as one operator-readable

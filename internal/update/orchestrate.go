@@ -342,6 +342,16 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 	if err != nil {
 		return failAfterStop("activate", err)
 	}
+	// The stable paths are established right after the pointer moves,
+	// because they resolve through it. They are created only when they
+	// are ABSENT: a path that already exists is the operator's
+	// arrangement, and the updater does not move it aside the way the
+	// installer does. Anything unexpected is reported rather than
+	// changed.
+	stableWarnings, err := ensureStablePaths(dataRoot)
+	if err != nil {
+		return failAfterStop("stable-paths", err)
+	}
 	// A failure after the pointer moved either falls back or stops
 	// degraded (see below). A failure before needs no rollback:
 	// nothing was changed.
@@ -517,6 +527,9 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 		fmt.Fprintf(&b, "note: managed service(s) still running (%s) were NOT restarted (no --restart-services); they may still use the old executable until restarted\n", strings.Join(sc.ActiveUnits(), ", "))
 	}
 	for _, w := range identityWarnings {
+		fmt.Fprintf(&b, "warning: %s\n", w)
+	}
+	for _, w := range stableWarnings {
 		fmt.Fprintf(&b, "warning: %s\n", w)
 	}
 	b.WriteString(staleNote(dataRoot))

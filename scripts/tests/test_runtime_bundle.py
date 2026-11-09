@@ -23,6 +23,7 @@ Hermeticity: every root is a fresh mktemp directory and nothing
 resolves into the real ~/.mpm.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -115,7 +116,41 @@ class BundleFixture(unittest.TestCase):
             '  "bundle_layout": "versioned-bundle/1"\n'
             '}\n'
         )
+        self._add_host_assets(bundle)
         return bundle
+
+    def _add_host_assets(self, bundle: Path) -> None:
+        """Give the bundle the release-scoped host assets, declared.
+
+        A bundle that omits them installs an installation whose own
+        managed block points at files that do not exist, so the
+        validator refuses one. The fixture therefore has to be a
+        WELL-FORMED bundle, and "well-formed" now includes the
+        declaration the validator reads.
+        """
+        assets = {
+            "agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md": "# canonical\n",
+            "agent_installation/mpm-agent-protocol.md": "# protocol\n",
+            "agent_installation/scripts/block_provenance.py": "# shared\n",
+        }
+        declaration = {}
+        for rel, body in assets.items():
+            p = bundle / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body)
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            declaration[rel] = {"sha256": digest}
+        # The runtime payload declaration travels with the bundle too.
+        payload_decl = bundle / "agent_installation" / "runtime_payloads.json"
+        payload_decl.parent.mkdir(parents=True, exist_ok=True)
+        payload_decl.write_text(
+            json.dumps({"version": 1, "payloads": []}, indent=2) + "\n"
+        )
+        manifest = bundle / "config" / "runtime-assets.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(
+            json.dumps({"version": 1, "assets": declaration}, indent=2, sort_keys=True) + "\n"
+        )
 
     # ------------------------------------------------------------------
     # driver
@@ -155,6 +190,36 @@ class TestBundleValidation(BundleFixture):
         r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
         self.assertIn("rc=1", r.stdout, r.stderr)
         self.assertIn("mpm-telemetry", r.stderr)
+
+    def test_a_bundle_without_the_host_asset_declaration_is_refused(self):
+        # THE POINT. The installed managed block advertises
+        # ~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md and
+        # .../mpm-agent-protocol.md. A bundle that omits the
+        # integration assets installs an installation whose own
+        # instructions point at files that do not exist, so it is
+        # refused rather than installed.
+        bundle = self.make_bundle()
+        (bundle / "config" / "runtime-assets.json").unlink()
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("host-asset", r.stderr)
+
+    def test_a_bundle_whose_host_asset_was_altered_is_refused(self):
+        # The declaration is checked against the bundle's OWN contents.
+        bundle = self.make_bundle()
+        (bundle / "agent_installation" / "mpm-agent-protocol.md").write_text("# tampered\n")
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("host", r.stderr)
+
+    def test_a_bundle_carrying_an_undeclared_host_asset_file_is_refused(self):
+        # A file under agent_installation/ that no declaration names was
+        # provisioned by nobody and is owned by nobody.
+        bundle = self.make_bundle()
+        (bundle / "agent_installation" / "scripts" / "undeclared.py").write_text("# surprise\n")
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("no declaration names it", r.stderr)
 
     def test_a_non_executable_binary_is_refused(self):
         bundle = self.make_bundle()

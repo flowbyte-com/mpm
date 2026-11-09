@@ -30,7 +30,17 @@ func extractLifecycleDDL(src string) (string, error) {
 	}
 	var cands []string
 	for _, s := range spans {
-		if strings.HasPrefix(strings.ToUpper(strings.TrimLeft(s, " \t\n")), prefix) {
+		// The span is upper-cased and so must be the prefix: comparing
+		// an upper-cased span against a mixed-case prefix can never
+		// match, and the failure is SILENT — stageSchemaDDL treats an
+		// unextractable DDL as "this checkout ships no DDL" and
+		// returns nil, so the bundle was published with no schema
+		// preflight and the collision check degraded to a no-op.
+		//
+		// scripts/lib/schema_preflight.py compares prefix.upper(), and
+		// the two must agree or the Go side silently ships less than
+		// the shell side.
+		if strings.HasPrefix(strings.ToUpper(strings.TrimLeft(s, " \t\n")), strings.ToUpper(prefix)) {
 			cands = append(cands, s)
 		}
 	}

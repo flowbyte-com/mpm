@@ -206,6 +206,17 @@ func (b GoBuilder) BuildFromCheckout(srcDir, dstDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The release-scoped host assets come BEFORE the runtime payload,
+	// exactly as install.sh and scripts/assemble-release-bundle.sh
+	// order them. They are what the installed managed block points at
+	// and what the per-adapter installers import by path, so a bundle
+	// without them installs an installation whose own instructions are
+	// dangling. The payload lands in the same adapter directory and its
+	// validator only requires the files the payload manifest names, so
+	// the two sets coexist.
+	if err := stageHostAssets(srcDir, dstDir); err != nil {
+		return "", err
+	}
 	if err := stagePayloads(srcDir, dstDir, sources); err != nil {
 		if b.payloadRequired() {
 			return "", err

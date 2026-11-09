@@ -34,7 +34,7 @@ func installRelease(dataRoot, candidateDir, rev string) (installed bool, err err
 		if rep.Valid {
 			return false, nil
 		}
-		return false, fmt.Errorf("release %s already exists at %s and does not validate; a release is immutable, so it will not be replaced", rev, final)
+		return false, fmt.Errorf("release %s already exists at %s and does not validate (%s); a release is immutable, so it will not be replaced. Remove it by hand if you want a fresh build of that label, or promote a different revision", rev, final, failedCheckNames(rep))
 	}
 	if err := os.Rename(candidateDir, final); err != nil {
 		return false, fmt.Errorf("could not install the bundle into %s: %w", final, err)

@@ -412,6 +412,113 @@ print(v if v is not None else "")
 PY
 }
 
+# rb_validate_host_assets checks a bundle against its own host-asset
+# declaration, and refuses the bundle when the declaration is absent,
+# empty, incomplete, or contradicted by the bundle's contents.
+#
+# WHY THIS IS A REFUSAL AND NOT A WARNING. The installed managed block
+# advertises ~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md
+# and ~/.mpm/agent_installation/mpm-agent-protocol.md, and the
+# per-adapter installers import the shared scripts under
+# agent_installation/scripts/ by path. A bundle that omits them installs
+# an installation whose own instructions point at files that do not
+# exist — and the omission is invisible until an agent follows the
+# pointer.
+#
+# The bundle declares its assets (config/runtime-assets.json), so this
+# check needs no source tree. The declaration is written by
+# scripts/install_runtime_assets.py — the same authority that
+# provisions the assets — so it cannot drift from what was installed.
+#
+# This is the shell twin of internal/update/hostassets.go. The two must
+# agree: the Go validator refuses a bundle the shell validator accepts,
+# or the other way round, and the bundle that reaches an operator
+# depends on which tool ran.
+rb_validate_host_assets() {
+    local bundle="$1"
+    python3 - "$bundle" <<'PY'
+import hashlib, json, os, sys
+
+bundle = sys.argv[1]
+problems = []
+
+manifest_path = os.path.join(bundle, "config", "runtime-assets.json")
+if not os.path.isfile(manifest_path):
+    sys.stderr.write(
+        "the bundle carries no host-asset declaration (config/runtime-assets.json); "
+        "the integration assets the installed instructions point at would be missing\n")
+    sys.exit(1)
+
+try:
+    manifest = json.load(open(manifest_path, "r", encoding="utf-8"))
+except Exception as exc:
+    sys.stderr.write(f"the bundle's host-asset declaration is not readable JSON: {exc}\n")
+    sys.exit(1)
+
+version = manifest.get("version")
+if version != 1:
+    sys.stderr.write(
+        f"the bundle's host-asset declaration is version {version!r}; "
+        "this build understands version 1\n")
+    sys.exit(1)
+
+assets = manifest.get("assets") or {}
+if not assets:
+    sys.stderr.write(
+        "the bundle's host-asset declaration names no assets, so the integration "
+        "assets were never provisioned\n")
+    sys.exit(1)
+
+declared = set()
+for rel, rec in sorted(assets.items()):
+    declared.add(rel.replace(os.sep, "/"))
+    full = os.path.join(bundle, *rel.split("/"))
+    if not os.path.isfile(full) or os.path.islink(full):
+        problems.append(f"the bundle declares the host asset {rel!r} but does not carry it")
+        continue
+    want = (rec or {}).get("sha256", "")
+    if not want:
+        problems.append(f"the bundle declares the host asset {rel!r} with no digest")
+        continue
+    h = hashlib.sha256()
+    with open(full, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    got = h.hexdigest()
+    if got.lower() != want.lower():
+        problems.append(
+            f"the bundle's host asset {rel!r} has digest {got} but the declaration says {want}")
+
+# The payload files are declared by the bundle's own runtime payload
+# declaration, not by the asset declaration.
+payload_manifest = os.path.join(bundle, "agent_installation", "runtime_payloads.json")
+if not os.path.isfile(payload_manifest):
+    problems.append("the bundle carries no runtime payload declaration (agent_installation/runtime_payloads.json)")
+else:
+    declared.add("agent_installation/runtime_payloads.json")
+    try:
+        payload = json.load(open(payload_manifest, "r", encoding="utf-8"))
+        for record in payload.get("payloads", []):
+            for f in record.get("files", []):
+                declared.add(f"agent_installation/{record.get('adapter', '')}/{f}")
+    except Exception as exc:
+        problems.append(f"the bundle's runtime payload declaration is not readable JSON: {exc}")
+
+# Every file under agent_installation/ must be declared by something.
+root = os.path.join(bundle, "agent_installation")
+for dirpath, _dirnames, filenames in os.walk(root):
+    for name in filenames:
+        full = os.path.join(dirpath, name)
+        rel = os.path.relpath(full, bundle).replace(os.sep, "/")
+        if rel not in declared:
+            problems.append(f"the bundle carries {rel!r} under agent_installation/ but no declaration names it")
+
+for problem in problems:
+    sys.stderr.write(problem + "\n")
+sys.exit(1 if problems else 0)
+PY
+}
+
 # ---------- validation ----------
 
 # rb_reported_commit <binary>
@@ -734,6 +841,17 @@ rb_validate_bundle() {
             rb_err "(the bundle is a mixture of two builds — refusing to install it)"
             return 1
         fi
+    fi
+
+    # 6. The release-scoped host assets.
+    #
+    # The bundle declares them (config/runtime-assets.json) and the
+    # declaration is checked against the bundle's own contents. A
+    # bundle without the integration assets installs an installation
+    # whose managed block points at files that do not exist.
+    if ! rb_validate_host_assets "$bundle"; then
+        rb_err "the bundle's host integration assets are missing or do not match the bundle's own declaration"
+        return 1
     fi
 
     return 0
