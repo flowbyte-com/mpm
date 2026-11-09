@@ -196,7 +196,7 @@ gap of §1.3: the 27 `PRAGMA`/`VACUUM` sites, plus the one connection-scoped
 
 The classification is a judgement about the **consequence** of the loss, and
 it is recorded per site in
-[`bare-write-inventory-2026-11-06.md`](bare-write-inventory-2026-11-06.md). It
+[`bare-write-inventory-2026-11-07.md`](bare-write-inventory-2026-11-07.md). It
 is anchored to the merged ratchet's own reason vocabulary, so the two
 cannot drift apart:
 
@@ -239,7 +239,7 @@ checkpoints, the `VACUUM`s, and the nine retention sweeps.
 
 The full inventory — every bare pool write on the base commit, with its file,
 line, reason and statement — is in
-[`bare-write-inventory-2026-11-06.md`](bare-write-inventory-2026-11-06.md).
+[`bare-write-inventory-2026-11-07.md`](bare-write-inventory-2026-11-07.md).
 
 ---
 
