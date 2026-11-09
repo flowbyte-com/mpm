@@ -4,25 +4,26 @@
 WHAT THIS PROVES
 
 A release bundle is a directory. The published archive is a TARBALL of
-that directory, and the list of entries that go into it is written out
-by hand in scripts/assemble-release-bundle.sh. A list written out by
-hand is a list that can fall behind.
-
-It fell behind. The host-asset declaration — the file that says which
-integration assets the bundle carries, and with which digests — lives
-in config/, and config/ was not in the tar list. The published archive
-therefore carried the assets and NOT the declaration that proves them,
-so the updater's validator, which checks a bundle against its own
-declaration, refused every bundle the assembler produced.
-
-The failure was silent: the assembler validated the CANDIDATE (which
-has config/) and then published an archive without it.
+that directory, and the entries that go into it used to be written out
+by hand in scripts/assemble-release-bundle.sh — while a test compared
+that hand-written list against a COPY of the same list. Two copies of
+a list is exactly how the archive came to omit config/, the directory
+that holds the host-asset declaration: the assets were in the tarball
+and the declaration that proves them was not, and the assembler
+validated the CANDIDATE (which does have config/), so the failure was
+silent.
 
 THE RULE
 
-Every top-level entry of the bundle must appear in the tar list. The
-list is read out of the script, so a future entry cannot be added to
-the bundle without being added to the archive.
+The bundle's top-level shape is declared ONCE, in
+scripts/lib/runtime_bundle.sh, as RB_BUNDLE_ENTRIES. The assembler
+reads that list, and this test pins the two together. A bundle entry
+added to that list is in the archive BY CONSTRUCTION — there is no
+second list to forget.
+
+The test asserts the assembler USES the shared list rather than
+repeating it. That is the property the old test could not check: it
+compared two hand-written lists, so both could be wrong together.
 """
 
 import re
@@ -31,26 +32,28 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ASSEMBLER = REPO_ROOT / "scripts" / "assemble-release-bundle.sh"
-
-# The top-level entries a bundle has. Every one of them must be in the
-# archive: a bundle the installer produces, a bundle the assembler
-# produces and a bundle the updater builds all have exactly this
-# shape.
-BUNDLE_ENTRIES = ("bin", "agent_installation", "config", "RELEASE.json")
-
-# schema/ is OPTIONAL: the lifecycle_events DDL is extracted on a
-# best-effort basis, and the assembler falls back to an archive without
-# it when the extraction produced nothing. It must appear in at least
-# one of the archive lists, or the published bundle never carries the
-# schema preflight.
-OPTIONAL_ENTRIES = ("schema",)
+LIBRARY = REPO_ROOT / "scripts" / "lib" / "runtime_bundle.sh"
 
 
-def tar_lists() -> list[list[str]]:
+def library_bundle_entries() -> list[str]:
+    """Return RB_BUNDLE_ENTRIES, the bundle's declared top-level shape."""
+    text = LIBRARY.read_text(encoding="utf-8")
+    match = re.search(r'^RB_BUNDLE_ENTRIES="([^"]*)"', text, re.MULTILINE)
+    if not match:
+        raise AssertionError(
+            "scripts/lib/runtime_bundle.sh declares no RB_BUNDLE_ENTRIES; "
+            "the bundle's shape must be declared once, and read by both the "
+            "assembler and this test")
+    return match.group(1).split()
+
+
+def assembler_tar_lists() -> list[list[str]]:
     """Return the entry lists of every tar invocation in the assembler."""
     text = ASSEMBLER.read_text(encoding="utf-8")
     lists = []
-    for match in re.finditer(r"tar\s+-C\s+\"\$CANDIDATE\"\s+-czf\s+\"\$OUT/\$ARCHIVE\"\s+([^\n;|]+)", text):
+    for match in re.finditer(
+            r"tar\s+-C\s+\"\$CANDIDATE\"\s+-czf\s+\"\$OUT/\$ARCHIVE\"\s+([^\n;|]+)",
+            text):
         entries = [e for e in match.group(1).split() if not e.startswith("2>")]
         if entries:
             lists.append(entries)
@@ -58,39 +61,66 @@ def tar_lists() -> list[list[str]]:
 
 
 class TestReleaseBundleLayout(unittest.TestCase):
-    def test_the_assembler_names_a_tar_list(self):
-        lists = tar_lists()
+    def test_the_bundle_shape_is_declared_once(self):
+        entries = library_bundle_entries()
+        self.assertTrue(entries, "RB_BUNDLE_ENTRIES names no entries")
+
+    def test_the_assembler_reads_the_shared_list(self):
+        # THE property the old test could not check. The assembler must
+        # NOT repeat the list: a repeat is a second copy, and a second
+        # copy is how the archive and the bundle drifted apart.
+        text = ASSEMBLER.read_text(encoding="utf-8")
+        self.assertIn(
+            "$RB_BUNDLE_ENTRIES",
+            text,
+            "the assembler hand-writes the archive's entry list instead of "
+            "reading RB_BUNDLE_ENTRIES; a hand-written list is a second copy "
+            "of the bundle's shape, and the two drift apart",
+        )
+
+    def test_the_archive_list_is_the_bundles_declared_shape(self):
+        expected = library_bundle_entries()
+        lists = assembler_tar_lists()
         self.assertTrue(lists, "the assembler has no tar invocation to check")
+        for entries in lists:
+            if "$RB_BUNDLE_ENTRIES" in entries:
+                continue  # the shared list, expanded below
+            self.assertEqual(
+                entries,
+                expected,
+                f"the assembler's archive list {entries} is not the bundle's "
+                f"declared shape {expected}",
+            )
 
-    def test_every_tar_list_covers_the_whole_bundle(self):
-        for entries in tar_lists():
-            for required in BUNDLE_ENTRIES:
-                self.assertIn(
-                    required,
+    def test_the_archive_carries_the_whole_declared_shape(self):
+        expected = library_bundle_entries()
+        lists = assembler_tar_lists()
+        self.assertTrue(lists, "the assembler has no tar invocation to check")
+        for entries in lists:
+            if "$RB_BUNDLE_ENTRIES" in entries:
+                self.assertEqual(
                     entries,
-                    f"the assembler's archive list {entries} omits {required!r}; "
-                    "the published archive would not carry the whole bundle",
+                    ["$RB_BUNDLE_ENTRIES"],
+                    "the assembler expands the shared list by hand",
                 )
+            else:
+                self.assertEqual(entries, expected)
 
-    def test_every_tar_list_carries_the_host_asset_declaration(self):
+    def test_the_archive_carries_the_host_asset_declaration(self):
         # config/ is where the host-asset declaration lives. Without it
         # the archive carries the assets and not the declaration that
         # proves them, and the updater refuses the bundle.
-        for entries in tar_lists():
-            self.assertIn(
-                "config",
-                entries,
-                f"the assembler's archive list {entries} omits config/, so the "
-                "published bundle carries no host-asset declaration",
-            )
+        self.assertIn("config", library_bundle_entries())
 
-    def test_some_tar_list_carries_the_schema_preflight(self):
-        lists = tar_lists()
-        self.assertTrue(
-            any(entry in entries for entries in lists for entry in OPTIONAL_ENTRIES),
-            "no archive list carries the schema preflight, so the published bundle "
-            "would never carry the lifecycle_events DDL",
-        )
+    def test_the_archive_carries_the_schema_preflight(self):
+        # schema/ carries the substrate's lifecycle_events DDL. Without
+        # it the schema-collision preflight degrades to a no-op.
+        self.assertIn("schema", library_bundle_entries())
+
+    def test_the_archive_carries_the_payload_and_the_identity(self):
+        entries = library_bundle_entries()
+        for required in ("bin", "agent_installation", "RELEASE.json"):
+            self.assertIn(required, entries)
 
 
 if __name__ == "__main__":

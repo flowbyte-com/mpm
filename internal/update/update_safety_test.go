@@ -239,6 +239,12 @@ esac
 	if err := writeTestHostAssets(dstDir); err != nil {
 		return "", err
 	}
+	// And the schema preflight: a bundle without it is refused before
+	// it is ever activated, because the schema-collision check would
+	// degrade to a no-op.
+	if err := writeTestSchemaPreflight(dstDir); err != nil {
+		return "", err
+	}
 	return commit, nil
 }
 

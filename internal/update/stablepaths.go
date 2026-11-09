@@ -64,25 +64,3 @@ func ensureStablePaths(dataRoot string) ([]string, error) {
 	}
 	return warnings, nil
 }
-
-// stablePathResolves reports whether a stable path resolves into the
-// active release. A path that exists but does not resolve is a
-// dangling pointer: the operator's instructions name it, and it leads
-// nowhere.
-func stablePathResolves(dataRoot, name string) bool {
-	target := filepath.Join(dataRoot, name)
-	resolved, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		return false
-	}
-	release := filepath.Join(dataRoot, "releases")
-	if _, rev, err := CurrentReleaseTarget(dataRoot); err == nil && rev != "" {
-		want := filepath.Join(release, rev, name)
-		if resolved == want {
-			return true
-		}
-	}
-	// Without an active pointer, resolving at all is the best the
-	// check can say.
-	return resolved != ""
-}

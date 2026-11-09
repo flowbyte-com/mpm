@@ -96,13 +96,21 @@ fi
 rb_write_release "$CANDIDATE" "$TAG" "$COMMIT" "$EPOCH" "$VERSION"
 
 # 5. The substrate's own schema, so the preflight travels with the bundle.
-if [ -r "$PROJECT_ROOT/scripts/lib/schema_preflight.py" ] && [ -r "$PROJECT_ROOT/internal/core/schema.go" ]; then
-  mkdir -p "$CANDIDATE/schema"
-  python3 "$PROJECT_ROOT/scripts/lib/schema_preflight.py" extract \
-    --go "$PROJECT_ROOT/internal/core/schema.go" \
-    --table lifecycle_events \
-    --out "$CANDIDATE/schema/lifecycle_events.sql" || { rm -rf "$WORK"; exit 1; }
+#
+# FAIL CLOSED. The schema-collision preflight compares the live table
+# against the DDL the substrate itself would apply. A bundle that does
+# not carry that DDL degrades the check to a no-op, silently. An
+# archive that ships such a bundle installs a runtime whose collision
+# check compares the live table against nothing.
+if [ ! -r "$PROJECT_ROOT/scripts/lib/schema_preflight.py" ] || [ ! -r "$PROJECT_ROOT/internal/core/schema.go" ]; then
+  echo "assemble-release-bundle: the substrate's schema source is not readable, so the bundle cannot carry the schema preflight" >&2
+  rm -rf "$WORK"; exit 1
 fi
+mkdir -p "$CANDIDATE/schema"
+python3 "$PROJECT_ROOT/scripts/lib/schema_preflight.py" extract \
+  --go "$PROJECT_ROOT/internal/core/schema.go" \
+  --table lifecycle_events \
+  --out "$CANDIDATE/schema/lifecycle_events.sql" || { rm -rf "$WORK"; exit 1; }
 
 # 6. Validate with the canonical validator before anything is published.
 #    The updater applies the same checks on download; a bundle that
@@ -111,18 +119,23 @@ if ! rb_validate_bundle "$CANDIDATE" "$TAG"; then
   rm -rf "$WORK"; exit 1
 fi
 
-# The archive carries every top-level entry of the bundle. The list
-# MUST cover them all: the host-asset declaration lives in config/, and
-# an archive that drops it publishes a bundle the updater's own
-# validator refuses — the assets would be in the tarball and the
-# declaration that proves them would not.
+# The archive carries every top-level entry of the bundle, and the list
+# of those entries is RB_BUNDLE_ENTRIES — the bundle's declared shape,
+# defined ONCE in scripts/lib/runtime_bundle.sh and read from here.
 #
-# The check that the tar list is complete lives in
-# scripts/tests/test_release_bundle_layout.py, so a future entry cannot
-# be added to the bundle without being added here.
+# It used to be written out by hand, and a test compared it against a
+# COPY of the same list. Two copies of a list is exactly how the
+# archive came to omit config/ — the directory that holds the
+# host-asset declaration — while the bundle it was cut from carried it:
+# the assets were in the tarball and the declaration that proves them
+# was not, so the updater refused every bundle this script published.
+#
+# scripts/tests/test_release_bundle_layout.py pins the archive against
+# RB_BUNDLE_ENTRIES, so a bundle entry added to that list is in the
+# archive by construction.
 ARCHIVE="mpm_${TAG}_${PLAT}.tar.gz"
-tar -C "$CANDIDATE" -czf "$OUT/$ARCHIVE" bin agent_installation config RELEASE.json schema 2>/dev/null || \
-tar -C "$CANDIDATE" -czf "$OUT/$ARCHIVE" bin agent_installation config RELEASE.json || { rm -rf "$WORK"; exit 1; }
+# shellcheck disable=SC2086
+tar -C "$CANDIDATE" -czf "$OUT/$ARCHIVE" $RB_BUNDLE_ENTRIES || { rm -rf "$WORK"; exit 1; }
 (cd "$OUT" && sha256sum "$ARCHIVE" > SHA256SUMS)
 
 echo "wrote $OUT/$ARCHIVE"

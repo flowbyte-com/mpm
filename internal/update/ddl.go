@@ -2,6 +2,9 @@ package update
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -52,4 +55,68 @@ func extractLifecycleDDL(src string) (string, error) {
 		return "", fmt.Errorf("lifecycle_events DDL does not end with ';'")
 	}
 	return ddl, nil
+}
+
+// SchemaPreflightRelPath is where a bundle carries the substrate's
+// lifecycle_events DDL.
+//
+// WHY THE BUNDLE CARRIES IT. The schema-collision preflight compares
+// the live table against the DDL the substrate itself would apply. A
+// bundle that carries that DDL lets the check run without a source
+// checkout; a bundle that does not carry it degrades the check to a
+// no-op, SILENTLY. That silent degradation is the failure this
+// existence is here to prevent, so the preflight is a required part of
+// a candidate bundle — not an optional extra.
+const SchemaPreflightRelPath = "schema/lifecycle_events.sql"
+
+// lifecycleEventsDDLPattern matches a CREATE TABLE statement for the
+// lifecycle_events table.
+//
+// IT IS THE SHAPE THE EXTRACTOR PRODUCES, and it is deliberately
+// narrow. The preflight must not be satisfied by an unrelated or
+// destructive statement: "DROP TABLE lifecycle_events;" names the
+// table but says nothing about the shape the substrate applies, and a
+// file containing only that would pass a looser check while leaving
+// the collision preflight with nothing to compare.
+//
+// The rule is applied identically by the shell validator
+// (rb_validate_schema_preflight in scripts/lib/runtime_bundle.sh), so
+// the two validators cannot disagree about what counts as a preflight.
+var lifecycleEventsDDLPattern = regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?lifecycle_events\b`)
+
+// schemaPreflightProblems checks a bundle's schema preflight and
+// returns one message per problem.
+//
+// REQUIRED (candidate scope): the preflight must be present, non-empty
+// and carry the lifecycle_events CREATE TABLE. A bundle without one
+// would install a runtime whose collision preflight cannot run.
+//
+// OPTIONAL (installed scope): a release promoted before the preflight
+// travelled with the bundle may not carry one. That is a documented
+// historic gap, not a corruption, so it is reported and not refused —
+// but if the file IS there, it must be valid.
+func schemaPreflightProblems(bundleDir string, required bool) []string {
+	path := filepath.Join(bundleDir, filepath.FromSlash(SchemaPreflightRelPath))
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if !required {
+			return nil
+		}
+		return []string{fmt.Sprintf("the bundle carries no schema preflight (%s); the schema-collision preflight would degrade to a no-op", SchemaPreflightRelPath)}
+	}
+	if !fi.Mode().IsRegular() {
+		return []string{fmt.Sprintf("the bundle's schema preflight (%s) is not a regular file", SchemaPreflightRelPath)}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return []string{fmt.Sprintf("the bundle's schema preflight (%s) could not be read: %v", SchemaPreflightRelPath, err)}
+	}
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return []string{fmt.Sprintf("the bundle's schema preflight (%s) is empty; the schema-collision preflight would have nothing to compare the live table against", SchemaPreflightRelPath)}
+	}
+	if !lifecycleEventsDDLPattern.MatchString(text) {
+		return []string{fmt.Sprintf("the bundle's schema preflight (%s) does not declare the lifecycle_events table; it must carry the substrate's own CREATE TABLE for it, or the schema-collision preflight compares the live table against nothing", SchemaPreflightRelPath)}
+	}
+	return nil
 }

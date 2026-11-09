@@ -251,6 +251,15 @@ def add_host_assets(bundle: Path) -> None:
     manifest.write_text(
         json.dumps({"version": 1, "assets": declaration}, indent=2,
                    sort_keys=True) + "\n")
+    # The schema preflight. A bundle without it degrades the
+    # schema-collision check to a no-op, so the validator refuses one:
+    # "well-formed" now includes it.
+    schema = bundle / "schema" / "lifecycle_events.sql"
+    schema.parent.mkdir(parents=True, exist_ok=True)
+    schema.write_text(
+        "CREATE TABLE IF NOT EXISTS lifecycle_events (\n"
+        "\tevent_id TEXT PRIMARY KEY NOT NULL\n"
+        ");\n")
 
 
 class ProbeFixture(unittest.TestCase):

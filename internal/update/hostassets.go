@@ -115,13 +115,53 @@ func pythonBinary() (string, error) {
 	return "", fmt.Errorf("no python interpreter was found on PATH; a checkout build provisions the host integration assets with scripts/install_runtime_assets.py, which needs one (install python3 and retry)")
 }
 
+// BundleScope says WHAT a bundle validation is for.
+//
+// The two scopes answer different questions, and a bundle that
+// answers one of them correctly can fail the other. Collapsing them is
+// how an immutable rollback target ends up refused for the sake of a
+// file the runtime itself wrote into it.
+//
+// SCOPE CANDIDATE — "is this bundle COMPLETE?"
+//
+// Every file the bundle carries must be accounted for. A file nobody
+// provisioned is a file nobody owns, and a file that was provisioned
+// and then lost is a bundle that installs an installation whose own
+// instructions point at nothing.
+//
+// SCOPE INSTALLED — "is this bundle INTACT?"
+//
+// The assets the bundle declares must still be present with the
+// digests it declares. The completeness question does NOT apply: a
+// release directory is not immutable in practice. The runtime writes
+// into it after the bundle was validated — Python's bytecode caches,
+// the adapter's build-provenance sidecar — and a release that fails
+// the completeness rule for that reason is not corrupt. Refusing to
+// reuse it would push the operator towards deleting an immutable
+// rollback target, which is the one thing a release directory must
+// never be asked to be.
+type BundleScope int
+
+const (
+	// ScopeCandidate is a bundle being assembled for installation.
+	ScopeCandidate BundleScope = iota
+	// ScopeInstalled is a bundle that was already installed.
+	ScopeInstalled
+)
+
+// Strict reports whether the scope applies the construction rules
+// (completeness, mandatory schema preflight) or only the integrity
+// ones.
+func (s BundleScope) Strict() bool { return s == ScopeCandidate }
+
 // hostAssetProblems checks a bundle against its own host-asset
 // declaration and returns one message per problem.
 //
 // It is FAIL-CLOSED. A bundle that carries no declaration is refused:
 // without one there is no way to know whether the integration assets
 // were provisioned or omitted, and a bundle that omits them installs
-// an installation whose managed block points at missing files.
+// an installation whose own instructions point at files that do not
+// exist.
 //
 // The rules are:
 //
@@ -129,13 +169,16 @@ func pythonBinary() (string, error) {
 //  2. the declaration is a version this build understands;
 //  3. the declaration names at least one asset — an empty declaration is
 //     a bundle that provisioned nothing;
-//  4. every declared asset is present in the bundle as a regular file
+//  4. every declared key is a SAFE bundle-relative path (see
+//     hostAssetKeyProblem) — a key that could point outside the bundle
+//     would let a corrupted declaration hide a real omission;
+//  5. every declared asset is present in the bundle as a regular file
 //     with exactly the declared digest;
-//  5. every file the bundle carries under agent_installation/ is
-//     declared — by the asset declaration, or by the bundle's runtime
-//     payload declaration. An undeclared file is a file nobody
-//     provisioned and nobody owns.
-func hostAssetProblems(bundleDir string) []string {
+//  6. (candidate scope only) every file the bundle carries under
+//     agent_installation/ is declared — by the asset declaration, or by
+//     the bundle's runtime payload declaration. An undeclared file is a
+//     file nobody provisioned and nobody owns.
+func hostAssetProblems(bundleDir string, scope BundleScope) []string {
 	var problems []string
 
 	manifest, err := readHostAssetManifest(bundleDir)
@@ -153,8 +196,16 @@ func hostAssetProblems(bundleDir string) []string {
 
 	declared := map[string]bool{}
 	for rel, rec := range manifest.Assets {
+		if why := hostAssetKeyProblem(rel); why != "" {
+			problems = append(problems, why)
+			continue
+		}
 		declared[filepath.ToSlash(rel)] = true
 		full := filepath.Join(bundleDir, filepath.FromSlash(rel))
+		if !pathStaysInside(bundleDir, full) {
+			problems = append(problems, fmt.Sprintf("the bundle declares the host asset %q, which resolves outside the bundle root", rel))
+			continue
+		}
 		fi, err := os.Lstat(full)
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("the bundle declares the host asset %q but does not carry it", rel))
@@ -178,6 +229,14 @@ func hostAssetProblems(bundleDir string) []string {
 		}
 	}
 
+	// The completeness rule is a CONSTRUCTION rule. An installed
+	// release carries files the runtime wrote into it after
+	// validation, and refusing it for those would be refusing it for
+	// being used.
+	if !scope.Strict() {
+		return problems
+	}
+
 	// The payload files are declared by the bundle's own runtime
 	// payload declaration, not by the asset declaration.
 	payloadDeclared, err := bundlePayloadDeclaredPaths(bundleDir)
@@ -196,6 +255,83 @@ func hostAssetProblems(bundleDir string) []string {
 		problems = append(problems, fmt.Sprintf("the bundle carries %q under agent_installation/ but no declaration names it", rel))
 	}
 	return problems
+}
+
+// hostAssetKeyProblem describes why a declaration key is unsafe, or
+// returns "" when the key is safe.
+//
+// IT MIRRORS THE AUTHORITY'S OWN RULE. scripts/install_runtime_assets.py
+// refuses a manifest entry that "is not a safe runtime-relative path":
+// an absolute path, or one carrying a '..' segment. The bundle
+// validators must not be WEAKER than the authority they adopted, or a
+// corrupted declaration could steer a validator outside the bundle —
+// and a traversal key hides a genuine omission behind a file that is
+// not there.
+//
+// The rules:
+//
+//  1. the key is not empty;
+//  2. the key is relative: no leading '/', and no Windows drive
+//     prefix ("C:...");
+//  3. no path segment is '..';
+//  4. the key uses '/' as its separator and carries no '\'. A
+//     backslash can never name a real asset on any platform, and its
+//     presence is a sign of a corrupted declaration;
+//  5. the key is in NORMAL FORM: no './' prefix, no empty segment, no
+//     trailing '/'. The authority never writes such a key, so
+//     accepting one would only ever widen the surface.
+//
+// Rule 5 makes the rule deliberate instead of accidental: without it,
+// "./agent_installation/x" and "agent_installation/x" name the same
+// file but are different map keys, so the completeness scan would
+// report a declared file as undeclared for no reason a reader could
+// see.
+func hostAssetKeyProblem(rel string) string {
+	if rel == "" {
+		return "the bundle's host-asset declaration names an empty path"
+	}
+	if strings.ContainsRune(rel, '\\') {
+		return fmt.Sprintf("the bundle's host-asset declaration names %q, which contains a backslash — an asset path uses '/' as its separator", rel)
+	}
+	if path.IsAbs(rel) || strings.HasPrefix(rel, "/") {
+		return fmt.Sprintf("the bundle's host-asset declaration names %q, which is an absolute path — an asset path is relative to the bundle root", rel)
+	}
+	if len(rel) >= 2 && rel[1] == ':' {
+		return fmt.Sprintf("the bundle's host-asset declaration names %q, which carries a drive prefix — an asset path is relative to the bundle root", rel)
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == ".." {
+			return fmt.Sprintf("the bundle's host-asset declaration names %q, which contains a '..' segment — an asset path cannot leave the bundle root", rel)
+		}
+	}
+	if path.Clean(rel) != rel {
+		return fmt.Sprintf("the bundle's host-asset declaration names %q, which is not a plain relative path — the declaration must name the asset exactly as it sits in the bundle", rel)
+	}
+	return ""
+}
+
+// pathStaysInside reports whether a resolved path is inside a root.
+//
+// It is the containment backstop for the key rules above: even a key
+// that passes them is resolved against the bundle root, and the result
+// must remain under it.
+func pathStaysInside(root, resolved string) bool {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	absPath, err := filepath.Abs(resolved)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absRoot, absPath)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // readHostAssetManifest reads a bundle's host-asset declaration.

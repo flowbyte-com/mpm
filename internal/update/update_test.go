@@ -153,6 +153,14 @@ func (f fakeBuilder) BuildFromCheckout(srcDir, dstDir string) (string, error) {
 	if err := writeTestHostAssets(dstDir); err != nil {
 		return "", err
 	}
+	// The schema preflight. A real builder extracts the substrate's
+	// lifecycle_events DDL into the bundle (stageSchemaDDL, fail
+	// closed); the fake models the same bundle. Without it the
+	// schema-collision preflight would degrade to a no-op, so the
+	// validator refuses a bundle that does not carry one.
+	if err := writeTestSchemaPreflight(dstDir); err != nil {
+		return "", err
+	}
 	for name, content := range f.extraFiles {
 		full := filepath.Join(dstDir, name)
 		os.MkdirAll(filepath.Dir(full), 0755)

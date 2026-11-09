@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,6 +86,23 @@ func writeTestHostAssets(dstDir string) error {
 	return os.WriteFile(decl, raw, 0644)
 }
 
+// writeTestSchemaPreflight writes the bundle's schema preflight.
+//
+// It is the substrate's own lifecycle_events DDL, which is what the
+// schema-collision preflight compares the live table against. A bundle
+// without it degrades that check to a no-op, so the validator refuses
+// one.
+func writeTestSchemaPreflight(dstDir string) error {
+	dir := filepath.Join(dstDir, "schema")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	body := "CREATE TABLE IF NOT EXISTS lifecycle_events (\n" +
+		"\tevent_id TEXT PRIMARY KEY NOT NULL\n" +
+		");\n"
+	return os.WriteFile(filepath.Join(dir, "lifecycle_events.sql"), []byte(body), 0644)
+}
+
 // testBundleDir builds a complete, valid bundle in a temporary
 // directory and returns its path.
 func testBundleDir(t *testing.T) string {
@@ -148,7 +166,7 @@ func TestTheBundleBuiltFromACheckoutCarriesTheHostAssets(t *testing.T) {
 
 	// The bundle declares them, and the declaration matches its own
 	// contents.
-	if problems := hostAssetProblems(dst); len(problems) > 0 {
+	if problems := hostAssetProblems(dst, ScopeCandidate); len(problems) > 0 {
 		t.Errorf("the built bundle does not satisfy its own host-asset declaration: %v", problems)
 	}
 
@@ -470,7 +488,436 @@ func TestAFailureWhileEstablishingTheStablePathsFallsBack(t *testing.T) {
 	}
 }
 
+// stablePathResolves reports whether a stable path resolves into the
+// active release.
+//
+// It is a TEST helper: it asserts the property the installed managed
+// block depends on — that the path it names leads into whichever
+// release is active — and it has no production caller. Keeping it in
+// production code would be a helper that only tests use, and a
+// production file that exists only to be asserted against is a
+// liability, not a contract.
+func stablePathResolves(dataRoot, name string) bool {
+	target := filepath.Join(dataRoot, name)
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return false
+	}
+	release := filepath.Join(dataRoot, "releases")
+	if _, rev, err := CurrentReleaseTarget(dataRoot); err == nil && rev != "" {
+		want := filepath.Join(release, rev, name)
+		if resolved == want {
+			return true
+		}
+	}
+	// Without an active pointer, resolving at all is the best the
+	// check can say.
+	return resolved != ""
+}
+
+// --- B3: the declaration's keys must be safe paths ---------------------------
+
+// TestTheHostAssetDeclarationRefusesTraversal is the RED test for the
+// traversal hole.
+//
+// A declaration key is a path. A key that can point OUTSIDE the bundle
+// lets a corrupted declaration name an asset the bundle does NOT
+// carry: the validator resolves the key, finds a file that happens to
+// sit next to the bundle, and reports the bundle as complete. The
+// release is then not self-contained — its own declaration promises a
+// file whose bytes live somewhere else entirely, and the next
+// verification of that release (in a rollback, in a copy, in a
+// different directory layout) resolves the key to something else, or
+// to nothing.
+//
+// THE FIXTURE IS THE HOLE, NOT A NEAR MISS:
+//
+//   - the bundle is COMPLETE — every asset it declares is present and
+//     matches, so the completeness rule has nothing to say;
+//   - the outside file really exists, one directory above the bundle,
+//     and its digest really matches what the declaration claims.
+//
+// The only thing wrong with the bundle is the key. Without the key
+// rule (and without the containment backstop) the validators accept
+// it, and the release claims an asset it does not have.
+//
+// The rules mirror the authority's own
+// (scripts/install_runtime_assets.py refuses an absolute path or a
+// '..' segment).
+func TestTheHostAssetDeclarationRefusesTraversal(t *testing.T) {
+	lib := shellLibraryPath(t)
+	if lib == "" {
+		t.Skip("the shell library is not available")
+	}
+	for _, key := range []string{
+		"../outside-target.txt",
+		"agent_installation/../../outside-target.txt",
+	} {
+		t.Run(key, func(t *testing.T) {
+			dir := testBundleDir(t)
+			// The outside file: one directory ABOVE the bundle, so a
+			// traversal reaches it.
+			outside := filepath.Join(filepath.Dir(dir), "outside-target.txt")
+			if err := os.WriteFile(outside, []byte("# outside the bundle\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			// The bundle keeps every asset it declares — it is
+			// COMPLETE — and additionally declares the outside file.
+			addDeclarationKey(t, dir, key, digestOf(t, outside))
+			goValid := ValidateBundle(dir, "").Valid
+			shellValid := shellValidateBundle(t, lib, dir)
+			if goValid {
+				t.Error("the Go validator accepted a declaration that points outside the bundle")
+			}
+			if shellValid {
+				t.Error("the shell validator accepted a declaration that points outside the bundle")
+			}
+			if goValid != shellValid {
+				t.Errorf("the validators disagree: Go says %v, the shell library says %v", goValid, shellValid)
+			}
+		})
+	}
+}
+
+// TestTheHostAssetDeclarationRefusesUnsafeKeys is the broader matrix
+// for the declaration's KEYS.
+//
+// The traversal case above is the hole; the rest is hardening. A
+// relative path with a redundant segment names the same file as a
+// plain one, and the declaration must name it the way it sits in the
+// bundle — otherwise the completeness scan reports a declared file as
+// undeclared for no reason a reader could see.
+//
+// BOTH validators must refuse every case: the bundle that reaches an
+// operator depends on which tool ran.
+func TestTheHostAssetDeclarationRefusesUnsafeKeys(t *testing.T) {
+	lib := shellLibraryPath(t)
+	if lib == "" {
+		t.Skip("the shell library is not available")
+	}
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{"absolute path", "/etc/passwd"},
+		{"dot-slash prefix", "./agent_installation/mpm-agent-protocol.md"},
+		{"backslash separator", `agent_installation\scripts\block_provenance.py`},
+		{"drive prefix", "C:/outside.txt"},
+		{"empty key", ""},
+		{"double slash", "agent_installation//mpm-agent-protocol.md"},
+		{"trailing slash", "agent_installation/mpm-agent-protocol.md/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := testBundleDir(t)
+			// The declaration names the unsafe key INSTEAD of the
+			// protocol document, so the bundle is genuinely missing an
+			// asset it must carry.
+			rewriteDeclaration(t, dir, map[string]string{
+				tc.key: digestOf(t, filepath.Join(dir, "agent_installation", "mpm-agent-protocol.md")),
+			})
+			goValid := ValidateBundle(dir, "").Valid
+			shellValid := shellValidateBundle(t, lib, dir)
+			if goValid {
+				t.Error("the Go validator accepted a declaration with an unsafe key")
+			}
+			if shellValid {
+				t.Error("the shell validator accepted a declaration with an unsafe key")
+			}
+			if goValid != shellValid {
+				t.Errorf("the validators disagree: Go says %v, the shell library says %v", goValid, shellValid)
+			}
+		})
+	}
+}
+
+// TestTheDeclaredAssetMayNotBeASymlink proves the declaration cannot
+// point at a file OUTSIDE the bundle through a symlink.
+func TestTheDeclaredAssetMayNotBeASymlink(t *testing.T) {
+	dir := testBundleDir(t)
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	if err := os.WriteFile(outside, []byte("# outside\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "agent_installation", "scripts", "linked.py")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	rewriteDeclaration(t, dir, map[string]string{
+		"agent_installation/scripts/linked.py": digestOf(t, outside),
+	})
+	rep := ValidateBundle(dir, "")
+	if rep.Valid {
+		t.Fatal("a declaration naming a symlink was accepted")
+	}
+	if !reportHasCheck(rep, "host-assets", false) {
+		t.Errorf("the refusal does not name the host-assets check: %+v", rep.Checks)
+	}
+}
+
+// --- B4: the schema preflight -------------------------------------------------
+
+// TestTheSchemaPreflightIsRequiredInACandidate proves a candidate
+// without a usable schema preflight is refused.
+//
+// The schema-collision preflight compares the live table against the
+// DDL the substrate itself would apply. A bundle that does not carry
+// that DDL degrades the check to a no-op, SILENTLY — and the whole
+// point of this contract is that a silent degradation is a failure.
+func TestTheSchemaPreflightIsRequiredInACandidate(t *testing.T) {
+	lib := shellLibraryPath(t)
+	if lib == "" {
+		t.Skip("the shell library is not available")
+	}
+	cases := []struct {
+		name  string
+		mutar func(t *testing.T, dir string)
+	}{
+		{"the directory is gone", func(t *testing.T, dir string) {
+			os.RemoveAll(filepath.Join(dir, "schema"))
+		}},
+		{"the file is gone", func(t *testing.T, dir string) {
+			os.Remove(filepath.Join(dir, "schema", "lifecycle_events.sql"))
+		}},
+		{"the file is empty", func(t *testing.T, dir string) {
+			os.WriteFile(filepath.Join(dir, "schema", "lifecycle_events.sql"), []byte("  \n"), 0644)
+		}},
+		{"the file declares a destructive statement", func(t *testing.T, dir string) {
+			os.WriteFile(filepath.Join(dir, "schema", "lifecycle_events.sql"), []byte("DROP TABLE lifecycle_events;\n"), 0644)
+		}},
+		{"the file declares an unrelated table", func(t *testing.T, dir string) {
+			os.WriteFile(filepath.Join(dir, "schema", "lifecycle_events.sql"), []byte("CREATE TABLE something_else (id TEXT);\n"), 0644)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := testBundleDir(t)
+			tc.mutar(t, dir)
+			goValid := ValidateBundle(dir, "").Valid
+			shellValid := shellValidateBundle(t, lib, dir)
+			if goValid {
+				t.Error("the Go validator accepted a bundle with no usable schema preflight")
+			}
+			if shellValid {
+				t.Error("the shell validator accepted a bundle with no usable schema preflight")
+			}
+			if goValid != shellValid {
+				t.Errorf("the validators disagree: Go says %v, the shell library says %v", goValid, shellValid)
+			}
+		})
+	}
+}
+
+// TestTheSchemaPreflightIsOptionalInAnInstalledRelease proves the
+// documented compatibility: a release promoted before the preflight
+// travelled with the bundle may not carry one.
+//
+// The gap is historic and is NOT retrospectively closed on installed
+// releases: doing so would refuse releases that were perfectly good
+// when they were installed, and push the operator towards deleting an
+// immutable rollback target.
+func TestTheSchemaPreflightIsOptionalInAnInstalledRelease(t *testing.T) {
+	dir := testBundleDir(t)
+	if err := os.RemoveAll(filepath.Join(dir, "schema")); err != nil {
+		t.Fatal(err)
+	}
+	rep := ValidateInstalledRelease(dir, "")
+	if !rep.Valid {
+		t.Fatalf("an installed release without a schema preflight was refused: %v", rep.ValidationError())
+	}
+	// A CANDIDATE without one is still refused.
+	if ValidateBundle(dir, "").Valid {
+		t.Fatal("a candidate without a schema preflight was accepted")
+	}
+	// And if the file IS there, it must be valid.
+	if err := os.MkdirAll(filepath.Join(dir, "schema"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "schema", "lifecycle_events.sql"), []byte("DROP TABLE lifecycle_events;\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if ValidateInstalledRelease(dir, "").Valid {
+		t.Fatal("an installed release with a destructive schema preflight was accepted")
+	}
+}
+
+// --- B2: an already-installed release ----------------------------------------
+
+// TestAnInstalledReleaseWithRuntimeDroppingsStillValidates is the B2
+// case: a release that has been in use.
+//
+// The runtime writes into a release directory after installation —
+// Python's bytecode caches, the adapter's build-provenance sidecar —
+// and a release that fails the COMPLETENESS rule for that reason is
+// not corrupt. It is used.
+//
+// The rule applies to CANDIDATES. An installed release is checked for
+// INTEGRITY: the assets it declares must still be present with the
+// digests it declares.
+func TestAnInstalledReleaseWithRuntimeDroppingsStillValidates(t *testing.T) {
+	dir := testBundleDir(t)
+
+	// The two droppings the live installation actually carries.
+	cacheDir := filepath.Join(dir, "agent_installation", "scripts", "__pycache__")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "block_provenance.cpython-314.pyc"), []byte("not really bytecode"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "agent_installation", "mpm-opencode", "dist", "mpm-build-provenance.json")
+	if err := os.WriteFile(sidecar, []byte(`{"commit":"x","built":"1"}`+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A CANDIDATE with those files is refused: a fresh staging
+	// directory has no business carrying them.
+	if ValidateBundle(dir, "").Valid {
+		t.Fatal("a candidate carrying undeclared runtime droppings was accepted")
+	}
+	// An INSTALLED release with them is accepted.
+	rep := ValidateInstalledRelease(dir, "")
+	if !rep.Valid {
+		t.Fatalf("an installed release carrying runtime droppings was refused: %v", rep.ValidationError())
+	}
+}
+
+// TestAnInstalledReleaseWithACorruptedAssetIsRefused proves the
+// compatibility rule does not weaken the detection of a CORRUPTED
+// release.
+func TestAnInstalledReleaseWithACorruptedAssetIsRefused(t *testing.T) {
+	dir := testBundleDir(t)
+	target := filepath.Join(dir, "agent_installation", "mpm-agent-protocol.md")
+	if err := os.WriteFile(target, []byte("# tampered\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rep := ValidateInstalledRelease(dir, "")
+	if rep.Valid {
+		t.Fatal("an installed release with a corrupted asset was accepted")
+	}
+	if !reportHasCheck(rep, "host-assets", false) {
+		t.Errorf("the refusal does not name the host-assets check: %+v", rep.Checks)
+	}
+}
+
+// TestAnInstalledReleaseWithoutADeclarationIsRefused proves the
+// compatibility rule does not extend to a release that carries NO
+// declaration.
+//
+// Such a release was built before the host-asset contract existed. It
+// is genuinely incomplete — it is the very defect this contract exists
+// to detect — and detecting it must not be traded away for the
+// convenience of an installed directory.
+func TestAnInstalledReleaseWithoutADeclarationIsRefused(t *testing.T) {
+	dir := testBundleDir(t)
+	if err := os.Remove(filepath.Join(dir, filepath.FromSlash(HostAssetManifestRelPath))); err != nil {
+		t.Fatal(err)
+	}
+	if ValidateInstalledRelease(dir, "").Valid {
+		t.Fatal("an installed release with no host-asset declaration was accepted")
+	}
+}
+
+// TestRePromotingAnAlreadyInstalledRevisionIsAccepted is the B2
+// re-promotion case.
+//
+// Re-promoting a revision that is already installed must remain a
+// no-op, not a refusal: the release is immutable, so the only outcome
+// available is "use the one that is there". Refusing it would tell the
+// operator to delete an immutable rollback target.
+func TestRePromotingAnAlreadyInstalledRevisionIsAccepted(t *testing.T) {
+	rev := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	root := testLayout(t, rev)
+	l := NewLayout(root)
+
+	// The installed release has been in use: the runtime wrote its
+	// bytecode cache into it.
+	cacheDir := filepath.Join(l.ReleaseDir(rev), "agent_installation", "scripts", "__pycache__")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "block_provenance.cpython-314.pyc"), []byte("not really bytecode"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A candidate for the same revision.
+	candidate := t.TempDir()
+	b := fakeBuilder{commit: rev}
+	if _, err := b.BuildFromCheckout(t.TempDir(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate, "RELEASE.json"), []byte(fmt.Sprintf(`{"revision":%q,"commit":%q,"short_commit":"12345678","build_epoch":1,"version":"v0","built_at":"x","bundle_layout":"versioned-bundle/1"}`, rev, rev)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	installed, err := installRelease(root, candidate, rev)
+	if err != nil {
+		t.Fatalf("re-promoting an already-installed revision was refused: %v", err)
+	}
+	if installed {
+		t.Fatal("the existing release was replaced; a release is immutable")
+	}
+}
+
+// --- B1: the runtime must not write into a release ----------------------------
+
+// addDeclarationKey adds one key to a bundle's host-asset declaration,
+// leaving the existing ones alone.
+func addDeclarationKey(t *testing.T, dir, rel, digest string) {
+	t.Helper()
+	decl := filepath.Join(dir, filepath.FromSlash(HostAssetManifestRelPath))
+	raw, err := os.ReadFile(decl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest HostAssetManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Assets == nil {
+		manifest.Assets = map[string]HostAssetRecord{}
+	}
+	manifest.Assets[rel] = HostAssetRecord{SHA256: digest}
+	out, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(decl, out, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// rewriteDeclaration replaces a bundle's host-asset declaration with
+// the given keys and digests.
+func rewriteDeclaration(t *testing.T, dir string, assets map[string]string) {
+	t.Helper()
+	manifest := HostAssetManifest{Version: hostAssetManifestVersion, Assets: map[string]HostAssetRecord{}}
+	for rel, digest := range assets {
+		manifest.Assets[rel] = HostAssetRecord{SHA256: digest}
+	}
+	raw, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decl := filepath.Join(dir, filepath.FromSlash(HostAssetManifestRelPath))
+	if err := os.WriteFile(decl, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// digestOf returns the sha256 of a file, as the declaration spells it.
+func digestOf(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 // --- helpers ------------------------------------------------------------------
+
 // promoteOnce runs one promotion in a disposable root and returns the
 // root and the new revision.
 func promoteOnce(t *testing.T) (string, string) {
