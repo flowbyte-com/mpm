@@ -85,10 +85,21 @@ test pins that they agree:
 `TestTheShellAndGoValidatorsAgreeOnTheHostAssets` in
 `internal/update/hostassets_test.go`.
 
-### A known divergence, present before this contract
+**They do not agree on everything.** Two rules differ, and both
+differences predate this contract — see the section below. Where they
+agree, a test pins that; where they differ, the difference is listed.
 
-The two validators do not agree about one rule: **a bundle that carries
-no `bin/mpm-update`**.
+### The two known divergences, both present before this contract
+
+The two validators do not agree about two rules. **Both differences
+predate the host-asset contract** — they are the same on the head this
+contract was built on — and neither is a host-asset or schema-preflight
+rule, so neither is in scope here. They are recorded because the
+compatibility matrix below reports them, and a reader comparing the two
+columns deserves to know that the difference is in the binary and
+payload rules, not in the asset rules.
+
+**1. A bundle that carries no `bin/mpm-update`.**
 
 - the Go validator reports it and does not refuse it — a release built
   before the standalone updater existed still validates
@@ -97,12 +108,24 @@ no `bin/mpm-update`**.
   whose recovery executable can never be provisioned
   (`scripts/lib/runtime_bundle.sh`, `RB_BINARIES`).
 
-This divergence **predates the host-asset contract** and is not
-introduced by it: it is the same on the head this contract was built
-on. It is not a host-asset or schema-preflight rule, so it is out of
-scope here; it is recorded because the compatibility matrix below
-reports it, and a reader comparing the two columns deserves to know
-that the difference is in the binary rule, not in the asset rule.
+**2. A bundle whose runtime payload is missing a declared file** — for
+example `agent_installation/mpm-opencode/dist/index.v2.js`, the
+compiled plugin's entry point.
+
+- the Go validator refuses it — the payload check requires every file
+  the payload declaration names to be present and loadable
+  (`internal/update/verify.go`, the `payload` check);
+- the shell validator **accepts** it: the shell library has no payload
+  check in either scope, and its completeness rule only asks that every
+  file the bundle CARRIES is declared — not that every declared file is
+  carried.
+
+That second direction is the one that produces the outcome this
+contract set out to eliminate: a bundle the shell assembler accepts and
+publishes, and the updater then refuses. Reconciling it is a separate
+change; until then, the shell validator is the weaker of the two on
+this rule, and a bundle published by the shell assembler must be
+checked by the Go validator before it is trusted.
 
 Measured against the live releases (disposable copies):
 
@@ -110,8 +133,11 @@ Measured against the live releases (disposable copies):
 |---|---|---|---|---|
 | `77738cfd…` (carries the declaration and the preflight) | refused | **valid** | refused | **valid** |
 | `baadfeb98…` | refused | **valid** | refused | **valid** |
-| `3d63244e…`, `aeec40f1…` (predate `mpm-update`) | refused | **valid** | refused | refused |
+| `3d63244e…`, `aeec40f1…` (predate `mpm-update`) | refused | **valid** | refused | refused † |
 | `4a870c8a…` (the defective release: no declaration) | refused | refused | refused | refused |
+
+† divergence 1. (Divergence 2 does not apply to these releases: they
+carry their payload's declared files.)
 
 Every "refused" in the candidate columns is the completeness rule
 (undeclared runtime droppings) or the missing declaration — exactly
@@ -146,17 +172,84 @@ preflight compares the live table against it; a bundle that does not
 carry it degrades that check to a **no-op**, silently, and the check
 reports success because it compared the live table against nothing.
 
+### The preflight is EXECUTED, so its content is a security boundary
+
+The collision check does not read the file — it **compiles** it. It
+runs the candidate's reference DDL against an in-memory database and
+compares the shape the statement produces with the live table's shape
+(`internal/update/preflight.go`, `checkTableShape`).
+
+So the file is code. A file that merely *contains* a
+`CREATE TABLE lifecycle_events (...)` is not a reference DDL: it may
+also carry a `DROP`, a `DELETE`, or an `ATTACH` that writes a file
+outside the database — and the updater would run it.
+
+Two rules follow, and both are enforced identically in Go and in the
+shell:
+
+1. **The bundle is validated BEFORE the preflight runs.** The
+   promotion and the dry run validate the candidate first and compile
+   its preflight second. A bundle whose preflight is not one supported
+   statement is refused before anything in it is executed.
+2. **The file must be EXACTLY ONE statement.** One `CREATE TABLE` for
+   `lifecycle_events`, terminated by `;`, with nothing before or after
+   it, and balanced parentheses. The scan is comment- and
+   string-aware: the substrate's own DDL contains a `;` inside a line
+   comment, so a rule that counted semicolons without looking at
+   comments would reject the canonical output.
+
+The rule is in `internal/update/ddl.go`
+(`preflightStatementProblems`) and in `scripts/lib/runtime_bundle.sh`
+(`rb_validate_schema_preflight`); the parity test
+`TestTheSchemaPreflightRuleIsTheSameInGoAndInTheShell` runs both over
+the same matrix, with the canonical extractor's exact output as the
+positive control.
+
 So:
 
-- a **candidate** must carry it, and it must be non-empty and declare
-  the table. `DROP TABLE lifecycle_events;` and
-  `CREATE TABLE something_else (...)` do not satisfy it.
+- a **candidate** must carry it, and it must be exactly one supported
+  statement. `DROP TABLE lifecycle_events;`, a valid `CREATE` followed
+  by a `DROP`, an unterminated `CREATE`, a comment that merely contains
+  the expected phrase, and a statement for a different table are all
+  refused.
 - `stageSchemaDDL` (Go), `install.sh` and `scripts/assemble-release-bundle.sh`
   all **fail closed**: an unreadable schema source or an unextractable
   DDL is an error, not "this checkout ships no DDL".
 - an **installed** release may lack it — releases promoted before the
-  preflight travelled with the bundle did. If it is present, it must be
-  valid.
+  preflight travelled with the bundle did. If it is present, it must
+  satisfy the same rule.
+
+### What the preflight check does NOT establish
+
+**The bundle ASSERTS that its preflight is the substrate's DDL. The
+release format cannot prove it.**
+
+The candidate's binary embeds the substrate's schema, but it exposes no
+way to read it back, and the bundle carries no source. So nothing in
+the bundle independently witnesses that `schema/lifecycle_events.sql`
+is the statement that binary will apply. A bundle that ships a
+*different* — but syntactically valid — `CREATE TABLE lifecycle_events`
+passes every check, and the collision check then compares the live
+table against the bundle's own claim.
+
+Two consequences, stated plainly:
+
+- the validator proves the file is **one supported statement**. It does
+  not prove the statement is the substrate's, and its success message
+  says exactly that: *"the bundle carries one CREATE TABLE
+  lifecycle_events statement for the schema-collision preflight (the
+  bundle asserts it is the substrate's DDL; the release format cannot
+  prove that)"*.
+- the collision check is sound **for a bundle the canonical builder
+  assembled**, because that builder extracts the DDL from the very
+  checkout it compiles. For a bundle assembled elsewhere it is only as
+  strong as the bundle's self-consistency.
+
+This is the same boundary the host-asset declaration has: a publisher
+who controls the archive controls the binaries in it. The bundle
+validators are completeness and consistency checks, not authenticity
+boundaries — and they are now documented as such rather than being
+described as if they were more.
 
 ## Where the rules are implemented
 
@@ -164,7 +257,8 @@ So:
 |---|---|---|
 | the scopes | `internal/update/hostassets.go` (`BundleScope`), `internal/update/verify.go` (`ValidateBundle`, `ValidateInstalledRelease`) | `scripts/lib/runtime_bundle.sh` (`rb_validate_bundle`, `rb_validate_installed_release`) |
 | the declaration keys | `internal/update/hostassets.go` (`hostAssetKeyProblem`, `pathStaysInside`) | `scripts/lib/runtime_bundle.sh` (`rb_validate_host_assets`, `key_problem`, `stays_inside`) |
-| the schema preflight | `internal/update/ddl.go` (`schemaPreflightProblems`) | `scripts/lib/runtime_bundle.sh` (`rb_validate_schema_preflight`) |
+| the schema preflight | `internal/update/ddl.go` (`schemaPreflightProblems`, `preflightStatementProblems`, `scanPreflight`) | `scripts/lib/runtime_bundle.sh` (`rb_validate_schema_preflight`, `scan_preflight`) |
+| the order — validate before compiling | `internal/update/orchestrate.go` (the promotion and the dry run), `internal/update/resolve.go` (`preflight`) | — |
 
 The authority for the asset set is unchanged:
 `scripts/install_runtime_assets.py`, whose own `load_manifest` refuses

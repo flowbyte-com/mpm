@@ -245,9 +245,19 @@ residual is real and it lasts until the daemons are restarted:
 # The units are USER-level (they are installed with `systemctl --user`),
 # so the plain `systemctl` reports "inactive" for them and means
 # nothing. Use --user.
-systemctl --user status mpm-scheduler mpm-telemetry \
+#
+# mpm-scheduler is the unit a stock installation has: install.sh
+# installs that one (SERVICE_NAME="mpm-scheduler"). mpm-telemetry is
+# OPTIONAL — its unit may simply not exist on this host, and
+# "Unit mpm-telemetry.service could not be found" is a red herring in
+# a procedure whose purpose is to avoid red herrings. Ask about the
+# units that are actually installed:
+systemctl --user list-unit-files 'mpm-*' --no-legend
+systemctl --user status mpm-scheduler \
   | grep -E "ExecStart|Active"
 ```
+
+If `mpm-telemetry.service` IS installed, check it the same way.
 
 Two ways to close it, in the operator's order of preference:
 
