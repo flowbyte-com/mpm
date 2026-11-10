@@ -1789,6 +1789,7 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 	}
 
 	totalPruned := 0
+	var errs []error
 
 	// Prune expired
 	//
@@ -1805,10 +1806,10 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 			DELETE FROM memories
 		WHERE expires_at IS NOT NULL AND expires_at < strftime('%s','now')
 		  AND `+DirectiveExclusionClause, 0)
-		if err == nil {
-			if rows, _ := result.RowsAffected(); rows > 0 {
-				totalPruned += int(rows)
-			}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("prune expired: %w", err))
+		} else if rows, rerr := result.RowsAffected(); rerr == nil && rows > 0 {
+			totalPruned += int(rows)
 		}
 	}
 
@@ -1828,10 +1829,10 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 				LIMIT 100
 			)
 		`, 0, cfg.NeverAccessedMaxDays)
-		if err == nil {
-			if rows, _ := result.RowsAffected(); rows > 0 {
-				totalPruned += int(rows)
-			}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("prune never-accessed: %w", err))
+		} else if rows, rerr := result.RowsAffected(); rerr == nil && rows > 0 {
+			totalPruned += int(rows)
 		}
 	}
 
@@ -1851,14 +1852,16 @@ func (s *MemoryStore) AutoPrunePolicy(cfg AutoPruneConfig) (int, error) {
 				LIMIT 100
 			)
 		`, 3, cfg.LowWeightMaxDays)
-		if err == nil {
-			if rows, _ := result.RowsAffected(); rows > 0 {
-				totalPruned += int(rows)
-			}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("prune low-weight: %w", err))
+		} else if rows, rerr := result.RowsAffected(); rerr == nil && rows > 0 {
+			totalPruned += int(rows)
 		}
 	}
 
-	return totalPruned, nil
+	// Every arm above runs even when an earlier one failed, so the returned
+	// count is the work that DID happen. The error names what did not.
+	return totalPruned, errors.Join(errs...)
 }
 
 // ConsolidateMemories merges similar memories about the same topic.
@@ -1962,6 +1965,7 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 
 	// Find clusters of similar memories (simplified: same tags or similar content)
 	consolidated := 0
+	var errs []error
 	seen := make(map[string]bool)
 
 	for i, mem := range memories {
@@ -2004,18 +2008,56 @@ func (s *MemoryStore) ConsolidateMemories(similarityThreshold float64, maxPerTop
 				}
 			}
 
-			// Delete all except the best
+			// Delete all except the best.
+			//
+			// The count is the number of rows this run ACTUALLY soft-deleted,
+			// established from RowsAffected(), not from "the statement did not
+			// return an error". A statement that succeeds and changes nothing
+			// is not a consolidation:
+			//
+			//   - the row vanished between the SELECT and the UPDATE (a
+			//     concurrent `prune --older-than` hard-delete or shred), or
+			//   - the row was already soft-deleted by another writer.
+			//
+			// The `AND deleted_at IS NULL` guard is what makes the second case
+			// distinguishable: without it SQLite still matches an
+			// already-deleted row, so RowsAffected() would be 1 and the row
+			// would be counted (and its original deletion timestamp
+			// overwritten). With it, both cases report 0 rows and are skipped.
+			//
+			// A zero-row result is NOT added to errs: losing a race to a
+			// concurrent delete is routine, and it must not make
+			// `mpm ops maintain` exit non-zero. A failed statement and a failed
+			// row count ARE errors and are reported.
 			for k := 0; k < len(cluster); k++ {
-				if k != bestIdx {
-					s.execTracked(`UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?`, 0, cluster[k])
-					consolidated++
+				if k == bestIdx {
+					continue
 				}
+				res, cErr := s.execTracked(`
+					UPDATE memories
+					SET deleted_at = CAST(strftime('%s','now') AS INTEGER)
+					WHERE id = ? AND deleted_at IS NULL`, 0, cluster[k])
+				if cErr != nil {
+					errs = append(errs, fmt.Errorf("consolidate %s: %w", cluster[k], cErr))
+					continue
+				}
+				rows, rErr := res.RowsAffected()
+				if rErr != nil {
+					errs = append(errs, fmt.Errorf("consolidate %s: cannot confirm the row count: %w", cluster[k], rErr))
+					continue
+				}
+				if rows == 0 {
+					continue
+				}
+				consolidated++
 			}
 			seen[cluster[bestIdx]] = true
 		}
 	}
 
-	return consolidated, nil
+	// consolidated counts only rows a soft-delete actually changed; the error
+	// names the statements and row counts that could not be established.
+	return consolidated, errors.Join(errs...)
 }
 
 // cosineSimilarityFloat32 computes cosine similarity between two
@@ -2241,33 +2283,59 @@ type MaintenanceStats struct {
 	NeverAccessed  int `json:"never_accessed"`
 	LowWeight      int `json:"low_weight"`
 	ForReview      int `json:"for_spaced_reinforcement"`
+	// Errors names the maintenance OPERATIONS that failed during this
+	// run, so a caller can distinguish "everything ran" from "the numbers
+	// are partial". Empty means every operation succeeded.
+	Errors []string `json:"errors,omitempty"`
 }
 
 // RunSelfMaintenance runs all self-improvement processes.
-// Returns maintenance statistics.
+//
+// It returns the statistics it managed to produce AND an error naming every
+// operation that failed. The two are not exclusive: a failed prune does not
+// make a successful decay useless, so the caller gets the partial numbers and
+// the failure. A nil error is the ONLY signal that every operation ran.
+//
+// Before this, every failure below was discarded and the function always
+// returned nil — so `mpm ops maintain` printed "complete" and exited 0 while
+// decay, pruning or consolidation had not run at all.
 func (s *MemoryStore) RunSelfMaintenance() (*MaintenanceStats, error) {
 	stats := &MaintenanceStats{}
+	var errs []error
 
-	// 1. Decay unused weights (per-collection policies, weekly)
-	decayed, err := s.DecayWeights(DefaultDecayPolicies, 7)
-	if err == nil {
-		stats.DecayedWeights = decayed
+	// fail records one failed operation by NAME (for the stats envelope) and
+	// keeps the wrapped detail (for the returned error).
+	fail := func(op string, err error) {
+		stats.Errors = append(stats.Errors, op)
+		errs = append(errs, fmt.Errorf("%s: %w", op, err))
 	}
 
-	// 2. Auto-prune policy
+	// 1. Decay unused weights (per-collection policies, weekly).
+	//
+	// The count is recorded even on failure: DecayWeights returns the number
+	// it had already decayed, and that partial progress is real.
+	decayed, err := s.DecayWeights(DefaultDecayPolicies, 7)
+	stats.DecayedWeights = decayed
+	if err != nil {
+		fail("decay_weights", err)
+	}
+
+	// 2. Auto-prune policy.
 	pruned, err := s.AutoPrunePolicy(AutoPruneConfig{
 		NeverAccessedMaxDays: 30, // 30 days
 		LowWeightMaxDays:     90, // 90 days
 		ExpiredEnabled:       true,
 	})
-	if err == nil {
-		stats.PrunedTotal = pruned
+	stats.PrunedTotal = pruned
+	if err != nil {
+		fail("auto_prune", err)
 	}
 
-	// 3. Consolidate similar LTM memories
+	// 3. Consolidate similar LTM memories.
 	consolidated, err := s.ConsolidateMemories(0.85, 50)
-	if err == nil {
-		stats.Consolidated = consolidated
+	stats.Consolidated = consolidated
+	if err != nil {
+		fail("consolidate", err)
 	}
 
 	// 4. The review backlog — the CANONICAL rule and the TOTAL.
@@ -2297,13 +2365,19 @@ func (s *MemoryStore) RunSelfMaintenance() (*MaintenanceStats, error) {
 	//    so there is ONE definition of review eligibility in the
 	//    substrate.
 	forReview, err := s.CountMemoriesDueForReview(ReviewDueAfterDays)
-	if err == nil {
+	if err != nil {
+		// A failed COUNT does not fail the maintenance; it makes the
+		// report incomplete. The statistic stays at its zero value and
+		// the error says so.
+		fail("review_backlog", err)
+		if s.DM != nil {
+			s.DM.LogAudit(AuditWarn, "memory", fmt.Sprintf("RunSelfMaintenance: review backlog count failed, defaulting to 0: %v", err), "", AuditContext{})
+		}
+	} else {
 		stats.ForReview = forReview
-	} else if s.DM != nil {
-		s.DM.LogAudit(AuditWarn, "memory", fmt.Sprintf("RunSelfMaintenance: review backlog count failed, defaulting to 0: %v", err), "", AuditContext{})
 	}
 
-	// Get never-accessed count
+	// Get never-accessed count.
 	if s.DB != nil {
 		var count int
 		if err := s.DB.QueryRow(`
@@ -2312,11 +2386,13 @@ func (s *MemoryStore) RunSelfMaintenance() (*MaintenanceStats, error) {
 			  AND last_accessed_at IS NULL
 			  AND reinforcement_count = 0
 		`).Scan(&count); err != nil {
+			fail("never_accessed_count", err)
 			if s.DM != nil {
 				s.DM.LogAudit(AuditWarn, "memory", fmt.Sprintf("RunSelfMaintenance: never-accessed count failed, defaulting to 0: %v", err), "", AuditContext{})
 			}
+		} else {
+			stats.NeverAccessed = count
 		}
-		stats.NeverAccessed = count
 
 		var lowWeight int
 		if err := s.DB.QueryRow(`
@@ -2325,14 +2401,16 @@ func (s *MemoryStore) RunSelfMaintenance() (*MaintenanceStats, error) {
 			  AND weight = 1
 			  AND reinforcement_count = 0
 		`).Scan(&lowWeight); err != nil {
+			fail("low_weight_count", err)
 			if s.DM != nil {
 				s.DM.LogAudit(AuditWarn, "memory", fmt.Sprintf("RunSelfMaintenance: low-weight count failed, defaulting to 0: %v", err), "", AuditContext{})
 			}
+		} else {
+			stats.LowWeight = lowWeight
 		}
-		stats.LowWeight = lowWeight
 	}
 
-	return stats, nil
+	return stats, errors.Join(errs...)
 }
 
 // FullTextSearch performs substring search using FTS5 or SQLite LIKE.

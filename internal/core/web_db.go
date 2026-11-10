@@ -1902,18 +1902,27 @@ func (dm *DatabaseManager) RunSelfMaintenance() (map[string]interface{}, error) 
 	}
 
 	stats, err := store.RunSelfMaintenance()
-	if err != nil {
+	if stats == nil {
 		return nil, err
 	}
 
-	return map[string]interface{}{
+	// The statistics and the error are NOT exclusive. When an operation fails
+	// the remaining numbers are still the truth about the work that DID
+	// happen, so they are returned alongside the error rather than discarded.
+	out := map[string]interface{}{
 		"decayed_weights":          stats.DecayedWeights,
 		"pruned_total":             stats.PrunedTotal,
 		"consolidated":             stats.Consolidated,
 		"never_accessed":           stats.NeverAccessed,
 		"low_weight":               stats.LowWeight,
 		"for_spaced_reinforcement": stats.ForReview,
-	}, nil
+	}
+	// Present only when something failed, so the success payload keeps its
+	// existing shape.
+	if len(stats.Errors) > 0 {
+		out["errors"] = append([]string(nil), stats.Errors...)
+	}
+	return out, err
 }
 
 // GetSpacedReinforcementReview returns memories for spaced reinforcement review.
