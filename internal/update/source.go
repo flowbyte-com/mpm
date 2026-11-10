@@ -206,6 +206,17 @@ func (b GoBuilder) BuildFromCheckout(srcDir, dstDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The release-scoped host assets come BEFORE the runtime payload,
+	// exactly as install.sh and scripts/assemble-release-bundle.sh
+	// order them. They are what the installed managed block points at
+	// and what the per-adapter installers import by path, so a bundle
+	// without them installs an installation whose own instructions are
+	// dangling. The payload lands in the same adapter directory and its
+	// validator only requires the files the payload manifest names, so
+	// the two sets coexist.
+	if err := stageHostAssets(srcDir, dstDir); err != nil {
+		return "", err
+	}
 	if err := stagePayloads(srcDir, dstDir, sources); err != nil {
 		if b.payloadRequired() {
 			return "", err
@@ -293,14 +304,26 @@ func readVersionFile(srcDir string) string {
 
 // stageSchemaDDL embeds the substrate's lifecycle_events DDL so the
 // preflight travels with the bundle (same rule install.sh applies).
+//
+// IT FAILS CLOSED. A bundle with no preflight is a bundle whose
+// schema-collision check silently degrades to a no-op: the updater
+// would compare the live table against nothing and report success.
+// That is the exact harm the preflight exists to prevent, and it is
+// invisible until a destructive schema change reaches the live
+// database.
+//
+// So an unreadable schema source is an error, and an unextractable
+// DDL is an error. Neither is "this checkout ships no DDL": the
+// substrate's schema is not optional, and a bundle that cannot carry
+// it must not be published or installed.
 func stageSchemaDDL(srcDir, dstDir string) error {
 	raw, err := os.ReadFile(filepath.Join(srcDir, "internal", "core", "schema.go"))
 	if err != nil {
-		return nil // a checkout without the Go schema ships no DDL; preflight degrades gracefully
+		return fmt.Errorf("the checkout's substrate schema could not be read (%s): %w; a bundle without it would install a runtime whose schema-collision preflight cannot run", filepath.Join(srcDir, "internal", "core", "schema.go"), err)
 	}
 	ddl, err := extractLifecycleDDL(string(raw))
 	if err != nil {
-		return nil
+		return fmt.Errorf("the substrate's lifecycle_events DDL could not be extracted: %w; a bundle without it would install a runtime whose schema-collision preflight cannot run", err)
 	}
 	dir := filepath.Join(dstDir, "schema")
 	if err := os.MkdirAll(dir, 0755); err != nil {

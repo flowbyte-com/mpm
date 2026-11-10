@@ -72,6 +72,19 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
+# DO NOT WRITE BYTECODE INTO THE RUNTIME.
+#
+# This script runs FROM INSIDE an installed release directory
+# (~.mpm/agent_installation/...), and a release directory is versioned
+# and immutable: it is what a rollback gives back, and it is validated
+# against its own declaration. A bytecode cache written into it is a
+# file no declaration names, so the release would fail its own
+# validation.
+#
+# It is set BEFORE the local imports below, because the import system
+# compiles and caches the sibling modules the moment they are imported.
+sys.dont_write_bytecode = True
+
 AGENT_INSTALLATION = Path(__file__).resolve().parent.parent
 RENDER_SCRIPT = AGENT_INSTALLATION / "scripts" / "render_managed_blocks.py"
 RECONCILE_SCRIPT = AGENT_INSTALLATION / "scripts" / "reconcile_managed_blocks.py"

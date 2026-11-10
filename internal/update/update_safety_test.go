@@ -233,6 +233,18 @@ esac
 	if err := writeTestPayload(dstDir); err != nil {
 		return "", err
 	}
+	// And the release-scoped host assets, with the declaration the
+	// validator checks. A bundle without them is refused before it is
+	// ever activated.
+	if err := writeTestHostAssets(dstDir); err != nil {
+		return "", err
+	}
+	// And the schema preflight: a bundle without it is refused before
+	// it is ever activated, because the schema-collision check would
+	// degrade to a no-op.
+	if err := writeTestSchemaPreflight(dstDir); err != nil {
+		return "", err
+	}
 	return commit, nil
 }
 
@@ -481,6 +493,11 @@ esac
 	// A COMPLETE, loadable payload: the bundle must carry the whole
 	// package, not the two files that used to be enough to pass.
 	if err := writeTestPayload(dstDir); err != nil {
+		return "", err
+	}
+	// And the release-scoped host assets, with the declaration the
+	// validator checks.
+	if err := writeTestHostAssets(dstDir); err != nil {
 		return "", err
 	}
 	return commit, nil

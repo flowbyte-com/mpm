@@ -23,6 +23,7 @@ Hermeticity: every root is a fresh mktemp directory and nothing
 resolves into the real ~/.mpm.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -115,7 +116,58 @@ class BundleFixture(unittest.TestCase):
             '  "bundle_layout": "versioned-bundle/1"\n'
             '}\n'
         )
+        self._add_host_assets(bundle)
         return bundle
+
+    def _add_host_assets(self, bundle: Path) -> None:
+        """Give the bundle the release-scoped host assets, declared.
+
+        A bundle that omits them installs an installation whose own
+        managed block points at files that do not exist, so the
+        validator refuses one. The fixture therefore has to be a
+        WELL-FORMED bundle, and "well-formed" now includes the
+        declaration the validator reads.
+        """
+        assets = {
+            "agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md": "# canonical\n",
+            "agent_installation/mpm-agent-protocol.md": "# protocol\n",
+            "agent_installation/scripts/block_provenance.py": "# shared\n",
+        }
+        declaration = {}
+        for rel, body in assets.items():
+            p = bundle / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body)
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            declaration[rel] = {"sha256": digest}
+        # The runtime payload declaration travels with the bundle too.
+        payload_decl = bundle / "agent_installation" / "runtime_payloads.json"
+        payload_decl.parent.mkdir(parents=True, exist_ok=True)
+        payload_decl.write_text(
+            json.dumps({"version": 1, "payloads": []}, indent=2) + "\n"
+        )
+        manifest = bundle / "config" / "runtime-assets.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(
+            json.dumps({"version": 1, "assets": declaration}, indent=2, sort_keys=True) + "\n"
+        )
+        self._add_schema_preflight(bundle)
+
+    def _add_schema_preflight(self, bundle: Path) -> None:
+        """Give the bundle the substrate's lifecycle_events DDL.
+
+        The schema-collision preflight compares the live table against
+        the DDL the substrate itself would apply. A bundle that does not
+        carry it degrades the check to a no-op, so the validator refuses
+        one — and "well-formed" now includes it.
+        """
+        schema = bundle / "schema" / "lifecycle_events.sql"
+        schema.parent.mkdir(parents=True, exist_ok=True)
+        schema.write_text(
+            "CREATE TABLE IF NOT EXISTS lifecycle_events (\n"
+            "\tevent_id TEXT PRIMARY KEY NOT NULL\n"
+            ");\n"
+        )
 
     # ------------------------------------------------------------------
     # driver
@@ -155,6 +207,36 @@ class TestBundleValidation(BundleFixture):
         r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
         self.assertIn("rc=1", r.stdout, r.stderr)
         self.assertIn("mpm-telemetry", r.stderr)
+
+    def test_a_bundle_without_the_host_asset_declaration_is_refused(self):
+        # THE POINT. The installed managed block advertises
+        # ~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md and
+        # .../mpm-agent-protocol.md. A bundle that omits the
+        # integration assets installs an installation whose own
+        # instructions point at files that do not exist, so it is
+        # refused rather than installed.
+        bundle = self.make_bundle()
+        (bundle / "config" / "runtime-assets.json").unlink()
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("host-asset", r.stderr)
+
+    def test_a_bundle_whose_host_asset_was_altered_is_refused(self):
+        # The declaration is checked against the bundle's OWN contents.
+        bundle = self.make_bundle()
+        (bundle / "agent_installation" / "mpm-agent-protocol.md").write_text("# tampered\n")
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("host", r.stderr)
+
+    def test_a_bundle_carrying_an_undeclared_host_asset_file_is_refused(self):
+        # A file under agent_installation/ that no declaration names was
+        # provisioned by nobody and is owned by nobody.
+        bundle = self.make_bundle()
+        (bundle / "agent_installation" / "scripts" / "undeclared.py").write_text("# surprise\n")
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("no declaration names it", r.stderr)
 
     def test_a_non_executable_binary_is_refused(self):
         bundle = self.make_bundle()
@@ -777,6 +859,261 @@ class TestRollbackValidation(BundleFixture):
         self.assertTrue(
             (self.data_root / "agent_installation" / "adapter" / "file.txt").is_file()
         )
+
+
+class TestBundleContractNegativeControls(BundleFixture):
+    """The refusal matrix: what a bundle validator must NOT accept.
+
+    These are the controls that keep the contract honest. A validator
+    that accepts too much is as broken as one that accepts too little:
+    the first installs a runtime whose own instructions point at
+    nothing, the second refuses an immutable rollback target.
+    """
+
+    def test_a_declaration_that_points_outside_the_bundle_is_refused(self):
+        # THE HOLE, NOT A NEAR MISS.
+        #
+        #   - the bundle is COMPLETE — every asset it declares is
+        #     present and matches, so the completeness rule has
+        #     nothing to say;
+        #   - the outside file really exists, one directory above the
+        #     bundle, and its digest really matches what the
+        #     declaration claims.
+        #
+        # The only thing wrong with the bundle is the key. Without the
+        # key rule (and without the containment backstop) the validator
+        # accepts it, and the release claims an asset it does not
+        # have: its own declaration promises a file whose bytes live
+        # somewhere else entirely.
+        bundle = self.make_bundle()
+        outside = bundle.parent / "outside-target.txt"
+        outside.write_text("# outside the bundle\n")
+        self._add_declaration_key(bundle, "../outside-target.txt",
+                                  hashlib.sha256(outside.read_bytes()).hexdigest())
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("'..' segment", r.stderr)
+
+    def test_a_declaration_with_an_unsafe_key_is_refused(self):
+        # THE POINT. A declaration key is a path. A key that can point
+        # OUTSIDE the bundle would let a corrupted declaration hide a
+        # genuine omission behind a file that is not there: the
+        # completeness property would hold while the asset it was
+        # supposed to require is missing.
+        #
+        # The rules mirror the authority's own
+        # (scripts/install_runtime_assets.py refuses an absolute path or
+        # a '..' segment).
+        cases = {
+            "relative traversal": "../outside-target.txt",
+            "traversal in the middle": "agent_installation/../../outside-target.txt",
+            "absolute path": "/etc/passwd",
+            "dot-slash prefix": "./agent_installation/mpm-agent-protocol.md",
+            "backslash separator": "agent_installation\\scripts\\block_provenance.py",
+            "drive prefix": "C:/outside.txt",
+            "empty key": "",
+        }
+        for name, key in cases.items():
+            with self.subTest(name=name):
+                bundle = self.make_bundle(name="unsafe")
+                self._declare_only(bundle, {key: "0" * 64})
+                r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+                self.assertIn("rc=1", r.stdout, r.stderr)
+                self.assertIn("host-asset declaration names", r.stderr)
+
+    def test_a_declaration_naming_a_symlink_is_refused(self):
+        # The declaration may not point at a file outside the bundle
+        # through a symlink.
+        bundle = self.make_bundle()
+        outside = self._tmp / "outside.md"
+        outside.write_text("# outside\n")
+        link = bundle / "agent_installation" / "scripts" / "linked.py"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(outside, link)
+        self._declare_only(bundle, {
+            "agent_installation/scripts/linked.py": hashlib.sha256(
+                outside.read_bytes()).hexdigest(),
+        })
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("does not carry it", r.stderr)
+
+    def test_a_preflight_that_is_not_one_statement_is_refused(self):
+        # THE RULE. The schema-collision preflight COMPILES the
+        # candidate's reference DDL: it runs the file against an
+        # in-memory database and compares the shape it produces with
+        # the live table's. So the file is EXECUTED, and what it
+        # contains is a security boundary.
+        #
+        # A file that merely CONTAINS a "CREATE TABLE lifecycle_events"
+        # is not a reference DDL. Each case below would either do
+        # something else entirely (the ATTACH writes a file outside
+        # the database) or defeat the collision check the preflight
+        # exists for (a statement crafted to match the live table).
+        #
+        # The Go validator applies the same rule; the parity test is
+        # TestTheSchemaPreflightRuleIsTheSameInGoAndInTheShell in
+        # internal/update/preflight_rule_test.go.
+        cases = {
+            "a valid CREATE followed by a DROP":
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL);\n"
+                "DROP TABLE lifecycle_events;\n",
+            "a valid CREATE followed by a DELETE":
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL);\n"
+                "DELETE FROM memories;\n",
+            "a DROP before a valid CREATE":
+                "DROP TABLE lifecycle_events;\n"
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL);\n",
+            "an unterminated CREATE":
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY",
+            "a comment containing the expected phrase":
+                "-- 'CREATE TABLE lifecycle_events (x)'\n",
+            "unexpected SQL before the declaration":
+                "SELECT 1;\n"
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL);\n",
+            "unexpected SQL after the declaration":
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL);\n"
+                "SELECT 1;\n",
+            "an ATTACH that writes a file outside the database":
+                "ATTACH DATABASE '/tmp/mpm-preflight-side-effect.db' AS side;\n"
+                "CREATE TABLE side.payload(x);\n",
+            "a statement for a different table":
+                "CREATE TABLE memories (id TEXT PRIMARY KEY NOT NULL);\n",
+            "unbalanced parentheses":
+                "CREATE TABLE lifecycle_events (event_id TEXT PRIMARY KEY NOT NULL));\n",
+            "a destructive statement only":
+                "DROP TABLE lifecycle_events;\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                bundle = self.make_bundle()
+                (bundle / "schema" / "lifecycle_events.sql").write_text(text)
+                r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+                self.assertIn("rc=1", r.stdout, r.stderr)
+                self.assertIn("schema preflight", r.stderr)
+
+    def test_the_canonical_extractors_output_is_accepted(self):
+        # THE POSITIVE CONTROL. The exact output of the canonical
+        # extractor must be accepted, byte for byte. A rule that only
+        # happens to accept the substrate's current DDL is not a rule.
+        canonical = self._canonical_preflight()
+        bundle = self.make_bundle()
+        (bundle / "schema" / "lifecycle_events.sql").write_text(canonical)
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=0", r.stdout, r.stderr)
+
+    def _canonical_preflight(self) -> str:
+        """The substrate's own DDL, extracted by the canonical extractor."""
+        repo = Path(__file__).resolve().parent.parent.parent
+        helper = repo / "scripts" / "lib" / "schema_preflight.py"
+        if not helper.is_file():
+            self.skipTest("the canonical extractor is not available")
+        out = self._tmp / "canonical-lifecycle_events.sql"
+        r = subprocess.run(
+            ["python3", str(helper), "extract",
+             "--go", str(repo / "internal" / "core" / "schema.go"),
+             "--table", "lifecycle_events",
+             "--out", str(out)],
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return out.read_text()
+
+    def test_a_bundle_without_a_schema_preflight_is_refused(self):
+        # The schema-collision preflight compares the live table against
+        # the DDL the substrate itself would apply. A bundle that does
+        # not carry it degrades the check to a no-op, silently.
+        bundle = self.make_bundle()
+        (bundle / "schema" / "lifecycle_events.sql").unlink()
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("schema preflight", r.stderr)
+
+    def test_a_bundle_with_an_empty_schema_preflight_is_refused(self):
+        bundle = self.make_bundle()
+        (bundle / "schema" / "lifecycle_events.sql").write_text("  \n")
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("empty", r.stderr)
+
+    def test_a_bundle_with_a_destructive_schema_preflight_is_refused(self):
+        # The preflight must declare the table it exists to protect. A
+        # file that only names it destructively would leave the check
+        # comparing the live table against nothing.
+        bundle = self.make_bundle()
+        (bundle / "schema" / "lifecycle_events.sql").write_text(
+            "DROP TABLE lifecycle_events;\n")
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("lifecycle_events", r.stderr)
+
+    def test_an_installed_release_with_runtime_droppings_is_accepted(self):
+        # The runtime writes into a release directory after
+        # installation — Python's bytecode caches, the adapter's
+        # build-provenance sidecar — and a release that fails the
+        # COMPLETENESS rule for that reason is not corrupt. It is used.
+        #
+        # The completeness rule applies to CANDIDATES; an installed
+        # release is checked for INTEGRITY.
+        bundle = self.make_bundle()
+        cache = bundle / "agent_installation" / "scripts" / "__pycache__"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "block_provenance.cpython-314.pyc").write_text("not bytecode")
+        sidecar = bundle / "agent_installation" / "mpm-opencode" / "dist"
+        sidecar.mkdir(parents=True, exist_ok=True)
+        (sidecar / "mpm-build-provenance.json").write_text('{"commit":"x"}\n')
+
+        r = self.drive(f'rb_validate_bundle "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+
+        r = self.drive(
+            f'rb_validate_installed_release "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=0", r.stdout, r.stderr)
+
+    def test_an_installed_release_without_a_schema_preflight_is_accepted(self):
+        # A release promoted before the preflight travelled with the
+        # bundle may not carry one. That is a documented historic gap,
+        # not a corruption, so it is reported and not refused.
+        bundle = self.make_bundle()
+        (bundle / "schema" / "lifecycle_events.sql").unlink()
+        r = self.drive(
+            f'rb_validate_installed_release "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=0", r.stdout, r.stderr)
+
+    def test_an_installed_release_with_a_corrupted_asset_is_refused(self):
+        # The compatibility rule does not weaken the detection of a
+        # CORRUPTED release.
+        bundle = self.make_bundle()
+        (bundle / "agent_installation" / "mpm-agent-protocol.md").write_text(
+            "# tampered\n")
+        r = self.drive(
+            f'rb_validate_installed_release "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("has digest", r.stderr)
+
+    def test_an_installed_release_without_a_declaration_is_refused(self):
+        # Such a release was built before the host-asset contract
+        # existed. It is genuinely incomplete — it is the very defect
+        # the contract exists to detect — and detecting it must not be
+        # traded away for the convenience of an installed directory.
+        bundle = self.make_bundle()
+        (bundle / "config" / "runtime-assets.json").unlink()
+        r = self.drive(
+            f'rb_validate_installed_release "{bundle}"; echo "rc=$?"')
+        self.assertIn("rc=1", r.stdout, r.stderr)
+        self.assertIn("host-asset declaration", r.stderr)
+
+    def _declare_only(self, bundle: Path, assets: dict) -> None:
+        """Replace the bundle's host-asset declaration."""
+        manifest = bundle / "config" / "runtime-assets.json"
+        manifest.write_text(json.dumps(
+            {"version": 1, "assets": assets}, indent=2, sort_keys=True) + "\n")
+
+    def _add_declaration_key(self, bundle: Path, key: str, digest: str) -> None:
+        """Add one key to the bundle's host-asset declaration."""
+        manifest = bundle / "config" / "runtime-assets.json"
+        doc = json.loads(manifest.read_text())
+        doc.setdefault("assets", {})[key] = {"sha256": digest}
+        manifest.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
 
 class TestBundleCarriesItsPayloadDeclaration(unittest.TestCase):

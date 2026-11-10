@@ -145,6 +145,22 @@ func (f fakeBuilder) BuildFromCheckout(srcDir, dstDir string) (string, error) {
 			return "", err
 		}
 	}
+	// The release-scoped host assets. A real builder provisions them
+	// with scripts/install_runtime_assets.py; the fake models the same
+	// bundle, including the declaration the validator checks. Without
+	// them every validation in these tests would fail for the wrong
+	// reason.
+	if err := writeTestHostAssets(dstDir); err != nil {
+		return "", err
+	}
+	// The schema preflight. A real builder extracts the substrate's
+	// lifecycle_events DDL into the bundle (stageSchemaDDL, fail
+	// closed); the fake models the same bundle. Without it the
+	// schema-collision preflight would degrade to a no-op, so the
+	// validator refuses a bundle that does not carry one.
+	if err := writeTestSchemaPreflight(dstDir); err != nil {
+		return "", err
+	}
 	for name, content := range f.extraFiles {
 		full := filepath.Join(dstDir, name)
 		os.MkdirAll(filepath.Dir(full), 0755)
@@ -660,12 +676,15 @@ func buildTestTarball(t *testing.T) []byte {
 		}
 		hdr := &tar.Header{Name: rel, Mode: int64(fi.Mode().Perm()), Size: 0}
 		if fi.IsDir() {
-			hdr.Typeflag = tar.TypeReg
-			hdr.Name += "/.keep"
-			raw := []byte{}
-			hdr.Size = int64(len(raw))
+			// A real directory entry. The archive used to carry a
+			// ".keep" file for every directory, because a tar built
+			// only from regular files cannot represent an empty
+			// directory — but a bundle's declaration covers FILES,
+			// and a ".keep" nobody declared is a file the bundle
+			// validator must refuse.
+			hdr.Typeflag = tar.TypeDir
+			hdr.Name += "/"
 			tw.WriteHeader(hdr)
-			tw.Write(raw)
 			return nil
 		}
 		raw, _ := os.ReadFile(p)
@@ -724,6 +743,56 @@ func readShellForbidden(t *testing.T) []string {
 		}
 	}
 	return nil
+}
+
+// readShellLibrary returns the contents of the shell library.
+func readShellLibrary(t *testing.T) string {
+	t.Helper()
+	for _, root := range []string{".", "..", "../.."} {
+		raw, err := os.ReadFile(filepath.Join(root, "scripts", "lib", "runtime_bundle.sh"))
+		if err == nil {
+			return string(raw)
+		}
+	}
+	return ""
+}
+
+// TestTheHostAssetRequirementIsTheSameOnBothSides pins that the shell
+// library and the Go validator both REQUIRE the host assets.
+//
+// The bundle that reaches an operator depends on which tool assembled
+// it, and a bundle that passes one validator and fails the other is a
+// bundle that was published and then refused — or, worse, installed by
+// the tool that was more forgiving.
+func TestTheHostAssetRequirementIsTheSameOnBothSides(t *testing.T) {
+	lib := readShellLibrary(t)
+	if lib == "" {
+		t.Skip("the shell library is not available")
+	}
+	if !strings.Contains(lib, "rb_validate_host_assets") {
+		t.Error("the shell library has no host-asset check, so a bundle that omits the integration assets passes the shell validator")
+	}
+	if !strings.Contains(lib, "rb_validate_host_assets \"$bundle\"") {
+		t.Error("the shell library defines a host-asset check but rb_validate_bundle does not call it")
+	}
+	// The Go side: the check exists and it is part of the report.
+	rep := BundleReport{}
+	_ = rep
+	if !strings.Contains(readGoVerifySource(t), `"host-assets"`) {
+		t.Error("the Go validator has no host-assets check")
+	}
+}
+
+// readGoVerifySource returns the contents of the Go validator.
+func readGoVerifySource(t *testing.T) string {
+	t.Helper()
+	for _, root := range []string{".", "..", "../.."} {
+		raw, err := os.ReadFile(filepath.Join(root, "internal", "update", "verify.go"))
+		if err == nil {
+			return string(raw)
+		}
+	}
+	return ""
 }
 
 // --- helpers --------------------------------------------------------------------------

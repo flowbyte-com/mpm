@@ -46,6 +46,15 @@ class ReleaseBundlesWorkflowTest(unittest.TestCase):
         text = WORKFLOW.read_text()
         self.assertIn("attest-build-provenance", text)
 
+    def test_refuses_to_publish_a_bundle_without_the_host_asset_declaration(self):
+        # The published archive must carry the host-asset declaration.
+        # Without it the archive carries the integration assets and not
+        # the declaration that proves them, and the updater refuses the
+        # bundle it is offered.
+        text = WORKFLOW.read_text()
+        self.assertIn("config/runtime-assets.json", text)
+        self.assertIn("host-asset declaration", text)
+
     def test_assembler_is_the_only_producer(self):
         text = WORKFLOW.read_text()
         self.assertIn("scripts/assemble-release-bundle.sh", text)

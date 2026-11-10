@@ -60,7 +60,7 @@ type BundleCheck struct {
 	Detail string
 }
 
-// ValidateBundle proves a candidate bundle before it is exposed.
+// ValidateBundle proves a CANDIDATE bundle before it is exposed.
 //
 // The five checks are the same five rb_validate_bundle performs, in the
 // same order, with the same refusals:
@@ -71,17 +71,52 @@ type BundleCheck struct {
 //  4. RELEASE.json is readable and names the expected revision;
 //  5. the binaries report the revision they claim (anti-mixture).
 //
-// Plus two updater-specific checks:
+// Plus the updater-specific checks:
 //
 //  6. the OpenCode runtime payload is present (fail-closed: a bundle
 //     without a validated payload registers a plugin that loads
 //     nothing — the exact silent failure the staging validator exists
 //     to prevent);
-//  7. mpm-update is present (reported, not required — see above).
+//  7. mpm-update is present (reported, not required — see above);
+//  8. the release-scoped host assets are declared and carried;
+//  9. the schema preflight is present and declares the table it exists
+//     to protect.
 //
 // Nothing outside the candidate directory is touched. A refusal here
 // costs nothing: the running installation is exactly as it was.
 func ValidateBundle(bundleDir, expectedRev string) BundleReport {
+	return validateBundle(bundleDir, expectedRev, ScopeCandidate)
+}
+
+// ValidateInstalledRelease proves a bundle that was ALREADY
+// INSTALLED.
+//
+// It asks a different question from ValidateBundle, and the difference
+// matters:
+//
+//   - a CANDIDATE is checked for CONSTRUCTION: every file it carries
+//     must be accounted for, and the schema preflight must be present.
+//     A candidate is assembled in a fresh staging directory, so an
+//     undeclared file there is a file nobody provisioned.
+//
+//   - an INSTALLED release is checked for INTEGRITY: the assets it
+//     declares must still be present with the digests it declares.
+//     A release directory is not immutable in practice — the runtime
+//     writes into it (Python's bytecode caches, the adapter's
+//     build-provenance sidecar) — so the construction rules would
+//     refuse a release for being used, and refusing it would push the
+//     operator towards deleting an immutable rollback target.
+//
+// The host-asset DECLARATION is still required in both scopes: a
+// release that carries no declaration was built before the host-asset
+// contract existed, and it is genuinely incomplete — that is the
+// defect this contract exists to detect, and detecting it must not be
+// traded away for the convenience of an installed directory.
+func ValidateInstalledRelease(bundleDir, expectedRev string) BundleReport {
+	return validateBundle(bundleDir, expectedRev, ScopeInstalled)
+}
+
+func validateBundle(bundleDir, expectedRev string, scope BundleScope) BundleReport {
 	rep := BundleReport{}
 	check := func(name, detail string, ok bool) {
 		rep.Checks = append(rep.Checks, BundleCheck{Name: name, OK: ok, Detail: detail})
@@ -175,7 +210,82 @@ func ValidateBundle(bundleDir, expectedRev string) BundleReport {
 		check("updater", "mpm-update is absent (a release built before the updater existed; reported, not refused)", true)
 	}
 
+	// 8. The release-scoped host assets.
+	//
+	// FAIL-CLOSED, and deliberately so. The installed managed block
+	// advertises ~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md
+	// and ~/.mpm/agent_installation/mpm-agent-protocol.md, and the
+	// per-adapter installers import the shared scripts under
+	// agent_installation/scripts/ by path. A bundle that omits them
+	// installs an installation whose own instructions point at files
+	// that do not exist — and the omission is invisible until an agent
+	// follows the pointer.
+	//
+	// The bundle declares its assets (config/runtime-assets.json) and
+	// the check is against that declaration, so the validator needs no
+	// source tree and the declaration is produced by the authority that
+	// provisions the assets, not by a second list that could drift.
+	if problems := hostAssetProblems(bundleDir, scope); len(problems) > 0 {
+		for _, p := range problems {
+			check("host-assets", p, false)
+		}
+	} else {
+		check("host-assets", "the bundle declares and carries its host integration assets", true)
+	}
+
+	// 9. The schema preflight.
+	//
+	// REQUIRED for a candidate: a bundle with no preflight installs a
+	// runtime whose schema-collision check degrades to a no-op, and
+	// that degradation is silent.
+	//
+	// OPTIONAL for an installed release: a release promoted before the
+	// preflight travelled with the bundle may not carry one. That is a
+	// documented historic gap, not a corruption. If the file IS there,
+	// it must be valid — an empty file or a file that does not declare
+	// the table is refused in both scopes.
+	if problems := schemaPreflightProblems(bundleDir, scope.Strict()); len(problems) > 0 {
+		for _, p := range problems {
+			check("schema-preflight", p, false)
+		}
+	} else {
+		// WHAT THIS MESSAGE MAY AND MAY NOT SAY.
+		//
+		// It may say the file IS one CREATE TABLE lifecycle_events
+		// statement: that was checked.
+		//
+		// It may NOT say the file IS the substrate's DDL: that was NOT
+		// checked and cannot be. The bundle asserts it; nothing in the
+		// release format can prove it (SchemaIdentityIsUnproven). A
+		// validator whose success message overstates what it
+		// established is worse than one that says less, because the
+		// operator reads the message as a guarantee.
+		detail := "the bundle carries one CREATE TABLE lifecycle_events statement for the schema-collision preflight (the bundle asserts it is the substrate's DDL; the release format cannot prove that)"
+		if !scope.Strict() {
+			detail = "the bundle carries no schema preflight (a release promoted before the preflight travelled with the bundle; reported, not refused)"
+		}
+		check("schema-preflight", detail, true)
+	}
+
 	return rep
+}
+
+// failedCheckNames renders the names of the checks a report failed, so
+// a refusal names WHICH property the bundle lacks.
+func failedCheckNames(rep BundleReport) string {
+	var failed []string
+	seen := map[string]bool{}
+	for _, c := range rep.Checks {
+		if c.OK || seen[c.Name] {
+			continue
+		}
+		seen[c.Name] = true
+		failed = append(failed, c.Name)
+	}
+	if len(failed) == 0 {
+		return "no named check failed"
+	}
+	return strings.Join(failed, ", ")
 }
 
 // ValidationError renders a failed report as one operator-readable

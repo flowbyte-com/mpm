@@ -86,9 +86,21 @@ jobs:
               member = tf.extractfile("RELEASE.json")
               assert member is not None, "bundle has no RELEASE.json"
               rel = json.load(member)
+              names = tf.getnames()
           assert rel.get("revision") == tag, \
               f"bundle revision {rel.get('revision')!r} != tag {tag!r}"
           assert rel.get("commit"), "bundle RELEASE.json names no commit"
+          # The bundle must declare its host integration assets. The
+          # assets themselves are the canonical managed-block source,
+          # the behavioural protocol and the per-adapter templates and
+          # installer modules — the files the installed managed block
+          # points at. A bundle without the declaration installs an
+          # installation whose own instructions are dangling, and the
+          # updater refuses it, so it must never be published.
+          assert "config/runtime-assets.json" in names, \
+              "the bundle carries no host-asset declaration; the published archive " \
+              "would install an installation whose managed block points at files " \
+              "that do not exist"
           print(f"verified: {archive} is release {tag} ({rel['commit'][:8]})")
           PY
 

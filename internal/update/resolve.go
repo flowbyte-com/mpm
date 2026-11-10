@@ -262,6 +262,22 @@ func preflight(candidateDir, dataRoot string) error {
 	if err != nil {
 		return fmt.Errorf("could not read the candidate's schema DDL: %w", err)
 	}
+	// THE FILE IS ABOUT TO BE EXECUTED, so it is checked FIRST — and
+	// it is checked with the SAME rule the bundle validator applies.
+	//
+	// The promotion and the dry run both validate the bundle before
+	// they get here, so this is the second line of defence. It is
+	// here because "the caller happened to validate first" is not a
+	// property a function that executes a file should rely on: this
+	// function compiles whatever it is given.
+	//
+	// What is refused is anything that is not exactly one CREATE TABLE
+	// lifecycle_events statement — a second statement, an ATTACH, a
+	// DROP, a DELETE. Compiling one of those against the reference
+	// database would run it.
+	if problems := preflightStatementProblems(string(raw)); len(problems) > 0 {
+		return fmt.Errorf("the candidate's schema preflight is not one supported CREATE TABLE lifecycle_events statement, so it will not be compiled: %s", strings.Join(problems, "; "))
+	}
 	live := NewLayout(dataRoot).LiveDB()
 	if _, err := os.Stat(live); os.IsNotExist(err) {
 		return nil // no live database yet; nothing to collide with
