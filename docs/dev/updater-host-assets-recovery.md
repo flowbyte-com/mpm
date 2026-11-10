@@ -4,6 +4,15 @@
 > been run against the live installation. Every command is written for
 > the operator to run deliberately, with the preconditions and stop
 > conditions stated.
+>
+> **The target revision is pinned.** The procedure below targets
+> `2045afcc57f1f7603f38e016a2909b85985e48dc` (`origin/main`, the merge
+> of PR #236). Every stage names the revision it expects. A different
+> target is only legitimate if a **separate code-change decision** makes
+> it necessary — and then the digests in §2, the preflight's digest in
+> §2.2 and the check count in §3.3 Step 3 must be recomputed for it.
+> Do not "pick a newer revision" to work around a problem: the fix must
+> be *in* the revision, and §3.3 Step 2 is what proves it.
 
 ## 1. What happened
 
@@ -54,24 +63,57 @@ that OpenCode 2 cannot load it.
 
 ## 2. What the installed runtime is missing
 
-Thirteen files. The digests are the ones the authority
-(`scripts/install_runtime_assets.py`) produced for the promoted commit,
-so they are checkable rather than asserted.
+Thirteen files: the twelve host assets, plus the declaration that
+names them.
 
-```
-agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md        9d9f23be6999
-agent_installation/mpm-agent-protocol.md                    00ad1de7e510
-agent_installation/mpm-opencode/reconcile.json              927c559c7d0a
-agent_installation/mpm-opencode/scripts/install_agents_instructions.py  b8ae313993f1
-agent_installation/mpm-opencode/scripts/jsonc_config.py     890af38078da
-agent_installation/mpm-opencode/templates/AGENTS.md.snippet  b3c47c3e744d
-agent_installation/scripts/block_provenance.py              364f29677f6f
-agent_installation/scripts/check_installed_managed_blocks.py 5eeeab65063a
-agent_installation/scripts/managed_block_convergence.py     883a6c4040e2
-agent_installation/scripts/reconcile_managed_blocks.py      929f52f58e75
-agent_installation/scripts/render_managed_blocks.py         dc86a5f5b2a8
-agent_installation/scripts/stage_runtime_package.sh         0737c617f532
-config/runtime-assets.json                                  db2daf0160ca
+**Read the digests carefully — there are two tables, for two
+revisions, and they differ.** The *installed* runtime is missing the
+files; the *repaired* runtime must carry the **target** revision's
+bytes. Two of the twelve assets changed **in the fix itself** (PR #236
+added `sys.dont_write_bytecode = True` to two of them), so the two
+tables below are not interchangeable.
+
+### 2.1 The twelve host assets
+
+The **installed** column is what the authority produced for the
+promoted commit `4a870c8a` — it describes the gap. The **target**
+column is what the authority produces for the pinned target
+`2045afcc` — it is what a repaired installation must carry, and it is
+what §3.3 Step 6 verifies.
+
+| host asset | installed (`4a870c8a`) | **target (`2045afcc`)** |
+|---|---|---|
+| `agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md` | `9d9f23be6999` | `9d9f23be6999` |
+| `agent_installation/mpm-agent-protocol.md` | `00ad1de7e510` | `00ad1de7e510` |
+| `agent_installation/mpm-opencode/reconcile.json` | `927c559c7d0a` | `927c559c7d0a` |
+| `agent_installation/mpm-opencode/scripts/install_agents_instructions.py` | `b8ae313993f1` | **`05fa8310e32a`** |
+| `agent_installation/mpm-opencode/scripts/jsonc_config.py` | `890af38078da` | `890af38078da` |
+| `agent_installation/mpm-opencode/templates/AGENTS.md.snippet` | `b3c47c3e744d` | `b3c47c3e744d` |
+| `agent_installation/scripts/block_provenance.py` | `364f29677f6f` | `364f29677f6f` |
+| `agent_installation/scripts/check_installed_managed_blocks.py` | `5eeeab65063a` | **`c60d49c6fb9f`** |
+| `agent_installation/scripts/managed_block_convergence.py` | `883a6c4040e2` | `883a6c4040e2` |
+| `agent_installation/scripts/reconcile_managed_blocks.py` | `929f52f58e75` | `929f52f58e75` |
+| `agent_installation/scripts/render_managed_blocks.py` | `dc86a5f5b2a8` | `dc86a5f5b2a8` |
+| `agent_installation/scripts/stage_runtime_package.sh` | `0737c617f532` | `0737c617f532` |
+
+Plus the declaration itself:
+
+| file | installed (`4a870c8a`) | **target (`2045afcc`)** |
+|---|---|---|
+| `config/runtime-assets.json` | `db2daf0160ca` | **`24231202b29d`** |
+
+**The declaration's digest moves because the declaration records the
+digest of every asset it names**, and two of those assets changed. An
+operator who checks a repaired installation against the *installed*
+column will see three non-errors. **Check against the target column.**
+
+These digests are the authority's own output — `scripts/install_runtime_assets.py`
+— so they are checkable rather than asserted:
+
+```bash
+# the authority, run against a checkout of the pinned target
+python3 scripts/install_runtime_assets.py \
+  --source-root "$BUILD_ROOT/src" --runtime-root "$SCRATCH_BUNDLE" --groups host-assets
 ```
 
 What the active release **does** carry, and must keep:
@@ -86,7 +128,22 @@ agent_installation/mpm-opencode/dist/{index.v2,wake-context,event-envelope,
 
 The repair **adds** to the release. It never replaces a payload file.
 
-### 2.1 What the installed releases carry that no declaration names
+### 2.2 The schema preflight
+
+The bundle also carries `schema/lifecycle_events.sql`, the substrate's
+own `CREATE TABLE lifecycle_events` statement, which the
+schema-collision preflight compares against the live table. At the
+pinned target it is **byte-identical to the canonical extraction**
+(`scripts/lib/schema_preflight.py extract`), sha256
+`7f122e30bad9b192b68a40a86bceb5ee6cdad704cf1e95528099dfd6630599f2`.
+
+That equality matters for this recovery: it means the preflight
+compares the live table against the **genuine** substrate DDL, so the
+format's general inability to prove schema identity (see
+[`bundle-validation-scopes.md`](bundle-validation-scopes.md)) does not
+gate this cutover. It remains a follow-up, not a blocker.
+
+### 2.3 What the installed releases carry that no declaration names
 
 Two files, in the older releases. They are not omissions — they are
 files the runtime wrote into the release directory after it was
@@ -132,20 +189,56 @@ A promotion moves `current` to a new release that carries the assets,
 and `~/.mpm/agent_installation` — already a symlink into `current/` —
 resolves into them with no change to the symlink itself.
 
-### 3.1 Preconditions
+### 3.1 Five acts, and what each one changes
+
+They are separate acts with separate effects and separate revisions.
+Do not let one stand in for another.
+
+| act | command | what it changes | revision afterwards |
+|---|---|---|---|
+| **1. checks** | `mpm-update --dry-run --commit <target>` (§3.3 Steps 3–4) | **nothing.** No backup, no staging in the data root, no lock, no history record, no release directory | unchanged: `4a870c8a` |
+| **2. promotion** | `mpm-update --commit <target>` (§3.3 Step 5) | the new release directory, the `current` pointer, a **fresh backup**, the history record, and the stable updater | `2045afcc` |
+| **3. service restart** | `mpm-update --restart-services` **on the promotion itself** (it has no effect on a later re-run), or `systemctl --user restart mpm-scheduler` by hand | the **executables the daemons run** | the daemons run `2045afcc`; until then they keep running `4a870c8a` |
+| **4. instruction refresh** | §4.2 | `~/.config/opencode/AGENTS.md` (only the marked span) | the provenance line names `2045afcc` |
+| **5. OpenCode restart** | by hand | the running agent sessions | only **new** sessions read the refreshed block |
+
+Acts 3, 4 and 5 are **not** part of the promotion. The promotion does
+not stop the daemons, does not rewrite the operator's instructions and
+does not touch the agent sessions. Each is a separate decision with its
+own authorisation; §5 records the residual of leaving them undone.
+
+### 3.2 Preconditions
 
 | # | precondition | how to check |
 |---|---|---|
-| P1 | the fix is merged and the branch is available | `git log --oneline -1 origin/main` |
+| P1 | the fix is merged and the target is the pinned revision | `git log --oneline -1 origin/main` → `2045afcc` (§3.3 Step 0) |
 | P2 | a Go toolchain, node/npm and python3 are available | `command -v go node npm python3` |
-| P3 | the target revision does **not** already exist under `releases/` | `ls ~/.mpm/releases/` |
-| P4 | disk headroom | `df -h / ~/.mpm` |
+| P3 | the target does **not** already exist under `releases/` — **or** it does and it validates | `ls ~/.mpm/releases/` (§3.4) |
+| P4 | disk headroom **and** temporary-space headroom | `df -h / ~/.mpm "$TMPDIR"` (§3.3 Step 1) |
 | P5 | no other agent is using the updater | process inventory |
 | P6 | the operator has read §4 (the instruction migration) | — |
 
-### 3.2 Steps
+### 3.3 Steps
 
-**Step 1 — build the fixed updater, out of tree.**
+#### Step 0 — pin and verify the target
+
+```bash
+TARGET=2045afcc57f1f7603f38e016a2909b85985e48dc
+REPO=/path/to/a/checkout/of/this/repository
+
+git -C "$REPO" fetch origin
+git -C "$REPO" log --oneline -1 origin/main
+#   must be: 2045afcc Merge pull request #236 from flowbyte-com/fix/updater-host-assets
+```
+
+**Neither checkout on the operator's machine is at that revision**, and
+the procedure does not care where the checkout is — only that it can be
+put at `TARGET`. Step 1 makes a fresh one.
+
+**Expected revision:** `2045afcc` (the target; the installed revision
+is still `4a870c8a` and does not change in this step).
+
+#### Step 1 — build the fixed updater, out of tree
 
 The installed `mpm-update` **is the build from the promoted revision**
 `4a870c8a…` — the promotion replaced the stable recovery executable
@@ -159,85 +252,219 @@ Confirm that before going further:
 
 ```bash
 strings ~/.mpm/mpm-update | grep -oE '\b[0-9a-f]{40}\b' | sort | uniq -c | sort -rn | head -1
+#   must name 4a870c8a0d10b4567d9362df4c3dda1fbe0a01ae  (a pre-fix revision)
 ```
 
-The commit it names must be one that predates the fix. If it names a
-commit that already contains the fix, the recovery executable is
-already current and Step 2 is unnecessary.
+If it names a revision that **already contains the fix**, the recovery
+executable is already current and Step 1 can be skipped.
 
-The stable recovery executable at `~/.mpm/mpm-update` is the one the
-operator runs, so it is the one that must be replaced — and the old
-copy is kept, because it is the recovery tool for the runtime that is
-running *now*.
-
-**It is a REGULAR FILE, not a symlink.** `installStableUpdater`
-(`internal/update/activate.go`) writes it through a temporary file and
-a rename(2), so it never resolves into a release directory. That is
-why replacing it cannot mutate an immutable release — the very thing
-this document warns against elsewhere — and it is why `install -m
-0755` is safe here. Confirm it before replacing it:
+**Build space.** Use a private directory that is **outside the
+operator's checkout** and **outside the installed runtime**, and give
+it temporary space of its own:
 
 ```bash
-test -L ~/.mpm/mpm-update && echo "symlink — stop and investigate" \
-                      || echo "regular file — safe to replace"
+BUILD_ROOT="$HOME/.cache/mpm-recovery"       # private, disposable, out of the checkout
+TMPDIR="$BUILD_ROOT/tmp"                     # the build's scratch space
+export TMPDIR
+mkdir -p "$BUILD_ROOT/tmp"
+df -h "$BUILD_ROOT" "$TMPDIR"
 ```
+
+**`TMPDIR` must be on a filesystem with headroom.** A checkout build
+clones the repository, links six binaries and compiles the plugin
+payload; budget about a gigabyte. A rehearsal on a host whose `/tmp`
+was a 16 GB tmpfs at 76 % capacity failed with
+
+```
+/usr/local/go/pkg/tool/linux_amd64/link: mapping output file failed: disk quota exceeded
+```
+
+which reads like a compiler fault and is not one. Point `TMPDIR` at the
+same filesystem you checked in P4, or at least a few gigabytes free.
+
+Now the build, from a **clean, isolated** checkout of the pinned
+target:
 
 ```bash
-# from a checkout of the fixed branch
-go build -tags fts5 -o /tmp/mpm-update-fixed ./cmd/mpm-update
+git -C "$REPO" worktree add --detach "$BUILD_ROOT/src" "$TARGET"
+git -C "$BUILD_ROOT/src" status --short          # must print nothing
+git -C "$BUILD_ROOT/src" rev-parse HEAD         # must print $TARGET
 
-# keep the current recovery executable
-cp -p ~/.mpm/mpm-update ~/.mpm/mpm-update.pre-host-assets
+cd "$BUILD_ROOT/src"
+make build                                       # carries the FTS5 flags itself
+install -m 0755 .build/bin/mpm-update "$BUILD_ROOT/mpm-update-fixed"
 ```
 
-**Step 2 — install the fixed recovery executable.**
+**The build flags are not optional.** `AGENTS.md` §1 is explicit:
+`CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1`, `go build -tags fts5` **and**
+`CGO_LDFLAGS=-lm` are required *together*; the `-lm` omission breaks
+CI runners and fresh containers at link time. `make build` sets all
+three. If you invoke `go build` directly, set all three yourself:
 
 ```bash
-install -m 0755 /tmp/mpm-update-fixed ~/.mpm/mpm-update
+CGO_CFLAGS=-DSQLITE_ENABLE_FTS5=1 CGO_LDFLAGS=-lm \
+  go build -tags fts5 -o "$BUILD_ROOT/mpm-update-fixed" ./cmd/mpm-update
 ```
 
-**Step 3 — dry-run against the target revision, in a disposable
-workspace.**
+**Expected revision:** `2045afcc` (the built binary names it — Step 2
+proves it).
 
-`--dry-run` takes no lock and is not serialised against other agents'
-dry-runs, so run it when nobody else is using the updater. Point
-`MPM_WORKSPACE` at a scratch directory so the real installation is not
-touched.
+#### Step 2 — verify the built updater's identity, before any live change
+
+This step is what keeps the recovery from reproducing the defect it
+exists to repair. A build from a pre-fix revision produces a bundle
+**without** the host assets, and the pre-fix validator accepts it
+without complaint: an operator who promoted with such a build would
+install exactly the defective release, silently.
 
 ```bash
-MPM_WORKSPACE=$(mktemp -d) ~/.mpm/mpm-update --dry-run --commit <fixed-commit>
+"$BUILD_ROOT/mpm-update-fixed" --version
+strings "$BUILD_ROOT/mpm-update-fixed" | grep -oE '\b[0-9a-f]{40}\b' | sort | uniq -c | sort -rn | head -1
 ```
 
-The report must contain **`[ok] host-assets`**. That line is the proof
-that the candidate carries the integration assets — before the fix, the
-dry-run reported 11 checks and none of them was this one.
+**Both must name `2045afcc57f1f7603f38e016a2909b85985e48dc`.** A build
+that names anything else — in particular `4a870c8a` — is **rejected**.
+Rebuild from the pinned target; do not proceed.
 
-**Stop** if the report shows `FAIL`, if the `host-assets` line is
-absent, or if the dry-run changed anything under `MPM_WORKSPACE`
-(it must not: `--dry-run` takes no backup, stages nothing in the data
-root and records nothing).
+**Expected revision:** `2045afcc`.
 
-**Step 4 — promote.**
+#### Step 3 — dry run #1: the candidate, in a scratch workspace
 
 ```bash
-~/.mpm/mpm-update --commit <fixed-commit>
+SCRATCH=$(mktemp -d)
+MPM_WORKSPACE="$SCRATCH" "$BUILD_ROOT/mpm-update-fixed" --dry-run --commit "$TARGET"
 ```
 
-The promotion now provisions the host assets into the candidate, the
-candidate declares them, the validator checks the declaration against
-the candidate's own contents, and only then is the release installed
-and `current` repointed.
+The report must contain **thirteen** `[ok]` lines, and two of them
+must be:
 
-**The daemons are NOT restarted by this command.** `mpm-update` stops
-and restarts the managed units only when it is given
-`--restart-services`, and this procedure does not: a service restart
-is an operational act with its own authorisation, and this document
-does not assume one.
+```
+  [ok] host-assets: the bundle declares and carries its host integration assets
+  [ok] schema-preflight: the bundle carries one CREATE TABLE lifecycle_events statement …
+```
 
-So after the promotion, `mpm-scheduler` and `mpm-telemetry` are still
-running the **previous** revision's executables, while the CLI on
-`PATH` and the managed block's provenance line name the new one. The
-residual is real and it lasts until the daemons are restarted:
+**STOP if the report has eleven checks, or if it has no
+`[ok] host-assets` line.** That is the signature of an updater built
+**before the fix** — its builder omits the host assets and its
+validator has no host-asset check, so it reports a clean dry run for a
+bundle that is missing them. The diagnosis is: *the updater you built
+predates the fix*; go back to Step 1. Do not promote.
+
+The scratch workspace must still be **empty** afterwards. A dry run
+takes no lock, stages the candidate in a temporary directory outside
+the data root, takes no backup and records nothing.
+
+```bash
+find "$SCRATCH" -mindepth 1 | head    # must print nothing
+```
+
+**Expected revision:** unchanged (`4a870c8a`).
+
+#### Step 4 — dry run #2: the candidate against the **real** live database
+
+Step 3 proves the candidate is well-formed. It does **not** prove the
+promotion's schema-collision preflight would pass against the live
+table, because a scratch workspace has no live database and
+`preflight()` returns early — *"no live database yet; nothing to
+collide with"*. The `[ok] schema-preflight` line in Step 3 is about
+the preflight **file**, not about the live table.
+
+This second dry run exercises the real check. Run it with
+`MPM_WORKSPACE` **unset**, so the updater resolves the real data root
+(`$HOME/.mpm`):
+
+```bash
+unset MPM_WORKSPACE
+"$BUILD_ROOT/mpm-update-fixed" --dry-run --commit "$TARGET"
+```
+
+**STOP if it refuses with a schema collision.** A collision means the
+live `lifecycle_events` table is not the substrate's table. **Do not
+rename or migrate the live table to make the check pass** — a
+collision means something else on the host is using that name, and
+the refusal is the mechanism working. Read §5.1 of
+[`bundle-validation-scopes.md`](bundle-validation-scopes.md) and the
+collision message, then decide with the operator.
+
+**This dry run creates no persistent changes.** It is read-only
+against the live database: `preflight()` opens the live file with
+`openSQLiteRO` and copies it with `VACUUM INTO` into a temporary file
+(`os.CreateTemp`), so the live database file is never written and no
+transaction is committed. The updater says so on every dry run:
+
+```
+  dry run — nothing was changed and nothing was kept:
+  (no backup was taken, nothing was staged in the data root, nothing was recorded)
+```
+
+Confirm it, rather than trusting it:
+
+```bash
+# before
+ls -1 "$HOME/.mpm/backups"                      > /tmp/mpm-before-backups.txt
+wc -l < "$HOME/.mpm/update-history.jsonl"       > /tmp/mpm-before-history.txt
+ls -d "$HOME/.mpm/staging" 2>/dev/null          > /tmp/mpm-before-staging.txt
+
+# … run the dry run …
+
+# after
+ls -1 "$HOME/.mpm/backups"                      > /tmp/mpm-after-backups.txt
+wc -l < "$HOME/.mpm/update-history.jsonl"       > /tmp/mpm-after-history.txt
+ls -d "$HOME/.mpm/staging" 2>/dev/null          > /tmp/mpm-after-staging.txt
+
+diff /tmp/mpm-before-backups.txt  /tmp/mpm-after-backups.txt  && echo "no backup was taken"
+diff /tmp/mpm-before-history.txt  /tmp/mpm-after-history.txt  && echo "nothing was recorded"
+diff /tmp/mpm-before-staging.txt /tmp/mpm-after-staging.txt   && echo "nothing was staged"
+```
+
+The live **database** is written by the running scheduler
+continuously, so a byte-for-byte comparison of the database file is
+not a valid check while it runs. What the dry run must not do is
+create a release directory, a backup, a history entry or a staging
+directory — the three diffs above are the check. (A read-only open of
+a WAL-mode database touches the existing `-wal`/`-shm` sidecars; their
+mtimes move and the WAL index is rewritten. The database file itself
+is not written and no transaction is committed.)
+
+**Expected revision:** unchanged (`4a870c8a`).
+
+#### Step 5 — promote, from the build path
+
+```bash
+"$BUILD_ROOT/mpm-update-fixed" --commit "$TARGET"
+```
+
+**Run it from its build path.** `mpm-update` does not re-exec the
+stable copy (`LocateStableUpdater` is used only by the `mpm update`
+command and by the status report), so there is no need to replace
+`~/.mpm/mpm-update` by hand before promoting — and doing so would
+replace the live recovery executable with a binary that has proved
+nothing, before anything has been checked.
+
+**The promotion installs the stable updater itself**, at the designed
+moment: it is the last step of the sequence, after the release has
+been installed, the pointer moved and the health smoke passed, and it
+is written through a temporary file and a `rename(2)` in the data
+root. A rehearsal in a disposable installation confirmed the whole
+sequence:
+
+```
+the pointer moved:      current -> releases/2045afcc57f1f7603f38e016a2909b85985e48dc
+the stable updater:     a regular file, byte-identical to the release's own bin/mpm-update,
+                        naming commit 2045afcc57f1f7603f38e016a2909b85985e48dc
+the fresh backup:       backups/upgrade-<timestamp>/mpm.db
+the history record:     outcome: success, backup_dir: …/backups/upgrade-<timestamp>
+```
+
+**Do not pass `--restart-services`.** A service restart is an
+operational act with its own authorisation, and this procedure does
+not assume one — see §3.1.
+
+After the promotion, `mpm-scheduler` (and `mpm-telemetry`, if it is
+installed) are still running the **previous** revision's executables,
+while the CLI on `PATH`, the managed block's provenance line and the
+recovery executable all name the new one. The residual is real and it
+lasts until the daemons are restarted:
 
 ```bash
 # what the running daemons are actually executing
@@ -261,51 +488,198 @@ If `mpm-telemetry.service` IS installed, check it the same way.
 
 Two ways to close it, in the operator's order of preference:
 
-1. **restart the daemons explicitly**, once the operator has decided
-   that is acceptable:
+1. **restart the units by hand**, once the operator has decided that
+   is acceptable:
 
    ```bash
-   ~/.mpm/mpm-update --commit <fixed-commit> --restart-services
+   systemctl --user restart mpm-scheduler
+   systemctl --user status mpm-scheduler | grep -E "ExecStart|Active"
    ```
 
-   or, equivalently, restart the units by hand.
+   The running executable must resolve into
+   `~/.mpm/releases/2045afcc…`.
+
+   > **Re-running the promotion will NOT do this.** `mpm-update`
+   > returns *"already up to date"* as soon as the pointer names the
+   > target — that check happens **before** the service handling — so
+   > `mpm-update --commit <target> --restart-services` after the
+   > promotion reports success and **restarts nothing**. The flag has
+   > an effect only during a promotion that actually runs. Confirmed in
+   > a disposable installation: the re-run printed *"already up to
+   > date at 2045afcc…"* and no unit was touched.
+
+   The alternative is to pass `--restart-services` **on the promotion
+   itself** (§3.3 Step 5), if the operator has authorised a restart at
+   that point instead.
 
 2. **leave them running** and accept the residual until the next
    reboot or the next service restart. The daemons are long-lived
    schedulers; they do not pick up the new binaries on their own.
 
+The promotion's own report says this in as many words when it leaves
+the daemons alone:
+
+```
+note: managed service(s) still running (mpm-scheduler) were NOT restarted
+(no --restart-services); they may still use the old executable until restarted
+```
+
 What this residual does NOT affect: the CLI, the managed block's
 provenance line, and the recovery executable all name the new revision
-immediately after the promotion. Only the two daemons lag.
+immediately after the promotion. Only the daemons lag.
 
-**Stop** if the promotion reports a failure, or if the new release does
-not carry `agent_installation/mpm-agent-protocol.md`.
+**Expected revision:** `2045afcc` (the CLI, the pointer, the release
+and the recovery executable). The daemons still run `4a870c8a` until
+they are restarted.
 
-**Step 5 — verify the repair.**
+#### Step 6 — verify the repair
 
 ```bash
 # the advertised paths now resolve
 ls -l ~/.mpm/agent_installation
-cat ~/.mpm/agent_installation/mpm-agent-protocol.md | head -3
+head -3 ~/.mpm/agent_installation/mpm-agent-protocol.md
 test -f ~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md && echo OK
 
-# the release declares them
-python3 -c "import json;d=json.load(open('$HOME/.mpm/releases/<fixed-commit>/config/runtime-assets.json'));print(len(d['assets']),'assets declared')"
+# the release declares the twelve assets, and every one matches
+python3 - "$TARGET" <<'PY'
+import hashlib, json, os, sys
+root = os.path.join(os.environ["HOME"], ".mpm", "releases", sys.argv[1])
+man = json.load(open(os.path.join(root, "config/runtime-assets.json")))
+bad = []
+for rel, meta in man["assets"].items():
+    path = os.path.join(root, rel)
+    got = hashlib.sha256(open(path, "rb").read()).hexdigest() if os.path.isfile(path) else ""
+    if got != meta["sha256"]:
+        bad.append(rel)
+print(f"{len(man['assets'])} assets declared, {len(bad)} digest mismatches", bad)
+PY
 
-# the binaries are the promoted ones
+# the binaries, the recovery executable and the pointer are the new ones
 ~/.mpm/bin/mpm --version
+~/.mpm/mpm-update --version
+readlink ~/.mpm/current
+
+# the promotion is recorded
+tail -1 ~/.mpm/update-history.jsonl
 ```
 
-### 3.3 Stop conditions
+**Every one of these must be true:**
 
-- the dry-run does not report `[ok] host-assets` → **stop**;
-- `~/.mpm/releases/<fixed-commit>` already exists → **stop**: a release
-  is immutable and will not be replaced; choose another revision;
-- the promotion reports `outcome: failed` → **stop** and read
-  `~/.mpm/update-history.jsonl` before retrying;
-- the live database's schema fingerprint changed → **stop**: the
-  updater will refuse a runtime-only rollback, and the recovery
-  point named in the history record is the one to use.
+| check | expected |
+|---|---|
+| the advertised paths resolve | yes |
+| the declaration | **12** assets, **0** digest mismatches |
+| `~/.mpm/bin/mpm --version` | names `2045afcc` |
+| `~/.mpm/mpm-update --version` | names `2045afcc` — the promotion installed it |
+| `~/.mpm/current` | `releases/2045afcc…` |
+| the last history record | `outcome: success`, `to_rev: 2045afcc…`, a `backup_dir` |
+
+The payload must still be present (the repair adds to the release, it
+never replaces a payload file): `agent_installation/runtime_payloads.json`
+and every file it names.
+
+**Expected revision:** `2045afcc`.
+
+### 3.4 The recovery point: when it is created, and which one to use
+
+**The promotion creates a fresh backup of its own.** The exact point is
+inside the promotion's sequence, and it matters:
+
+```
+resolve → lock → stage the candidate
+      → CREATE THE BACKUP          ← the recovery point is created here
+      → validate the bundle → schema preflight
+      → [stop and start the services, only with --restart-services]
+      → install the release → move the pointer
+      → establish the stable paths
+      → health smoke (a live write path — see §5)
+      → install the stable updater (last, atomically)
+      → record the outcome
+```
+
+So the backup is taken **after** the candidate is staged and **before**
+the bundle is validated, before the preflight and before the smoke. It
+therefore exists even when the promotion later fails, and it is a
+snapshot of the live database at the moment of the cutover.
+
+**It is verified at the moment it is created.** `BackupLiveDB` copies
+the live database with `VACUUM INTO` and then verifies the copy: it is
+non-empty, it carries the `SQLite format 3` header, `PRAGMA
+integrity_check` returns `ok`, and its **table set equals the live
+table set**. A backup that fails verification aborts the promotion; it
+is never left half-made.
+
+**Which recovery point to use.**
+
+| recovery point | what it is | when to use it |
+|---|---|---|
+| **the one this promotion creates** — `~/.mpm/backups/upgrade-<timestamp>/` | a copy of the live database **at the moment of the cutover** | **the recovery point for this cutover.** This is the one a rollback-with-restore uses. |
+| `upgrade-20261107T201536Z` | the point for the *earlier* promotion (`77738cfd` → `4a870c8a`) | only to recover from **that** promotion. **Never a routine restoration point for this cutover** — restoring it would roll the data back by the distance between that moment and now. |
+| `upgrade-20261102T161236Z` | a stale historical point | **never.** It is older than the Nov-7 point by days of live data. |
+
+The history record names the recovery point the promotion took:
+
+```bash
+tail -1 ~/.mpm/update-history.jsonl | python3 -m json.tool
+#   "backup_dir": "/home/v/.mpm/backups/upgrade-<timestamp>"
+```
+
+The promotion also records the database's schema fingerprint before
+and after, in the same record (`pre_fp`, `post_fp`). If the two
+differ, the live schema changed during the promotion and the record
+says so.
+
+**Verify a recovery point before you rely on it.** See §5.1.
+
+### 3.5 Stop conditions
+
+Stop and read. None of these is a reason to pick a different revision.
+
+| situation | what it means | what to do |
+|---|---|---|
+| the dry run reports **eleven** checks, or has no `[ok] host-assets` line | the updater you built **predates the fix**; its builder omits the host assets and its validator cannot see that | **STOP.** Rebuild from the pinned target (Step 1). Do not promote |
+| any dry-run line is not `[ok]` | the candidate is not valid | **STOP.** Read the message; a `[ok] schema-preflight` that is absent means the preflight file is not one supported statement |
+| the real-data-root dry run reports a **schema collision** | the live `lifecycle_events` table is not the substrate's table | **STOP.** Do **not** rename or migrate the live table. Something else on the host owns that name |
+| the promotion reports `outcome: failed` | the promotion stopped | **STOP.** Read `~/.mpm/update-history.jsonl` before retrying. The pointer is restored on every failure path |
+| the promotion reports *"already up to date"* | the pointer already names the target — the promotion did not run, so **nothing was validated and no service was restarted** | It is not a success. Restart the units by hand if that is what you wanted (§3.3 Step 5). If you expected a promotion, the pointer is already where you thought it was — check `readlink ~/.mpm/current` |
+| **partial success — the release directory exists but the pointer did not move** | the promotion failed after the install stage | **Re-run the same command.** An existing release that validates is **re-used**, not refused — see the note at the end of this table. Do **not** choose another revision, and do **not** delete the release directory |
+| **partial success — the pointer moved but the stable updater was not replaced** | the promotion failed after the pointer moved | The updater restores the pointer on this path. The stable updater is replaced **only** on success, so `~/.mpm/mpm-update` is still the old build — which is correct, and it is the recovery tool for the runtime that is running. Re-run the same command |
+| **failed service identity** — after `--restart-services`, the history record or the promotion's report carries a warning that a unit runs something other than the active release | the daemon was not actually restarted, or it restarted from another path | The updater records a **warning**; it does not claim a clean restart. Restart the unit by hand and re-check `systemctl --user status <unit>`; the running executable must resolve into `~/.mpm/releases/2045afcc…` |
+| **degraded rollback** — the promotion reports `DEGRADED:` | the live schema changed and the previous release cannot read it, **or** the post-smoke fingerprint failed so the schema state is unknown | The pointer **stays at the new release** (the binaries match the data). Recover with `mpm-update --rollback --with-db-restore --force` — which restores the **pre-update backup the promotion took** and overwrites newer data — or fix forward. Do not delete anything |
+
+**About "the release already exists".** An existing
+`releases/2045afcc…` is refused **only when it does not validate**. If
+it validates — the normal case after an attempt that failed *after* the
+release was installed — **re-running the same command is the correct
+action**. A rehearsal in a disposable installation confirmed it: with
+the release directory present and the pointer moved back, the same
+command succeeded, re-used the release and moved the pointer forward.
+
+The refusal that matters is the one for a release that does **not**
+validate (for example `4a870c8a`, which carries no declaration):
+*"A release is immutable, so it will not be replaced. Do NOT delete it
+by hand — it may be the operator's rollback target."*
+
+### 3.6 Rollback
+
+```bash
+~/.mpm/mpm-update --rollback
+```
+
+The rollback moves the pointer back. **It does not validate its
+target**, so the defective `4a870c8a` remains a usable rollback target
+— which is the property that makes this whole procedure recoverable.
+**Do not delete it.**
+
+A database restore is a **separate, explicit** operation:
+
+```bash
+~/.mpm/mpm-update --rollback --with-db-restore --force
+```
+
+`--with-db-restore` overwrites newer user data and is refused without
+`--force`. It restores **the backup the promotion took** (§3.4) — not
+the Nov-7 point, and never the Nov-2 one.
 
 ## 4. The instruction migration policy
 
@@ -320,7 +694,7 @@ implements it:
 
 | rule | behaviour |
 |---|---|
-| only the marked span is rewritten | the region between `<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->` and `<!-- END MPM-MANAGED SECTION:opencode-instructions -->` is replaced; **everything outside is preserved byte-for-byte** |
+| only the marked span is rewritten | the region between `<!-- BEGIN MPM-MANAGED SECTION:opencode-instructions -->` and `<!-- END MPM-MANAGED SECTION:opencode-instructions -->` is replaced; everything outside is preserved, **apart from one newline appended immediately after the outer END marker** — no operator text is affected |
 | a backup is written first | `<target>.bak`, `<target>.bak.1`, … next to the target |
 | a BEGIN without a matching END | **refuses to modify** and exits 2 — the conservative case |
 | no managed block at all | appends the section, after a backup |
@@ -329,18 +703,36 @@ implements it:
 So the operator's own text outside the markers is never overwritten,
 and the refresh is reversible from the `.bak` file.
 
+The refresh is also a **correctness** fix, not a cosmetic one: the
+installed block names the OpenCode **V1** hook
+`experimental.chat.system.transform`, which the running V2 plugin does
+not register. The refreshed block names `ctx.session.hook("context")`.
+
 ### 4.2 The step
 
-Run it **after** step 5, from the installed assets — the refresher
-resolves its snippet as a sibling of the adapter directory, so it must
-run from the installed tree:
+Run it **after Step 6**, from the installed assets. The paths below do
+not exist before the promotion: the active release carries only the
+runtime payload until the repair adds the assets.
+
+**The command must export the provenance**, or it will stamp
+`commit=unknown` and fail its own acceptance test below.
+`block_provenance` reads `MPM_BUILD_VERSION` and `MPM_BUILD_COMMIT`
+from the environment; `install.sh` and `make refresh-installed` export
+both, but a standalone run of the refresher exports nothing:
 
 ```bash
+MPM_BUILD_VERSION=0.1.0-dev \
+MPM_BUILD_COMMIT="$TARGET" \
 python3 ~/.mpm/agent_installation/mpm-opencode/scripts/install_agents_instructions.py \
   --scope user \
   --target ~/.config/opencode/AGENTS.md \
   --snippet ~/.mpm/agent_installation/mpm-opencode/templates/AGENTS.md.snippet
 ```
+
+The reconciler (`reconcile_managed_blocks.py --only mpm-opencode
+--home $HOME`) resolves the manifest's snippet path relative to the
+adapter directory and is an equivalent route — **but it does not export
+the provenance either**, so the two exports are still required.
 
 Verify:
 
@@ -349,8 +741,12 @@ grep -n "mpm-provenance" ~/.config/opencode/AGENTS.md
 grep -n "ctx.session.hook" ~/.config/opencode/AGENTS.md
 ```
 
-The provenance line must name the **new** revision, and the block must
-name `ctx.session.hook("context")`.
+The provenance line must name **`2045afcc57f1f7603f38e016a2909b85985e48dc`**
+— not `unknown` — and the block must name `ctx.session.hook("context")`.
+
+**This changes new sessions only.** The running OpenCode sessions keep
+the block they started with. Restarting them is a separate, deliberate
+act (§3.1, act 5).
 
 ### 4.3 What this step does not do
 
@@ -358,7 +754,8 @@ name `ctx.session.hook("context")`.
   `~/.mpm/CLI_AGENT_RULES.md` — those are the project guidance, not the
   host's managed block;
 - it does not change the operator's content outside the markers;
-- it does not change the payload, the binaries or the database.
+- it does not change the payload, the binaries or the database;
+- it does not restart any session.
 
 ## 5. What not to do
 
@@ -366,15 +763,14 @@ name `ctx.session.hook("context")`.
   is the active release and a rollback target; a release is immutable,
   and an in-place edit changes what a rollback gives back. Promote
   instead.
-- **Do not restore the Nov-2 backup.** `~/.mpm/backups/upgrade-20261102T161236Z`
-  is a **stale historical** recovery point: it holds the database as it
-  was on 2026-11-02 — a *different and older* database than the live
-  one, and restoring it would silently roll the data back by the
-  distance between those two points in time. The live database has
-  moved on since; the counts are in §5.1, and they are the reason.
-  The pre-update recovery point is
-  `~/.mpm/backups/upgrade-20261107T201536Z` — and it must be VERIFIED
-  before it is relied upon. See §5.1.
+- **Do not restore the Nov-7 backup as a routine step.** The
+  promotion creates its own fresh recovery point (§3.4), and that is
+  the one a rollback-with-restore uses. The Nov-7 point belongs to the
+  earlier promotion; restoring it would roll the data back by the
+  distance between that moment and now.
+- **Do not restore the Nov-2 backup.** It is a **stale historical**
+  recovery point: it holds the database as it was on 2026-11-02 — a
+  *different and older* database than the live one.
 - **Do not copy the assets from the old release `77738cfd…` into the
   new one.** They belong to a different revision, and a bundle's
   declaration is a COMPLETE description: it records the digest of every
@@ -383,16 +779,27 @@ name `ctx.session.hook("context")`.
   refused) or a declaration rewritten to match the copy (and the
   declaration no longer describes what the authority provisioned).
 
-  Measured: nine of the twelve assets are byte-identical between
-  `77738cfd…` and the fixed revision — only
+  Measured against the pinned target: **seven** of the twelve assets are
+  byte-identical between `77738cfd…` and `2045afcc…`; **five** differ —
   `MPM_AGENT_INTEGRATION_SNIPPETS.md`, `AGENTS.md.snippet` and
-  `render_managed_blocks.py` differ. A PARTIAL copy of the other nine
-  would therefore be accepted by the validator, which is exactly why
-  the rule is a rule and not a technicality: the validator cannot tell
-  a deliberate partial copy from a complete one.
+  `render_managed_blocks.py`, plus the two the fix itself changed
+  (`install_agents_instructions.py`, `check_installed_managed_blocks.py`).
+  A PARTIAL copy of the other seven would therefore be accepted by the
+  validator, which is exactly why the rule is a rule and not a
+  technicality: the validator cannot tell a deliberate partial copy
+  from a complete one.
 - **Do not hand-edit the managed block.** The refresher writes the
   provenance stamp; a hand-edit loses it and the next refresh cannot
   tell a current block from an edited one.
+- **Do not promote a different revision to get around an existing
+  release directory.** §3.5 covers the correct action.
+- **Do not read the promotion's health smoke as a check.** The smoke
+  is a **live write path**: it runs the newly installed binary against
+  the **live** database (`mpm call mpm_system --payload '{"action":
+  "health_check"}'`, with `MPM_DB_PATH` pointing at the live file). It
+  is the point of no return for the schema. It is *not* part of the
+  dry run, and it is why the promotion is a separate, authorised act
+  from the checks in §3.3 Steps 3–4.
 
 ### 5.1 Verify the recovery point before you rely on it
 
@@ -401,7 +808,8 @@ taken, and it is NOT removed when the backup fails. So the DIRECTORY's
 existence proves nothing: a failed backup leaves an empty directory
 behind, and restoring from it is restoring nothing.
 
-Verify the named recovery point before you depend on it:
+The promotion's own backup is verified at creation (§3.4), so it does
+not need this. An **older** recovery point does.
 
 ```bash
 BK=~/.mpm/backups/upgrade-20261107T201536Z
@@ -446,7 +854,7 @@ For the record at the time of writing, the numbers are:
 | point | memories | schema migrations |
 |---|---|---|
 | `upgrade-20261102T161236Z` (the Nov-2 backup) | 179 | 18 |
-| `upgrade-20261107T201536Z` (the pre-update recovery point) | 320 | 20 |
+| `upgrade-20261107T201536Z` (the point for the defective promotion) | 320 | 20 |
 
 The LIVE count is deliberately not written down here: it grows every
 time the installation is used, so a number in a document is a number
@@ -469,6 +877,12 @@ that matches the promotion being recovered from.
 If the verification fails, the backup is not a recovery point. Do not
 restore it. Find another, or accept that the promotion is a
 forward-only operation for this installation.
+
+### 5.2 Litter worth removing before the cutover
+
+`~/.mpm/staging/candidate.<n>` — 289 MB of abandoned staging from the
+interrupted 2026-11-07 update. It is not a blocker, but it is inside
+the data root and it is space the promotion wants.
 
 ## 6. Cross-references
 
