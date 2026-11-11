@@ -240,6 +240,9 @@ the old revision is not an available answer.**
 ```bash
 TARGET=2045afcc57f1f7603f38e016a2909b85985e48dc
 REPO=/path/to/a/checkout/of/this/repository
+#   $REPO must NOT be the data root (~/.mpm). Step 1 adds a git worktree,
+#   and that writes worktree bookkeeping into $REPO/.git — into the live
+#   installation's git directory if $REPO is the data root.
 
 git -C "$REPO" fetch origin
 git -C "$REPO" log --oneline -1 origin/main
@@ -299,6 +302,14 @@ same filesystem you checked in P4, or at least a few gigabytes free.
 
 Now the build, from a **clean, isolated** checkout of the pinned
 target:
+
+> **`$REPO` must not be the data root.** `git worktree add` writes
+> worktree metadata into `$REPO/.git`, so a `$REPO` of `~/.mpm` would
+> write into the live installation's own git directory. Any other
+> checkout is fine — the procedure does not care where it is. If the
+> only checkout available is the data root, **clone** instead:
+> `git clone --no-checkout https://github.com/flowbyte-com/mpm.git
+> "$BUILD_ROOT/repo"`.
 
 ```bash
 git -C "$REPO" worktree add --detach "$BUILD_ROOT/src" "$TARGET"
@@ -446,8 +457,19 @@ is not written and no transaction is committed.)
 #### Step 5 — promote, from the build path
 
 ```bash
-"$BUILD_ROOT/mpm-update-fixed" --commit "$TARGET"
+# Policy S1 is in force on this host (§3.8): the flag goes ON the
+# promotion, and nothing starts or stops the unit by hand.
+# With NO host-specific scheduler policy in force, DROP the flag and
+# close the residual afterwards (§3.1, act 3).
+"$BUILD_ROOT/mpm-update-fixed" --commit "$TARGET" --restart-services
 ```
+
+**The flag is on the command line, not only in the prose below.** The
+host-specific procedure for this host runs exactly this command, with
+exactly this flag, and its own Stage 3 gate refuses the promotion if
+the running executable does not resolve into the new release. An
+operator who copies the command without the flag leaves the scheduler
+on the old revision — which that gate then refuses.
 
 **Run it from its build path.** `mpm-update` does not re-exec the
 stable copy (`LocateStableUpdater` is used only by the `mpm update`
@@ -772,57 +794,96 @@ itself** — a file-corrupting accident — and the wrong one for a
 **runtime rollback**. Those are different acts and they need different
 words.
 
+**What a rollback leaves behind, and what it does not.** The corrected
+host-specific procedure records this in its §10.5.3, and this guide
+agrees with it:
+
+| left behind | why it is left alone |
+|---|---|
+| the block's provenance still names `2045afcc`, while the runtime is `4a870c8a` | the line records **where the block was rendered from**, and that is still true. Re-stamping it is impossible — the rolled-back release carries no refresher — and hand-editing it is not permitted |
+| the **retired V1** block, if the refresh never ran | that is the pre-cutover condition, unchanged by the rollback |
+| the block's references to `~/.mpm/agent_installation/MPM_AGENT_INTEGRATION_SNIPPETS.md` and `…/mpm-agent-protocol.md`, which the `4a870c8a` bundle does not carry | **host-asset remediation**, and it is **separately authorised**: either re-provision the host assets into the `4a870c8a` release, or re-promote `2045afcc` |
+
+So **a rollback after the refresh is not a complete cutover on the old
+revision.** The host is back on `4a870c8a` with the host-asset gap
+re-exposed; the gap is repaired by re-promoting, not by restoring a
+block.
+
 ### 3.8 The host-specific cutover procedure for this host
 
-`/home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md` is the approved
-cutover procedure for exactly this revision pair
+`/home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md` is the cutover
+procedure for exactly this revision pair
 (`4a870c8a0d10b4567d9362df4c3dda1fbe0a01ae` →
-`2045afcc57f1f7603f38e016a2909b85985e48dc`) on this host. It was
-independently approved (its eighteenth review, 2026-11-10) and **has not
-been executed against the live installation**.
+`2045afcc57f1f7603f38e016a2909b85985e48dc`) on this host. Its current
+revision is SHA-256
+`64303ebc3b94be196a07db8ea8b1969b0f6384c3bb3ae17bcffe4af4618b71e7`,
+published beside it in `MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256`.
 
-**Run it. It is the procedure for this host.** Its stages and this
+> **That revision is NOT APPROVED, and no part of it may be executed.**
+> Its own status line says so: the approval of the earlier checksum is
+> **void** for it, because the executable sequence changed, and **a
+> fresh independent review is required first**. The operator must
+> check that checksum before running anything — a procedure that has
+> changed under its own feet is not a procedure to run on trust.
+
+**Run it — it is the procedure for this host.** Its stages and this
 guide's steps are the same sequence — pin, build the bootstrap updater
 out of tree, verify its identity, dry run, promote, verify, refresh,
 relaunch — so there is no second sequence to choose between.
 
-**Where the two speak to the same act, the host-specific one wins.**
-The differences that matter, and what this guide therefore no longer
-says on its own:
+**The precedence rule, in one line.** The host-specific procedure
+governs **every act it defines**. This guide governs the acts it
+defines and the host-specific procedure does **not**, and it adds the
+**database-safety requirements in §4**. Where the two describe the same
+act, **follow the host-specific procedure**; where they describe the
+same act **differently**, that is a defect in one of them — **stop and
+report it** (§8), do not pick the one that reads better. A conflict
+that survived one round of reconciliation is exactly what that rule is
+for.
+
+The acts they both describe, and what governs each:
 
 | act | this guide (general) | the host-specific procedure | what governs |
 |---|---|---|---|
-| **the scheduler** | a service restart is a separate, separately-authorised act; the residual may be closed by hand afterwards | **Policy S1** — the updater owns the unit's lifecycle: `--restart-services` is passed **once, on the promotion invocation**, and nothing stops or starts the unit by hand inside the promotion window | **S1.** Pass the flag on the promotion; do not touch the unit by hand; **do not leave the scheduler on `4a870c8a`** |
+| **the scheduler** | a service restart is a separate, separately-authorised act; the residual may be closed by hand afterwards | **Policy S1** — the updater owns the unit's lifecycle: `--restart-services` is passed **once, on the promotion invocation**, and nothing stops or starts the unit by hand inside the promotion window | **S1.** Pass the flag on the promotion (§3.3 Step 5 carries it); do not touch the unit by hand; **do not leave the scheduler on `4a870c8a`** |
 | **the promotion's service gate** | the residual is checked by reading `systemctl --user status` | a mandatory `/proc/<pid>/exe` gate: the running executable must resolve into `releases/<REV>/` | **S1's gate**, which is stronger than reading `status` |
-| **the managed-block refresh** | §5.2 above | Stage 4 — the same RELEASE.json-sourced provenance, the same keep decision, plus a content-outside-the-markers diff check | **both**; they agree, and this guide now carries the same discipline |
-| **the recovery point** | §3.4 and §4.2 | the promotion log must name it and the history entry must match it | **both**; §4.2's freshness assessment is the part the host-specific procedure does not carry |
+| **the managed-block refresh** | §5.2 above | Stage 4 — the same RELEASE.json-sourced provenance, the same keep decision, a content-outside-the-markers diff check, and acceptance of an `unrepaired` block so a failed refresh is **repaired by re-running Stage 4** | **both**; they agree, and this guide carries the same discipline |
+| **the managed block after a runtime rollback** | §3.7 — leave the refreshed block in place; never restore the `.bak` | its §10.5.3 and `assess_rollback_block_state` — the block is **never** restored to its pre-refresh copy; the state left behind (stale provenance, retired-V1 state, dangling host-asset references) is **recorded**, and the host-asset gap needs separately authorised remediation | **both**; the corrected revision removed the restoration that used to contradict §3.7 |
+| **the recovery point** | §3.4 and §4.2 | the promotion log must name it, and the history entry must match it, with `pre_fp` and `post_fp` present | **both** |
+| **a destructive restore** | §4.3 — measure the delta, write it down, separate approval; §4.5 — the journal-mode verification | its §10.5.1–§10.5.4 — `measure_restore_impact` (the point's SHA-256, per-table before/after counts, `rows_would_be_lost` / `rows_would_be_resurrected`), an approval **bound** to that measurement (`RESTORE <rows_would_be_lost>`), the block state recorded, and `verify_wal_state` / `reestablish_wal` after the restore | **both**; the corrected revision now carries what this section previously said it did not |
 
-**What this guide still adds, and the host-specific procedure does not
-carry.** §4 is not optional and is not superseded:
+**What this guide still adds.** §4 is not superseded. It is the part
+the host-specific procedure does not carry in the same form:
 
-- **§4.3 — measure the data delta before a destructive restore.** The
-  host-specific procedure asks for a typed `RESTORE` authorisation, but
-  it does not *quantify* what the restore discards. §4.3 requires the
-  delta to be measured and written down, and the approver to see it.
-- **§4.5 — the journal mode a restore changes.** The host-specific
-  procedure restores and then goes straight to its identity and
-  scheduler gates. A restore takes the installation out of WAL mode,
-  and §4.5's procedure — restore, re-establish the mode, **verify** it,
-  verify the data, and only then restart the scheduler — is the part
-  that has to be added to it.
+- **§4.2 — the freshness assessment.** The host-specific procedure
+  gates the *identity* of the recovery point (the promotion log names
+  it, the history entry matches it, the fingerprints are present) and
+  says honestly that a backup count lower than the live baseline is
+  normal. The operator's own **pre-promotion baseline** and the
+  **count comparison** are §4.2's, and they are what say whether the
+  recovery point holds the data you expect.
+- **§4.4 — the writer scan, its limits, and the quiescence rules.** The
+  host procedure refuses a restore under a live writer; §4.4 is what
+  says why, and what `--force` can and cannot bypass.
+- **§4.6 — read-only inspection and scratch safety.** The rules for
+  handling a copy of the corpus.
 
-**Two conditions on the cutover, stated here so they are not lost:**
+**Section numbering.** Every `§` reference below is a section of
+**this** document. The host-specific procedure's own sections are
+named "its §…", so the two are never confused.
 
-1. **The §4.3 and §4.5 requirements must be present in the
-   host-specific procedure before it is executed** — or the operator
-   must carry them out of §4 by hand. Closing the gap in the upstream
-   guide does not close it in the procedure that will actually be run.
-2. **The host-specific procedure's block-restore path needs its own
-   review.** It restores the pre-refresh managed block after a rollback,
-   which reinstates the V1 hook name that the rolled-back runtime does
-   not register — the defect §3.7 describes. This is recorded as a
-   follow-up (§8); **this guide does not modify another procedure's
-   approved text.**
+**Two conditions on the cutover.**
+
+1. **The host-specific procedure must be approved before any part of it
+   is executed.** Its current revision is not, and its own status line
+   says so.
+2. **§4.3's measured delta and §4.5's journal-mode verification must be
+   done as §4 describes them.** The corrected revision carries
+   equivalents (its §10.5.1, §10.5.2, §10.5.4), so this is a matter of
+   *running* them, not of adding them — with one correction: §4.5's
+   journal-mode step is a **verification with a recovery path**, not a
+   gate on the restore, because MPM re-establishes WAL by itself on its
+   next connection. The premise is corrected below.
 
 ## 4. Database safety
 
@@ -1105,15 +1166,25 @@ sessions, and does not need quiescence. The writer scan exists for the
 stopped **and** the operator's agent sessions must be closed by their owners.
 The updater can stop the first and will never stop the second.
 
-### 4.5 The journal mode a restore changes
+### 4.5 The journal mode after a restore
 
-The recovery point is produced by `VACUUM INTO`, which writes a database in
-the **DELETE** (rollback-journal) mode. The live database is in **WAL** mode.
-`restoreDatabase` copies the recovery point over the live file and then
-removes the live `-wal` and `-shm` sidecars — which is exactly what leaving
-WAL mode requires.
+Three things happen, and they are easy to conflate: **the state of the
+restored file**, **what the runtime does about it**, and **what nobody
+checks**.
 
-Measured on a private copy (2026-11-11), reproducing what the restore does:
+**1 — The restored file's initial state is the rollback-journal mode.**
+The recovery point is produced by `VACUUM INTO`, which writes a database
+in the **DELETE** (rollback-journal) mode. The live database is in
+**WAL** mode. `restoreDatabase` copies the recovery point over the live
+file and then removes the live `-wal` and `-shm` sidecars — which is
+exactly what leaving WAL mode requires. The updater **never opens the
+live database for write** (every one of its opens is read-only) and
+**never sets `journal_mode`**, so the file the restore leaves on disk
+is in rollback-journal mode, and it stays that way until something
+opens it.
+
+Measured on a private copy (2026-11-11), reproducing what the restore
+does:
 
 ```
 before: journal_mode = wal        live header bytes 18/19: 2,2
@@ -1122,27 +1193,51 @@ memories after the restore: 320    (live had 2,405)
 integrity: ok
 ```
 
-**So a restore does not only roll the data back — it takes the live
-installation out of WAL mode.** The consequence is not a detail of the
-restore: the installation then runs without WAL, so there is no concurrent
-reader during a write and no shared-memory index, and the next writer
-re-establishes the sidecars from scratch.
+**2 — MPM re-establishes WAL by itself, on its next connection.** Every
+production open path in `internal/core/db.go` runs
+`db.Exec("PRAGMA journal_mode = WAL")`, so the first MPM connection
+after the restore normally converts the file back to WAL. Measured on
+a private copy: the conversion took the header bytes from `1,1` to
+`2,2` and `PRAGMA journal_mode` from `delete` to `wal`.
 
-**Nothing in the upstream procedure says so.** It must be said here.
+**So a restore does not, as a rule, leave the installation running
+without WAL.** The window without WAL is the time between the restore
+and the next MPM connection — and in that window a reader blocks a
+writer.
 
-**If a restore is ever authorised, the journal mode is a separate, validated
-step — not an automatic consequence.** The recovery procedure for the
-journal mode is:
+**3 — And that is the whole of the residual, because the attempt is
+unchecked.** The open path **discards the error** from that `db.Exec`.
+A conversion that cannot be performed fails — measured on a private
+copy: `database is locked`, when another connection holds the database
+— and leaves the file in rollback-journal mode **without anything
+reporting it**. That is the failure worth guarding against: not a
+permanent downgrade, but a **silent** one, in an installation whose
+concurrency assumptions (WAL plus `busy_timeout`) no longer hold.
 
-1. **decide explicitly** whether the installation should return to WAL, and
-   record the decision. WAL is what the live installation uses and what
-   `internal/core/db.go` sets on open;
-2. **restore first**, then **re-establish the mode** with an explicit
-   `PRAGMA journal_mode = WAL` against the restored database, and **verify**
-   it: the header bytes 18/19 must read `2,2`, `PRAGMA journal_mode` must
-   report `wal`, and `PRAGMA integrity_check` must still return `ok`;
-3. **verify the data** against the counts measured in §4.3, step 2;
-4. only then restart the scheduler and re-open the agent sessions.
+**Nothing in the upstream procedure says any of this.** It must be said
+here.
+
+**If a restore is ever authorised, the journal mode is a separate,
+validated step — not an automatic consequence, and not a gate on the
+restore.** It is a **verification with a recovery path**:
+
+1. **decide explicitly** whether the installation should run in WAL
+   mode, and record the decision. WAL is what the live installation
+   uses and what `internal/core/db.go` sets on open;
+2. **restore first**;
+3. **verify the mode**: the header bytes 18/19 must read `2,2` **and**
+   `PRAGMA journal_mode` must report `wal` **and** `PRAGMA
+   integrity_check` must still return `ok`. Read the pragma's
+   **result** — it is the mode actually in effect, not the mode that
+   was requested;
+4. **if it is not WAL, re-establish it explicitly**: run
+   `PRAGMA journal_mode = WAL` against the restored database **and
+   check the error**, then verify again;
+5. **if that fails, STOP.** The database stays in rollback-journal
+   mode, the failure is recorded, and the operator escalates. **Do not
+   start the scheduler on a database whose journal mode is unknown**;
+6. **verify the data** against the counts measured in §4.3, step 2;
+7. only then restart the scheduler and re-open the agent sessions.
 
 **Do not change the live database's journal settings during a review, a
 rehearsal or a dry run.** The mode is a property of the running
@@ -1409,6 +1504,17 @@ act (§3.1, act 5).
 - **Do not restore the managed-block backup after a runtime rollback.**
   It reinstates the retired V1 hook name, which the rolled-back runtime
   does not register either. Leave the refreshed block in place (§3.7).
+- **Do not "repair" the block's stale provenance after a rollback, and
+  do not restore the block to make it match the runtime.** The
+  provenance line records where the block was **rendered from**; the
+  rolled-back release carries no refresher to re-stamp it with, and the
+  corrected host-specific procedure records the stale state rather than
+  editing it (§3.7, §3.8).
+- **Do not report a rollback after the refresh as a complete cutover on
+  the old revision.** The host-asset gap is re-exposed, and repairing it
+  is separately authorised (§3.7).
+- **Do not build from a checkout that is the data root.** `git worktree
+  add` writes into `$REPO/.git` (§3.3 Step 0, Step 1).
 - **Do not read the promotion's health smoke as a check.** The smoke
   is a **live write path**: it runs the newly installed binary against
   the **live** database (`mpm call mpm_system --payload '{"action":
@@ -1554,21 +1660,33 @@ none of them belongs in a documentation-only change.
   updater checks row counts, and it does not. It should be corrected in a
   separate change, in the same file, by the people who own it. **This
   document does not change production code.**
-- **The host-specific cutover procedure needs §4.3 and §4.5 before it
-  runs.** Its destructive-restore branch asks for a typed `RESTORE`
-  authorisation without quantifying the loss, and it restores without
-  re-establishing the journal mode — so the scheduler would come back
-  against a database that has silently left WAL mode. §4.3's measured
-  delta and §4.5's validated mode recovery have to be added to it, or
-  carried out of §4 by hand (§3.8).
-- **The host-specific procedure's block-restore path reinstates the
-  retired V1 hook name.** After a runtime rollback it restores the
-  pre-refresh managed block, which names
-  `experimental.chat.system.transform` — a hook the rolled-back
-  runtime's V2 plugin does not register either. §3.7 says to leave the
-  refreshed block in place. This needs the procedure's own author to
-  change it and re-approve it; this guide does not modify another
-  procedure's approved text.
+- **The host-specific cutover procedure is not approved.** Its current
+  revision is SHA-256
+  `64303ebc3b94be196a07db8ea8b1969b0f6384c3bb3ae17bcffe4af4618b71e7`,
+  and its own status line records that the earlier checksum's approval
+  is **void** for it because the executable sequence changed. It needs a
+  fresh independent review before any part of it is executed (§3.8).
+- **What the corrected revision changed, and what it now carries.** The
+  automatic restoration of the pre-refresh managed block after a runtime
+  rollback is **removed** — it reinstated the retired V1 hook name that
+  the rolled-back runtime's plugin does not register either (§3.7) — and
+  the state a rollback leaves behind is **recorded** instead. A
+  destructive restore now requires a **measured** impact (`measure_restore_
+  impact`: the point's SHA-256, per-table before/after counts,
+  `rows_would_be_lost` / `rows_would_be_resurrected`) and an approval
+  **bound** to that measurement. And after any restore the journal mode
+  is **verified** (`verify_wal_state`) with an explicit recovery path
+  (`reestablish_wal`) and a stop if the conversion fails. **This guide
+  does not modify another procedure's text**; the two are reconciled in
+  §3.8.
+- **§4.5's journal-mode premise is corrected.** An earlier revision of
+  this section said a restore leaves the installation running without
+  WAL. It does not: MPM re-establishes WAL by itself on its next
+  connection, because every production open path runs
+  `db.Exec("PRAGMA journal_mode = WAL")`. The real residual is that the
+  call **discards its error**, so a conversion that fails is silent.
+  The verification step is worth having; it is defence in depth, not a
+  gate on the restore.
 - **The candidate binary does not expose its own schema.** The bundle's
   schema preflight is a file the bundle asserts; the format cannot prove it
   is the substrate's DDL. The durable fix is for the candidate binary to
