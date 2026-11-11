@@ -847,10 +847,32 @@ The acts they both describe, and what governs each:
 |---|---|---|---|
 | **the scheduler** | a service restart is a separate, separately-authorised act; the residual may be closed by hand afterwards | **Policy S1** — the updater owns the unit's lifecycle: `--restart-services` is passed **once, on the promotion invocation**, and nothing stops or starts the unit by hand inside the promotion window | **S1.** Pass the flag on the promotion (§3.3 Step 5 carries it); do not touch the unit by hand; **do not leave the scheduler on `4a870c8a`** |
 | **the promotion's service gate** | the residual is checked by reading `systemctl --user status` | a mandatory `/proc/<pid>/exe` gate: the running executable must resolve into `releases/<REV>/` | **S1's gate**, which is stronger than reading `status` |
-| **the managed-block refresh** | §5.2 above | Stage 4 — the same RELEASE.json-sourced provenance, the same keep decision, a content-outside-the-markers diff check, and acceptance of an `unrepaired` block so a failed refresh is **repaired by re-running Stage 4** | **both**; they agree, and this guide carries the same discipline |
+| **the managed-block refresh** | §5.2 above | Stage 4 — the same RELEASE.json-sourced provenance, the same keep decision, a content-outside-the-markers diff check, and acceptance of an `unrepaired` block so a failed refresh does not have to be "repaired" by restoring the retired copy — **but see the note below: that repair path is currently deadlocked** | **both**; they agree, and this guide carries the same discipline |
 | **the managed block after a runtime rollback** | §3.7 — leave the refreshed block in place; never restore the `.bak` | its §10.5.3 and `assess_rollback_block_state` — the block is **never** restored to its pre-refresh copy; the state left behind (stale provenance, retired-V1 state, dangling host-asset references) is **recorded**, and the host-asset gap needs separately authorised remediation | **both**; the corrected revision removed the restoration that used to contradict §3.7 |
 | **the recovery point** | §3.4 and §4.2 | the promotion log must name it, and the history entry must match it, with `pre_fp` and `post_fp` present | **both** |
 | **a destructive restore** | §4.3 — measure the delta, write it down, separate approval; §4.5 — the journal-mode verification | its §10.5.1–§10.5.4 — `measure_restore_impact` (the point's SHA-256, per-table before/after counts, `rows_would_be_lost` / `rows_would_be_resurrected`), an approval **bound** to that measurement (`RESTORE <rows_would_be_lost>`), the block state recorded, and `verify_wal_state` / `reestablish_wal` after the restore | **both**; the corrected revision now carries what this section previously said it did not |
+
+**§3.7 and the procedure's §10.5.3 are now the same rule.** The
+procedure no longer restores the pre-refresh block after a runtime
+rollback: it **records** the state the rollback leaves behind — the
+stale provenance, the retired-V1 state if the refresh never ran, and
+the dangling host-asset references — and names the remediation as
+separately authorised. That is exactly §3.7's rule, and the two
+documents no longer disagree about it.
+
+**One defect in the procedure's own repair path.** The corrected
+revision accepts an `unrepaired` block, so a failed refresh is not
+"repaired" by restoring the retired V1 copy. **Re-running Stage 4 is
+the intended repair — and it is currently deadlocked.** The refresher
+appends one newline at the END-marker boundary on every rewrite, so a
+second rewrite grows the suffix again, while the procedure's post-check
+compares the result against the **Stage 0b backup** and allows exactly
+one extra newline. Measured: suffix 7 → 8 → 9 bytes, and the
+post-check then fails on a **correct** block; re-running fails
+identically, because the refresher is now a no-op and the suffix stays
+at 9. **Do not rely on that path.** The fix belongs to the procedure:
+compare the post-state against the file as it stood immediately before
+*this* run, not against the first attempt's backup. Recorded in §8.
 
 **What this guide still adds.** §4 is not superseded. It is the part
 the host-specific procedure does not carry in the same form:
@@ -1429,7 +1451,9 @@ act (§3.1, act 5).
 - it does not touch `~/.mpm/AGENTS.md`, `~/.mpm/CLAUDE.md` or
   `~/.mpm/CLI_AGENT_RULES.md` — those are the project guidance, not the
   host's managed block;
-- it does not change the operator's content outside the markers;
+- it does not change the operator's content outside the markers — apart
+  from the one newline immediately after the outer END marker that §5.1
+  names;
 - it does not change the payload, the binaries or the database;
 - it does not restart any session.
 
@@ -1501,9 +1525,12 @@ act (§3.1, act 5).
   `MPM_BUILD_COMMIT` and `MPM_BUILD_VERSION` from the active release's
   `RELEASE.json` and cross-check them against the release directory and
   the CLI before writing anything (§5.2).
-- **Do not restore the managed-block backup after a runtime rollback.**
-  It reinstates the retired V1 hook name, which the rolled-back runtime
-  does not register either. Leave the refreshed block in place (§3.7).
+- **Do not restore the managed-block backup after a runtime rollback** —
+  neither the installer's `AGENTS.md.bak*` chain nor the host
+  procedure's Stage 0b copy (`AGENTS.md.pre-cutover`). They are two
+  different files with the same content, and both reinstate the retired
+  V1 hook name, which the rolled-back runtime does not register either.
+  Leave the refreshed block in place (§3.7).
 - **Do not "repair" the block's stale provenance after a rollback, and
   do not restore the block to make it match the runtime.** The
   provenance line records where the block was **rendered from**; the
@@ -1666,6 +1693,22 @@ none of them belongs in a documentation-only change.
   and its own status line records that the earlier checksum's approval
   is **void** for it because the executable sequence changed. It needs a
   fresh independent review before any part of it is executed (§3.8).
+- **The procedure's `unrepaired` repair path is deadlocked.** Stage 4
+  accepts a block whose body is right but whose provenance is wrong, so
+  that a failed refresh is repaired by **re-running** Stage 4 rather
+  than by restoring the retired V1 copy. That repair currently cannot
+  pass the procedure's own post-check: the refresher appends one
+  newline at the END-marker boundary on every rewrite (suffix 7 → 8 →
+  9 bytes measured), while the post-check compares against the **Stage
+  0b backup** and allows exactly one extra newline — so it fails on a
+  **correct** block, and re-running fails identically, because the
+  refresher is then a no-op and the suffix does not move. The operator
+  is left with a correct block and a permanently failing gate. The fix
+  belongs to the procedure: snapshot the live file at the start of
+  Stage 4 and compare the post-state against **that**, and express the
+  real invariant — the content outside the markers may differ only by
+  the whitespace the refresher itself inserted. **Do not rely on that
+  path** (§3.8).
 - **What the corrected revision changed, and what it now carries.** The
   automatic restoration of the pre-refresh managed block after a runtime
   rollback is **removed** — it reinstated the retired V1 hook name that
