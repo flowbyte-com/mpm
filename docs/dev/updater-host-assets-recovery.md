@@ -726,7 +726,7 @@ Stop and read. None of these is a reason to pick a different revision.
 | **partial success — the release directory exists but the pointer did not move** | the promotion failed after the install stage | **Re-run the same command.** An existing release that validates is **re-used**, not refused — see the note at the end of this table. Do **not** choose another revision, and do **not** delete the release directory |
 | **partial success — the pointer moved but the stable updater was not replaced** | the promotion failed after the pointer moved | The updater restores the pointer on this path. The stable updater is replaced **only** on success, so `~/.mpm/mpm-update` is still the old build — which is correct, and it is the recovery tool for the runtime that is running. Re-run the same command |
 | **failed service identity** — after `--restart-services`, the history record or the promotion's report carries a warning that a unit runs something other than the active release | the daemon was not actually restarted, or it restarted from another path | The updater records a **warning**; it does not claim a clean restart. Restart the unit by hand and re-check `systemctl --user status <unit>`; the running executable must resolve into `~/.mpm/releases/2045afcc…` |
-| **degraded rollback** — the promotion reports `DEGRADED:` | the live schema changed and the previous release cannot read it, **or** the post-smoke fingerprint failed so the schema state is unknown | The pointer **stays at the new release** (the binaries match the data). Recover with `mpm-update --rollback --with-db-restore --force` — which restores the **pre-update backup the promotion took** and overwrites newer data — or fix forward. Do not delete anything |
+| **degraded rollback** — the promotion reports `DEGRADED:` | the live schema changed and the previous release cannot read it, **or** the post-smoke fingerprint failed so the schema state is unknown | The pointer **stays at the new release** (the binaries match the data). Recover with `mpm-update --rollback --with-db-restore --force` — which restores the **pre-update backup the promotion took** and overwrites newer data — or fix forward. **That command is the last step of an operation, not the operation**: §3.6 lists the three things required before it (identify the point, measure the data loss, approve it bound to the measurement) and the journal-mode verification required after it. Do not delete anything |
 
 **About "the release already exists".** An existing
 `releases/2045afcc…` is refused **only when it does not validate**. If
@@ -761,6 +761,27 @@ A database restore is a **separate, explicit** operation:
 `--with-db-restore` overwrites newer user data and is refused without
 `--force`. It restores **the backup the promotion took** (§3.4) — not
 the Nov-7 point, and never the Nov-2 one.
+
+**That command is the last step of an operation, not the operation.**
+Three things come before it and one comes after, and this is where an
+operator meets them:
+
+| | what | where |
+|---|---|---|
+| **before** | **identify** the point the command will use — read it out of the record that matches the active revision; do not infer it | §4.3, step 1 |
+| **before** | **measure** the data loss, in writing, against a read-only comparison of the point and the live database | §4.3, step 2 |
+| **before** | **approve it explicitly, bound to the measured figure** — the approver states the number they are accepting. The approval to *promote* is not the approval to *destroy data* | §4.3, step 3 |
+| **before** | **quiesce the writers** — the updater refuses a restore while a definite holder has the database open, and `--force` does not bypass that | §4.4 |
+| **after** | **verify the journal mode** the restored database is actually in, and re-establish it if it is not | §4.5 |
+
+**On this host the host-specific procedure carries the executable form of
+all of it**, and its §10.5 is normative for its own rollback and
+degraded-stop paths: `measure_restore_impact` (the point's SHA-256,
+per-table before/after counts, `rows_would_be_lost` /
+`rows_would_be_resurrected`), an approval **bound** to that measurement
+(`RESTORE <rows_would_be_lost>` — a bare `RESTORE` is refused), the
+managed-block state recorded, and `verify_wal_state` /
+`reestablish_wal` after the restore. **Follow that form** (§3.8).
 
 A runtime rollback leaves the managed block alone. **That is correct**,
 and §3.7 says why — and what *not* to do afterwards.
@@ -1118,6 +1139,14 @@ operator's, not the tool's.**
    with the delta in front of the approver. The approval to *promote* is not
    the approval to *destroy data*; they are different acts with different
    consequences, and this document grants the first, not the second.
+
+   **Bind the approval to the measurement.** The approver must state the
+   figure they are accepting — *"I approve discarding 2,085 memories, 2,081
+   evidence rows and 13,363 tool_invocations from the November 7 point"* —
+   so the approval cannot be given without the number, and the number
+   cannot change afterwards without a new approval. The host-specific
+   procedure makes this mechanical: its `authorize_restore` requires
+   `RESTORE <rows_would_be_lost>` and refuses a bare `RESTORE` (§3.8).
 
 **The restore also has to survive the writer rules** (§4.4), and it changes
 the live database's journal mode (§4.5). Both are reasons to treat it as a
