@@ -13,6 +13,13 @@
 > §2.2 and the check count in §3.3 Step 3 must be recomputed for it.
 > Do not "pick a newer revision" to work around a problem: the fix must
 > be *in* the revision, and §3.3 Step 2 is what proves it.
+>
+> **On this host a host-specific procedure governs the execution.**
+> `/home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md` is the approved
+> cutover procedure for exactly this revision pair (`4a870c8a…` →
+> `2045afcc…`) on this host. **Run that procedure.** Where it and this
+> guide speak to the same act, the host-specific one wins — §3.8 says
+> which, and says what this guide still adds on top of it.
 
 ## 1. What happened
 
@@ -198,7 +205,7 @@ Do not let one stand in for another.
 |---|---|---|---|
 | **1. checks** | `mpm-update --dry-run --commit <target>` (§3.3 Steps 3–4) | **nothing.** No backup, no staging in the data root, no lock, no history record, no release directory | unchanged: `4a870c8a` |
 | **2. promotion** | `mpm-update --commit <target>` (§3.3 Step 5) | the new release directory, the `current` pointer, a **fresh backup**, the history record, and the stable updater | `2045afcc` |
-| **3. service restart** | `mpm-update --restart-services` **on the promotion itself** (it has no effect on a later re-run), or `systemctl --user restart mpm-scheduler` by hand | the **executables the daemons run** | the daemons run `2045afcc`; until then they keep running `4a870c8a` |
+| **3. service restart** | governed by the **scheduler policy in force** (§3.8): `--restart-services` **on the promotion itself** (it has no effect on a later re-run), or a manual `systemctl --user restart mpm-scheduler` **outside** the promotion window | the **executables the daemons run** | the daemons run `2045afcc`; until then they keep running `4a870c8a` |
 | **4. instruction refresh** | §5.2 | `~/.config/opencode/AGENTS.md` (only the marked span) | the provenance line names `2045afcc` |
 | **5. OpenCode restart** | by hand | the running agent sessions | only **new** sessions read the refreshed block |
 
@@ -206,6 +213,14 @@ Acts 3, 4 and 5 are **not** part of the promotion. The promotion does
 not stop the daemons, does not rewrite the operator's instructions and
 does not touch the agent sessions. Each is a separate decision with its
 own authorisation; §6 records the residual of leaving them undone.
+
+Act 3 has **one policy in force at a time**, and it is chosen **before**
+the promotion, not improvised during it. The host-specific procedure for
+this host chooses one — **Policy S1**: the updater owns the unit's
+lifecycle, `--restart-services` is passed **once, on the promotion
+invocation**, and nothing stops or starts the unit by hand inside the
+promotion window (§3.8). **Under that policy, leaving the scheduler on
+the old revision is not an available answer.**
 
 ### 3.2 Preconditions
 
@@ -465,15 +480,29 @@ is what makes the comparison possible afterwards:
 # §4.2, Step 1 — the baseline
 ```
 
-**Do not pass `--restart-services`.** A service restart is an
-operational act with its own authorisation, and this procedure does
-not assume one — see §3.1.
+**The scheduler policy is decided before the promotion, not during
+it.** A service restart is an operational act with its own
+authorisation, so this procedure does not assume one — see §3.1. But
+the host-specific procedure for this host **does** require one:
 
-After the promotion, `mpm-scheduler` (and `mpm-telemetry`, if it is
-installed) are still running the **previous** revision's executables,
-while the CLI on `PATH`, the managed block's provenance line and the
-recovery executable all name the new one. The residual is real and it
-lasts until the daemons are restarted:
+- **If a host-specific scheduler policy is in force** (§3.8 — on this
+  host it is **Policy S1**), pass `--restart-services` **once, on this
+  promotion invocation**. Do not stop, start or restart the unit by
+  hand anywhere inside the promotion window: the updater owns the
+  lifecycle, and a manual stop before it creates exactly the
+  *"already inactive, so nothing to start"* trap. **Under that policy
+  the scheduler must end up on `2045afcc`; leaving it on `4a870c8a` is
+  not an available answer.**
+- **If no host-specific policy is in force**, this procedure's default
+  applies: do not pass `--restart-services`, and close the residual by
+  hand afterwards (§3.1, act 3).
+
+**If `--restart-services` was NOT passed**, then after the promotion
+`mpm-scheduler` (and `mpm-telemetry`, if it is installed) are still
+running the **previous** revision's executables, while the CLI on
+`PATH`, the managed block's provenance line and the recovery executable
+all name the new one. The residual is real and it lasts until the
+daemons are restarted:
 
 ```bash
 # what the running daemons are actually executing
@@ -495,7 +524,10 @@ systemctl --user status mpm-scheduler \
 
 If `mpm-telemetry.service` IS installed, check it the same way.
 
-Two ways to close it, in the operator's order of preference:
+Two ways to close it, in the operator's order of preference. **Neither
+is available while a host-specific scheduler policy is in force** — under
+that policy the promotion itself restarts the unit, and the operator does
+not touch it:
 
 1. **restart the units by hand**, once the operator has decided that
    is acceptable:
@@ -524,6 +556,9 @@ Two ways to close it, in the operator's order of preference:
 2. **leave them running** and accept the residual until the next
    reboot or the next service restart. The daemons are long-lived
    schedulers; they do not pick up the new binaries on their own.
+   **This is not available under a host-specific scheduler policy**: the
+   scheduler would keep running `4a870c8a` while the pointer, the CLI
+   and the recovery executable all name `2045afcc`.
 
 The promotion's own report says this in as many words when it leaves
 the daemons alone:
@@ -598,11 +633,12 @@ inside the promotion's sequence, and it matters:
 resolve → lock → stage the candidate
       → CREATE THE BACKUP          ← the recovery point is created here
       → validate the bundle → schema preflight
-      → [stop and start the services, only with --restart-services]
+      → [STOP the managed units, only with --restart-services]
       → install the release → move the pointer
       → establish the stable paths
       → health smoke (a live write path — see §6)
       → install the stable updater (last, atomically)
+      → [START the stopped units back, and verify their identity]
       → record the outcome
 ```
 
@@ -637,6 +673,17 @@ The promotion also records the database's schema fingerprint before
 and after, in the same record (`pre_fp`, `post_fp`). If the two
 differ, the live schema changed during the promotion and the record
 says so.
+
+The **stop** and the **start** are two events at two different points,
+and the order is not incidental. With `--restart-services` the updater
+stops the active units **after** the candidate is built and preflighted,
+and starts them back **after** the live smoke test and the stable-updater
+install — so a restarted unit resolves into the **new** release, and the
+updater verifies that it does (`restarted: mpm-scheduler (verified
+against 2045afcc…)`). Only units that were **active** are stopped, and
+only those are started back: a service that was inactive before the
+promotion stays inactive — and a policy that wants a restart it cannot
+get is a policy that cannot proceed (§3.8).
 
 **Verify a recovery point before you rely on it.** See §6.1 for an
 older point, and **§4.2** for the independent verification of the
@@ -693,6 +740,90 @@ A database restore is a **separate, explicit** operation:
 `--force`. It restores **the backup the promotion took** (§3.4) — not
 the Nov-7 point, and never the Nov-2 one.
 
+A runtime rollback leaves the managed block alone. **That is correct**,
+and §3.7 says why — and what *not* to do afterwards.
+
+### 3.7 The managed block after a runtime rollback
+
+**Leave the refreshed block in place.** A runtime rollback moves the
+pointer back to `4a870c8a…`; it does not touch
+`~/.config/opencode/AGENTS.md`, and that is the correct outcome.
+
+The reason is the hook name. The rolled-back release runs the **V2**
+plugin, and the V2 plugin registers `ctx.session.hook("context", …)` —
+the name the **refreshed** block carries. The pre-refresh block, and
+every `.bak` of it, carries the retired V1 name
+`experimental.chat.system.transform`, which the V2 plugin **does not
+register**: in `dist/index.v2.js` the V1 name appears only inside a
+comment describing the V1→V2 mapping. Restoring the backup therefore
+reinstates a block that names a hook the running plugin does not
+register — the same defect the refresh exists to fix.
+
+So, after a runtime rollback:
+
+| do | do not |
+|---|---|
+| leave the refreshed block in place | restore `AGENTS.md.bak*` |
+| let the block's `commit=2045afcc…` stand — it records where the block was **rendered from**, and that remains true | try to re-stamp the block: the rolled-back release carries **no** refresher and **no** snippet, so there is nothing to re-stamp it with |
+| treat "put the block back to its pre-cutover text" as host-asset remediation with its own authorisation | treat the `.bak` as the block's rollback target |
+
+The `.bak` file remains the right rollback target for the **refresh
+itself** — a file-corrupting accident — and the wrong one for a
+**runtime rollback**. Those are different acts and they need different
+words.
+
+### 3.8 The host-specific cutover procedure for this host
+
+`/home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md` is the approved
+cutover procedure for exactly this revision pair
+(`4a870c8a0d10b4567d9362df4c3dda1fbe0a01ae` →
+`2045afcc57f1f7603f38e016a2909b85985e48dc`) on this host. It was
+independently approved (its eighteenth review, 2026-11-10) and **has not
+been executed against the live installation**.
+
+**Run it. It is the procedure for this host.** Its stages and this
+guide's steps are the same sequence — pin, build the bootstrap updater
+out of tree, verify its identity, dry run, promote, verify, refresh,
+relaunch — so there is no second sequence to choose between.
+
+**Where the two speak to the same act, the host-specific one wins.**
+The differences that matter, and what this guide therefore no longer
+says on its own:
+
+| act | this guide (general) | the host-specific procedure | what governs |
+|---|---|---|---|
+| **the scheduler** | a service restart is a separate, separately-authorised act; the residual may be closed by hand afterwards | **Policy S1** — the updater owns the unit's lifecycle: `--restart-services` is passed **once, on the promotion invocation**, and nothing stops or starts the unit by hand inside the promotion window | **S1.** Pass the flag on the promotion; do not touch the unit by hand; **do not leave the scheduler on `4a870c8a`** |
+| **the promotion's service gate** | the residual is checked by reading `systemctl --user status` | a mandatory `/proc/<pid>/exe` gate: the running executable must resolve into `releases/<REV>/` | **S1's gate**, which is stronger than reading `status` |
+| **the managed-block refresh** | §5.2 above | Stage 4 — the same RELEASE.json-sourced provenance, the same keep decision, plus a content-outside-the-markers diff check | **both**; they agree, and this guide now carries the same discipline |
+| **the recovery point** | §3.4 and §4.2 | the promotion log must name it and the history entry must match it | **both**; §4.2's freshness assessment is the part the host-specific procedure does not carry |
+
+**What this guide still adds, and the host-specific procedure does not
+carry.** §4 is not optional and is not superseded:
+
+- **§4.3 — measure the data delta before a destructive restore.** The
+  host-specific procedure asks for a typed `RESTORE` authorisation, but
+  it does not *quantify* what the restore discards. §4.3 requires the
+  delta to be measured and written down, and the approver to see it.
+- **§4.5 — the journal mode a restore changes.** The host-specific
+  procedure restores and then goes straight to its identity and
+  scheduler gates. A restore takes the installation out of WAL mode,
+  and §4.5's procedure — restore, re-establish the mode, **verify** it,
+  verify the data, and only then restart the scheduler — is the part
+  that has to be added to it.
+
+**Two conditions on the cutover, stated here so they are not lost:**
+
+1. **The §4.3 and §4.5 requirements must be present in the
+   host-specific procedure before it is executed** — or the operator
+   must carry them out of §4 by hand. Closing the gap in the upstream
+   guide does not close it in the procedure that will actually be run.
+2. **The host-specific procedure's block-restore path needs its own
+   review.** It restores the pre-refresh managed block after a rollback,
+   which reinstates the V1 hook name that the rolled-back runtime does
+   not register — the defect §3.7 describes. This is recorded as a
+   follow-up (§8); **this guide does not modify another procedure's
+   approved text.**
+
 ## 4. Database safety
 
 > This section is about the **data**, not the binaries. The promotion in §3
@@ -703,8 +834,14 @@ the Nov-7 point, and never the Nov-2 one.
 ### 4.1 What the schema fingerprint establishes — and what it does not
 
 `SchemaFingerprint` hashes the database's **structure**: the `sqlite_master`
-entries (each table's name and its `CREATE` statement) and every table's
-`PRAGMA table_info` columns. It reads **no rows**.
+entries (each table's name and its `CREATE` statement), every table's
+`PRAGMA table_info` columns, that table's **CHECK expressions**, and its
+**index and trigger names**. It reads **no rows**.
+
+An index's or a trigger's *name* is therefore part of the fingerprint:
+adding or renaming one moves it. That is still structure, never data —
+but it means the fingerprint moves for more reasons than "a table
+changed shape", and a reader comparing two fingerprints should know it.
 
 So:
 
@@ -795,7 +932,7 @@ history entry (`pre_fp`), and the backup's own copy must carry it:
 ```bash
 BK=<the backup_dir the successful record names>
 
-python3 - "$BK/mpm.db" "$BK/../.." <<'PY'
+python3 - "$BK/mpm.db" <<'PY'
 import sqlite3, sys
 db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
 print("integrity:", db.execute("PRAGMA integrity_check").fetchone()[0])
@@ -811,8 +948,14 @@ for t in ("memories", "evidence", "tool_invocations", "works",
 PY
 ```
 
-Compare the shape with the recorded `pre_fp` — the updater will refuse a
-restore whose copy does not carry it, and so should you.
+Compare the shape with the recorded `pre_fp`. **You cannot recompute the
+fingerprint with the shipped tooling** — no CLI surface prints one, and the
+algorithm's details (the CHECK expressions, the index and trigger names)
+are Go-side, so a hand reimplementation would not be byte-identical. Use
+the **executable proxies** this step already prints — the table count, the
+table set, and `schema_migrations` equality — as the shape check, and let
+the updater enforce the fingerprint binding at restore time: it refuses a
+recovery point whose copy does not carry the recorded `pre_fp`.
 
 **Step 4 — compare the counts with the baseline, and investigate.**
 `schema_migrations` must be **equal**. The row counts must be **equal or
@@ -910,7 +1053,7 @@ descriptors, and classifies every process that could hold the database:
 | class | meaning | effect |
 |---|---|---|
 | **holder** | the process demonstrably holds `mpm.db`, `mpm.db-wal` or `mpm.db-shm` open | the restore is **refused** |
-| **unverifiable** | the process's `/proc/<pid>/fd` could not be read — root-owned system services — and no lock on the database was found | the restore is **refused unless `--force`**; with `--force` they are **accepted and recorded**, never silently ignored |
+| **unverifiable** | the process's `/proc/<pid>/fd` could not be read and no lock on the database was found — a **same-uid** process (a hardened agent, a keyring daemon) or a process owned by another user | the restore is **refused unless `--force`**; with `--force` they are **accepted and recorded**, never silently ignored |
 | ruled out | the process was positively excluded | nothing |
 
 **What it is not.** It is a **point-in-time `/proc` snapshot**. The code says
@@ -926,7 +1069,7 @@ paths with the updater's own scanner:
 ```
 definite holders : 1
    {PID:2977 Name:mpm-scheduler File:/home/v/.mpm/src/db/mpm.db}
-unverifiable     : 42   (root-owned system daemons; /proc/<pid>/fd unreadable)
+unverifiable     : 30   (processes whose /proc/<pid>/fd could not be read)
 checkWriters(force=true)  -> refusing to restore the database: 1 process(es) still hold it open:
   pid 2977 mpm-scheduler (/home/v/.mpm/src/db/mpm.db)
 Stop the writers, then retry.
@@ -943,7 +1086,14 @@ the **unverifiable** residual — and it records the processes it accepted.
 | `mpm-scheduler` (the managed unit) | the scheduler, running on a 60-second interval | **yes** — with `--restart-services`, or by hand. It is the definite holder |
 | **OpenCode agent sessions** | every session running against this installation | **no.** The updater reports them as *"agent session — restart by hand; the updater will never touch it"*, and never terminates them. A restore under an open session is a restore **under a writer** |
 | **MCP servers / other processes** holding the database | anything else that opened it | **no** — they show up as holders and the restore is refused |
-| root-owned system daemons | 42 unverifiable on this host | **no** — and no lock on the database was found for any of them |
+| **same-uid processes with unreadable descriptors** | **2** on this host: a `sd-pam` session daemon (pid 2767) and an `ssh-agent -D` (pid 3203) | **no** — and these are the entries to look at **first**: they are the operator's own processes, they are named, and they are the only ones in the class that *could* hold an operator-owned database. A root-owned service normally cannot open it at all — the database is mode `0600` and owned by the operator |
+| processes owned by other users | the rest of the unverifiable list | **no** — and no lock on the database was found for any of them |
+
+The count of unverifiable processes is a **point-in-time snapshot of a
+moving host population**, not a property of the installation: the scan
+reported **30** at the time of measurement (2026-11-11), **42** earlier
+the same day and **30** the day before. What is stable is the *shape* of
+the class, not its size.
 
 **An ordinary promotion needs none of this.** The promotion takes an **online**
 backup (`VACUUM INTO`, a transactionally consistent copy) and **never replaces
@@ -1068,7 +1218,10 @@ implements it:
 | already current | a no-op; the provenance timestamp is preserved |
 
 So the operator's own text outside the markers is never overwritten,
-and the refresh is reversible from the `.bak` file.
+and the refresh is reversible from the `.bak` file — **but that
+reversibility is about the refresh, not about a runtime rollback.**
+After a runtime rollback the `.bak` is the **wrong** target for the
+block; §3.7 says why.
 
 The refresh is also a **correctness** fix, not a cosmetic one: the
 installed block names the OpenCode **V1** hook
@@ -1077,24 +1230,69 @@ not register. The refreshed block names `ctx.session.hook("context")`.
 
 ### 5.2 The step
 
-Run it **after Step 6**, from the installed assets. The paths below do
+Run it **after Step 6 has passed** and **after the operator has decided
+to keep the new release**, from the installed assets. The paths below do
 not exist before the promotion: the active release carries only the
 runtime payload until the repair adds the assets.
+
+**The keep decision comes first, and it is the operator's.** The
+managed block's provenance line names the revision the block was
+rendered from. A block that names a revision the operator has rolled
+back from is a false claim — and there is no way to re-stamp it, because
+the rolled-back release carries no refresher at all (§3.7). The order is
+therefore **runtime verification → keep decision → refresh**. If the
+operator is not yet sure they are keeping `2045afcc`, **do not
+refresh**.
 
 **The command must export the provenance**, or it will stamp
 `commit=unknown` and fail its own acceptance test below.
 `block_provenance` reads `MPM_BUILD_VERSION` and `MPM_BUILD_COMMIT`
 from the environment; `install.sh` and `make refresh-installed` export
-both, but a standalone run of the refresher exports nothing:
+both, but a standalone run of the refresher exports nothing.
+
+**Source both values from the promoted release's own declaration — do
+not type them.** `RELEASE.json` is written into the release at build
+time and is the authority on what was actually installed:
 
 ```bash
-MPM_BUILD_VERSION=0.1.0-dev \
-MPM_BUILD_COMMIT="$TARGET" \
-python3 ~/.mpm/agent_installation/mpm-opencode/scripts/install_agents_instructions.py \
+REL="$HOME/.mpm/current"
+RELJSON="$REL/RELEASE.json"
+[ -f "$RELJSON" ] || { echo "STOP: the active release declares no RELEASE.json" >&2; exit 1; }
+
+MPM_BUILD_COMMIT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["commit"])' "$RELJSON")
+MPM_BUILD_VERSION=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$RELJSON")
+
+# cross-check 1: the release directory IS the revision it declares
+[ "$(basename "$(readlink -f "$REL")")" = "$MPM_BUILD_COMMIT" ] \
+  || { echo "STOP: release dir != RELEASE.json commit" >&2; exit 1; }
+# cross-check 2: the CLI declares the same revision and the same version
+[ "$("$HOME/.mpm/bin/mpm" version --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["commit"])')" = "$MPM_BUILD_COMMIT" ] \
+  || { echo "STOP: CLI revision != RELEASE.json commit" >&2; exit 1; }
+[ "$("$HOME/.mpm/bin/mpm" version --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')" = "$MPM_BUILD_VERSION" ] \
+  || { echo "STOP: CLI version != RELEASE.json version" >&2; exit 1; }
+
+export MPM_BUILD_COMMIT MPM_BUILD_VERSION
+```
+
+**Do not type the version.** A hand-typed constant is a claim about a
+release nobody checked, and the version is the one provenance field no
+other step verifies. The two cross-checks above are what turn the
+provenance from an assertion into a measurement: on a mismatch the
+command **stops before it writes anything**.
+
+Now run the refresher with the sourced values:
+
+```bash
+python3 "$HOME/.mpm/current/agent_installation/mpm-opencode/scripts/install_agents_instructions.py" \
   --scope user \
   --target ~/.config/opencode/AGENTS.md \
-  --snippet ~/.mpm/agent_installation/mpm-opencode/templates/AGENTS.md.snippet
+  --snippet "$HOME/.mpm/current/agent_installation/mpm-opencode/templates/AGENTS.md.snippet" \
+  || { echo "STOP: the instruction refresh failed" >&2; exit 1; }
 ```
+
+The refresher **exits 2 and refuses to modify** a target whose BEGIN
+marker has no matching END, and exits 0 on a no-op. **Check the exit
+status** — a refusal is not a success.
 
 The reconciler (`reconcile_managed_blocks.py --only mpm-opencode
 --home $HOME`) resolves the manifest's snippet path relative to the
@@ -1106,10 +1304,26 @@ Verify:
 ```bash
 grep -n "mpm-provenance" ~/.config/opencode/AGENTS.md
 grep -n "ctx.session.hook" ~/.config/opencode/AGENTS.md
+
+if grep -q "experimental.chat.system.transform" ~/.config/opencode/AGENTS.md; then
+  echo "STOP: the retired V1 hook name is still in the block" >&2; exit 1
+fi
+echo "the retired V1 hook name is gone"
+
+# the drift gate: does the installed block byte-match the canonical render?
+python3 "$HOME/.mpm/current/agent_installation/scripts/check_installed_managed_blocks.py"
 ```
 
 The provenance line must name **`2045afcc57f1f7603f38e016a2909b85985e48dc`**
-— not `unknown` — and the block must name `ctx.session.hook("context")`.
+— not `unknown` — and the block must name `ctx.session.hook("context")`
+and must **not** name `experimental.chat.system.transform`: the running
+plugin registers the V2 hook, and in its `dist/index.v2.js` the V1 name
+appears only inside a comment describing the V1→V2 mapping.
+
+The drift gate's verdict must be **PASS** — *"installed block
+byte-matches canonical render"*. A `WARN` means the installed block
+differs from the release's canonical render; read the divergent line it
+names before going further.
 
 **This changes new sessions only.** The running OpenCode sessions keep
 the block they started with. Restarting them is a separate, deliberate
@@ -1177,6 +1391,24 @@ act (§3.1, act 5).
   which on this installation is the **November 7** point until the promotion
   has happened. That is the wrong point for this cutover, and the command
   will not say so (§4.3).
+- **Do not leave the scheduler running on the old revision when the
+  scheduler policy in force requires `--restart-services` on the
+  promotion.** The updater stops the active unit after the candidate is
+  built and preflighted and starts it back after the live smoke test,
+  so the restarted unit resolves into the new release — and the
+  promotion verifies that it does. Under that policy, "leave it running
+  and accept the residual" is not an option (§3.8).
+- **Do not stop or start the scheduler by hand inside the promotion
+  window.** The updater owns the lifecycle there; a manual stop before
+  it produces exactly the *"already inactive, so nothing to start"*
+  trap (§3.8).
+- **Do not type the managed block's provenance values.** Source
+  `MPM_BUILD_COMMIT` and `MPM_BUILD_VERSION` from the active release's
+  `RELEASE.json` and cross-check them against the release directory and
+  the CLI before writing anything (§5.2).
+- **Do not restore the managed-block backup after a runtime rollback.**
+  It reinstates the retired V1 hook name, which the rolled-back runtime
+  does not register either. Leave the refreshed block in place (§3.7).
 - **Do not read the promotion's health smoke as a check.** The smoke
   is a **live write path**: it runs the newly installed binary against
   the **live** database (`mpm call mpm_system --payload '{"action":
@@ -1297,7 +1529,10 @@ the data root and it is space the promotion wants.
 - the migration policy for the managed block: §5.1 above, implemented by
   `agent_installation/mpm-opencode/scripts/install_agents_instructions.py`;
 - the two validation scopes (candidate vs installed) and the exact
-  compatibility rule: [`bundle-validation-scopes.md`](bundle-validation-scopes.md).
+  compatibility rule: [`bundle-validation-scopes.md`](bundle-validation-scopes.md);
+- the host-specific cutover procedure for this host — the one to run,
+  and the one whose scheduler policy governs:
+  `/home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md` (§3.8).
 
 ## 8. Known follow-ups
 
@@ -1319,6 +1554,21 @@ none of them belongs in a documentation-only change.
   updater checks row counts, and it does not. It should be corrected in a
   separate change, in the same file, by the people who own it. **This
   document does not change production code.**
+- **The host-specific cutover procedure needs §4.3 and §4.5 before it
+  runs.** Its destructive-restore branch asks for a typed `RESTORE`
+  authorisation without quantifying the loss, and it restores without
+  re-establishing the journal mode — so the scheduler would come back
+  against a database that has silently left WAL mode. §4.3's measured
+  delta and §4.5's validated mode recovery have to be added to it, or
+  carried out of §4 by hand (§3.8).
+- **The host-specific procedure's block-restore path reinstates the
+  retired V1 hook name.** After a runtime rollback it restores the
+  pre-refresh managed block, which names
+  `experimental.chat.system.transform` — a hook the rolled-back
+  runtime's V2 plugin does not register either. §3.7 says to leave the
+  refreshed block in place. This needs the procedure's own author to
+  change it and re-approve it; this guide does not modify another
+  procedure's approved text.
 - **The candidate binary does not expose its own schema.** The bundle's
   schema preflight is a file the bundle asserts; the format cannot prove it
   is the substrate's DDL. The durable fix is for the candidate binary to
