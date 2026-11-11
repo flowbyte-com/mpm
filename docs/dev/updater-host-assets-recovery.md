@@ -837,7 +837,7 @@ procedure for exactly this revision pair
 (`4a870c8a0d10b4567d9362df4c3dda1fbe0a01ae` →
 `2045afcc57f1f7603f38e016a2909b85985e48dc`) on this host. Its current
 revision is SHA-256
-`64303ebc3b94be196a07db8ea8b1969b0f6384c3bb3ae17bcffe4af4618b71e7`,
+`554c8183b4ce696b6ed247cff53f9242a85296010ce5d93f533a9caf0f882ef8`,
 published beside it in `MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256`.
 
 > **That revision is NOT APPROVED, and no part of it may be executed.**
@@ -846,6 +846,17 @@ published beside it in `MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256`.
 > fresh independent review is required first**. The operator must
 > check that checksum before running anything — a procedure that has
 > changed under its own feet is not a procedure to run on trust.
+
+> **Only the checksum in the sidecar counts, and it moves.** Two
+> earlier checksums appear in this guide's history and **neither is
+> live**: `9fc056b9ec089276b45f486bd8404242951765a8de5c548960d04c19c7bc7f78`
+> had an approval that the current revision voids, and
+> `64303ebc3b94be196a07db8ea8b1969b0f6384c3bb3ae17bcffe4af4618b71e7`
+> was an intermediate revision that was **never approved at all** — the
+> procedure's own approval record says it "was itself never approved: it
+> was returned REQUEST CHANGES by the Stage 4 review" — and the
+> current revision supersedes it. **Read the sidecar; do not trust a
+> checksum quoted anywhere else**, including in this document.
 
 **Run it — it is the procedure for this host.** Its stages and this
 guide's steps are the same sequence — pin, build the bootstrap updater
@@ -868,7 +879,7 @@ The acts they both describe, and what governs each:
 |---|---|---|---|
 | **the scheduler** | a service restart is a separate, separately-authorised act; the residual may be closed by hand afterwards | **Policy S1** — the updater owns the unit's lifecycle: `--restart-services` is passed **once, on the promotion invocation**, and nothing stops or starts the unit by hand inside the promotion window | **S1.** Pass the flag on the promotion (§3.3 Step 5 carries it); do not touch the unit by hand; **do not leave the scheduler on `4a870c8a`** |
 | **the promotion's service gate** | the residual is checked by reading `systemctl --user status` | a mandatory `/proc/<pid>/exe` gate: the running executable must resolve into `releases/<REV>/` | **S1's gate**, which is stronger than reading `status` |
-| **the managed-block refresh** | §5.2 above | Stage 4 — the same RELEASE.json-sourced provenance, the same keep decision, a content-outside-the-markers diff check, and acceptance of an `unrepaired` block so a failed refresh does not have to be "repaired" by restoring the retired copy — **but see the note below: that repair path is currently deadlocked** | **both**; they agree, and this guide carries the same discipline |
+| **the managed-block refresh** | §5.2 above | Stage 4 — the same RELEASE.json-sourced provenance, the same keep decision, acceptance of an `unrepaired` block so a failed refresh does not have to be "repaired" by restoring the retired copy, and a post-check that judges the outcome against a **per-run snapshot** of the file rather than against the pre-cutover backup | **both**; they agree, and this guide carries the same discipline |
 | **the managed block after a runtime rollback** | §3.7 — leave the refreshed block in place; never restore the `.bak` | its §10.5.3 and `assess_rollback_block_state` — the block is **never** restored to its pre-refresh copy; the state left behind (stale provenance, retired-V1 state, dangling host-asset references) is **recorded**, and the host-asset gap needs separately authorised remediation | **both**; the corrected revision removed the restoration that used to contradict §3.7 |
 | **the recovery point** | §3.4 and §4.2 | the promotion log must name it, and the history entry must match it, with `pre_fp` and `post_fp` present | **both** |
 | **a destructive restore** | §4.3 — measure the delta, write it down, separate approval; §4.5 — the journal-mode verification | its §10.5.1–§10.5.4 — `measure_restore_impact` (the point's SHA-256, per-table before/after counts, `rows_would_be_lost` / `rows_would_be_resurrected`), an approval **bound** to that measurement (`RESTORE <rows_would_be_lost>`), the block state recorded, and `verify_wal_state` / `reestablish_wal` after the restore | **both**; the corrected revision now carries what this section previously said it did not |
@@ -881,19 +892,39 @@ the dangling host-asset references — and names the remediation as
 separately authorised. That is exactly §3.7's rule, and the two
 documents no longer disagree about it.
 
-**One defect in the procedure's own repair path.** The corrected
-revision accepts an `unrepaired` block, so a failed refresh is not
-"repaired" by restoring the retired V1 copy. **Re-running Stage 4 is
-the intended repair — and it is currently deadlocked.** The refresher
-appends one newline at the END-marker boundary on every rewrite, so a
-second rewrite grows the suffix again, while the procedure's post-check
-compares the result against the **Stage 0b backup** and allows exactly
-one extra newline. Measured: suffix 7 → 8 → 9 bytes, and the
-post-check then fails on a **correct** block; re-running fails
-identically, because the refresher is now a no-op and the suffix stays
-at 9. **Do not rely on that path.** The fix belongs to the procedure:
-compare the post-state against the file as it stood immediately before
-*this* run, not against the first attempt's backup. Recorded in §8.
+**The procedure's repair path is no longer deadlocked.** An earlier
+revision accepted an `unrepaired` block — so that a failed refresh
+would be repaired by **re-running** Stage 4 rather than by restoring
+the retired V1 copy — but its post-check compared the result against
+the **Stage 0b backup**, and the refresher inserts one newline at the
+END-marker boundary on every rewriting run. A second rewrite therefore
+grows the suffix again, the post-check fails on a **correct** block,
+and re-running fails identically, because the refresher is then a
+no-op. Measured: suffix 7 → 8 → 9 bytes.
+
+**The current revision fixes it, and this is the change that matters
+to the operator.** Stage 4 now takes a private, byte-exact snapshot of
+the file immediately before **each** refresh
+(`$BLOCK_PRE_RUN` = `AGENTS.md.pre-run`, mode `600` in a mode-`700`
+directory) and judges the outcome against **that** snapshot, through
+the new `verify_refresh_outcome` helper. The pre-cutover backup is
+**kept** as the historical baseline and the recovery copy — it is
+still compared for the prefix — and it is simply no longer the suffix
+comparator. The refresher's own report classifies the outcome
+(`already has current managed section; no-op` vs `refreshed from
+snippet`), and an unrecognised report is a **stop**, not a guess. The
+`unrepaired` path can therefore complete: the failed first attempt is
+followed by a legitimate second rewrite, and the second is judged
+against the state the first left behind.
+
+**What is still true, and is the operational point.** The newline
+behaviour is unchanged and is now stated as a measured fact: the
+rewrite path replaces exactly the `BEGIN`..`END` span and inserts
+**one** newline immediately after the `END` marker — at the **start**
+of the suffix — while the no-op path writes nothing at all. The content
+outside the markers may therefore differ from the pre-cutover baseline
+by more than one newline, and **a snapshot taken once at the cutover is
+the wrong thing to compare against** after a second attempt.
 
 **What this guide still adds.** §4 is not superseded. It is the part
 the host-specific procedure does not carry in the same form:
@@ -1718,31 +1749,42 @@ none of them belongs in a documentation-only change.
   document does not change production code.**
 - **The host-specific cutover procedure is not approved.** Its current
   revision is SHA-256
-  `64303ebc3b94be196a07db8ea8b1969b0f6384c3bb3ae17bcffe4af4618b71e7`,
+  `554c8183b4ce696b6ed247cff53f9242a85296010ce5d93f533a9caf0f882ef8`,
   and its own status line records that the earlier checksum's approval
-  is **void** for it because the executable sequence changed. It needs a
+  is **void** for it because the executable sequence changed. Its
+  approval record adds that the intermediate revision
+  `64303ebc3b94be196a07db8ea8b1969b0f6384c3bb3ae17bcffe4af4618b71e7`
+  was itself **never approved** — it was returned REQUEST CHANGES by
+  the Stage 4 review — and that this revision supersedes it. It needs a
   fresh independent review before any part of it is executed (§3.8).
-- **The procedure's `unrepaired` repair path is deadlocked.** Stage 4
-  accepts a block whose body is right but whose provenance is wrong, so
-  that a failed refresh is repaired by **re-running** Stage 4 rather
-  than by restoring the retired V1 copy. That repair currently cannot
-  pass the procedure's own post-check: the refresher appends one
-  newline at the END-marker boundary on every rewrite (suffix 7 → 8 →
-  9 bytes measured), while the post-check compares against the **Stage
-  0b backup** and allows exactly one extra newline — so it fails on a
-  **correct** block, and re-running fails identically, because the
-  refresher is then a no-op and the suffix does not move. The operator
-  is left with a correct block and a permanently failing gate. The fix
-  belongs to the procedure: snapshot the live file at the start of
-  Stage 4 and compare the post-state against **that**, and express the
-  real invariant — the content outside the markers may differ only by
-  the whitespace the refresher itself inserted. **Do not rely on that
-  path** (§3.8).
-- **What the corrected revision changed, and what it now carries.** The
+- **The procedure's `unrepaired` repair path was deadlocked — CLOSED by
+  the current revision.** Stage 4 accepts a block whose body is right
+  but whose provenance is wrong, so that a failed refresh is repaired by
+  **re-running** Stage 4 rather than by restoring the retired V1 copy.
+  That repair could not pass the procedure's own post-check: the
+  refresher appends one newline at the END-marker boundary on every
+  rewriting run (suffix 7 → 8 → 9 bytes measured), while the post-check
+  compared against the **Stage 0b backup** and allowed exactly one
+  extra newline — so it failed on a **correct** block, and re-running
+  failed identically, because the refresher was then a no-op and the
+  suffix did not move. The operator was left with a correct block and a
+  permanently failing gate. **The current revision fixes it:** Stage 4
+  now takes a private, byte-exact snapshot of the file immediately
+  before **each** refresh (`$BLOCK_PRE_RUN`) and judges the outcome
+  against **that**, through the new `verify_refresh_outcome` helper;
+  the pre-cutover backup is kept as the historical baseline and the
+  recovery copy and is no longer the suffix comparator; and the
+  refresher's report is classified explicitly, with an unrecognised
+  report a **stop** rather than a guess. **The repair path can now
+  complete** (§3.8).
+- **What the current revision changed, and what it now carries.** The
   automatic restoration of the pre-refresh managed block after a runtime
   rollback is **removed** — it reinstated the retired V1 hook name that
   the rolled-back runtime's plugin does not register either (§3.7) — and
-  the state a rollback leaves behind is **recorded** instead. A
+  the state a rollback leaves behind is **recorded** instead. The Stage
+  4 post-check is also corrected: it now judges the refresh against a
+  **per-run snapshot** of the file, not against the pre-cutover backup,
+  so the `unrepaired` repair path can complete (§3.8). A
   destructive restore now requires a **measured** impact (`measure_restore_
   impact`: the point's SHA-256, per-table before/after counts,
   `rows_would_be_lost` / `rows_would_be_resurrected`) and an approval
