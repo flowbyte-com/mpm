@@ -15,11 +15,22 @@
 > be *in* the revision, and §3.3 Step 2 is what proves it.
 >
 > **On this host a host-specific procedure governs the execution.**
-> `/home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md` is the approved
-> cutover procedure for exactly this revision pair (`4a870c8a…` →
-> `2045afcc…`) on this host. **Run that procedure.** Where it and this
-> guide speak to the same act, the host-specific one wins — §3.8 says
-> which, and says what this guide still adds on top of it.
+> `/home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md` is **the** cutover
+> procedure for exactly this revision pair (`4a870c8a…` → `2045afcc…`)
+> on this host — **the one to follow, once it is approved and
+> authorised (§3.8).** Where it and this guide speak to the same act,
+> the host-specific one wins — §3.8 says which, and says what this
+> guide still adds on top of it.
+>
+> **That procedure is not approved yet, and this guide does not approve
+> it.** Its current revision declares itself **NOT APPROVED — pending a
+> fresh independent review**. **Nothing in either document may be
+> executed until both of two separate permissions are in hand:** an
+> **independent approval recorded against the procedure's exact current
+> SHA-256**, and the **operator's own authorisation of the acts**. Those
+> are different permissions; neither is conferred by reading a document,
+> and neither follows from the other. §3.2 carries the check as a
+> precondition; §3.8 records the live checksum.
 
 ## 1. What happened
 
@@ -232,6 +243,7 @@ the old revision is not an available answer.**
 | P4 | disk headroom **and** temporary-space headroom | `df -h / ~/.mpm "$TMPDIR"` (§3.3 Step 1) |
 | P5 | no other agent is using the updater | process inventory |
 | P6 | the operator has read §5 (the instruction migration) | — |
+| **P7** | **the host-specific procedure's current revision carries an independent approval recorded against its exact SHA-256, and the operator has authorised the acts to be performed** | compare `sha256sum /home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md` with the checksum in `MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256`, then read the procedure's status line and its approval record (§3.8). **If the status line says NOT APPROVED, P7 fails and nothing is executed** — the two permissions are separate, and neither follows from reading this guide |
 
 ### 3.3 Steps
 
@@ -725,7 +737,7 @@ Stop and read. None of these is a reason to pick a different revision.
 | the promotion reports *"already up to date"* | the pointer already names the target — the promotion did not run, so **nothing was validated and no service was restarted** | It is not a success. Restart the units by hand if that is what you wanted (§3.3 Step 5). If you expected a promotion, the pointer is already where you thought it was — check `readlink ~/.mpm/current` |
 | **partial success — the release directory exists but the pointer did not move** | the promotion failed after the install stage | **Re-run the same command.** An existing release that validates is **re-used**, not refused — see the note at the end of this table. Do **not** choose another revision, and do **not** delete the release directory |
 | **partial success — the pointer moved but the stable updater was not replaced** | the promotion failed after the pointer moved | The updater restores the pointer on this path. The stable updater is replaced **only** on success, so `~/.mpm/mpm-update` is still the old build — which is correct, and it is the recovery tool for the runtime that is running. Re-run the same command |
-| **failed service identity** — after `--restart-services`, the history record or the promotion's report carries a warning that a unit runs something other than the active release | the daemon was not actually restarted, or it restarted from another path | The updater records a **warning**; it does not claim a clean restart. Restart the unit by hand and re-check `systemctl --user status <unit>`; the running executable must resolve into `~/.mpm/releases/2045afcc…` |
+| **failed service identity** — after `--restart-services`, the history record or the promotion's report carries a warning that a unit runs something other than the active release | the daemon was not actually restarted, or it restarted from another path | The updater records a **warning**; it does not claim a clean restart. This is a **post-promotion recovery action, outside the promotion window** — S1 forbids touching the unit *inside* the window, and permits exactly **one** such restart after it. Restart the unit by hand, then **repeat the Stage 3 gate**: the running executable must resolve into `~/.mpm/releases/2045afcc…`, checked through `/proc/<pid>/exe` (§3.8). Do not loop restarts |
 | **degraded rollback** — the promotion reports `DEGRADED:` | the live schema changed and the previous release cannot read it, **or** the post-smoke fingerprint failed so the schema state is unknown | The pointer **stays at the new release** (the binaries match the data). Recover with `mpm-update --rollback --with-db-restore --force` — which restores the **pre-update backup the promotion took** and overwrites newer data — or fix forward. **That command is the last step of an operation, not the operation**: §3.6 lists the three things required before it (identify the point, measure the data loss, approve it bound to the measurement) and the journal-mode verification required after it. Do not delete anything |
 
 **About "the release already exists".** An existing
@@ -858,10 +870,36 @@ published beside it in `MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256`.
 > current revision supersedes it. **Read the sidecar; do not trust a
 > checksum quoted anywhere else**, including in this document.
 
-**Run it — it is the procedure for this host.** Its stages and this
-guide's steps are the same sequence — pin, build the bootstrap updater
-out of tree, verify its identity, dry run, promote, verify, refresh,
-relaunch — so there is no second sequence to choose between.
+**It is the procedure for this host — once it is approved and
+authorised.** Its stages and this guide's steps are the same sequence —
+pin, build the bootstrap updater out of tree, verify its identity, dry
+run, promote, verify, refresh, relaunch — so there is no second
+sequence to choose between, and no reason to assemble one out of this
+guide alone.
+
+**Two permissions, and this section grants neither.**
+
+1. **Independent approval of the exact checksum.** The revision must
+   carry an independent review's approval recorded against **its
+   current SHA-256** — the one in the sidecar — and not an earlier
+   revision's. An approval of a superseded checksum does not carry
+   forward: the procedure's own record voids it whenever the executable
+   sequence changes, and it has already voided one twice. **A document
+   whose own status line says "NOT APPROVED" is not a document that may
+   be executed, whatever else it says** — and a document that says
+   "NOT APPROVED" and then says "run it" is describing a contradiction,
+   not a procedure.
+2. **Separate operator authorisation, act by act.** Even an approved
+   procedure is not an instruction to run. Each act in §3.1 — checks,
+   promotion, service restart, instruction refresh, OpenCode restart —
+   is a separate decision with its own authorisation, and the
+   destructive one (a database restore, §4.3) needs its own approval
+   **bound to the measured loss**. **Approval of the procedure is not
+   approval of any act in it.**
+
+**Both must be in hand before the first command is typed.** If either
+is missing, the answer is to obtain it — not to run the procedure and
+ask afterwards.
 
 **The precedence rule, in one line.** The host-specific procedure
 governs **every act it defines**. This guide governs the acts it
@@ -949,8 +987,12 @@ named "its §…", so the two are never confused.
 **Two conditions on the cutover.**
 
 1. **The host-specific procedure must be approved before any part of it
-   is executed.** Its current revision is not, and its own status line
-   says so.
+   is executed, and the acts must be authorised separately.** Its
+   current revision is not approved, and its own status line says so.
+   Approval means an independent review recorded against the
+   procedure's **exact current SHA-256**; authorisation is the
+   operator's own decision, act by act (§3.1). Neither is conferred by
+   this guide, and neither follows from the other (§3.2 P7).
 2. **§4.3's measured delta and §4.5's journal-mode verification must be
    done as §4 describes them.** The corrected revision carries
    equivalents (its §10.5.1, §10.5.2, §10.5.4), so this is a matter of
@@ -1519,6 +1561,13 @@ act (§3.1, act 5).
 
 ## 6. What not to do
 
+- **Do not execute the host-specific cutover procedure before it is
+  approved against its exact checksum.** Its current revision declares
+  itself **NOT APPROVED**, and no document grants what that one
+  withholds: an independent approval recorded against the procedure's
+  exact current SHA-256, and the operator's separate authorisation of
+  the acts, are two different permissions and both must be in hand
+  first (§3.2 P7, §3.8).
 - **Do not restore the assets into `releases/4a870c8a…` by hand.** It
   is the active release and a rollback target; a release is immutable,
   and an in-place edit changes what a rollback gives back. Promote
@@ -1757,6 +1806,9 @@ none of them belongs in a documentation-only change.
   was itself **never approved** — it was returned REQUEST CHANGES by
   the Stage 4 review — and that this revision supersedes it. It needs a
   fresh independent review before any part of it is executed (§3.8).
+  **Approval and authorisation are separate**: the approval is a
+  reviewer's verdict recorded against the exact checksum; the
+  authorisation is the operator's own, act by act (§3.1, §3.2 P7).
 - **The procedure's `unrepaired` repair path was deadlocked — CLOSED by
   the current revision.** Stage 4 accepts a block whose body is right
   but whose provenance is wrong, so that a failed refresh is repaired by
