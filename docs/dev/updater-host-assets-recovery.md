@@ -22,15 +22,21 @@
 > the host-specific one wins — §3.8 says which, and says what this
 > guide still adds on top of it.
 >
-> **That procedure is not approved yet, and this guide does not approve
-> it.** Its current revision declares itself **NOT APPROVED — pending a
+> **That procedure carries no approval yet, and this guide does not
+> approve it.** Its current revision declares itself **NOT APPROVED — pending a
 > fresh independent review**. **Nothing in either document may be
 > executed until both of two separate permissions are in hand:** an
 > **independent approval recorded against the procedure's exact current
 > SHA-256**, and the **operator's own authorisation of the acts**. Those
 > are different permissions; neither is conferred by reading a document,
 > and neither follows from the other. §3.2 carries the check as a
-> precondition; §3.8 records the live checksum.
+> precondition; §3.8 records the live checksum and the **external
+> attestation** in which the approval is to live.
+>
+> **The approval is recorded outside the procedure, and that is not an
+> oversight.** Writing the approval into the procedure would edit the
+> file, change the checksum, and invalidate the approval it was
+> recording. §3.8 sets out the attestation and the reasoning.
 
 ## 1. What happened
 
@@ -216,7 +222,7 @@ Do not let one stand in for another.
 |---|---|---|---|
 | **1. checks** | `mpm-update --dry-run --commit <target>` (§3.3 Steps 3–4) | **nothing.** No backup, no staging in the data root, no lock, no history record, no release directory | unchanged: `4a870c8a` |
 | **2. promotion** | `mpm-update --commit <target>` (§3.3 Step 5) | the new release directory, the `current` pointer, a **fresh backup**, the history record, and the stable updater | `2045afcc` |
-| **3. service restart** | governed by the **scheduler policy in force** (§3.8): `--restart-services` **on the promotion itself** (it has no effect on a later re-run), or a manual `systemctl --user restart mpm-scheduler` **outside** the promotion window | the **executables the daemons run** | the daemons run `2045afcc`; until then they keep running `4a870c8a` |
+| **3. service restart** | governed by the **scheduler policy in force** (§3.8): `--restart-services` **on the promotion itself** (it has no effect on a later re-run), or a manual `systemctl --user restart mpm-scheduler` **outside** the promotion window | the **executables the daemons run** | the daemons run `2045afcc`; until then they keep running `4a870c8a`. **The promotion and the destructive restore are governed by different policies** — S1 for the promotion, C1 for the restore, and they never overlap (§3.8) |
 | **4. instruction refresh** | §5.2 | `~/.config/opencode/AGENTS.md` (only the marked span) | the provenance line names `2045afcc` |
 | **5. OpenCode restart** | by hand | the running agent sessions | only **new** sessions read the refreshed block |
 
@@ -243,7 +249,7 @@ the old revision is not an available answer.**
 | P4 | disk headroom **and** temporary-space headroom | `df -h / ~/.mpm "$TMPDIR"` (§3.3 Step 1) |
 | P5 | no other agent is using the updater | process inventory |
 | P6 | the operator has read §5 (the instruction migration) | — |
-| **P7** | **the host-specific procedure's current revision carries an independent approval recorded against its exact SHA-256, and the operator has authorised the acts to be performed** | compare `sha256sum /home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md` with the checksum in `MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256`, then read the procedure's status line and its approval record (§3.8). **If the status line says NOT APPROVED, P7 fails and nothing is executed** — the two permissions are separate, and neither follows from reading this guide |
+| **P7** | **the host-specific procedure's current revision carries an independent approval recorded against its exact SHA-256, covering every scope the cutover needs, and the operator has authorised the acts to be performed** | compare `sha256sum /home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md` with the checksum in `MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256`, then check the **attestation** beside it (§3.8.1): its `artifact_sha256` must equal that checksum, its own checksum must match its `.sha256`, and its `scopes` must cover **every** scope P7 requires — the database-safety scope, the managed-block and Stage 4 scope, and the whole-procedure scope. **The two halves are separate and both must hold.** The procedure's own status line reads NOT APPROVED, and it always will: recording the approval inside the file would change the checksum the approval is bound to (§3.8.1) — so **the status line is not the approval state, and the attestation is**. **If the attestation is absent, does not bind this checksum, or does not cover every required scope, P7 fails and nothing is executed** |
 
 ### 3.3 Steps
 
@@ -783,8 +789,20 @@ operator meets them:
 | **before** | **identify** the point the command will use — read it out of the record that matches the active revision; do not infer it | §4.3, step 1 |
 | **before** | **measure** the data loss, in writing, against a read-only comparison of the point and the live database | §4.3, step 2 |
 | **before** | **approve it explicitly, bound to the measured figure** — the approver states the number they are accepting. The approval to *promote* is not the approval to *destroy data* | §4.3, step 3 |
-| **before** | **quiesce the writers** — the updater refuses a restore while a definite holder has the database open, and `--force` does not bypass that | §4.4 |
+| **before** | **quiesce the writers** — the updater refuses a restore while a definite holder has the database open, and `--force` does not bypass that. On the host procedure's **Policy C1** the managed units are stopped **by hand**, under a **separate authorisation**, inside a recorded **maintenance window** | §4.4, §3.8 |
+| **after** | **verify the restored database** — record for record against the recovery point, with the one permitted health-check audit addition (§4.6) | §4.6 |
 | **after** | **verify the journal mode** the restored database is actually in, and re-establish it if it is not | §4.5 |
+
+**Do not add `--restart-services` to that command.** The command above
+carries no flag, and on this host it must not carry one: with the flag, the
+updater stops the unit, restores the database, swaps the pointer, runs its
+health check and then **starts the unit itself** — inside the rollback,
+before the command returns, and on a database whose journal mode no gate has
+yet verified. Without it, the updater starts nothing on any path and
+refuses the restore if a managed unit is still active. The host procedure's
+**Policy C1** governs that path: the units are stopped by hand, under a
+separate authorisation, and started by hand only after the restored database
+has been verified (§4.4, §3.8).
 
 **On this host the host-specific procedure carries the executable form of
 all of it**, and its §10.5 is normative for its own rollback and
@@ -849,7 +867,7 @@ procedure for exactly this revision pair
 (`4a870c8a0d10b4567d9362df4c3dda1fbe0a01ae` →
 `2045afcc57f1f7603f38e016a2909b85985e48dc`) on this host. Its current
 revision is SHA-256
-`554c8183b4ce696b6ed247cff53f9242a85296010ce5d93f533a9caf0f882ef8`,
+`31ccfb7716b24fb0c04b1775f2700646c43b17ac8184e9d39364f934ca893fa6`,
 published beside it in `MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256`.
 
 > **That revision is NOT APPROVED, and no part of it may be executed.**
@@ -859,16 +877,19 @@ published beside it in `MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256`.
 > check that checksum before running anything — a procedure that has
 > changed under its own feet is not a procedure to run on trust.
 
-> **Only the checksum in the sidecar counts, and it moves.** Two
-> earlier checksums appear in this guide's history and **neither is
-> live**: `9fc056b9ec089276b45f486bd8404242951765a8de5c548960d04c19c7bc7f78`
-> had an approval that the current revision voids, and
-> `64303ebc3b94be196a07db8ea8b1969b0f6384c3bb3ae17bcffe4af4618b71e7`
-> was an intermediate revision that was **never approved at all** — the
-> procedure's own approval record says it "was itself never approved: it
-> was returned REQUEST CHANGES by the Stage 4 review" — and the
-> current revision supersedes it. **Read the sidecar; do not trust a
-> checksum quoted anywhere else**, including in this document.
+> **Only the checksum in the sidecar counts, and it moves.** Four
+> earlier checksums appear in this guide's history and **none of them is
+> live**, and each is named in the procedure's own approval record:
+>
+> | checksum | what happened to it |
+> |---|---|
+> | `9fc056b9ec089276b45f486bd8404242951765a8de5c548960d04c19c7bc7f78` | approved by an earlier independent review; that approval is **void** here, because the executable sequence changed |
+> | `64303ebc3b94be196a07db8ea8b1969b0f6384c3bb3ae17bcffe4af4618b71e7` | **never approved** — returned REQUEST CHANGES by the Stage 4 review |
+> | `554c8183b4ce696b6ed247cff53f9242a85296010ce5d93f533a9caf0f882ef8` | **never approved** — returned REQUEST CHANGES by the Phase 3 database-safety review, findings N1/N3/N4 with N2 latent |
+> | `20ec16887ec3ceafbd998e19ba2b99474817dc676c1268f7e5a7862ad51361ec` | **never approved** — returned REQUEST CHANGES by the Phase 4 review, N4 alone |
+>
+> The current revision supersedes all four. **Read the sidecar; do not
+> trust a checksum quoted anywhere else**, including in this document.
 
 **It is the procedure for this host — once it is approved and
 authorised.** Its stages and this guide's steps are the same sequence —
@@ -880,15 +901,11 @@ guide alone.
 **Two permissions, and this section grants neither.**
 
 1. **Independent approval of the exact checksum.** The revision must
-   carry an independent review's approval recorded against **its
+   carry an independent reviewer's approval recorded against **its
    current SHA-256** — the one in the sidecar — and not an earlier
    revision's. An approval of a superseded checksum does not carry
    forward: the procedure's own record voids it whenever the executable
-   sequence changes, and it has already voided one twice. **A document
-   whose own status line says "NOT APPROVED" is not a document that may
-   be executed, whatever else it says** — and a document that says
-   "NOT APPROVED" and then says "run it" is describing a contradiction,
-   not a procedure.
+   sequence changes, and it has already voided one four times.
 2. **Separate operator authorisation, act by act.** Even an approved
    procedure is not an instruction to run. Each act in §3.1 — checks,
    promotion, service restart, instruction refresh, OpenCode restart —
@@ -916,11 +933,13 @@ The acts they both describe, and what governs each:
 | act | this guide (general) | the host-specific procedure | what governs |
 |---|---|---|---|
 | **the scheduler** | a service restart is a separate, separately-authorised act; the residual may be closed by hand afterwards | **Policy S1** — the updater owns the unit's lifecycle: `--restart-services` is passed **once, on the promotion invocation**, and nothing stops or starts the unit by hand inside the promotion window | **S1.** Pass the flag on the promotion (§3.3 Step 5 carries it); do not touch the unit by hand; **do not leave the scheduler on `4a870c8a`** |
+| **the scheduler, on the destructive-restore path** | §4.4 — the units must be stopped and the sessions closed before a restore | **Policy C1** — a *separate* policy, for the destructive restore only: the restore is invoked **without** `--restart-services`; the units are stopped **by hand** under a **separate authorisation**, inside a recorded **maintenance window**; the updater **starts nothing on any path** | **C1**, and it is **not** S1. The two never overlap: S1 governs the promotion, C1 governs the destructive restore. **A restore must not carry `--restart-services`** |
 | **the promotion's service gate** | the residual is checked by reading `systemctl --user status` | a mandatory `/proc/<pid>/exe` gate: the running executable must resolve into `releases/<REV>/` | **S1's gate**, which is stronger than reading `status` |
 | **the managed-block refresh** | §5.2 above | Stage 4 — the same RELEASE.json-sourced provenance, the same keep decision, acceptance of an `unrepaired` block so a failed refresh does not have to be "repaired" by restoring the retired copy, and a post-check that judges the outcome against a **per-run snapshot** of the file rather than against the pre-cutover backup | **both**; they agree, and this guide carries the same discipline |
-| **the managed block after a runtime rollback** | §3.7 — leave the refreshed block in place; never restore the `.bak` | its §10.5.3 and `assess_rollback_block_state` — the block is **never** restored to its pre-refresh copy; the state left behind (stale provenance, retired-V1 state, dangling host-asset references) is **recorded**, and the host-asset gap needs separately authorised remediation | **both**; the corrected revision removed the restoration that used to contradict §3.7 |
+| **the managed block after a runtime rollback** | §3.7 — leave the refreshed block in place; never restore the `.bak` | its §10.5.3 and `assess_rollback_block_state` — the block is **never** restored to its pre-refresh copy; the state left behind (stale provenance, retired-V1 state, dangling host-asset references) is **recorded**, and the host-asset gap needs separately authorised remediation | **both**; the current revision removed the restoration that used to contradict §3.7 |
 | **the recovery point** | §3.4 and §4.2 | the promotion log must name it, and the history entry must match it, with `pre_fp` and `post_fp` present | **both** |
-| **a destructive restore** | §4.3 — measure the delta, write it down, separate approval; §4.5 — the journal-mode verification | its §10.5.1–§10.5.4 — `measure_restore_impact` (the point's SHA-256, per-table before/after counts, `rows_would_be_lost` / `rows_would_be_resurrected`), an approval **bound** to that measurement (`RESTORE <rows_would_be_lost>`), the block state recorded, and `verify_wal_state` / `reestablish_wal` after the restore | **both**; the corrected revision now carries what this section previously said it did not |
+| **a destructive restore** | §4.3 — measure the delta, write it down, separate approval; §4.5 — the journal-mode verification | its §10.5.1–§10.5.6 — `measure_restore_impact` (the point's SHA-256, per-table before/after counts, `rows_would_be_lost` / `rows_would_be_resurrected`), an approval **bound** to that measurement (`RESTORE <rows_would_be_lost>`), the block state recorded, `verify_wal_state` / `reestablish_wal` after the restore, and the **no-restart** ordering (its §10.5.5) | **both**; the current revision carries what this section previously said it did not |
+| **the restored database** | §4.6 — the record-by-record comparison, and the one audit row it may add | its §10.5.6 `verify_restored_database` — the table set, **every** recovery-point record present and **unmodified** (primary-key-aware, content-exact), the one explicitly allowed health-check audit addition, the recovery point's own SHA-256, the measured estimate, and `PRAGMA integrity_check` — **before any start** | **both**; the guide says what it means, the procedure carries the executable form |
 
 **§3.7 and the procedure's §10.5.3 are now the same rule.** The
 procedure no longer restores the pre-refresh block after a runtime
@@ -977,7 +996,12 @@ the host-specific procedure does not carry in the same form:
 - **§4.4 — the writer scan, its limits, and the quiescence rules.** The
   host procedure refuses a restore under a live writer; §4.4 is what
   says why, and what `--force` can and cannot bypass.
-- **§4.6 — read-only inspection and scratch safety.** The rules for
+- **§4.6 — what the restored database must reproduce.** The host
+  procedure's `verify_restored_database` carries the executable form
+  (its §10.5.6); §4.6 says what the comparison means, what the one
+  permitted audit addition is, and what the verification does **not**
+  prove.
+- **§4.7 — read-only inspection and scratch safety.** The rules for
   handling a copy of the corpus.
 
 **Section numbering.** Every `§` reference below is a section of
@@ -988,18 +1012,111 @@ named "its §…", so the two are never confused.
 
 1. **The host-specific procedure must be approved before any part of it
    is executed, and the acts must be authorised separately.** Its
-   current revision is not approved, and its own status line says so.
-   Approval means an independent review recorded against the
-   procedure's **exact current SHA-256**; authorisation is the
-   operator's own decision, act by act (§3.1). Neither is conferred by
-   this guide, and neither follows from the other (§3.2 P7).
-2. **§4.3's measured delta and §4.5's journal-mode verification must be
-   done as §4 describes them.** The corrected revision carries
-   equivalents (its §10.5.1, §10.5.2, §10.5.4), so this is a matter of
-   *running* them, not of adding them — with one correction: §4.5's
-   journal-mode step is a **verification with a recovery path**, not a
-   gate on the restore, because MPM re-establishes WAL by itself on its
-   next connection. The premise is corrected below.
+   current revision carries no internal approval — its own status line
+   says so, and it always will (§3.8.1). Approval means an **attestation
+   bound to the procedure's exact current SHA-256**, covering the scopes
+   §3.2 P7 requires; authorisation is the operator's own decision, act
+   by act (§3.1). Neither is conferred by this guide, and neither
+   follows from the other.
+2. **§4.3's measured delta, §4.5's journal-mode verification and §4.6's
+   record-by-record comparison must be done as §4 describes them.** The
+   current revision carries equivalents (its §10.5.1, §10.5.2,
+   §10.5.4, §10.5.6), so this is a matter of *running* them, not of
+   adding them — with one correction: §4.5's journal-mode step is a
+   **verification with a recovery path**, not a gate on the restore,
+   because MPM re-establishes WAL by itself on its next connection. The
+   premise is corrected below.
+
+#### 3.8.1 The approval attestation — proposed, and not yet in place
+
+**The circularity, stated exactly.** The procedure's own approval
+record lives **inside** the procedure, and its own rule is that *"any
+further edit to this file's executable sequence"* invalidates the
+approval. Those two facts cannot both be satisfied by writing the
+approval into the file: **editing the file to say APPROVED changes the
+file, changes its SHA-256, and therefore changes the very value the
+approval is bound to.** The regress does not terminate — "write
+APPROVED in" produces a new checksum, which needs a new approval, which
+would have to be written in.
+
+**The resolution is to record the approval outside the procedure.** The
+procedure already points at it: its approval record says the checksum
+"is published in the sidecar …; **a reviewer records the verdict
+against that value**" — against the *value*, not in the file. So the
+approval is an **attestation**: a separate, small, write-once artifact
+bound to the procedure's exact SHA-256, kept beside it.
+
+**Proposed form** — `MPM_CUTOVER_4a870c8a_to_2045afcc.approved.json`,
+canonical JSON, one key per line, keys sorted, UTF-8, LF:
+
+```json
+{
+  "artifact": "MPM_CUTOVER_4a870c8a_to_2045afcc.md",
+  "artifact_sha256": "31ccfb7716b24fb0c04b1775f2700646c43b17ac8184e9d39364f934ca893fa6",
+  "attestation_version": 1,
+  "reviewed_at": "<RFC 3339 UTC>",
+  "reviewer": "<who reviewed it>",
+  "scopes": ["<scope>", "..."],
+  "verdict": "APPROVE"
+}
+```
+
+with its own checksum beside it, in
+`MPM_CUTOVER_4a870c8a_to_2045afcc.approved.json.sha256`.
+
+**What makes it immutable, rather than merely external.**
+
+- **Write-once.** An attestation is never edited in place. A superseding
+  verdict is a **new** file with a higher `attestation_version`, and the
+  earlier one is retained; the version history is the audit trail.
+- **Self-binding.** The attestation binds the artifact by checksum, and
+  its own checksum is published separately, so an edit to either is
+  detectable.
+- **Published, not merely local.** A file on this host can be edited by
+  whoever holds it. The attestation is **published** — committed to a
+  repository, attached to a release, or posted as a review — so that the
+  exact bytes are reconstructible by someone else, and the local copy
+  can be checked against that publication.
+- **No signature is required to make it work**, but one is better: a
+  signature over the canonical body binds the verdict to the reviewer
+  rather than to the file's owner.
+
+**The operator's check** — four commands and one reading:
+
+```bash
+cd /home/v/src
+sha256sum -c MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256
+sha256sum -c MPM_CUTOVER_4a870c8a_to_2045afcc.approved.json.sha256
+cat MPM_CUTOVER_4a870c8a_to_2045afcc.approved.json
+```
+
+The artifact's checksum must equal the attestation's `artifact_sha256`,
+and the attestation's `scopes` must cover **every scope P7 requires**.
+If either fails, the procedure is not approved and nothing is executed.
+
+#### 3.8.2 Two things this cannot paper over
+
+**The procedure's status line still reads NOT APPROVED, and no edit can
+change that without voiding the approval.** That is not a gap in the
+attestation; it is the consequence of the circularity above. The status
+line is the file's statement that it carries **no internal approval** —
+which is true, and is exactly the state an unreviewed revision is in.
+The authoritative approval state is the attestation. **An operator who
+reads only the file will read NOT APPROVED, and that is not a formality
+to be explained away: the attestation has to exist, has to bind this
+exact checksum, and has to carry the required scopes.** The guide says
+so here because the procedure's own text cannot.
+
+**A scoped approval is not a cutover approval.** The database-safety
+review of the current revision is an **APPROVE for the database-safety
+scope** — the restoration path (N1, N2, N3, N4). It found **no cutover
+blockers in the revision**, and it is the review the procedure's status
+line was waiting for on that scope. It is **not** an approval of the
+whole document: the managed-block and Stage 4 scope, and the final
+whole-procedure gate, have not signed off against this checksum. **Do
+not read a database-safety APPROVE as permission to run the cutover.**
+P7 names the scopes it requires, so that a partial attestation cannot
+satisfy it by accident.
 
 ## 4. Database safety
 
@@ -1068,7 +1185,7 @@ verify it **afterwards**, independently of the updater's own verification.
 
 **Step 1 — take a baseline, before the promotion.** Capture the counts you
 will compare against, with a timestamp, in a file you keep. Read-only opens
-only (§4.6):
+only (§4.7):
 
 ```bash
 BASELINE="$HOME/.cache/mpm-recovery/baseline-$(date -u +%Y%m%dT%H%M%SZ).txt"
@@ -1288,7 +1405,35 @@ sessions, and does not need quiescence. The writer scan exists for the
 
 **Quiescence, stated plainly:** before a restore, the scheduler must be
 stopped **and** the operator's agent sessions must be closed by their owners.
-The updater can stop the first and will never stop the second.
+The updater will never stop the second — it reports agent sessions as
+*"restart by hand; the updater will never touch it"* and never terminates them.
+
+**On the destructive-restore path, the updater stops the first too.** The
+host procedure's **Policy C1** governs that path, and it is a different act
+with a different authorisation:
+
+- the restore is invoked **without** `--restart-services`, and the updater
+  then **starts no managed service on any path** — success, restore failure,
+  repoint failure, health-check failure, or a restore refused because a
+  writer appeared;
+- the managed units are stopped **by hand**, under a **separate
+  authorisation**, inside a recorded **maintenance window**, and the units
+  that were active are recorded so that exactly those are started again;
+- the updater's own refusal — *"managed service(s) still running … stop them
+  first"* — is the backstop if the manual stop did not take effect. It is an
+  error, not a warning;
+- **no scheduler may be started until the restored database has been
+  verified** (§4.6, §4.5). If a verification fails, **nothing is started**:
+  the pointer has moved, the database has been replaced but is not trusted,
+  and the units are stopped.
+
+**Why the restore must not carry `--restart-services`.** With the flag, the
+updater stops the unit, restores the database, swaps the pointer, runs its
+health check and then **starts the unit itself** — inside the rollback,
+before the command returns, and on a database whose journal mode no gate has
+yet verified. Without the flag the updater refuses the restore if a managed
+unit is active, and otherwise starts nothing. So the safe path is the
+no-restart path, and C1 exists to authorise the manual stop it needs.
 
 ### 4.5 The journal mode after a restore
 
@@ -1367,7 +1512,98 @@ restore.** It is a **verification with a recovery path**:
 rehearsal or a dry run.** The mode is a property of the running
 installation, not an inspection parameter.
 
-### 4.6 Inspecting a recovery point safely
+### 4.6 What the restored database must reproduce
+
+A destructive restore replaces the live database. What has to be true
+afterwards is not *"the row counts match"* — it is **"the restored
+database is the recovery point, record for record"**, plus a small,
+explicitly enumerated set of additions the system itself creates.
+
+**Why a count comparison is not enough.** The updater's own health check
+runs **inside** the rollback — `restoreDatabase` → `restorePointer` →
+`SmokeLive` — and it writes an audit row. A gate that demands equal row
+counts therefore **rejects a perfectly good restore**: the database is
+exactly the recovery point's, plus one legitimate, system-generated audit
+record. This is the defect the host procedure's N4 finding was, and it is
+fixed there; §4.6 says what the fixed comparison means, because an
+operator has to be able to read the result.
+
+**What the comparison is now: primary-key-aware and content-exact.**
+
+| # | check | what it rejects |
+|---|---|---|
+| 1 | the **table sets** must be identical | any drift, either way — fail-closed |
+| 2 | **every** record of the recovery point must be present in the restored database **and unmodified**: the primary key present *and* every column identical | a **deletion** (reported as missing) and a **modification** (reported as differing). A count comparison could see neither |
+| 3 | every record the restored database holds and the recovery point does not must be an **explicitly allowed** system-generated effect | any unexplained addition |
+| 4 | the per-table counts must still agree with the recorded estimate | a restore that no longer matches what was approved |
+| 5 | `PRAGMA integrity_check` must report `ok` | a corrupt database |
+| 6 | the recovery point's **SHA-256** must still be the one the estimate recorded | a recovery point that changed after the measurement |
+
+**The one permitted addition — the health-check audit entry.** One row, in
+one table:
+
+```
+tool_invocations:
+    tool_name    = 'mpm_system'
+    action       = 'health_check'
+    payload_hash = 'sha256:3e01bce17a689f77cb7e744fea6253ace3392bed1bdd5a3224a6a0053e9ccfcd'
+    result_status= 'success'
+```
+
+The `payload_hash` is the SHA-256 of the exact payload the updater sends
+(`{"action":"health_check"}`). It is a property of the **payload**, not of
+the build — measured identical on `2045afcc` and on `4a870c8a` — so a row
+carrying it *is* a health-check row of this shape and of no other.
+**At most one** such row is accepted: one health-check dispatch is one
+audit row.
+
+**Zero such rows is equally acceptable.** The audit hook is best-effort by
+design — *"an audit failure (table missing, DB locked) must NEVER block the
+underlying tool call"* — so a health check whose audit insert failed leaves
+no trace at all. The gate accepts both the one-row and the no-row case.
+
+**The second, narrower allowance.** Opening the database can make the
+router log an informational note into `system_audit_log` when the mode or
+persona defaults are absent from disk. Those notes are accepted only when
+they are router-level (`level='info'`, `component='router'`) and match one
+of the message shapes the router can emit, and **at most two** of them.
+On this host they never occur: `~/.mpm/mode/default.md` and
+`~/.mpm/persona/default.md` both exist, so the measured delta is exactly
+the one audit row. **Any other `system_audit_log` record is unexplained and
+rejected.**
+
+**The allow-list is never widened.** An unexpected record is a stop, not
+an invitation to widen the predicate — and the verification reports what it
+accepted, so the operator can see the accepted row in the output.
+
+**What the comparison does not prove.** It proves the restored database
+*is* the recovery point, record for record, plus the measured
+system-generated addition. It does **not** prove that nothing else wrote to
+the database between the restore and the verification: the measurement bounds
+what is **accepted**, it cannot prove the absence of a writer. That window
+is closed by **Policy C1** — the managed units are stopped and the only
+writer in the window is the updater's own health check (§4.4).
+
+**If the verification fails, nothing starts.** The host is left in a visible,
+fail-closed state: the pointer moved, the database was replaced but is not
+trusted, the units are stopped. The operator escalates — there is no
+automatic start after a failed database verification, not by the updater
+(it starts nothing) and not by the procedure (the start step is never
+reached).
+
+**The three approved gates, and what they are.** The independent
+database-safety review of the host procedure examined four behaviours and
+approved three of them unchanged and one after correction. They are named
+here so that the guide and the procedure use the same names:
+
+| | behaviour | where it lives |
+|---|---|---|
+| **N1** | **the destructive restore starts nothing** — no managed service is started on any path, so no scheduler can run on an unverified database | the procedure's §10.5.5, and §4.4 |
+| **N2** | **incompatible table sets fail safely** — the measurement is *refused*, no estimate is written, and therefore no restore approval can be bound to it, so no destructive restore may run | the procedure's `measure_restore_impact`; the guide's §4.3 step 2 |
+| **N3** | **the integrity check is executed and stops recovery** — the header bytes, `PRAGMA journal_mode` and `PRAGMA integrity_check` must all pass | the procedure's `verify_wal_state`; the guide's §4.5 |
+| **N4** | **the restored database is verified row by row**, with the one health-check audit addition narrowly permitted | the procedure's §10.5.6; this section |
+
+### 4.7 Inspecting a recovery point safely
 
 A copy of the MPM database is **the operator's complete memory corpus**. It is
 secret material, and the rules for handling it are not optional.
@@ -1568,6 +1804,22 @@ act (§3.1, act 5).
   exact current SHA-256, and the operator's separate authorisation of
   the acts, are two different permissions and both must be in hand
   first (§3.2 P7, §3.8).
+- **Do not record the procedure's approval inside the procedure.** Editing
+  the file to carry the verdict changes its SHA-256 and invalidates the
+  approval it was recording. The approval lives in an external
+  attestation bound to the checksum (§3.8.1).
+- **Do not run a destructive restore with `--restart-services`.** On that
+  path the updater starts the unit itself, inside the rollback, before the
+  command returns — on a database whose journal mode no gate has verified.
+  Policy C1 requires the restore to be invoked **without** the flag, with
+  the units stopped by hand under a separate authorisation (§4.4, §3.8).
+- **Do not start the scheduler after a destructive restore before the
+  restored database has been verified.** The table set, every
+  recovery-point record present and unmodified, the one permitted
+  health-check audit addition, the recovery point's SHA-256, the measured
+  estimate, `integrity_check`, the header bytes and the journal mode must
+  all pass. If any fails, nothing starts and the operator escalates
+  (§4.6, §4.5).
 - **Do not restore the assets into `releases/4a870c8a…` by hand.** It
   is the active release and a rollback target; a release is immutable,
   and an in-place edit changes what a rollback gives back. Promote
@@ -1629,7 +1881,10 @@ act (§3.1, act 5).
 - **Do not stop or start the scheduler by hand inside the promotion
   window.** The updater owns the lifecycle there; a manual stop before
   it produces exactly the *"already inactive, so nothing to start"*
-  trap (§3.8).
+  trap (§3.8). **The destructive-restore path is a different act under a
+  different policy** — Policy C1, where the units *are* stopped by hand,
+  under a separate authorisation, inside a recorded maintenance window, and
+  started only after the restored database has been verified (§4.4).
 - **Do not type the managed block's provenance values.** Source
   `MPM_BUILD_COMMIT` and `MPM_BUILD_VERSION` from the active release's
   `RELEASE.json` and cross-check them against the release directory and
@@ -1684,7 +1939,7 @@ ls -l "$BK/mpm.db"
 #    takes a WRITE LOCK on the database. On a recovery point that is
 #    harmless; pointed at the LIVE database it would take a write lock on
 #    a database the scheduler is actively writing to. Every open in this
-#    procedure is read-only — see §4.6.
+#    procedure is read-only — see §4.7.
 #
 #    What this establishes is that the copy is STRUCTURALLY sound and
 #    that it carries the expected tables. It does NOT establish
@@ -1796,19 +2051,46 @@ none of them belongs in a documentation-only change.
   updater checks row counts, and it does not. It should be corrected in a
   separate change, in the same file, by the people who own it. **This
   document does not change production code.**
-- **The host-specific cutover procedure is not approved.** Its current
-  revision is SHA-256
-  `554c8183b4ce696b6ed247cff53f9242a85296010ce5d93f533a9caf0f882ef8`,
-  and its own status line records that the earlier checksum's approval
-  is **void** for it because the executable sequence changed. Its
-  approval record adds that the intermediate revision
-  `64303ebc3b94be196a07db8ea8b1969b0f6384c3bb3ae17bcffe4af4618b71e7`
-  was itself **never approved** — it was returned REQUEST CHANGES by
-  the Stage 4 review — and that this revision supersedes it. It needs a
-  fresh independent review before any part of it is executed (§3.8).
-  **Approval and authorisation are separate**: the approval is a
-  reviewer's verdict recorded against the exact checksum; the
-  authorisation is the operator's own, act by act (§3.1, §3.2 P7).
+- **The host-specific cutover procedure carries no internal approval.**
+  Its current revision is SHA-256
+  `31ccfb7716b24fb0c04b1775f2700646c43b17ac8184e9d39364f934ca893fa6`,
+  and its own status line reads **NOT APPROVED — pending a fresh
+  independent review**. Four earlier checksums are void or never
+  approved (`9fc056b9…` voided, `64303ebc…` returned REQUEST CHANGES by
+  the Stage 4 review, `554c8183…` returned REQUEST CHANGES by the Phase 3
+  database-safety review for N1/N3/N4 with N2 latent, and `20ec1688…`
+  returned REQUEST CHANGES by the Phase 4 review for N4 alone), and this
+  revision supersedes all four. The status line **cannot** be changed to
+  say APPROVED, because that edit would change the checksum the approval
+  is bound to — so the approval is recorded **outside** the procedure, in
+  an attestation (§3.8.1), and it does not exist yet. **Approval and
+  authorisation are separate**: the approval is a reviewer's verdict bound
+  to the exact checksum and scoped; the authorisation is the operator's
+  own, act by act (§3.1, §3.2 P7).
+- **The database-safety scope of the current revision is approved; the
+  whole document is not.** The independent database-safety review of
+  `31ccfb77…` is an **APPROVE for the database-safety scope** — the
+  restoration path — and it found **no cutover blockers in the revision**.
+  It is **not** an approval of the whole procedure: the managed-block and
+  Stage 4 scope, and the final whole-procedure gate, have not signed off
+  against this checksum. **A scoped approval must not be read as
+  permission to run the cutover** (§3.8.2, §3.2 P7).
+- **Five hardening items are open in the procedure, and none of them
+  blocks this cutover on this host.** Recorded so they are not lost: (1)
+  the router-note allow-list pattern accepts six message shapes where the
+  code emits four, and the procedure's own change list says "four" — the
+  pattern should be tightened and the wording corrected; (2) the cap of
+  two `system_audit_log` rows is exactly this host's maximum, because the
+  mode and persona defaults exist — a cap of four, or one derived from the
+  emitted shapes, would remove the dependency on those files; (3)
+  `HEALTH_PAYLOAD_HASH` is hard-coded, so a future change to the updater's
+  payload would make the gate refuse a good restore — fail-closed, but a
+  deadlock, and deriving it at run time would remove the coupling; (4)
+  **this guide pinned a superseded checksum** — corrected here, in the
+  change that carries this approval; (5) `verify_wal_state` prints only
+  the first line of the integrity report, which is the banner rather than
+  the specific error. All five are general future hardening; none is on a
+  reachable path on this host.
 - **The procedure's `unrepaired` repair path was deadlocked — CLOSED by
   the current revision.** Stage 4 accepts a block whose body is right
   but whose provenance is wrong, so that a failed refresh is repaired by
