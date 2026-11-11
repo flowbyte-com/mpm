@@ -199,13 +199,13 @@ Do not let one stand in for another.
 | **1. checks** | `mpm-update --dry-run --commit <target>` (§3.3 Steps 3–4) | **nothing.** No backup, no staging in the data root, no lock, no history record, no release directory | unchanged: `4a870c8a` |
 | **2. promotion** | `mpm-update --commit <target>` (§3.3 Step 5) | the new release directory, the `current` pointer, a **fresh backup**, the history record, and the stable updater | `2045afcc` |
 | **3. service restart** | `mpm-update --restart-services` **on the promotion itself** (it has no effect on a later re-run), or `systemctl --user restart mpm-scheduler` by hand | the **executables the daemons run** | the daemons run `2045afcc`; until then they keep running `4a870c8a` |
-| **4. instruction refresh** | §4.2 | `~/.config/opencode/AGENTS.md` (only the marked span) | the provenance line names `2045afcc` |
+| **4. instruction refresh** | §5.2 | `~/.config/opencode/AGENTS.md` (only the marked span) | the provenance line names `2045afcc` |
 | **5. OpenCode restart** | by hand | the running agent sessions | only **new** sessions read the refreshed block |
 
 Acts 3, 4 and 5 are **not** part of the promotion. The promotion does
 not stop the daemons, does not rewrite the operator's instructions and
 does not touch the agent sessions. Each is a separate decision with its
-own authorisation; §5 records the residual of leaving them undone.
+own authorisation; §6 records the residual of leaving them undone.
 
 ### 3.2 Preconditions
 
@@ -216,7 +216,7 @@ own authorisation; §5 records the residual of leaving them undone.
 | P3 | the target does **not** already exist under `releases/` — **or** it does and it validates | `ls ~/.mpm/releases/` (§3.4) |
 | P4 | disk headroom **and** temporary-space headroom | `df -h / ~/.mpm "$TMPDIR"` (§3.3 Step 1) |
 | P5 | no other agent is using the updater | process inventory |
-| P6 | the operator has read §4 (the instruction migration) | — |
+| P6 | the operator has read §5 (the instruction migration) | — |
 
 ### 3.3 Steps
 
@@ -382,7 +382,7 @@ unset MPM_WORKSPACE
 live `lifecycle_events` table is not the substrate's table. **Do not
 rename or migrate the live table to make the check pass** — a
 collision means something else on the host is using that name, and
-the refusal is the mechanism working. Read §5.1 of
+the refusal is the mechanism working. Read §6.1 of
 [`bundle-validation-scopes.md`](bundle-validation-scopes.md) and the
 collision message, then decide with the operator.
 
@@ -454,6 +454,15 @@ the stable updater:     a regular file, byte-identical to the release's own bin/
                         naming commit 2045afcc57f1f7603f38e016a2909b85985e48dc
 the fresh backup:       backups/upgrade-<timestamp>/mpm.db
 the history record:     outcome: success, backup_dir: …/backups/upgrade-<timestamp>
+```
+
+**Before the promotion, take the baseline** that §4.2 compares the
+promotion's recovery point against. The counts are the only measure of
+freshness the schema fingerprint cannot supply (§4.1), and the baseline
+is what makes the comparison possible afterwards:
+
+```bash
+# §4.2, Step 1 — the baseline
 ```
 
 **Do not pass `--restart-services`.** A service restart is an
@@ -592,7 +601,7 @@ resolve → lock → stage the candidate
       → [stop and start the services, only with --restart-services]
       → install the release → move the pointer
       → establish the stable paths
-      → health smoke (a live write path — see §5)
+      → health smoke (a live write path — see §6)
       → install the stable updater (last, atomically)
       → record the outcome
 ```
@@ -629,7 +638,10 @@ and after, in the same record (`pre_fp`, `post_fp`). If the two
 differ, the live schema changed during the promotion and the record
 says so.
 
-**Verify a recovery point before you rely on it.** See §5.1.
+**Verify a recovery point before you rely on it.** See §6.1 for an
+older point, and **§4.2** for the independent verification of the
+recovery point this promotion creates — the one that matters, because it
+is the point a rollback would use.
 
 ### 3.5 Stop conditions
 
@@ -681,13 +693,368 @@ A database restore is a **separate, explicit** operation:
 `--force`. It restores **the backup the promotion took** (§3.4) — not
 the Nov-7 point, and never the Nov-2 one.
 
-## 4. The instruction migration policy
+## 4. Database safety
+
+> This section is about the **data**, not the binaries. The promotion in §3
+> never replaces the live database — it takes a copy of it. A **restore**
+> does. That difference is the whole of the database-safety story, and it is
+> why the promotion is a normal operation while a restore is not.
+
+### 4.1 What the schema fingerprint establishes — and what it does not
+
+`SchemaFingerprint` hashes the database's **structure**: the `sqlite_master`
+entries (each table's name and its `CREATE` statement) and every table's
+`PRAGMA table_info` columns. It reads **no rows**.
+
+So:
+
+| | |
+|---|---|
+| a matching fingerprint establishes | **compatibility** — the candidate's runtime can read this shape |
+| a matching fingerprint does **not** establish | **freshness** — that the copy holds the data you expect |
+
+The verified example on this installation. The live database and the
+**November 7** recovery point have the **identical** fingerprint:
+
+```
+sha256:c85972e86e05f63623284ad9076b630e34414c0c4aa1e780fedb8f68cd305f5b
+```
+
+while their contents are materially different (measured 2026-11-11 with the
+updater's own `SchemaFingerprint` and read-only SQLite opens; the live counts
+grow every time the installation is used):
+
+| table | live | Nov-7 point | delta |
+|---|---|---|---|
+| `memories` | 2,405 | 320 | **−2,085** |
+| `evidence` | 2,333 | 252 | −2,081 |
+| `tool_invocations` | 51,185 | 37,822 | −13,363 |
+| `works` | 26 | 10 | −16 |
+| `session_handoffs` | 205 | 106 | −99 |
+| `lessons` | 39 | 39 | 0 |
+
+**A matching fingerprint is necessary for compatibility and is not evidence of
+data preservation.** `PRAGMA integrity_check` returning `ok` is equally
+insufficient: restoring the Nov-7 point over the live database leaves the
+integrity check green and the data three days old. **Structural integrity is
+not proof that the data is there.**
+
+### 4.2 Verifying the recovery point the promotion creates
+
+§3.4 describes **where** the promotion's backup is created. This is how to
+verify it **afterwards**, independently of the updater's own verification.
+
+**Two different things are being verified, and they are not the same.**
+
+| | built-in verification (the updater's) | the operator's freshness assessment |
+|---|---|---|
+| when | at creation, inside the promotion | after the promotion, by the operator |
+| what | the copy is **structurally sound**: non-empty, a `SQLite format 3` header, `PRAGMA integrity_check` = `ok`, every table readable, and the backup's **table set equals the live table set** | the copy holds the data you expect: **row counts** measured against a pre-promotion baseline (§4.1 — the fingerprint cannot see them) |
+| why not more | `VACUUM INTO` captures an instant *during* the backup, so comparing its counts against a *later* live read compares two different points in time: a legitimate concurrent write produces different counts and a false failure. The updater therefore verifies the copy **against itself**, not against a moving target | only the row counts measure freshness, and only the operator can say which tables matter |
+
+**Step 1 — take a baseline, before the promotion.** Capture the counts you
+will compare against, with a timestamp, in a file you keep. Read-only opens
+only (§4.6):
+
+```bash
+BASELINE="$HOME/.cache/mpm-recovery/baseline-$(date -u +%Y%m%dT%H%M%SZ).txt"
+mkdir -p "$(dirname "$BASELINE")"; chmod 700 "$(dirname "$BASELINE")"
+
+python3 - "$HOME/.mpm/src/db/mpm.db" > "$BASELINE" <<'PY'
+import sqlite3, sys, datetime
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+print("taken_at_utc:", datetime.datetime.now(datetime.UTC).isoformat())
+for t in ("memories", "evidence", "tool_invocations", "works",
+          "session_handoffs", "lessons", "schema_migrations"):
+    try:
+        print(f"{t}: {db.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]}")
+    except Exception as exc:
+        print(f"{t}: ({exc})")
+PY
+chmod 600 "$BASELINE"
+cat "$BASELINE"
+```
+
+**Step 2 — identify the recovery point the successful promotion recorded.**
+Match the backup directory to the **successful** history entry, not by name
+and not by date:
+
+```bash
+tail -1 ~/.mpm/update-history.jsonl | python3 -m json.tool
+```
+
+The entry must say `outcome: success`, name `to_rev: 2045afcc…`, and carry a
+`backup_dir`. That directory is the recovery point this promotion created.
+Also read `~/.mpm/.last-update-backup`, which the promotion wrote to the same
+value — it is a convenience pointer, not the authority.
+
+**Step 3 — verify that recovery point's integrity and its recorded
+fingerprint.** The promotion recorded the pre-update fingerprint in the same
+history entry (`pre_fp`), and the backup's own copy must carry it:
+
+```bash
+BK=<the backup_dir the successful record names>
+
+python3 - "$BK/mpm.db" "$BK/../.." <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+print("integrity:", db.execute("PRAGMA integrity_check").fetchone()[0])
+print("tables:", db.execute(
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+    "AND name NOT LIKE 'sqlite_%'").fetchone()[0])
+for t in ("memories", "evidence", "tool_invocations", "works",
+          "session_handoffs", "lessons", "schema_migrations"):
+    try:
+        print(f"{t}: {db.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]}")
+    except Exception as exc:
+        print(f"{t}: ({exc})")
+PY
+```
+
+Compare the shape with the recorded `pre_fp` — the updater will refuse a
+restore whose copy does not carry it, and so should you.
+
+**Step 4 — compare the counts with the baseline, and investigate.**
+`schema_migrations` must be **equal**. The row counts must be **equal or
+lower** than the baseline, because the backup was taken *before* the
+promotion:
+
+- a count **lower** than the baseline is the normal case — the backup
+  predates writes that the live database has since received;
+- a count **higher** than the baseline is possible (the backup is a snapshot
+  taken during concurrent writes) and is not automatically an error;
+- a count that is **materially lower than expected**, or a table that
+  **vanished**, is a **regression to investigate** — it is the signature of a
+  recovery point that does not represent the live data. Do not accept it
+  because the integrity check is green.
+
+**Do not impose unconditional per-table non-decreasing counts.** The
+scheduler writes to this database every 60 seconds, and agent sessions write
+whenever they work, so any table can legitimately move between the baseline
+and the comparison. A rule like *"every table's count must be ≥ the
+baseline's"* is not a safety property here — it is an assertion that
+happened to hold at one moment. The property that matters is **"no table
+lost rows it should not have"**, and that is a judgement the operator makes
+from the numbers, with the delta in front of them.
+
+**Record the result.** The measured counts, the delta and the timestamp are
+what the operator will need if a restore is ever proposed.
+
+### 4.3 A database restore is destructive
+
+`mpm-update --rollback --with-db-restore --force` **overwrites the live
+database with a copy taken at an earlier moment.** Everything written since
+that moment is gone. The `--force` is what makes it possible, and its own
+message says what it means: *"--force confirms overwriting newer data"*.
+
+**The updater selects the recovery point automatically, and it will select
+the wrong one if you do not know the rule.** The selection is: the **last**
+history entry with `action: update`, whose `to_rev` is the revision being
+rolled back **from**, and which carries a `backup_dir`. On this installation
+that means:
+
+| when | the active revision is | `--with-db-restore` selects |
+|---|---|---|
+| **before** the promotion | `4a870c8a` | the **November 7** point — 2,085 memories older than live |
+| **after** the promotion | `2045afcc` | the point **this promotion created** (§4.2) |
+
+So the foot-gun is real: run the restore **before** the promotion and the
+updater silently selects the November 7 point, because that is the only
+`backup_dir` recorded for `4a870c8a`. **This is why the November 7 point must
+not be the routine recovery point for this cutover** — it is the point that
+corresponds to the *defective* promotion, and it is the one an
+unattended `--with-db-restore --force` would pick.
+
+**A restore requires three things, in this order, and the third is the
+operator's, not the tool's.**
+
+1. **Identify the point the command will use — explicitly.** Do not infer it.
+   Read it out of the history record that matches the active revision
+   (§4.2, Step 2), and write the absolute path down:
+
+   ```bash
+   readlink ~/.mpm/current
+   tail -1 ~/.mpm/update-history.jsonl | python3 -m json.tool
+   ```
+
+   The `backup_dir` in that record is the one the restore will use. If the
+   path is not the one you expected, **stop** — you are about to restore the
+   wrong point.
+
+2. **Measure the data delta.** Compare the point's counts with the live
+   database's, with the same script and the same read-only opens. State the
+   delta explicitly, in writing, before the next step — *"restoring this
+   point discards N memories, M evidence rows, K tool_invocations written
+   since <timestamp>"*. §4.2's Step 3 script, pointed at both files, does
+   this.
+
+3. **Obtain separate, explicit operator approval** for the destructive step,
+   with the delta in front of the approver. The approval to *promote* is not
+   the approval to *destroy data*; they are different acts with different
+   consequences, and this document grants the first, not the second.
+
+**The restore also has to survive the writer rules** (§4.4), and it changes
+the live database's journal mode (§4.5). Both are reasons to treat it as a
+separate, deliberate operation — not a recovery step to reach for because a
+promotion failed.
+
+### 4.4 Writers: the scan, its limits, and what quiescence means
+
+The updater scans for processes holding the live database open
+(`internal/update/processes.go`, `ScanDBHolders`). It is worth knowing
+exactly what that scan does, because it is easy to over-trust.
+
+**What it does.** It walks `/proc`, reads each process's open file
+descriptors, and classifies every process that could hold the database:
+
+| class | meaning | effect |
+|---|---|---|
+| **holder** | the process demonstrably holds `mpm.db`, `mpm.db-wal` or `mpm.db-shm` open | the restore is **refused** |
+| **unverifiable** | the process's `/proc/<pid>/fd` could not be read — root-owned system services — and no lock on the database was found | the restore is **refused unless `--force`**; with `--force` they are **accepted and recorded**, never silently ignored |
+| ruled out | the process was positively excluded | nothing |
+
+**What it is not.** It is a **point-in-time `/proc` snapshot**. The code says
+so itself: *"a one-time /proc scan is not an atomic all-writers guarantee"*,
+and the check is deliberately run **twice** — once before the copy is staged
+and once immediately before the `rename(2)` — which *"narrows the
+check-then-act window to the rename syscall itself. It cannot close the
+window."* A process that opens the database after the last scan is not seen.
+
+**`--force` cannot bypass a definite holder.** Measured against the live
+paths with the updater's own scanner:
+
+```
+definite holders : 1
+   {PID:2977 Name:mpm-scheduler File:/home/v/.mpm/src/db/mpm.db}
+unverifiable     : 42   (root-owned system daemons; /proc/<pid>/fd unreadable)
+checkWriters(force=true)  -> refusing to restore the database: 1 process(es) still hold it open:
+  pid 2977 mpm-scheduler (/home/v/.mpm/src/db/mpm.db)
+Stop the writers, then retry.
+--force confirms overwriting newer data; it does not bypass this check.
+```
+
+The refusal is identical with and without `--force`. `--force` only relaxes
+the **unverifiable** residual — and it records the processes it accepted.
+
+**Who the writers are, on this installation.**
+
+| writer | what it is | can the updater stop it? |
+|---|---|---|
+| `mpm-scheduler` (the managed unit) | the scheduler, running on a 60-second interval | **yes** — with `--restart-services`, or by hand. It is the definite holder |
+| **OpenCode agent sessions** | every session running against this installation | **no.** The updater reports them as *"agent session — restart by hand; the updater will never touch it"*, and never terminates them. A restore under an open session is a restore **under a writer** |
+| **MCP servers / other processes** holding the database | anything else that opened it | **no** — they show up as holders and the restore is refused |
+| root-owned system daemons | 42 unverifiable on this host | **no** — and no lock on the database was found for any of them |
+
+**An ordinary promotion needs none of this.** The promotion takes an **online**
+backup (`VACUUM INTO`, a transactionally consistent copy) and **never replaces
+the live database**. It does not stop the scheduler, does not stop agent
+sessions, and does not need quiescence. The writer scan exists for the
+**restore** path, which is the only thing that replaces the live file.
+
+**Quiescence, stated plainly:** before a restore, the scheduler must be
+stopped **and** the operator's agent sessions must be closed by their owners.
+The updater can stop the first and will never stop the second.
+
+### 4.5 The journal mode a restore changes
+
+The recovery point is produced by `VACUUM INTO`, which writes a database in
+the **DELETE** (rollback-journal) mode. The live database is in **WAL** mode.
+`restoreDatabase` copies the recovery point over the live file and then
+removes the live `-wal` and `-shm` sidecars — which is exactly what leaving
+WAL mode requires.
+
+Measured on a private copy (2026-11-11), reproducing what the restore does:
+
+```
+before: journal_mode = wal        live header bytes 18/19: 2,2
+after : journal_mode = delete     Nov-7 point header bytes 18/19: 1,1
+memories after the restore: 320    (live had 2,405)
+integrity: ok
+```
+
+**So a restore does not only roll the data back — it takes the live
+installation out of WAL mode.** The consequence is not a detail of the
+restore: the installation then runs without WAL, so there is no concurrent
+reader during a write and no shared-memory index, and the next writer
+re-establishes the sidecars from scratch.
+
+**Nothing in the upstream procedure says so.** It must be said here.
+
+**If a restore is ever authorised, the journal mode is a separate, validated
+step — not an automatic consequence.** The recovery procedure for the
+journal mode is:
+
+1. **decide explicitly** whether the installation should return to WAL, and
+   record the decision. WAL is what the live installation uses and what
+   `internal/core/db.go` sets on open;
+2. **restore first**, then **re-establish the mode** with an explicit
+   `PRAGMA journal_mode = WAL` against the restored database, and **verify**
+   it: the header bytes 18/19 must read `2,2`, `PRAGMA journal_mode` must
+   report `wal`, and `PRAGMA integrity_check` must still return `ok`;
+3. **verify the data** against the counts measured in §4.3, step 2;
+4. only then restart the scheduler and re-open the agent sessions.
+
+**Do not change the live database's journal settings during a review, a
+rehearsal or a dry run.** The mode is a property of the running
+installation, not an inspection parameter.
+
+### 4.6 Inspecting a recovery point safely
+
+A copy of the MPM database is **the operator's complete memory corpus**. It is
+secret material, and the rules for handling it are not optional.
+
+**Inspect read-only.** Every open of a recovery point, a backup or the live
+database in this procedure uses a URI with `mode=ro`:
+
+```python
+sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+```
+
+A plain `sqlite3.connect(path)` takes a **write lock** on the database. On a
+recovery point that happens to be harmless; pointed at the **live** database,
+it takes a write lock on a database the scheduler is actively writing to.
+The two scripts in §6.1 must use the same read-only form.
+
+**Keep copies in owner-private directories.** Not in `/tmp`: it is sticky but
+world-traversable, and a default `umask` leaves files mode `0644`. Use a
+directory under `$HOME` that only the operator can enter, with files only
+the operator can read:
+
+```bash
+mkdir -p "$HOME/.cache/mpm-recovery" && chmod 700 "$HOME/.cache/mpm-recovery"
+install -m 0600 /path/to/copy.db "$HOME/.cache/mpm-recovery/copy.db"
+```
+
+Remove the copy when it is no longer needed. A copy that is still there is a
+copy that can still leak.
+
+**Two hygiene items to record, not to act on.**
+
+- **A rehearsal copy of the database in a shared temporary directory.** A
+  previous rehearsal left a copy of the live database under `/tmp` — a
+  world-traversable path. It has since been **removed from that path**, and
+  the audit finds **no copy of the MPM database anywhere under `/tmp`** now.
+  It is recorded here because the lesson is not the file: **a copy of the
+  corpus in shared temporary space is a leak**, whatever later removes it.
+- **An off-host copy of the whole installation.**
+  `/home/v/pCloudDrive/pCloud Backup/v/.mpm/` is a **complete copy of the
+  installation** (650 MB), including `src/db/mpm.db`, and it syncs to
+  pCloud. It is **stale** — it holds the **November 1** installation (174
+  memories, 18 schema migrations, fingerprint `6fa0883c…`), so it is not a
+  copy of the current corpus, but it *is* a copy of an earlier complete
+  corpus, and its directories are world-readable on this host.
+  **This is recorded for the operator to verify, and nothing about it was
+  changed.** The question is not a technical one: *is putting the operator's
+  complete memory corpus off the host — and readable by other local users —
+  intended?* If it is not, it is a separate change, made deliberately.
+
+## 5. The instruction migration policy
 
 **The updater does not rewrite the operator's instructions, and neither
 does this procedure.** The managed block is refreshed by a separate,
 explicit step, and the step is governed by an existing policy.
 
-### 4.1 The policy
+### 5.1 The policy
 
 `agent_installation/mpm-opencode/scripts/install_agents_instructions.py`
 implements it:
@@ -708,7 +1075,7 @@ installed block names the OpenCode **V1** hook
 `experimental.chat.system.transform`, which the running V2 plugin does
 not register. The refreshed block names `ctx.session.hook("context")`.
 
-### 4.2 The step
+### 5.2 The step
 
 Run it **after Step 6**, from the installed assets. The paths below do
 not exist before the promotion: the active release carries only the
@@ -748,7 +1115,7 @@ The provenance line must name **`2045afcc57f1f7603f38e016a2909b85985e48dc`**
 the block they started with. Restarting them is a separate, deliberate
 act (§3.1, act 5).
 
-### 4.3 What this step does not do
+### 5.3 What this step does not do
 
 - it does not touch `~/.mpm/AGENTS.md`, `~/.mpm/CLAUDE.md` or
   `~/.mpm/CLI_AGENT_RULES.md` — those are the project guidance, not the
@@ -757,7 +1124,7 @@ act (§3.1, act 5).
 - it does not change the payload, the binaries or the database;
 - it does not restart any session.
 
-## 5. What not to do
+## 6. What not to do
 
 - **Do not restore the assets into `releases/4a870c8a…` by hand.** It
   is the active release and a rollback target; a release is immutable,
@@ -793,6 +1160,23 @@ act (§3.1, act 5).
   tell a current block from an edited one.
 - **Do not promote a different revision to get around an existing
   release directory.** §3.5 covers the correct action.
+- **Do not treat a restore as a promotion step.** A restore replaces the
+  live database with an older copy and takes the installation out of WAL
+  mode (§4.5). It is a separate, destructive, separately-approved act.
+- **Do not change the live database's journal mode as part of an
+  inspection, a rehearsal or a dry run.** If a restore is ever authorised,
+  the journal mode is restored deliberately and verified afterwards
+  (§4.5).
+- **Do not run `--with-db-restore --force` without the three things §4.3
+  requires**: the recovery point the command will select, **identified
+  explicitly**; the **data delta** it would discard, measured and written
+  down; and **separate operator approval** for the destructive step. The
+  approval to promote is not the approval to destroy data.
+- **Do not let the updater choose the recovery point by implication.** It
+  selects the last history entry for the revision being rolled back from,
+  which on this installation is the **November 7** point until the promotion
+  has happened. That is the wrong point for this cutover, and the command
+  will not say so (§4.3).
 - **Do not read the promotion's health smoke as a check.** The smoke
   is a **live write path**: it runs the newly installed binary against
   the **live** database (`mpm call mpm_system --payload '{"action":
@@ -801,15 +1185,18 @@ act (§3.1, act 5).
   dry run, and it is why the promotion is a separate, authorised act
   from the checks in §3.3 Steps 3–4.
 
-### 5.1 Verify the recovery point before you rely on it
+### 6.1 Verify the recovery point before you rely on it
 
 `~/.mpm/backups/upgrade-<timestamp>/` is created BEFORE the backup is
 taken, and it is NOT removed when the backup fails. So the DIRECTORY's
 existence proves nothing: a failed backup leaves an empty directory
 behind, and restoring from it is restoring nothing.
 
-The promotion's own backup is verified at creation (§3.4), so it does
-not need this. An **older** recovery point does.
+The promotion's own backup is verified **structurally** at creation
+(§3.4), so it does not need this to be *sound*. It still needs the
+operator's **freshness** assessment (§4.2) to be *the point you expect* —
+structural verification cannot see row counts (§4.1). An **older** recovery
+point needs both.
 
 ```bash
 BK=~/.mpm/backups/upgrade-20261107T201536Z
@@ -817,19 +1204,33 @@ BK=~/.mpm/backups/upgrade-20261107T201536Z
 # 1. the database is there, and it is not empty
 ls -l "$BK/mpm.db"
 
-# 2. it opens, and it is a real database with the expected tables
+# 2. it opens READ-ONLY, and it is a real database with the expected tables.
+#
+#    The mode=ro URI is not decoration: a plain sqlite3.connect(path)
+#    takes a WRITE LOCK on the database. On a recovery point that is
+#    harmless; pointed at the LIVE database it would take a write lock on
+#    a database the scheduler is actively writing to. Every open in this
+#    procedure is read-only — see §4.6.
+#
+#    What this establishes is that the copy is STRUCTURALLY sound and
+#    that it carries the expected tables. It does NOT establish
+#    freshness — the fingerprint cannot see row counts (§4.1). For the
+#    counts, compare against a baseline (§4.2).
 python3 - "$BK/mpm.db" <<'PY'
 import sqlite3, sys
-db = sqlite3.connect(sys.argv[1])
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+# The table count EXCLUDES sqlite_* (sqlite_sequence and friends), so it
+# is comparable with the updater's own count. Counting them would make
+# two scripts disagree about the same database.
 tables = [r[0] for r in db.execute(
-    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+    "SELECT name FROM sqlite_master WHERE type='table' "
+    "AND name NOT LIKE 'sqlite_%' ORDER BY name")]
 print("tables:", len(tables))
 print("memories:", db.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
 migrations = 0
 if "schema_migrations" in tables:
     migrations = db.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
 print("schema_migrations:", migrations)
-db.execute("PRAGMA integrity_check").fetchone()
 print("integrity:", db.execute("PRAGMA integrity_check").fetchone()[0])
 PY
 ```
@@ -878,13 +1279,13 @@ If the verification fails, the backup is not a recovery point. Do not
 restore it. Find another, or accept that the promotion is a
 forward-only operation for this installation.
 
-### 5.2 Litter worth removing before the cutover
+### 6.2 Litter worth removing before the cutover
 
 `~/.mpm/staging/candidate.<n>` — 289 MB of abandoned staging from the
 interrupted 2026-11-07 update. It is not a blocker, but it is inside
 the data root and it is space the promotion wants.
 
-## 6. Cross-references
+## 7. Cross-references
 
 - the fix: `internal/update/hostassets.go`, `internal/update/source.go`,
   `internal/update/verify.go`, `scripts/lib/runtime_bundle.sh`;
@@ -893,7 +1294,41 @@ the data root and it is space the promotion wants.
   scan in `discover_source_assets`);
 - the installer policy for operator-edited assets: cases A–G in
   `scripts/install_runtime_assets.py`;
-- the migration policy for the managed block: §4.1 above, implemented by
+- the migration policy for the managed block: §5.1 above, implemented by
   `agent_installation/mpm-opencode/scripts/install_agents_instructions.py`;
 - the two validation scopes (candidate vs installed) and the exact
   compatibility rule: [`bundle-validation-scopes.md`](bundle-validation-scopes.md).
+
+## 8. Known follow-ups
+
+These are recorded, not fixed. None of them is a documentation defect, and
+none of them belongs in a documentation-only change.
+
+- **`internal/update/backup.go` — the package comment contradicts the
+  implementation.** The introductory comment on `BackupLiveDB` says the
+  backup is verified three ways, the third being *"every user table's row
+  count matches the live database"*. The implementation deliberately does
+  **not** compare row counts, and the design note on `verifyBackup` says so
+  at length: `VACUUM INTO` captures an instant *during* the backup, so
+  comparing its counts against a later live read compares two different
+  points in time, and a legitimate concurrent write would produce a false
+  failure. The verification is: the file is non-empty, it carries the
+  `SQLite format 3` header, `PRAGMA integrity_check` passes, every table is
+  readable, and the backup's **table set** equals the live table set.
+  **The comment is stale and misleading** — a reader would believe the
+  updater checks row counts, and it does not. It should be corrected in a
+  separate change, in the same file, by the people who own it. **This
+  document does not change production code.**
+- **The candidate binary does not expose its own schema.** The bundle's
+  schema preflight is a file the bundle asserts; the format cannot prove it
+  is the substrate's DDL. The durable fix is for the candidate binary to
+  expose the DDL it embeds, so the updater can compare the bundle's file
+  against the binary's own. It does not gate this cutover — the DDL is
+  byte-identical at both revisions and the bundle's file is byte-identical
+  to the canonical extraction — but it is the real fix for the general case.
+- **The shell validator has no payload check.** A bundle whose runtime
+  payload is missing a declared file is refused by the Go validator and
+  **accepted** by the shell validator. The shell assembler can therefore
+  publish a bundle the updater then refuses. The promotion path is not
+  implicated (the promotion is validated by the Go validator), but the
+  divergence is the dangerous direction and is worth reconciling.
