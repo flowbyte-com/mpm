@@ -249,7 +249,7 @@ the old revision is not an available answer.**
 | P4 | disk headroom **and** temporary-space headroom | `df -h / ~/.mpm "$TMPDIR"` (§3.3 Step 1) |
 | P5 | no other agent is using the updater | process inventory |
 | P6 | the operator has read §5 (the instruction migration) | — |
-| **P7** | **the host-specific procedure's current revision carries an approval recorded against its exact SHA-256, covering exactly the three canonical scopes, and the operator has authorised the acts to be performed** | **First half — the approval.** `sha256sum -c /home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256` must pass, and the **authority register** (§3.8.1) must exist, parse, cover **exactly** the three canonical scopes and carry `accepted: true` for each. Then the **published decision set** for the pull request must be enumerated **completely**, with its completeness demonstrated against **two** independent counts (§3.8.1): the traversal must reach a confirmed terminal state, the retrieved count must reconcile with both the listing's own page cursor and the issue object's comment count, no identifier may repeat, and two consecutive traversals must agree exactly on the id set and on every body hash. A pagination failure, an inaccessible page, a short final page, an unreconciled count, a repeated identifier, a set that changes mid-enumeration, or a body that cannot be parsed **fails closed** — a completeness failure is a **failure, not an empty result**. Then, for **each** scope — `database-safety`, `managed-block-stage-4`, `whole-procedure` — there must be **exactly one** current record, and the candidate is the **highest published version** for that scope: **local filenames never decide which version is current**. That candidate must have a **local** canonical record — whose **filename version equals the body's `attestation_version`**, whose **filename scope equals the body's `scope`**, whose sidecar matches and whose body is canonical — and that record must not be revoked or withdrawn, must carry a known `verdict`, must bind that same `artifact_sha256`, must be listed in the authority register for its scope, and must pass the **publication checks** in §3.8.1 (the publication **retrieved** from its channel, its author equal to the record's `reviewer`, its verdict and scope equal, its `artifact_sha256` equal, its `pr_head` equal where it carries one, and its body byte-identical to the local record). **Revocations are discovered from the same enumeration, not from local files**, and a revocation whose authority cannot be verified **fails closed**. The scope set must be **exactly** those three — a missing scope, an unknown scope, a duplicate, a conflicting claim, a filename/body mismatch or an unauthenticated publication **fails closed**. **Every local record must have a published counterpart**, so a forged local version fails closed; and so does **the local record for the current published version being missing**: **there is no fallback to an older one**. A revoked, withdrawn, inapplicable or invalid highest published version leaves the scope unapproved, and **a newer published decision bound to an obsolete PR head does not hand over to an older one**. **Second half — the authorisation.** The operator's own, act by act (§3.1); the approval of the procedure is not an authorisation of any act in it. **Both halves must hold, and they are separate.** The procedure's own status line reads NOT APPROVED, and it always will: recording the approval inside the file would change the checksum the approval is bound to (§3.8.1) — so **the status line is not the approval state, and the external attestation is**. **If either half fails, P7 fails and nothing is executed** |
+| **P7** | **the host-specific procedure's current revision carries an approval recorded against its exact SHA-256, covering exactly the three canonical scopes, and the operator has authorised the acts to be performed** | **First half — the approval.** `sha256sum -c /home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256` must pass, and the **authority register** (§3.8.1) must exist, parse, cover **exactly** the three canonical scopes and carry `accepted: true` for each. Then the **published decision set** for the pull request must be enumerated **completely**, with its completeness demonstrated against **two** independent counts (§3.8.1): the traversal must reach a confirmed terminal state, the retrieved count must reconcile with both the listing's own page cursor and the issue object's comment count, no identifier may repeat, and two consecutive traversals must agree exactly on the id set and on every body hash. A pagination failure, an inaccessible page, a short final page, an unreconciled count, a repeated identifier, a set that changes mid-enumeration, or a body that cannot be parsed **fails closed** — a completeness failure is a **failure, not an empty result**. Each retrieved body is then **classified** by the standalone-marker-line rule: a body with **no** standalone marker line is ordinary commentary and is ignored, and a body with **at least one** standalone marker line is an attempted decision and must satisfy the strict validation in §3.8.1 — exactly one BEGIN line, exactly one END line, in that order, enclosing one valid canonical record — or it **fails closed**, and is never reclassified as commentary. Then, for **each** scope — `database-safety`, `managed-block-stage-4`, `whole-procedure` — there must be **exactly one** current record, and the candidate is the **highest published version** for that scope: **local filenames never decide which version is current**. That candidate must have a **local** canonical record — whose **filename version equals the body's `attestation_version`**, whose **filename scope equals the body's `scope`**, whose sidecar matches and whose body is canonical — and that record must not be revoked or withdrawn, must carry a known `verdict`, must bind that same `artifact_sha256`, must be listed in the authority register for its scope, and must pass the **publication checks** in §3.8.1 (the publication **retrieved** from its channel, its author equal to the record's `reviewer`, its verdict and scope equal, its `artifact_sha256` equal, its `pr_head` equal where it carries one, and its body byte-identical to the local record). **Revocations are discovered from the same enumeration, not from local files**, and a revocation whose authority cannot be verified **fails closed**. The scope set must be **exactly** those three — a missing scope, an unknown scope, a duplicate, a conflicting claim, a filename/body mismatch or an unauthenticated publication **fails closed**. **Every local record must have a published counterpart**, so a forged local version fails closed; and so does **the local record for the current published version being missing**: **there is no fallback to an older one**. A revoked, withdrawn, inapplicable or invalid highest published version leaves the scope unapproved, and **a newer published decision bound to an obsolete PR head does not hand over to an older one**. **Second half — the authorisation.** The operator's own, act by act (§3.1); the approval of the procedure is not an authorisation of any act in it. **Both halves must hold, and they are separate.** The procedure's own status line reads NOT APPROVED, and it always will: recording the approval inside the file would change the checksum the approval is bound to (§3.8.1) — so **the status line is not the approval state, and the external attestation is**. **If either half fails, P7 fails and nothing is executed** |
 
 ### 3.3 Steps
 
@@ -1247,7 +1247,7 @@ seven things:
 | 3 | **the published verdict and the published scope** | the retrieved body's `verdict` and `scope` must equal the local record's |
 | 4 | **the exact procedure SHA-256** | the retrieved body's `artifact_sha256` must equal the local record's, and that must equal the procedure's sidecar |
 | 5 | **the final PR head, where relevant** | if the retrieved body carries a `pr_head`, it must equal the PR head in force. A scope that reviewed this guide must carry the head it read — **and a PR-head binding does not travel past an amendment to this guide** |
-| 6 | **the publication's content integrity** | the retrieved body must contain the local record's canonical body **verbatim**, between the fixed markers `<!-- MPM-APPROVAL-BEGIN -->` and `<!-- MPM-APPROVAL-END -->`; the bytes strictly between the marker lines must be byte-identical to the local file, and the local file's SHA-256 must match its own `.sha256` sidecar. **A hash stated only by the local record proves nothing** — the comparison is between the *retrieved* bytes and the *local* bytes, not between two local claims |
+| 6 | **the publication's content integrity** | the retrieved body must contain the local record's canonical body **verbatim**, between the fixed markers `<!-- MPM-APPROVAL-BEGIN -->` and `<!-- MPM-APPROVAL-END -->`; the bytes strictly between the **marker lines** — the standalone lines defined under "The published decision set" below — must be byte-identical to the local file, and the local file's SHA-256 must match its own `.sha256` sidecar. **A hash stated only by the local record proves nothing** — the comparison is between the *retrieved* bytes and the *local* bytes, not between two local claims |
 | 7 | **the evidence is neither superseded nor revoked** | the version rules below |
 
 **What this establishes, and what it does not.** It establishes that the
@@ -1318,13 +1318,58 @@ rather than an assertion:
    verified traversal**, and accept it only when two consecutive complete
    traversals agree.
 6. **Retrieve and classify, last.** Only then is each retrieved body
-   classified: a body carrying the attestation markers is parsed and
-   classified as an approval or a revocation; a body carrying **no**
-   markers is simply **not a decision** — it is a review report or an
-   operator note — and is skipped without comment. Completeness is a
-   claim about **retrieval**, not about interpretation, and a body that
-   **does** carry the markers but cannot be parsed is a **failure**, not
-   a skipped row.
+   classified. The discriminator is a **standalone marker line**: a line
+   whose content, with leading and trailing whitespace removed, is
+   **exactly** the marker string — `<!-- MPM-APPROVAL-BEGIN -->` or
+   `<!-- MPM-APPROVAL-END -->` — and nothing else on that line.
+
+   - **Ordinary commentary.** A body with **no** standalone marker line
+     is **not a decision candidate**. It is ignored for
+     approval-record parsing, even when the marker names appear
+     **inline**, inside backticks, in a table cell or in explanatory
+     prose. A quoted marker is not a marker, and a review report *about*
+     this mechanism routinely quotes the marker names — the report is
+     commentary, not an attempted decision, and it must not be treated
+     as one. Such a body is still part of the enumeration, and still
+     counts towards the reconciled totals.
+
+     Whitespace around a marker line is tolerated **on purpose**. A
+     decision published with a stray space at the end of a marker line
+     must still be a decision; if it were not, it would be **invisible**,
+     and an invisible decision would silently promote an older published
+     version — the very downgrade the version rules forbid.
+
+   - **An attempted decision.** A body with **at least one** standalone
+     marker line is an attempted decision, and it enters **strict
+     validation**. It must satisfy **all** of the following, and it
+     **fails closed** if it satisfies any less:
+
+     | # | requirement |
+     |---|---|
+     | 1 | **exactly one** BEGIN marker line |
+     | 2 | **exactly one** END marker line |
+     | 3 | the BEGIN marker line **precedes** the END marker line |
+     | 4 | **no duplicate or ambiguous decision markers** — one pair, and one pair only |
+     | 5 | the enclosed bytes are **non-empty** and parse as **one** valid JSON record |
+     | 6 | the enclosed bytes are **canonical** — re-serialising the parsed record reproduces them exactly — and the existing exact-byte comparison against the local record holds |
+     | 7 | every existing publication, identity, scope, version, checksum, head and authority check holds |
+
+     A missing, malformed, duplicated or out-of-order standalone marker
+     line is a **failure**. An attempted decision is **never** silently
+     reclassified as commentary: a body that announced itself as a
+     decision stops the check rather than being skipped.
+
+   **Classification never looks at the verdict.** A decision is
+   classified as an approval or as a revocation by its **kind of
+   record**, never by the verdict it carries. A published decision whose
+   verdict is not `APPROVE` is still the **current** version for its
+   scope, and it still supersedes an older `APPROVE` — the version
+   rules below are decided on version order, and the verdict is checked
+   afterwards, on the version that wins.
+
+   A body that is neither commentary nor an attempted decision does not
+   exist: every body is one or the other. Completeness is a claim about
+   **retrieval**, not about interpretation.
 
 **The exact fail-closed outcome.** If any of the following holds, the
 enumeration is **incomplete**, the published decision set is **not
@@ -1341,9 +1386,12 @@ check stops, and nothing is executed:
   hash;
 - the set changed while it was being enumerated, and a repeat traversal
   did not produce two agreeing complete traversals;
-- a retrieved body that carries the attestation markers cannot be
-  parsed, or names a scope that is not one of the three canonical
-  identifiers.
+- a retrieved body that carries **at least one standalone marker line**
+  is an attempted decision and fails strict validation — a missing,
+  duplicated or out-of-order marker line, an empty enclosure, a body
+  that is not JSON, or a body that is not canonical; or
+- a retrieved decision names a scope that is not one of the three
+  canonical identifiers.
 
 **The same principle governs revocations.** Revocations are discovered by
 the same enumeration of the same set, classified by the same markers, and
@@ -1553,7 +1601,15 @@ each of the following must be **rejected**:
     does not hand over to an older one;
 16. a **short final page**, a count that reconciles with neither
     independent source, a **repeated identifier**, and a set that
-    **changes between two traversals**.
+    **changes between two traversals**;
+17. a **review report that mentions the marker names inline** — it is
+    commentary, it must be ignored, and it must **not** be treated as a
+    malformed decision;
+18. an **attempted decision with only one marker line**, with the
+    markers **reversed**, with a **duplicated** pair, enclosing bytes
+    that are **not JSON**, and enclosing bytes that are **not
+    canonical** — each must fail closed, and none of them may be
+    reclassified as commentary.
 
 The last one is the counterpart of the second: neither a locally
 fabricated revocation nor a locally deleted one may silently establish
@@ -2597,18 +2653,20 @@ none of them belongs in a documentation-only change.
   The independent database-safety review of `31ccfb77…` is an **APPROVE
   for `database-safety`** — the restoration path — and it found **no
   cutover blockers in the revision**; it was published as version 1
-  against PR head `60079492…` and **renewed as version 2** against
-  `488b94b8…`. The Stage 4 review is an **APPROVE for
-  `managed-block-stage-4`**, bound to the procedure at `31ccfb77…`, also
-  published as version 1 against `60079492…` and **renewed as version 2**
-  against `488b94b8…`. The final independent gate is an **APPROVE for
-  `whole-procedure`**, bound to the procedure at `31ccfb77…`; the PR at
-  `c692e791…` was **CONDITIONAL** on it, and its `whole-procedure`
-  publication is **still outstanding** — no version of it has been
-  published. **A PR-head binding does not travel past an amendment to
-  this guide** — so this amendment expires the two version-2 head
-  bindings, and both must be published again against the head it
-  produces, at the version number that history then dictates.
+  against PR head `60079492…`, **renewed as version 2** against
+  `488b94b8…`, and **renewed again as version 3** against `19f5ef66…`.
+  The Stage 4 review is an **APPROVE for `managed-block-stage-4`**, bound
+  to the procedure at `31ccfb77…`, published as version 1 against
+  `60079492…` and **renewed as version 2** against `488b94b8…`. The
+  final independent gate is an **APPROVE for `whole-procedure`**, bound
+  to the procedure at `31ccfb77…`; the PR at `c692e791…` was
+  **CONDITIONAL** on it, and its `whole-procedure` publication is
+  **still outstanding** — no version of it has been published. **A
+  PR-head binding does not travel past an amendment to this guide** — so
+  this amendment expires the `database-safety` **version-3** binding and
+  the `managed-block-stage-4` **version-2** binding, and both must be
+  published again against the head it produces, at the version number
+  that history then dictates.
   **None of the three is permission to run the cutover** — the cutover
   needs all three, recorded, and then the operator's own authorisation on
   top (§3.8.2, §3.2 P7).
