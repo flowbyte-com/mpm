@@ -249,7 +249,7 @@ the old revision is not an available answer.**
 | P4 | disk headroom **and** temporary-space headroom | `df -h / ~/.mpm "$TMPDIR"` (§3.3 Step 1) |
 | P5 | no other agent is using the updater | process inventory |
 | P6 | the operator has read §5 (the instruction migration) | — |
-| **P7** | **the host-specific procedure's current revision carries an approval recorded against its exact SHA-256, covering exactly the three canonical scopes, and the operator has authorised the acts to be performed** | **First half — the approval.** `sha256sum -c /home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256` must pass, and the **authority register** (§3.8.1) must exist, parse, cover **exactly** the three canonical scopes and carry `accepted: true` for each. Then, for **each** scope — `database-safety`, `managed-block-stage-4`, `whole-procedure` — there must be **exactly one** current record: the highest version present for that scope, whose **filename version equals the body's `attestation_version`** and whose **filename scope equals the body's `scope`**, not revoked, parsing, carrying a known `verdict`, binding that same `artifact_sha256`, listed in the authority register for its scope, and passing the **publication checks** in §3.8.1 (the publication **retrieved** from its channel, its author equal to the record's `reviewer`, its verdict and scope equal, its `artifact_sha256` equal, its `pr_head` equal where it carries one, and its body byte-identical to the local record). **Revocations are discovered from the channel, not from local files**: the operator enumerates the channel for revocation records for each scope, and a pagination failure, an inaccessible channel, an ambiguous revocation or one whose authority cannot be verified **fails closed**. The scope set must be **exactly** those three — a missing scope, an unknown scope, a duplicate, a conflicting claim, a filename/body mismatch or an unauthenticated publication **fails closed**, and so does the highest version failing any check: **there is no fallback to an older one**, and a revoked or invalid highest version leaves the scope unapproved. **Second half — the authorisation.** The operator's own, act by act (§3.1); the approval of the procedure is not an authorisation of any act in it. **Both halves must hold, and they are separate.** The procedure's own status line reads NOT APPROVED, and it always will: recording the approval inside the file would change the checksum the approval is bound to (§3.8.1) — so **the status line is not the approval state, and the external attestation is**. **If either half fails, P7 fails and nothing is executed** |
+| **P7** | **the host-specific procedure's current revision carries an approval recorded against its exact SHA-256, covering exactly the three canonical scopes, and the operator has authorised the acts to be performed** | **First half — the approval.** `sha256sum -c /home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256` must pass, and the **authority register** (§3.8.1) must exist, parse, cover **exactly** the three canonical scopes and carry `accepted: true` for each. Then the **published decision set** for the pull request must be enumerated **completely**, with its completeness demonstrated against **two** independent counts (§3.8.1): the traversal must reach a confirmed terminal state, the retrieved count must reconcile with both the listing's own page cursor and the issue object's comment count, no identifier may repeat, and two consecutive traversals must agree exactly on the id set and on every body hash. A pagination failure, an inaccessible page, a short final page, an unreconciled count, a repeated identifier, a set that changes mid-enumeration, or a body that cannot be parsed **fails closed** — a completeness failure is a **failure, not an empty result**. Then, for **each** scope — `database-safety`, `managed-block-stage-4`, `whole-procedure` — there must be **exactly one** current record, and the candidate is the **highest published version** for that scope: **local filenames never decide which version is current**. That candidate must have a **local** canonical record — whose **filename version equals the body's `attestation_version`**, whose **filename scope equals the body's `scope`**, whose sidecar matches and whose body is canonical — and that record must not be revoked or withdrawn, must carry a known `verdict`, must bind that same `artifact_sha256`, must be listed in the authority register for its scope, and must pass the **publication checks** in §3.8.1 (the publication **retrieved** from its channel, its author equal to the record's `reviewer`, its verdict and scope equal, its `artifact_sha256` equal, its `pr_head` equal where it carries one, and its body byte-identical to the local record). **Revocations are discovered from the same enumeration, not from local files**, and a revocation whose authority cannot be verified **fails closed**. The scope set must be **exactly** those three — a missing scope, an unknown scope, a duplicate, a conflicting claim, a filename/body mismatch or an unauthenticated publication **fails closed**. **Every local record must have a published counterpart**, so a forged local version fails closed; and so does **the local record for the current published version being missing**: **there is no fallback to an older one**. A revoked, withdrawn, inapplicable or invalid highest published version leaves the scope unapproved, and **a newer published decision bound to an obsolete PR head does not hand over to an older one**. **Second half — the authorisation.** The operator's own, act by act (§3.1); the approval of the procedure is not an authorisation of any act in it. **Both halves must hold, and they are separate.** The procedure's own status line reads NOT APPROVED, and it always will: recording the approval inside the file would change the checksum the approval is bound to (§3.8.1) — so **the status line is not the approval state, and the external attestation is**. **If either half fails, P7 fails and nothing is executed** |
 
 ### 3.3 Steps
 
@@ -1102,11 +1102,10 @@ that scope, the record establishes publication provenance and nothing
 more.
 
 **The operator establishes the reviewer-to-scope assignment, and records
-it outside the attestation set.** The authority register is a separate
-file the operator maintains — `MPM_CUTOVER_4a870c8a_to_2045afcc.authority.json`
-— kept **beside** the attestations but **not among them**, so that
-whoever can write the attestation directory cannot also rewrite the
-mapping that governs it. One entry per canonical scope:
+it in the register.** The authority register is a separate file the
+operator maintains — `MPM_CUTOVER_4a870c8a_to_2045afcc.authority.json`
+— kept **beside** the attestations, **in the same directory**. One entry
+per canonical scope:
 
 ```json
 {
@@ -1128,12 +1127,32 @@ closed.**
 
 **What the register establishes, and what it does not.** It establishes
 that **the operator recorded an assignment** — a dated, attributable
-decision, made outside the records it governs. It does **not**
-establish that the principal is who it claims to be, that the
-publication's content came from that principal rather than from anyone
-who can post as the account, or that the three principals are distinct.
-**A locally created register is an operator's own record, not
-independent evidence of anything.**
+decision. It does **not** establish that the principal is who it claims
+to be, that the publication's content came from that principal rather
+than from anyone who can post as the account, or that the three
+principals are distinct. **A locally created register is an operator's
+own record, not independent evidence of anything.**
+
+**The boundary, stated exactly, with no protection invented.** The
+register is an **operator-controlled local policy record**. It is **not**
+isolated from anyone who can modify the attestation directory: it is
+**in** that directory, and **sharing a directory provides no filesystem
+isolation**. Anyone who can write the attestations can write the
+register; anyone who can read the attestations can read it. **The
+register does not independently authenticate a reviewer** — it records
+the operator's own acceptance of a reviewer-to-scope assignment, and
+that acceptance is the operator's word, not an attestation and not
+evidence from any other party.
+
+Keeping the register beside the attestations rather than among them is
+**record hygiene**, not a security boundary: the attestations are the
+channel's evidence, the register is the operator's policy, and the two
+are kept distinguishable because they answer to different things. What
+protects the register is exactly what protects the attestation
+directory itself — the host's filesystem permissions and the operator's
+custody of it. **If that custody is not trustworthy, then neither the
+register nor the attestations are**, and the check fails closed on the
+attestations long before it matters which file an attacker edited.
 
 **The trust boundary, stated plainly.** The shared account is the
 anchor; GitHub account authentication is **not** tamper-proof
@@ -1245,6 +1264,115 @@ established where, and the trust boundary says what none of them buys.
 and the signing key would be the same party, a signature would prove
 nothing the account does not already prove.
 
+##### The published decision set — and how its completeness is established
+
+**The decision set is what the channel holds, not what the directory
+holds.** Approvals and revocations are both discovered by enumerating the
+channel; the local directory is a **mirror** of that set, never its
+source. The enumeration must be **exhaustive**, and — this is the part
+that is easy to get wrong — **exhaustiveness must itself be
+demonstrated**. **A short page, an absent next-page link, or an HTTP 200
+is not proof that the set was fully retrieved.**
+
+**The channel and the scope of the enumeration.** The authoritative
+channel is the GitHub issue-comment API for the pull request that carries
+the reviews: repository `flowbyte-com/mpm`, issue **238**, **comments
+only**. The scope of the enumeration is **every comment on that issue** —
+not only the comments that look like attestations. A narrower scope is
+not safe: a decision that has not yet been recognised as an attestation
+would be invisible to a filtered query, and the filter is exactly where
+a truncation would hide.
+
+**The procedure.** It is reproducible, and every step is a measurement
+rather than an assertion:
+
+1. **Establish the independent count.** Read the issue object's own
+   comment count — `GET /repos/flowbyte-com/mpm/issues/238`, field
+   `comments`. This is a **different endpoint** from the listing, and it
+   is what makes the count a reconciliation rather than a self-report.
+2. **Traverse the listing to a confirmed terminal state.** Fetch
+   `GET /repos/flowbyte-com/mpm/issues/238/comments?per_page=P&page=k`,
+   following the `Link` header's `rel="next"` cursor until the response
+   carries **no** `rel="next"`. A response with no next cursor is the
+   terminal state; reaching it is what "exhaustive" means here. Choose
+   `P` small enough that the listing spans several pages, so the
+   server's own `rel="last"` cursor exists to be read.
+3. **Reconcile the count, from two directions.** The number of items
+   retrieved must equal **both**:
+   - the total implied by the server's own page cursor —
+     `(L − 1) × P + items_on_page_L`, where `L` is the `rel="last"` page
+     number from the **first** response's `Link` header; and
+   - the independent count from step 1.
+
+   A short final page breaks both at once. A count that reconciles with
+   only one of them is not reconciled.
+4. **Collect the stable identifiers.** Each item's numeric comment id is
+   its stable identifier. Collect them all, and check for **duplicates**:
+   an id appearing twice means the traversal repeated or overlapped, and
+   the enumeration is rejected.
+5. **Enumerate twice, and require the two to agree exactly.** Repeat the
+   whole traversal. The two id sets must be identical, and so must the
+   hash of every retrieved body. A set that **changed between the two
+   traversals** — a decision published, edited or withdrawn in between —
+   is not a complete enumeration of a stable set: **re-run the complete
+   verified traversal**, and accept it only when two consecutive complete
+   traversals agree.
+6. **Retrieve and classify, last.** Only then is each retrieved body
+   classified: a body carrying the attestation markers is parsed and
+   classified as an approval or a revocation; a body carrying **no**
+   markers is simply **not a decision** — it is a review report or an
+   operator note — and is skipped without comment. Completeness is a
+   claim about **retrieval**, not about interpretation, and a body that
+   **does** carry the markers but cannot be parsed is a **failure**, not
+   a skipped row.
+
+**The exact fail-closed outcome.** If any of the following holds, the
+enumeration is **incomplete**, the published decision set is **not
+established**, and every scope it concerns has **no approval** — the
+check stops, and nothing is executed:
+
+- the traversal did not reach a confirmed terminal state;
+- a page was inaccessible, a request failed, or the pagination was
+  interrupted;
+- the retrieved count does not reconcile with **either** independent
+  count;
+- any identifier appeared twice;
+- the two consecutive traversals disagree on the id set or on any body
+  hash;
+- the set changed while it was being enumerated, and a repeat traversal
+  did not produce two agreeing complete traversals;
+- a retrieved body that carries the attestation markers cannot be
+  parsed, or names a scope that is not one of the three canonical
+  identifiers.
+
+**The same principle governs revocations.** Revocations are discovered by
+the same enumeration of the same set, classified by the same markers, and
+subject to the same completeness requirement. There is no separate,
+weaker discovery path for them, and a revocation is not exempt from the
+count reconciliation.
+
+**What the channel's guarantees do not cover.** This is stated because
+the enumeration cannot establish it, and a specification that implies
+otherwise is worse than one that does not:
+
+- **A current listing is not an immutable historical audit log.** A
+  publication that is **edited** at the channel is detectable — the
+  retrieved bytes stop matching the local record — but a publication
+  that is **deleted** leaves no trace in the listing: the count falls
+  with it, the reconciliation still balances, and the deletion is
+  invisible to any enumeration. An audit log has to be maintained out of
+  band.
+- **A channel that truncates every view consistently cannot be detected
+  by any client-side procedure.** If the listing is silently short *and*
+  the counts it and the independent endpoint report are reduced to match,
+  then every reconciliation balances and the truncation is invisible. The
+  mitigations are the mirror rule below and an out-of-band record; the
+  guarantee itself cannot be claimed.
+- **The two counts are only as independent as the API makes them.** Both
+  are served by the same host from the same database. They are two
+  **views**, not two **systems**, and they do not substitute for an
+  archival copy of the publication set.
+
 ##### Versions, supersession and revocation
 
 **The filename carries the version.** A fixed filename cannot be
@@ -1277,7 +1405,11 @@ local revocation file that nobody published is not. **A locally
 fabricated revocation does not count; a locally deleted revocation does
 not un-revoke anything.**
 
-**Completeness and failure behaviour are defined, and they fail closed:**
+**Completeness and failure behaviour are defined, and they fail closed.**
+The completeness requirement — what "exhaustive" means, how it is
+demonstrated, and what is provably outside it — is set out in **"The
+published decision set"** above, and it applies to revocations exactly as
+it applies to approvals. In summary:
 
 - the enumeration must be **exhaustive** — every page retrieved. A
   pagination failure, a truncated listing or an inaccessible channel is
@@ -1292,33 +1424,94 @@ not un-revoke anything.**
   affect the current one; and a revocation **removes** a version, it
   never creates an approval of any other version.
 
-**Selecting the current version, per scope:**
+**Selecting the current version, per scope — from the published set,
+never from the filenames.** This is the rule the local directory must
+not be allowed to decide:
 
-1. enumerate that scope's records;
-2. let **N** be the **highest** version present;
-3. if version **N** is revoked — by a revocation discovered from the
-   channel — there is **no approval for this scope**, and there is
-   **no fallback** to an older version;
-4. the record at **N** must parse, carry a known `verdict`, bind the
-   current `artifact_sha256`, and pass all the publication checks
-   above — including the authority register.
+1. enumerate the published decision set for the scope **completely**, as
+   above — the same enumeration that discovers revocations;
+2. among the published **approval** decisions for the scope, let **N** be
+   the **highest** `attestation_version`. **Local filenames do not
+   participate in this choice at all**: the directory may hold a higher
+   version, a lower one, or neither, and none of that changes which
+   published decision is current;
+3. **the local record for version N must exist**, and must be the
+   canonical record for that decision — same scope, same version, same
+   `publication.id`, matching sidecar, canonical bytes — and that
+   publication must be listed in the authority register. **If the local
+   record for N is missing, the scope has no approval.** There is **no
+   fallback** to an older local record;
+4. version N must not be **revoked** by a revocation in the published
+   set, and it must not be **withdrawn** — a decision whose verdict is
+   not `APPROVE` is a decision against, and it leaves the scope
+   unapproved;
+5. version N must pass every publication check above — retrieved from
+   its channel, author equal to `reviewer`, scope, verdict,
+   `artifact_sha256` and `pr_head` equal, body byte-identical, listed in
+   the authority register.
+
+**Why the candidate must come from the channel.** The rule this
+replaces — *"the highest version present locally"* — is a downgrade, and
+it is a downgrade that the rest of this mechanism cannot catch. A local
+`v2` that says REQUEST CHANGES, deleted from the directory, leaves `v1`
+as the highest version **present**; `v1` then passes every remaining
+check, because its publication is retrievable and its bytes match, and
+the scope is **approved** on a decision the reviewer has superseded.
+The point of the no-fallback rule is that neither revocation nor
+invalidity of the newest decision may hand over to an older one — and
+that only holds if "the newest decision" is decided by the **published**
+set. **Deleting or renaming a local file must not change what is
+approved; it can only remove evidence, and removed evidence stops the
+check rather than moving it.**
+
+**Supersession is by version order, and a newer decision is never
+ignored.** If a newer decision has been published for the scope, that
+decision **is** the current decision — including when it is bound to an
+obsolete PR head, or to a procedure checksum that is no longer the one
+in force. It is not filtered out of the choice, and it does not hand
+over to an older one. It is **inapplicable**, and an inapplicable
+current decision leaves the scope **unapproved**. Two published
+decisions for one scope at the same version number are **ambiguous** and
+fail closed; so are two decisions that conflict.
+
+**Lower published versions are superseded, not discarded.** They remain
+in the published set and in the directory — the version history *is* the
+audit trail — but they are not candidates, and they are never activated
+by the failure of a higher one.
+
+**The directory mirrors the published set.** Two rules, and both are
+load-bearing:
+
+- **every local record must correspond to a published decision** for the
+  same scope and version. A local record with no published counterpart
+  is a **fabrication**, and it fails closed;
+- **the current published version must have a local counterpart** — the
+  rule above, and the reason a deleted local record stops the check
+  rather than moving it.
+
+The operator therefore **materialises every published decision**, not only
+the current one. That is what makes a truncated enumeration detectable in
+the common case: a decision the enumeration failed to return is still in
+the directory, the two disagree, and the check fails closed.
 
 **A higher version number does not establish approval.** The highest
-number present is only the *candidate*; the record at that version must
-be **valid and authenticated**, or the scope has no approval. A record
-whose publication cannot be retrieved, or fails any check, does not
-hand over to an older one. **Revocation and invalidity of the highest
+**published** number is only the *candidate*; the record at that version
+must be **valid and authenticated**, or the scope has no approval. A
+record whose publication cannot be retrieved, or fails any check, does
+not hand over to an older one. **Revocation and invalidity of the highest
 applicable version both leave the scope unapproved; neither activates
 an older approval.**
 
-**Fail closed on all of these:** no record for a scope; a record whose
-`artifact_sha256` differs from the sidecar; an unknown `verdict`; a
-revoked highest version with no superseding record; two different
-records claiming the same version; a malformed version; a filename/body
-version or scope mismatch; a publication that cannot be retrieved, or
-whose author, verdict, scope or hashes disagree; a publication the
-authority register does not list; an incomplete channel enumeration;
-and any record whose scope is not one of the three canonical
+**Fail closed on all of these:** no published decision for a scope; a
+record whose `artifact_sha256` differs from the sidecar; an unknown
+`verdict`; a revoked highest version with no superseding record; two
+different records claiming the same version; a malformed version; a
+filename/body version or scope mismatch; a publication that cannot be
+retrieved, or whose author, verdict, scope or hashes disagree; a
+publication the authority register does not list; an incomplete or
+unreconciled channel enumeration; a local record with no published
+counterpart; **the local record for the current published version
+missing**; and any record whose scope is not one of the three canonical
 identifiers.
 
 **One consequence worth stating plainly.** Whoever can publish on the
@@ -1348,7 +1541,19 @@ each of the following must be **rejected**:
 9. a wrong procedure checksum, and a wrong PR head;
 10. an **incomplete** channel enumeration, and an inaccessible one;
 11. a revocation published but absent locally — it must still be
-    honoured.
+    honoured;
+12. **a locally deleted higher-version approval** — the scope must stay
+    **unapproved**, not fall back to the older local record, even though
+    the older record passes every check it is given;
+13. a **forged higher-version local record** with no published
+    counterpart;
+14. a **published decision with no local record** — the scope is
+    unapproved;
+15. a **newer published decision bound to an obsolete PR head** — it
+    does not hand over to an older one;
+16. a **short final page**, a count that reconciles with neither
+    independent source, a **repeated identifier**, and a set that
+    **changes between two traversals**.
 
 The last one is the counterpart of the second: neither a locally
 fabricated revocation nor a locally deleted one may silently establish
@@ -1361,17 +1566,48 @@ cd /home/v/src
 # 1. the procedure is the approved one
 sha256sum -c MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256
 
-# 2. per scope: the records present, and their own checksums
+# 2. the published decision set, enumerated completely and reconciled
+#    (see "The published decision set" above for what each step proves)
+REPO=flowbyte-com/mpm; ISSUE=238; PER_PAGE=5
+WORK="$HOME/.cache/mpm-attestation"; mkdir -p "$WORK"; chmod 700 "$WORK"
+
+# 2a. the independent count, from a different endpoint
+gh api "repos/$REPO/issues/$ISSUE" --jq '.comments'
+
+# 2b. the traversal, to a confirmed terminal state.
+#     The body is base64-encoded so that one comment is one line, whatever
+#     it contains.
+gh api --paginate "repos/$REPO/issues/$ISSUE/comments?per_page=$PER_PAGE" \
+  --jq '.[] | "\(.id) \(.body | @base64)"' | tee "$WORK/set-1.txt" | wc -l
+
+# 2c. no repeated identifier
+cut -d' ' -f1 "$WORK/set-1.txt" | sort | uniq -d
+
+# 2d. the server's own page cursor — the count this enumeration must match
+gh api -i "repos/$REPO/issues/$ISSUE/comments?per_page=$PER_PAGE" 2>&1 \
+  | grep -i '^link:'
+
+# 2e. enumerate a second time; the two must agree exactly
+gh api --paginate "repos/$REPO/issues/$ISSUE/comments?per_page=$PER_PAGE" \
+  --jq '.[] | "\(.id) \(.body | @base64)"' > "$WORK/set-2.txt"
+cmp -s "$WORK/set-1.txt" "$WORK/set-2.txt" \
+  && echo "the two traversals agree exactly" \
+  || { echo "STOP: the publication set changed between traversals" >&2; exit 1; }
+
+# 3. per scope: the records present, and their own checksums
 for scope in database-safety managed-block-stage-4 whole-procedure; do
   ls -1 MPM_CUTOVER_4a870c8a_to_2045afcc.approved."$scope".v*.json
   sha256sum -c MPM_CUTOVER_4a870c8a_to_2045afcc.approved."$scope".v*.json.sha256
 done
 ```
 
-and then, for each scope, the seven checks of the publication above —
-retrieved, not asserted. **Every one of the three scopes must produce
-exactly one current, valid, authenticated record.** If any scope does
-not, the answer is to obtain the missing approval, not to proceed.
+and then, for each scope, the checks of the publication above —
+**retrieved, not asserted**, and applied to the **highest published**
+version, not to the highest version that happens to be in the directory.
+**Every one of the three scopes must produce exactly one current, valid,
+authenticated record.** If any scope does not, the answer is to obtain
+the missing approval, not to proceed — and **never** to fall back to an
+older record.
 
 #### 3.8.2 Two things this cannot paper over
 
@@ -2360,19 +2596,22 @@ none of them belongs in a documentation-only change.
 - **The three scopes are decided separately, and their bindings differ.**
   The independent database-safety review of `31ccfb77…` is an **APPROVE
   for `database-safety`** — the restoration path — and it found **no
-  cutover blockers in the revision**; it was first published against PR
-  head `c692e791…` and **renewed** against `60079492…`. The Stage 4
-  review is an **APPROVE for `managed-block-stage-4`**, bound to the
-  procedure at `31ccfb77…` and **renewed** against PR head
-  `60079492…`. The final independent gate is an **APPROVE for
+  cutover blockers in the revision**; it was published as version 1
+  against PR head `60079492…` and **renewed as version 2** against
+  `488b94b8…`. The Stage 4 review is an **APPROVE for
+  `managed-block-stage-4`**, bound to the procedure at `31ccfb77…`, also
+  published as version 1 against `60079492…` and **renewed as version 2**
+  against `488b94b8…`. The final independent gate is an **APPROVE for
   `whole-procedure`**, bound to the procedure at `31ccfb77…`; the PR at
   `c692e791…` was **CONDITIONAL** on it, and its `whole-procedure`
-  publication is still outstanding. **A PR-head binding does not travel
-  past an amendment to this guide** — so this amendment expires the two
-  renewed head bindings, and both must be published again against the
-  head it produces. **None of the three is permission to run the
-  cutover** — the cutover needs all three, recorded, and then the
-  operator's own authorisation on top (§3.8.2, §3.2 P7).
+  publication is **still outstanding** — no version of it has been
+  published. **A PR-head binding does not travel past an amendment to
+  this guide** — so this amendment expires the two version-2 head
+  bindings, and both must be published again against the head it
+  produces, at the version number that history then dictates.
+  **None of the three is permission to run the cutover** — the cutover
+  needs all three, recorded, and then the operator's own authorisation on
+  top (§3.8.2, §3.2 P7).
 - **Five hardening items are open in the procedure, and none of them
   blocks this cutover on this host.** Recorded so they are not lost: (1)
   the router-note allow-list pattern accepts six message shapes where the
