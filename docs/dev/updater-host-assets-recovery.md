@@ -249,7 +249,7 @@ the old revision is not an available answer.**
 | P4 | disk headroom **and** temporary-space headroom | `df -h / ~/.mpm "$TMPDIR"` (§3.3 Step 1) |
 | P5 | no other agent is using the updater | process inventory |
 | P6 | the operator has read §5 (the instruction migration) | — |
-| **P7** | **the host-specific procedure's current revision carries an independent approval recorded against its exact SHA-256, covering exactly the three canonical scopes, and the operator has authorised the acts to be performed** | **First half — the approval.** `sha256sum -c /home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256` must pass. Then, for **each** of the three canonical scopes — `database-safety`, `managed-block-stage-4`, `whole-procedure` — there must be **exactly one** current record: the highest version present for that scope, not revoked, parsing, carrying a known `verdict`, binding that same `artifact_sha256`, and passing the **seven publication checks** in §3.8.1 (the publication **retrieved** from its channel, its author equal to the record's `reviewer`, its verdict and scope equal, its `artifact_sha256` equal, its `pr_head` equal where it carries one, and its body byte-identical to the local record). The scope set must be **exactly** those three — a missing scope, an unknown scope, a duplicate, a conflicting claim or an unauthenticated publication **fails closed**, and so does the highest version failing any check: there is no fallback to an older one. **Second half — the authorisation.** The operator's own, act by act (§3.1); the approval of the procedure is not an authorisation of any act in it. **Both halves must hold, and they are separate.** The procedure's own status line reads NOT APPROVED, and it always will: recording the approval inside the file would change the checksum the approval is bound to (§3.8.1) — so **the status line is not the approval state, and the external attestation is**. **If either half fails, P7 fails and nothing is executed** |
+| **P7** | **the host-specific procedure's current revision carries an approval recorded against its exact SHA-256, covering exactly the three canonical scopes, and the operator has authorised the acts to be performed** | **First half — the approval.** `sha256sum -c /home/v/src/MPM_CUTOVER_4a870c8a_to_2045afcc.md.sha256` must pass, and the **authority register** (§3.8.1) must exist, parse, cover **exactly** the three canonical scopes and carry `accepted: true` for each. Then, for **each** scope — `database-safety`, `managed-block-stage-4`, `whole-procedure` — there must be **exactly one** current record: the highest version present for that scope, whose **filename version equals the body's `attestation_version`** and whose **filename scope equals the body's `scope`**, not revoked, parsing, carrying a known `verdict`, binding that same `artifact_sha256`, listed in the authority register for its scope, and passing the **publication checks** in §3.8.1 (the publication **retrieved** from its channel, its author equal to the record's `reviewer`, its verdict and scope equal, its `artifact_sha256` equal, its `pr_head` equal where it carries one, and its body byte-identical to the local record). **Revocations are discovered from the channel, not from local files**: the operator enumerates the channel for revocation records for each scope, and a pagination failure, an inaccessible channel, an ambiguous revocation or one whose authority cannot be verified **fails closed**. The scope set must be **exactly** those three — a missing scope, an unknown scope, a duplicate, a conflicting claim, a filename/body mismatch or an unauthenticated publication **fails closed**, and so does the highest version failing any check: **there is no fallback to an older one**, and a revoked or invalid highest version leaves the scope unapproved. **Second half — the authorisation.** The operator's own, act by act (§3.1); the approval of the procedure is not an authorisation of any act in it. **Both halves must hold, and they are separate.** The procedure's own status line reads NOT APPROVED, and it always will: recording the approval inside the file would change the checksum the approval is bound to (§3.8.1) — so **the status line is not the approval state, and the external attestation is**. **If either half fails, P7 fails and nothing is executed** |
 
 ### 3.3 Steps
 
@@ -1058,29 +1058,108 @@ an approval rather than a file.
 
 Exactly three, and no others:
 
-| scope | what it covers | decided by |
+| scope | what it covers | the review that decides it |
 |---|---|---|
-| `database-safety` | the restoration path — the measurement, the bound approval, the writer refusal, the record-by-record verification and the journal mode (N1–N4) | the independent database-safety reviewer |
-| `managed-block-stage-4` | the managed-block refresh, and the V2-compatible rollback (§3.7) | the Stage 4 reviewer |
-| `whole-procedure` | the procedure as a whole — the promotion path, the service gate, the failure branches | the final independent reviewer |
+| `database-safety` | the restoration path — the measurement, the bound approval, the writer refusal, the record-by-record verification and the journal mode (N1–N4) | the independent database-safety review |
+| `managed-block-stage-4` | the managed-block refresh, and the V2-compatible rollback (§3.7) | the Stage 4 review |
+| `whole-procedure` | the procedure as a whole — the promotion path, the service gate, the failure branches | the final independent review |
 
 **A scope name outside this list is not a scope.** Synonyms,
 abbreviations and additions are rejected; a superset is rejected as
 firmly as a subset, because a superset can smuggle in a scope that was
 never reviewed and an unknown name cannot be interpreted at all.
-**Each scope is a separate decision by a separate reviewer**, so the
-record cannot carry a single `reviewer` field — it would misattribute
-two of the three. **A reviewer covers a scope only by publishing that
-scope's decision**; a reviewer who published a different scope
-authorises nothing here.
+**Each scope is a separate published decision**, so the record carries
+one scope and one reviewer per file rather than a single `reviewer`
+field over several scopes.
+
+##### The authority boundary — what this mechanism does and does not establish
+
+**Three published approvals are three *decisions*, not three
+*authenticated human identities*.** That distinction is the whole of
+this subsection, and the specification must not blur it. Four things
+are different, and only two of them are mechanically checkable here:
+
+| | what it is | what establishes it |
+|---|---|---|
+| **authenticated publisher identity** | who the channel says published the comment | the channel's own authentication — mechanically checked, as the `reviewer` equality below |
+| **claimed reviewer role** | the role the publication asserts for itself | **nothing but the publication's own text.** It is a claim, and it is recorded as one |
+| **independently established reviewer authority** | whether the principal behind that publication is the one authorised to decide that scope | **not established by this mechanism at all.** Nothing inside an attestation can establish it |
+| **operator acceptance of that authority** | the operator's own decision to accept a named principal for a named scope | the **authority register**, below — the operator's record, kept outside the attestation set |
+
+**Every current publication on this host is made through the single
+shared `flowbyte-com` GitHub account.** The channel therefore reports
+the same author for all three reviews, and the `reviewer` field in all
+three records will be that same string. **This specification does not
+claim that the account distinguishes Bravo, Charlie and Echo, because
+it does not.** A party controlling that account can publish a record
+for any scope, and can amend the procedure, this guide and the branch
+as well — the account is the trust anchor of the whole project.
+
+**The `scope` field is not self-authorising.** A record that names
+`whole-procedure` is a *claim* to have decided that scope. It confers
+no authority. Until the operator's register accepts a principal for
+that scope, the record establishes publication provenance and nothing
+more.
+
+**The operator establishes the reviewer-to-scope assignment, and records
+it outside the attestation set.** The authority register is a separate
+file the operator maintains — `MPM_CUTOVER_4a870c8a_to_2045afcc.authority.json`
+— kept **beside** the attestations but **not among them**, so that
+whoever can write the attestation directory cannot also rewrite the
+mapping that governs it. One entry per canonical scope:
+
+```json
+{
+  "database-safety": {
+    "accepted": true,
+    "authority_basis": "<how the operator established this assignment>",
+    "principal": "<the principal the operator accepts for this scope>",
+    "publications": ["<the publication id the operator accepted for this scope>"],
+    "reviewed_at": "<RFC 3339 UTC>"
+  }
+}
+```
+
+The check requires the register to exist, to parse, to cover **exactly**
+the three canonical scopes, to carry `accepted: true` for each, and to
+list the attestation's `publication.id` among that scope's
+`publications`. **A publication the register does not list fails
+closed.**
+
+**What the register establishes, and what it does not.** It establishes
+that **the operator recorded an assignment** — a dated, attributable
+decision, made outside the records it governs. It does **not**
+establish that the principal is who it claims to be, that the
+publication's content came from that principal rather than from anyone
+who can post as the account, or that the three principals are distinct.
+**A locally created register is an operator's own record, not
+independent evidence of anything.**
+
+**The trust boundary, stated plainly.** The shared account is the
+anchor; GitHub account authentication is **not** tamper-proof
+protection against compromise or misuse of that account, and nothing
+here changes that. **No cryptographic signature is introduced**, and
+deliberately so: a signature is only as strong as the separation of
+keys, and a key stored beside the account's own credentials attests
+*"the holder of some key produced this"* — the same party. It would
+prove nothing the account does not already prove. Separate principals —
+separate accounts, or keys held by genuinely distinct parties — are
+the real remedy, and they are an organisational choice the operator has
+not made.
+
+**What the mechanism does buy, and it is not nothing.** Against an
+attacker who can write local files only, it is effective: a forged
+local record fails, because the comparison is between the *retrieved*
+bytes and the *local* bytes, and not between two local claims. It is
+against the shared account itself that it offers no protection, and it
+does not pretend to.
 
 ##### The record — one file per scope, per version
 
 `MPM_CUTOVER_4a870c8a_to_2045afcc.approved.<scope>.v<N>.json`, with its
-checksum in the matching `.sha256`. `<scope>` is one of the three
-canonical identifiers and `<N>` is a positive integer. **A record is
-never edited in place.** The body is canonical JSON — keys sorted, one
-key per line, UTF-8, LF, exactly one trailing newline:
+checksum in the matching `.sha256`. **A record is never edited in
+place.** The body is canonical JSON — keys sorted, one key per line,
+UTF-8, LF, exactly one trailing newline:
 
 ```json
 {
@@ -1109,6 +1188,32 @@ identifier, an independent retrieval path, and the author's identity —
 is not an acceptable channel. The record **does not contain its own
 hash**; nothing here is self-referential.
 
+**The filename is part of the record's identity, and the check binds it
+to the body.** The filename is not a label an attacker may rewrite:
+
+- the filename's `<scope>` must equal the body's canonical `scope`;
+- the filename's `<N>` must equal the body's `attestation_version`;
+- `<N>` must be a **canonical** positive integer — digits only, no
+  leading zeros, so `v1` and `v01` are not two spellings of one
+  version;
+- no two records for a scope may carry the same `<N>`;
+- the body must round-trip: re-serialising it canonically must
+  reproduce the file's bytes exactly.
+
+**Any mismatch is rejected.** A filename/body version mismatch, a
+filename/body scope mismatch, a duplicate version, a malformed version
+and a non-canonical body are all stops.
+
+**Why this binding is load-bearing.** Without it, a valid local `v1`
+record can simply be **renamed to `v2`** and its sidecar recomputed.
+Every other check still passes — the *published* bytes are those of the
+original `v1` — so the fabricated `v2` becomes the scope's current
+version, and a revocation of `v1` is thereby defeated: the rule that a
+revoked version leaves the scope unapproved with no fallback never
+fires, because the fabricated version is not the revoked one. The
+binding above is what closes that hole, and it is the reason the check
+compares the filename to the body rather than trusting either alone.
+
 ##### The publication is the evidence, and how it is checked
 
 The operator **retrieves the publication from the channel, independently
@@ -1127,16 +1232,18 @@ seven things:
 | 7 | **the evidence is neither superseded nor revoked** | the version rules below |
 
 **What this establishes, and what it does not.** It establishes that the
-decision was published by the named account on the named channel, that
-the retrieved content is byte-identical to the local record, that the
-record binds the procedure's exact checksum, the scope and the verdict,
-and that a later edit to the publication is **detected** because the
-retrieval no longer matches. It does **not** establish cryptographic
-non-repudiation, that the account is controlled by the person named, or
-that the judgement is correct — those rest on the channel's account
-controls and on the reviewer. A signature over the canonical body would
-strengthen the last link; it is permitted, and it is **not** claimed
-here.
+decision was published by the **named account** on the named channel,
+that the retrieved content is byte-identical to the local record, that
+the record binds the procedure's exact checksum, the scope and the
+verdict, and that a later edit to the publication is **detected**
+because the retrieval no longer matches. It does **not** establish
+which reviewer decided the scope, that the account is controlled by the
+person named, cryptographic non-repudiation, or that the judgement is
+correct — the authority boundary above says which of those is
+established where, and the trust boundary says what none of them buys.
+**No signature is required or claimed**; where the publishing principal
+and the signing key would be the same party, a signature would prove
+nothing the account does not already prove.
 
 ##### Versions, supersession and revocation
 
@@ -1144,36 +1251,108 @@ here.
 write-once and retain the earlier record at the same time: reusing the
 name overwrites, so the history is lost. With
 `…approved.<scope>.v<N>.json` the history is retained by construction,
-and the version history *is* the audit trail.
+and the version history *is* the audit trail. The version is bound to
+the body, as above, so a version cannot be moved by renaming a file.
 
-**A revocation is its own record** —
-`…approved.<scope>.v<N>.revoked.json` with its own `.sha256` — naming
-the version it revokes and the reason. It is a record in its own right,
-not an edit to the record it revokes.
+**A revocation is a published record, retrieved exactly like an
+approval.** It is not a local file and not an edit to the record it
+revokes. Its canonical body carries the same markers and the same
+shape as an approval's, and it binds:
+
+| | |
+|---|---|
+| the canonical scope | the scope whose approval is revoked |
+| the applicable procedure checksum | `artifact_sha256`, so a revocation cannot be carried across a procedure revision |
+| the target approval's identity and version | `target_publication` and `revoked_version` |
+| the authoritative publication source | its own `publication` object — where the revocation itself lives, and how it is retrieved |
+| the revocation decision | `decision: "REVOKE"`, with the reason |
+| the authority for the revocation | the reviewer or operator authority, carried in the authority register, exactly as for an approval |
+
+**Discovery is remote, and the local directory is not the discovery
+mechanism.** The operator enumerates the channel for revocation records
+covering each scope, and retrieves each one. **The absence of a local
+`.revoked.json` is not evidence that no revocation exists** — a
+revocation published but not mirrored locally is still in force, and a
+local revocation file that nobody published is not. **A locally
+fabricated revocation does not count; a locally deleted revocation does
+not un-revoke anything.**
+
+**Completeness and failure behaviour are defined, and they fail closed:**
+
+- the enumeration must be **exhaustive** — every page retrieved. A
+  pagination failure, a truncated listing or an inaccessible channel is
+  a **failure, not an empty result**, and the check stops;
+- a revocation whose publication cannot be retrieved, whose author
+  cannot be read, or whose authority the register does not list
+  **fails closed** — it is not ignored;
+- an **ambiguous** revocation — two records for the same version with
+  conflicting decisions, or one whose target cannot be resolved — fails
+  closed;
+- a revocation naming a version that is not the current one does not
+  affect the current one; and a revocation **removes** a version, it
+  never creates an approval of any other version.
 
 **Selecting the current version, per scope:**
 
 1. enumerate that scope's records;
 2. let **N** be the **highest** version present;
-3. if version **N** is revoked, there is **no approval for this scope** —
-   there is no fallback to an older version;
+3. if version **N** is revoked — by a revocation discovered from the
+   channel — there is **no approval for this scope**, and there is
+   **no fallback** to an older version;
 4. the record at **N** must parse, carry a known `verdict`, bind the
-   current `artifact_sha256`, and pass all seven publication checks
-   above.
+   current `artifact_sha256`, and pass all the publication checks
+   above — including the authority register.
 
 **A higher version number does not establish approval.** The highest
 number present is only the *candidate*; the record at that version must
 be **valid and authenticated**, or the scope has no approval. A record
 whose publication cannot be retrieved, or fails any check, does not
-hand over to an older one.
+hand over to an older one. **Revocation and invalidity of the highest
+applicable version both leave the scope unapproved; neither activates
+an older approval.**
 
 **Fail closed on all of these:** no record for a scope; a record whose
 `artifact_sha256` differs from the sidecar; an unknown `verdict`; a
 revoked highest version with no superseding record; two different
-records claiming the same version; a malformed version (not a positive
-integer); a publication that cannot be retrieved, or whose author,
-verdict, scope or hashes disagree; and any record whose scope is not
-one of the three canonical identifiers.
+records claiming the same version; a malformed version; a filename/body
+version or scope mismatch; a publication that cannot be retrieved, or
+whose author, verdict, scope or hashes disagree; a publication the
+authority register does not list; an incomplete channel enumeration;
+and any record whose scope is not one of the three canonical
+identifiers.
+
+**One consequence worth stating plainly.** Whoever can publish on the
+channel can also revoke, and so can deny a valid approval by revoking
+it. Revocation power and approval power are the same power here. That
+is a property of a single shared account, not of this specification,
+and it is why the authority register is the operator's own record.
+
+##### The adversarial cases the check must reject
+
+The check is not trustworthy because it reads well. It is trustworthy
+because it has been **exercised against attempts to defeat it**, and
+each of the following must be **rejected**:
+
+1. a valid record **renamed from `v1` to `v2`** with the local sidecar
+   recomputed;
+2. the same rename applied to a **revoked** version — the revocation
+   must still stand, and the scope must not acquire an approval;
+3. a forged record at a higher version with no publication of its own;
+4. a filename/body version mismatch, and a filename/body scope
+   mismatch;
+5. two records claiming the same version, however they are spelled;
+6. a publication body whose canonical bytes were altered after
+   publication;
+7. a publisher that is not the record's `reviewer`;
+8. a publication the authority register does not list;
+9. a wrong procedure checksum, and a wrong PR head;
+10. an **incomplete** channel enumeration, and an inaccessible one;
+11. a revocation published but absent locally — it must still be
+    honoured.
+
+The last one is the counterpart of the second: neither a locally
+fabricated revocation nor a locally deleted one may silently establish
+a different approval state.
 
 ##### The operator's check
 
@@ -2171,22 +2350,28 @@ none of them belongs in a documentation-only change.
   carried, and body bytes — and the scopes must be exactly the three
   canonical identifiers, each with its own reviewer's decision, in a
   versioned, retainable, revocable form whose current version is the
-  highest one **and** valid and authenticated. **Approval and
+  highest one **and** valid and authenticated; and the **reviewer-to-scope
+  assignments are the operator's own record**, kept outside the
+  attestation set, because a shared publishing account cannot
+  distinguish one reviewer from another (§3.8.1). **Approval and
   authorisation are separate**: the approval is a reviewer's verdict bound
   to the exact checksum and scoped; the authorisation is the operator's
   own, act by act (§3.1, §3.2 P7).
 - **The three scopes are decided separately, and their bindings differ.**
   The independent database-safety review of `31ccfb77…` is an **APPROVE
   for `database-safety`** — the restoration path — and it found **no
-  cutover blockers in the revision**. The Stage 4 review is an **APPROVE
-  for `managed-block-stage-4`**, bound to the procedure at `31ccfb77…`
-  **and** to PR head `c692e791…`. The final independent gate is an
-  **APPROVE for `whole-procedure`**, bound to the procedure at
-  `31ccfb77…`; the PR at `c692e791…` was **CONDITIONAL** on it,
-  pending this instrument amendment. **A PR-head binding does not travel
-  past an amendment to this guide**, so the two that carry one must be
-  re-confirmed against the new head. **None of the three is permission to
-  run the cutover** — the cutover needs all three, recorded, and then the
+  cutover blockers in the revision**; it was first published against PR
+  head `c692e791…` and **renewed** against `60079492…`. The Stage 4
+  review is an **APPROVE for `managed-block-stage-4`**, bound to the
+  procedure at `31ccfb77…` and **renewed** against PR head
+  `60079492…`. The final independent gate is an **APPROVE for
+  `whole-procedure`**, bound to the procedure at `31ccfb77…`; the PR at
+  `c692e791…` was **CONDITIONAL** on it, and its `whole-procedure`
+  publication is still outstanding. **A PR-head binding does not travel
+  past an amendment to this guide** — so this amendment expires the two
+  renewed head bindings, and both must be published again against the
+  head it produces. **None of the three is permission to run the
+  cutover** — the cutover needs all three, recorded, and then the
   operator's own authorisation on top (§3.8.2, §3.2 P7).
 - **Five hardening items are open in the procedure, and none of them
   blocks this cutover on this host.** Recorded so they are not lost: (1)
