@@ -153,6 +153,12 @@ Required schema fields (the markdown frontmatter MUST define both):
 Other frontmatter keys (description, when_to_use, inputs, outputs) are
 optional. See 'mpm docs skill' or the canonical SKILL.md template.
 
+--force overwrites an existing (name, version) in place, and resurrects a
+soft-deleted skill. It is REFUSED with "package_immutable" when the skill
+owns a package: a published package's entrypoint and manifest are
+immutable, and the legacy write path cannot change the projection without
+making the two disagree. Publish a new version instead.
+
 Examples:
   mpm save-skill --file ./SKILL.md                  # uses frontmatter name+version
   mpm save-skill --file ./SKILL.md --version 2.0.0  # CLI overrides frontmatter

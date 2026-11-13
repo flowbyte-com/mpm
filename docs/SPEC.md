@@ -1888,7 +1888,9 @@ The primary key of `skill_packages` **is** the skill id: there is no second iden
 
 **No reader, writer, importer or exporter exists for these tables.** They are created empty and stay empty. There is no CLI command, no MCP action and no agent-facing surface for packages. A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
 
-The later stages — canonicalisation, the importer, the read API, the export writer, the CLI and MCP surfaces — are described in §10 of the design document and are **not** part of this change. Several operator decisions in that design (the accepted archive layouts, the prune exemption's form, the binary-asset default, cross-workspace sharing) are **open**, and this stage does not decide any of them. In particular, the age-based prune still removes ordinary skills exactly as it did before; the package-aware prune exemption is a later stage and an operator decision.
+The later stages — canonicalisation, the importer, the read API, the export writer, the CLI and MCP surfaces — are described in §10 of the design document and are **not** part of this change. Several operator decisions in that design (the accepted archive layouts, the binary-asset default, cross-workspace sharing) are **open**, and this stage does not decide any of them.
+
+**One of them is no longer open.** The prune exemption's *form* was decided after P1: the operator approved the **blanket** exclusion of `collection = 'skills'` from the age-based `PruneOlderThan` (operator decision **O17**), and P3 implemented it. The age-based prune therefore no longer removes ordinary skills exactly as it did before — it no longer removes **any** skill. The compatibility impact and the reasoning are in [Skills (Procedural Memory)](#skills-procedural-memory); the implementation is `SkillsExclusionClause` in `internal/core/skill_db.go`. P3 also added the package-immutability guard on the legacy write path and the transaction-aware skill writer the importer will use. The importer, the read API, the export writer and the package CLI/MCP surfaces are still later stages.
 
 #### The tables are local-only
 
@@ -3551,6 +3553,32 @@ Three paths exist, each routed through the secret/poison scanner — no write pa
 The first two paths assume the caller already knows the skill is worth storing. The third path is the **formation/refinement gate**: it evaluates whether the proposed procedure actually belongs in the procedural-memory layer, derives a deterministic version when refining, and only writes when the decision model + validation + duplicate checks agree.
 
 Saving the same `(name, version)` pair requires `force=true` — silent overwrites are rejected. Saving a new version for an existing name flips the prior version's `is_latest` to `0` in the same transaction and stamps `supersedes` linkage, so older versions remain queryable but no longer advertise themselves as current.
+
+##### Package immutability — the `package_immutable` refusal
+
+**A skill that owns a package cannot be overwritten through the legacy single-document write path.** `mpm save-skill --force`, `mpm skill add --force` and the MCP `mpm_skills save` action with `force: true` all refuse such a skill with the distinct `package_immutable` refusal, on both the CLI and the MCP surface.
+
+The refusal is **fail closed**: nothing is written — not the content, not the metadata, not the provenance, not the package manifest, not the file rows, not the blobs. The old projection and the package entrypoint cannot diverge, because neither moves.
+
+The reason is that the legacy force path replaces `memories.content` **in place**, under the same id. For a packaged skill that would give one id two documents: `read` would return the new body while `read_file(SKILL.md)` returned the old bytes, `projection_sha256` would stop describing `memories.content`, and the package row, the file rows and the blobs would all still describe the previous document. The refusal is the only outcome that keeps those two views identical.
+
+The refusal applies to a **soft-deleted** packaged skill too. A soft shred preserves the skill row and — through the foreign key — the package row, so the package stays soft-shredded until it is explicitly re-imported; the legacy force path does not resurrect it.
+
+A skill with **no** package row is unaffected. `force=true` still overwrites an ordinary skill in place, still resurrects a soft-deleted ordinary skill, and still refreshes its provenance.
+
+The guard is transactionally safe: the check and the write share one transaction, and the `UPDATE` carries the guard's condition in its own `WHERE` clause, so the check and the write are one atomic statement even against a stale snapshot. There is no time-of-check/time-of-use window — a package row cannot appear between the check and the write.
+
+##### Retention — skills are exempt from age-based pruning
+
+**The age-based prune (`mpm prune --older-than <n>d`) never removes a skill.** The exclusion is a `collection` filter on the delete statement itself (`SkillsExclusionClause`), so it protects **every** skill — packaged or not, in every version.
+
+The blast radius is wider than "packages", and it is stated here rather than discovered by an operator: **an operator who has been using `--older-than` to reclaim space from stale skills will find that it silently stops doing anything for skills.** There is no error, no warning, and no count of skipped rows. The reported deletion count remains exact — it counts the rows that were deleted, never the rows the statement skipped.
+
+The exemption is **blanket** rather than package-aware, and that is deliberate. A package's bytes have no second copy, so an age-based delete of a packaged skill destroys content that exists nowhere else. A package-aware `NOT EXISTS` check would preserve age-based pruning for ordinary skills, but it puts a per-row check inside a bulk delete — which leaves a race between the check and the delete — and it is a larger change to a statement that carries exactly one exclusion clause. The blanket form mirrors the existing directive exemption (`DirectiveExclusionClause`), which is the precedent for a collection-scoped exemption in a hard delete.
+
+The other pruning operations keep their existing contracts: `PruneNeverAccessed`, `PruneExpired` and both `AutoPrunePolicy` rules are unchanged. Skills are `is_long_term = 1` with a `NULL` `expires_at`, so no expiry rule reaches them either.
+
+**Deliberate removal is unaffected.** `mpm skill delete` soft-shreds a skill and `mpm skill shred` hard-deletes it, cascading to the package row and the file rows; the blob becomes an unreferenced garbage-collection candidate. The exemption removes the unintentional, bulk, age-based destruction of content that exists nowhere else — it does not remove the operator's explicit routes.
 
 ##### Skills Workshop
 
