@@ -753,6 +753,290 @@ func TestPackageManifestValidateAcceptsTheReferencePackage(t *testing.T) {
 	}
 }
 
+// TestPackageManifestRefusesMalformedUTF8Paths pins that a manifest
+// cannot carry a path that is not valid UTF-8, at ANY boundary.
+//
+// This is the second half of the malformed-UTF-8 correction. The path
+// primitive refuses the name, but a manifest is a plain struct: a
+// caller can put anything in it. The construction boundary refuses to
+// ENCODE such a manifest, because encoding/json would replace the
+// invalid bytes with U+FFFD — so the stored manifest would no longer
+// name the path the file row carries, and two distinct malformed paths
+// would share one `package_hash`.
+func TestPackageManifestRefusesMalformedUTF8Paths(t *testing.T) {
+	manifests := map[string]func(*PackageManifest){
+		"a malformed file path": func(m *PackageManifest) {
+			m.Files[0].Path = "references/\xff.md"
+		},
+		"a malformed entrypoint": func(m *PackageManifest) {
+			m.Entrypoint = "\xff"
+		},
+		"a malformed entrypoint file path": func(m *PackageManifest) {
+			m.Files[0].Path = "\xed\xa0\x80"
+		},
+	}
+
+	for name, mutate := range manifests {
+		t.Run(name, func(t *testing.T) {
+			manifest := referenceManifest()
+			mutate(&manifest)
+
+			// The validation boundary.
+			err := manifest.Validate()
+			assertManifestReason(t, err, PackageManifestReason(invalidUTF8Code))
+
+			// The construction boundary: no canonical form, no hash and
+			// no stored form may be produced for a manifest that would
+			// misrepresent itself.
+			if _, err := manifest.CanonicalBytes(); err == nil {
+				t.Error("CanonicalBytes produced a document for a manifest with a malformed path")
+			} else {
+				assertManifestReason(t, err, PackageManifestReason(invalidUTF8Code))
+			}
+			if _, err := manifest.ComputePackageHash(); err == nil {
+				t.Error("ComputePackageHash produced a hash for a manifest with a malformed path")
+			} else {
+				assertManifestReason(t, err, PackageManifestReason(invalidUTF8Code))
+			}
+			if _, err := manifest.StoredJSON(); err == nil {
+				t.Error("StoredJSON produced a stored manifest for a manifest with a malformed path")
+			} else {
+				assertManifestReason(t, err, PackageManifestReason(invalidUTF8Code))
+			}
+		})
+	}
+}
+
+// TestMalformedUTF8PathsCannotShareAPackageHash pins the exact defect
+// the independent review demonstrated: two DIFFERENT malformed names
+// must not collapse onto one `package_hash`.
+//
+// Before the fix, "\xff" and "\xfe" were two distinct canonical paths
+// and produced byte-identical canonical documents, because encoding/json
+// replaced both with U+FFFD — so the two packages were the same
+// package_hash while claiming to be two different paths.
+func TestMalformedUTF8PathsCannotShareAPackageHash(t *testing.T) {
+	first := referenceManifest()
+	first.Files[0].Path = "\xff"
+	first.Entrypoint = "\xff"
+
+	second := referenceManifest()
+	second.Files[0].Path = "\xfe"
+	second.Entrypoint = "\xfe"
+
+	// Neither may be encoded at all, so neither has a hash.
+	for name, manifest := range map[string]PackageManifest{"\\xff": first, "\\xfe": second} {
+		if _, err := manifest.ComputePackageHash(); err == nil {
+			t.Errorf("%s was given a package hash; a malformed path must have none", name)
+		}
+	}
+
+	// And the refusal is the SAME for both — the malformed bytes are
+	// refused before they can be compared with one another.
+	for name, manifest := range map[string]PackageManifest{"\\xff": first, "\\xfe": second} {
+		err := manifest.Validate()
+		assertManifestReason(t, err, PackageManifestReason(invalidUTF8Code))
+		if !strings.Contains(err.Error(), string(PackageManifestReason(invalidUTF8Code))) {
+			t.Errorf("%s: the refusal does not carry the invalid_utf8 code: %v", name, err)
+		}
+	}
+}
+
+// TestStoredRoundTripPreservesThePathExactly pins that the stored JSON
+// round trip never SUBSTITUTES U+FFFD for an accepted path.
+//
+// A file genuinely named with the replacement character is valid UTF-8
+// and is preserved byte for byte through store → parse. That is the
+// distinction that matters: the round trip must not silently change an
+// accepted path, and the only way it could is if a malformed path had
+// been accepted in the first place.
+func TestStoredRoundTripPreservesThePathExactly(t *testing.T) {
+	const replacement = "�"
+
+	manifest := referenceManifest()
+	manifest.Files = append(manifest.Files, PackageManifestFile{
+		Path:        "references/" + replacement + ".md",
+		SHA256:      strings.Repeat("a", 64),
+		SizeBytes:   1,
+		ContentType: refMarkdownType,
+		Role:        PackageRoleReference,
+	})
+
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("a manifest with a literal U+FFFD path was refused: %v", err)
+	}
+
+	stored, err := manifest.StoredJSON()
+	if err != nil {
+		t.Fatalf("StoredJSON: %v", err)
+	}
+	parsed, _, err := ParsePackageManifest([]byte(stored))
+	if err != nil {
+		t.Fatalf("ParsePackageManifest: %v", err)
+	}
+
+	var found bool
+	for _, file := range parsed.Files {
+		if file.Path == "references/"+replacement+".md" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the stored round trip lost the path: %+v", parsed.Files)
+	}
+}
+
+// TestPackageManifestValidateRefusesTheVersionProvenanceContradictions
+// pins the version-provenance equivalence.
+//
+// §9: `declared_version` and `version_source` record HOW the effective
+// version was arrived at, and "A row therefore always says whether its
+// version came from the package or from MPM." A record that says
+// `declared` while carrying no declared version — or that says
+// `package_declares_no_version` while carrying one — is a row that
+// lies about its own provenance.
+func TestPackageManifestValidateRefusesTheVersionProvenanceContradictions(t *testing.T) {
+	declared := "1.0.0"
+
+	cases := []struct {
+		name   string
+		mutate func(*PackageManifest)
+	}{
+		{
+			name: "reason=declared with no declared version",
+			mutate: func(m *PackageManifest) {
+				m.DeclaredVersion = nil
+				m.VersionOverride.Declared = nil
+				m.VersionOverride.Reason = PackageVersionSourceDeclared
+			},
+		},
+		{
+			name: "reason=declared with a declared version but no override record",
+			mutate: func(m *PackageManifest) {
+				m.DeclaredVersion = &declared
+				m.VersionOverride.Declared = nil
+				m.VersionOverride.Reason = PackageVersionSourceDeclared
+			},
+		},
+		{
+			name: "reason=package_declares_no_version with a declared version",
+			mutate: func(m *PackageManifest) {
+				m.DeclaredVersion = &declared
+				m.VersionOverride.Declared = &declared
+				m.VersionOverride.Reason = PackageVersionSourceUnversioned
+			},
+		},
+		{
+			name: "reason=package_declares_no_version with an override record",
+			mutate: func(m *PackageManifest) {
+				m.DeclaredVersion = nil
+				m.VersionOverride.Declared = &declared
+				m.VersionOverride.Reason = PackageVersionSourceUnversioned
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := referenceManifest()
+			tc.mutate(&manifest)
+			err := manifest.Validate()
+			assertManifestReason(t, err, PackageManifestReasonDeclaredVersion)
+
+			// The construction boundary refuses it too, so a manifest
+			// that contradicts itself is never STORED.
+			if _, cerr := manifest.StoredJSON(); cerr == nil {
+				t.Error("StoredJSON stored a manifest whose version provenance contradicts itself")
+			} else {
+				assertManifestReason(t, cerr, PackageManifestReasonDeclaredVersion)
+			}
+
+			// And the parsing boundary refuses it, so a stored manifest
+			// that contradicts itself is never handed back as sound.
+			stored, serr := manifest.StoredJSON()
+			if serr == nil {
+				if _, _, perr := ParsePackageManifest([]byte(stored)); perr == nil {
+					t.Error("ParsePackageManifest accepted a manifest whose version provenance contradicts itself")
+				}
+			}
+		})
+	}
+}
+
+// TestPackageManifestAcceptsTheLegitimateVersionProvenance pins that
+// the correction refuses only the contradictions.
+//
+// The versionless-package convention of §5.2 — effective version
+// `1.0.0-unversioned`, source `package_declares_no_version`, no
+// declared version — must keep working, and so must a package that
+// genuinely declares its version, and so must an operator override of a
+// package that declares none.
+func TestPackageManifestAcceptsTheLegitimateVersionProvenance(t *testing.T) {
+	declared := "1.0.0"
+
+	cases := []struct {
+		name   string
+		mutate func(*PackageManifest)
+	}{
+		{
+			name: "a package that declares its version",
+			mutate: func(m *PackageManifest) {
+				m.Version = declared
+				m.DeclaredVersion = &declared
+				m.VersionOverride = PackageVersionOverride{
+					Declared:  &declared,
+					Effective: declared,
+					Reason:    PackageVersionSourceDeclared,
+				}
+			},
+		},
+		{
+			name: "the versionless-package convention",
+			mutate: func(m *PackageManifest) {
+				m.Version = refEffectiveVersion
+				m.DeclaredVersion = nil
+				m.VersionOverride = PackageVersionOverride{
+					Declared:  nil,
+					Effective: refEffectiveVersion,
+					Reason:    PackageVersionSourceUnversioned,
+				}
+			},
+		},
+		{
+			name: "an operator override of a package that declares no version",
+			mutate: func(m *PackageManifest) {
+				m.Version = "2.1.0"
+				m.DeclaredVersion = nil
+				m.VersionOverride = PackageVersionOverride{
+					Declared:  nil,
+					Effective: "2.1.0",
+					Reason:    PackageVersionSourceUnversioned,
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := referenceManifest()
+			tc.mutate(&manifest)
+			if err := manifest.Validate(); err != nil {
+				t.Fatalf("a legitimate version provenance was refused: %v", err)
+			}
+			if _, err := manifest.StoredJSON(); err != nil {
+				t.Fatalf("a legitimate version provenance could not be stored: %v", err)
+			}
+			stored, err := manifest.StoredJSON()
+			if err != nil {
+				t.Fatalf("StoredJSON: %v", err)
+			}
+			if _, _, err := ParsePackageManifest([]byte(stored)); err != nil {
+				t.Fatalf("a legitimate version provenance could not be parsed back: %v", err)
+			}
+		})
+	}
+}
+
 // TestPackageManifestValidateRefuses pins the manifest's own refusals.
 func TestPackageManifestValidateRefuses(t *testing.T) {
 	cases := []struct {

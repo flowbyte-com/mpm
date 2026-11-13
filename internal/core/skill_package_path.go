@@ -59,18 +59,19 @@ package internal
 // by the tests:
 //
 //   1. empty            → empty_path
-//   2. NUL              → nul_byte
-//   3. control char     → control_character
-//   4. UNC prefix       → unc_path
-//   5. drive letter     → drive_letter_prefix
-//   6. leading `/`      → absolute_path
-//   7. backslash        → backslash_separator
-//   8. trailing `/`     → trailing_slash
-//   9. empty segment    → empty_path_segment
-//  10. `.` segment      → dot_segment
-//  11. `..` segment     → path_traversal
-//  12. too long         → path_too_long
-//  13. too deep         → path_too_deep
+//   2. invalid UTF-8    → invalid_utf8
+//   3. NUL              → nul_byte
+//   4. control char     → control_character
+//   5. UNC prefix       → unc_path
+//   6. drive letter     → drive_letter_prefix
+//   7. leading `/`      → absolute_path
+//   8. backslash        → backslash_separator
+//   9. trailing `/`     → trailing_slash
+//  10. empty segment    → empty_path_segment
+//  11. `.` segment      → dot_segment
+//  12. `..` segment     → path_traversal
+//  13. too long         → path_too_long
+//  14. too deep         → path_too_deep
 //
 // The order runs from the most specific structural violation to the most
 // general, and from the raw name to the canonical form. NFC normalisation
@@ -80,6 +81,26 @@ package internal
 // has a canonical decomposition), so the structural checks are identical
 // before and after it. It CAN change the byte length, which is why the
 // length limit is measured on the normalised form.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY MALFORMED UTF-8 IS REFUSED AT THE INPUT BOUNDARY
+//
+// A canonical path is stored in a TEXT column and written into a JSON
+// manifest, and JSON is UTF-8. encoding/json does not reject an invalid
+// byte — it REPLACES it with U+FFFD. So a malformed name would be
+// accepted here, written to the row as the original bytes, and appear in
+// the manifest as U+FFFD: two DIFFERENT canonical paths producing one
+// document, therefore one `package_hash`, and a manifest that no longer
+// names the row it describes.
+//
+// The input is genuinely arbitrary bytes: a ZIP entry name is bytes
+// (archive/zip performs no path sanitisation, §7 threat 1), and a Linux
+// directory entry name is bytes rather than text. The bytes are not
+// repaired here — a malformed name is REFUSED, because repairing it
+// would silently invent a path that no archive carried.
+//
+// The check therefore runs before normalisation, before collision
+// detection, and before anything can build a manifest from the name.
 
 import (
 	"errors"
@@ -87,6 +108,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -119,6 +141,15 @@ type PackagePathReason string
 const (
 	// PackagePathReasonEmpty — the name was empty.
 	PackagePathReasonEmpty PackagePathReason = "empty_path"
+
+	// PackagePathReasonInvalidUTF8 — the name was not valid UTF-8.
+	//
+	// A canonical path is stored as text and written into a JSON
+	// manifest, and JSON is UTF-8. encoding/json replaces an invalid
+	// byte with U+FFFD rather than rejecting it, so a malformed name
+	// would be accepted here and then collapse onto a different path's
+	// identity in the manifest. The bytes are refused, never repaired.
+	PackagePathReasonInvalidUTF8 PackagePathReason = "invalid_utf8"
 
 	// PackagePathReasonNUL — the name contained a NUL byte.
 	PackagePathReasonNUL PackagePathReason = "nul_byte"
@@ -251,6 +282,11 @@ func CanonicalPackagePath(raw string) (string, error) {
 	// ── Phase 1: character-level rules, on the raw name ──────────────
 	if raw == "" {
 		return "", &PackagePathError{Reason: PackagePathReasonEmpty, Path: raw}
+	}
+	// Malformed UTF-8 is refused BEFORE anything else, so the name can
+	// never reach normalisation, collision detection or a manifest.
+	if !utf8.ValidString(raw) {
+		return "", &PackagePathError{Reason: PackagePathReasonInvalidUTF8, Path: raw}
 	}
 	if strings.IndexByte(raw, 0) >= 0 {
 		return "", &PackagePathError{Reason: PackagePathReasonNUL, Path: raw}

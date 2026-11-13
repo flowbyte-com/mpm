@@ -34,6 +34,15 @@ const nfdCafe = "references/cafe\u0301.md"
 // E WITH ACUTE. It is 19 bytes.
 const nfcCafe = "references/caf\u00e9.md"
 
+// invalidUTF8Code is the stable refusal code for a malformed name.
+//
+// It is written as a LITERAL rather than as the production constant on
+// purpose: this way the regression tests compile against the
+// pre-fix implementation as well, and therefore fail BEHAVIOURALLY
+// against it instead of failing to build. The production constant
+// carries this exact string.
+const invalidUTF8Code = "invalid_utf8"
+
 // ─────────────────────────────────────────────────────────────────────────────
 // valid canonical paths
 // ─────────────────────────────────────────────────────────────────────────────
@@ -265,6 +274,103 @@ func TestCanonicalPackagePathNormalisesToNFC(t *testing.T) {
 	}
 	if fromNFD != fromNFC {
 		t.Errorf("the NFD and NFC spellings canonicalised differently: %q and %q", fromNFD, fromNFC)
+	}
+}
+
+// TestCanonicalPackagePathRejectsMalformedUTF8 pins the refusal of
+// names that are not valid UTF-8.
+//
+// The reason this is a REFUSAL and not a repair: a canonical path is
+// stored as text and written into a JSON manifest, and encoding/json
+// REPLACES an invalid byte with U+FFFD rather than rejecting it. So a
+// malformed name that was accepted here would be written to the row as
+// the original bytes and would appear in the manifest as U+FFFD — two
+// DIFFERENT canonical paths collapsing onto one document, and therefore
+// onto one `package_hash`.
+//
+// The input really is arbitrary bytes: a ZIP entry name is bytes
+// (archive/zip performs no path sanitisation, §7 threat 1), and a Linux
+// directory entry name is bytes rather than text.
+func TestCanonicalPackagePathRejectsMalformedUTF8(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"a lone invalid byte", "\xff"},
+		{"another lone invalid byte", "\xfe"},
+		{"a truncated two-byte sequence", "\xc3"},
+		{"a truncated three-byte sequence", "\xe2\x82"},
+		{"a surrogate encoded as UTF-8", "\xed\xa0\x80"},
+		{"an overlong encoding", "\xc0\xaf"},
+		{"two invalid bytes", "\xff\xfe"},
+		{"an invalid byte inside a path", "refs/\xff.md"},
+		{"a valid name with an invalid byte appended", "SKILL.md\xff"},
+		{"an invalid byte before a valid name", "\xffSKILL.md"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := CanonicalPackagePath(tc.in)
+			if err == nil {
+				t.Fatalf("CanonicalPackagePath(%q) accepted a malformed name and returned %q", tc.in, got)
+			}
+			if got != "" {
+				t.Errorf("CanonicalPackagePath(%q) returned %q alongside the error", tc.in, got)
+			}
+			assertPathReason(t, err, PackagePathReason(invalidUTF8Code))
+		})
+	}
+}
+
+// TestMalformedUTF8IsRefusedBeforeTheOtherRules pins the precedence:
+// a name that is BOTH malformed and, say, a traversal is reported as
+// malformed, because the malformed bytes are the deeper problem — the
+// name cannot be represented at all, so what it would have said about
+// its shape is beside the point.
+//
+// It also pins that the malformed check runs BEFORE the NUL and control
+// checks, which is where the review placed it.
+func TestMalformedUTF8IsRefusedBeforeTheOtherRules(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"malformed and a traversal", "../\xff"},
+		{"malformed and absolute", "/\xff"},
+		{"malformed and a NUL", "\xff\x00"},
+		{"malformed and a control character", "\xff\x01"},
+		{"malformed and a backslash", "\xff\\a.md"},
+		{"malformed and a drive letter", "C:\xff"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CanonicalPackagePath(tc.in)
+			assertPathReason(t, err, PackagePathReason(invalidUTF8Code))
+		})
+	}
+}
+
+// TestPackagePathSetRefusesMalformedUTF8 pins that the collision set
+// refuses a malformed name, and — the point of the whole exercise —
+// that two DISTINCT malformed byte sequences can never become two
+// distinct identities.
+//
+// Before the fix, "\xff" and "\xfe" were two distinct canonical paths.
+// They were also the SAME path once encoded, because both became
+// U+FFFD.
+func TestPackagePathSetRefusesMalformedUTF8(t *testing.T) {
+	set := NewPackagePathSet()
+	if _, err := set.Add("\xff"); err == nil {
+		t.Error("the set accepted a malformed name")
+	} else {
+		assertPathReason(t, err, PackagePathReason(invalidUTF8Code))
+	}
+	if _, err := set.Add("\xfe"); err == nil {
+		t.Error("the set accepted a second malformed name")
+	} else {
+		assertPathReason(t, err, PackagePathReason(invalidUTF8Code))
+	}
+	if set.Len() != 0 {
+		t.Errorf("the set holds %d paths; a refused name must occupy no slot", set.Len())
 	}
 }
 

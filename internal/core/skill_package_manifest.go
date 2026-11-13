@@ -64,6 +64,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/mod/semver"
 )
@@ -311,6 +312,14 @@ const (
 	// path.
 	PackageManifestReasonFilePath PackageManifestReason = "manifest_file_path_invalid"
 
+	// PackageManifestReasonInvalidUTF8 — a path in the manifest is not
+	// valid UTF-8, so it cannot be represented in a JSON manifest.
+	//
+	// The code is the SAME string as the path primitive's
+	// `invalid_utf8`, so one refusal code names the condition wherever
+	// it is caught.
+	PackageManifestReasonInvalidUTF8 PackageManifestReason = "invalid_utf8"
+
 	// PackageManifestReasonDuplicatePath — two files carry the same
 	// canonical path.
 	PackageManifestReasonDuplicatePath PackageManifestReason = "duplicate_path"
@@ -487,6 +496,12 @@ func (m PackageManifest) StoredJSON() (string, error) {
 // that an integer survives the round trip as its exact literal rather
 // than as a float64 that might be re-encoded differently.
 func (m PackageManifest) canonicalDocument() (map[string]any, error) {
+	// The document must not misrepresent the manifest. See
+	// checkEncodable for what that means and why it matters here.
+	if err := m.checkEncodable(); err != nil {
+		return nil, err
+	}
+
 	// Sort a COPY of the file list: the caller's manifest is not
 	// mutated, and the canonical form is independent of the order the
 	// files were supplied in.
@@ -572,7 +587,7 @@ func (m PackageManifest) Validate() error {
 	// than quietly repaired.
 	canonicalEntrypoint, err := CanonicalPackagePath(m.Entrypoint)
 	if err != nil {
-		return manifestErrorf(PackageManifestReasonEntrypoint, "entrypoint",
+		return manifestErrorf(manifestPathReason(err, PackageManifestReasonEntrypoint), "entrypoint",
 			"entrypoint: %v", err)
 	}
 	if canonicalEntrypoint != m.Entrypoint {
@@ -587,7 +602,7 @@ func (m PackageManifest) Validate() error {
 
 		canonical, err := CanonicalPackagePath(file.Path)
 		if err != nil {
-			return manifestErrorf(PackageManifestReasonFilePath, "files",
+			return manifestErrorf(manifestPathReason(err, PackageManifestReasonFilePath), "files",
 				"files[%d].path: %v", i, err)
 		}
 		if canonical != file.Path {
@@ -665,6 +680,10 @@ func (m PackageManifest) validateVersionOverride() error {
 		return manifestErrorf(PackageManifestReasonVersionOverride, "version_override",
 			"version_override.effective: %q is not a valid semver version", override.Effective)
 	}
+	// The provenance record and the declared version must agree.
+	if err := m.validateVersionProvenance(); err != nil {
+		return err
+	}
 
 	// The declared version, where the package declared one, must BE the
 	// effective version (§5.2: "It must be valid semver and must equal
@@ -690,6 +709,103 @@ func (m PackageManifest) validateVersionOverride() error {
 		}
 	}
 	return nil
+}
+
+// validateVersionProvenance enforces the equivalence between the
+// version SOURCE and the presence of a declared version (§9:
+// "A row therefore always says whether its version came from the
+// package or from MPM").
+//
+//   - reason `declared` means the package carried a `version:` field, so
+//     a declared version must be present — in the manifest and in the
+//     override record, and they must be the same version.
+//   - reason `package_declares_no_version` means the package carried no
+//     version, so no declared version may be present anywhere.
+//
+// The two are checked as an equivalence rather than as two independent
+// optionalities, because a record that says one thing and carries
+// another is a row that lies about its own provenance.
+//
+// It is deliberately separate from the rest of validateVersionOverride:
+// this one invariant is also enforced at the construction boundary (so
+// a manifest can never be STORED with a contradictory record) and at the
+// parsing boundary (so a stored manifest that contradicts itself is
+// refused rather than handed back as though it were sound).
+func (m PackageManifest) validateVersionProvenance() error {
+	override := m.VersionOverride
+	switch override.Reason {
+	case PackageVersionSourceDeclared:
+		if m.DeclaredVersion == nil {
+			return manifestErrorf(PackageManifestReasonDeclaredVersion, "version_override.reason",
+				"version_override.reason: %q requires a declared version, but declared_version is absent",
+				override.Reason)
+		}
+		if override.Declared == nil {
+			return manifestErrorf(PackageManifestReasonDeclaredVersion, "version_override.declared",
+				"version_override.declared: must be present when the version source is %q",
+				override.Reason)
+		}
+	case PackageVersionSourceUnversioned:
+		if m.DeclaredVersion != nil {
+			return manifestErrorf(PackageManifestReasonDeclaredVersion, "declared_version",
+				"declared_version: must be absent when the version source is %q",
+				override.Reason)
+		}
+		if override.Declared != nil {
+			return manifestErrorf(PackageManifestReasonDeclaredVersion, "version_override.declared",
+				"version_override.declared: must be absent when the version source is %q",
+				override.Reason)
+		}
+	}
+	return nil
+}
+
+// checkEncodable refuses a manifest whose canonical form would
+// MISREPRESENT it.
+//
+// Two things make a manifest dishonest when it is encoded:
+//
+//   - a path that is not valid UTF-8. encoding/json REPLACES every
+//     invalid byte with U+FFFD, so two distinct malformed paths would
+//     encode to the same document and therefore to the same
+//     `package_hash`, and the stored manifest would no longer name the
+//     path the file row carries. The path primitive already refuses
+//     such a name; this is the second line, at the boundary where the
+//     document is actually built.
+//   - a version provenance record that contradicts itself. A manifest
+//     that says its version came from the package while carrying no
+//     declared version lies about its own provenance.
+//
+// The rest of the contract — the path grammar, the digests, the
+// entrypoint — is Validate's job. This guard is only about what the
+// ENCODING would do to the document, so that a manifest can never be
+// hashed or stored while misrepresenting itself.
+func (m PackageManifest) checkEncodable() error {
+	if !utf8.ValidString(m.Entrypoint) {
+		return manifestErrorf(PackageManifestReasonInvalidUTF8, "entrypoint",
+			"entrypoint: is not valid UTF-8 and cannot be represented in a manifest")
+	}
+	for i := range m.Files {
+		if !utf8.ValidString(m.Files[i].Path) {
+			return manifestErrorf(PackageManifestReasonInvalidUTF8, "files",
+				"files[%d].path: is not valid UTF-8 and cannot be represented in a manifest", i)
+		}
+	}
+	return m.validateVersionProvenance()
+}
+
+// manifestPathReason maps a path refusal onto the manifest's own
+// vocabulary.
+//
+// A malformed UTF-8 path keeps its own code, because "this path is not
+// representable" and "this path is not canonical" are different
+// failures with different fixes. Every OTHER refusal keeps the
+// caller's own reason, so the manifest's vocabulary is not flattened.
+func manifestPathReason(err error, fallback PackageManifestReason) PackageManifestReason {
+	if PackagePathReasonOf(err) == PackagePathReasonInvalidUTF8 {
+		return PackageManifestReasonInvalidUTF8
+	}
+	return fallback
 }
 
 // validateSHA256Hex checks that a hash field carries 64 lowercase hex
@@ -726,6 +842,14 @@ type packageManifestWire struct {
 // carries its own `format` field and a document that does not match the
 // format this stage understands is not silently reinterpreted.
 //
+// It also refuses a document whose version provenance contradicts
+// itself. A manifest that says its version came from the package while
+// carrying no declared version is not a manifest — it is a record that
+// lies about its own provenance (§9) — so it is refused here rather
+// than handed back as though it were sound. The parser's REMAINING
+// strictness (trailing bytes after the document, a zero `format`) is a
+// separate concern and is not addressed here.
+//
 // The `package_hash` key is read and returned separately; it is not part
 // of the manifest proper, because it is the hash OF the manifest.
 func ParsePackageManifest(data []byte) (*PackageManifest, string, error) {
@@ -735,6 +859,11 @@ func ParsePackageManifest(data []byte) (*PackageManifest, string, error) {
 	if err := decoder.Decode(&wire); err != nil {
 		return nil, "", manifestErrorf(PackageManifestReasonMalformed, "",
 			"package manifest: %v", err)
+	}
+	// A document that contradicts itself about its own version
+	// provenance is refused here, not handed back as sound.
+	if err := wire.PackageManifest.validateVersionProvenance(); err != nil {
+		return nil, "", err
 	}
 	return &wire.PackageManifest, wire.PackageHash, nil
 }
