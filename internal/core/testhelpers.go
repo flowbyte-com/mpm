@@ -9,9 +9,12 @@ package internal
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -49,15 +52,188 @@ var testDBCounter int64
 // deliberately pinned a workspace (NewTestSharedDM and friends) keep
 // their choice, and this helper never clobbers intent.
 //
+// **But a preset is VERIFIED before it is trusted.** The earlier shape
+// returned immediately on any non-empty MPM_WORKSPACE, which meant an
+// INHERITED environment variable could aim a test at the operator's
+// production workspace: `$HOME/.mpm` is where `active.json`, the
+// cross-process lock, `toxicphrases.txt` and the database itself live.
+// A test run with MPM_WORKSPACE pointing there wrote into the operator's
+// installation — the in-memory database kept the ROWS out of it, but the
+// workspace-scoped FILES still landed.
+//
+// So the preset is validated, and a preset that resolves to the
+// production workspace — or to anything inside it — is REFUSED, loudly,
+// before the database or the workspace is initialised. See
+// ValidateTestWorkspace for the exact rule.
+//
 // Note: t.Setenv is incompatible with t.Parallel. A test that wants
 // parallel execution cannot use a hermetic manager, because a hermetic
 // manager is by definition a process-global environment change.
 func PinIsolatedWorkspace(t *testing.T) {
 	t.Helper()
-	if ws := os.Getenv("MPM_WORKSPACE"); ws != "" {
-		return
+	if err := pinIsolatedWorkspace(t); err != nil {
+		t.Fatalf("refusing an unsafe MPM_WORKSPACE for a test: %v", err)
 	}
-	t.Setenv("MPM_WORKSPACE", t.TempDir())
+}
+
+// pinIsolatedWorkspace is the error-returning form of
+// PinIsolatedWorkspace.
+//
+// The split exists so the refusal is directly assertable: `t.Fatalf`
+// ends the test goroutine, which makes a negative test awkward to
+// write. The decision — and every side effect — is identical in both
+// forms: the pinned workspace is validated BEFORE the manager is
+// constructed, so nothing is written to an unsafe workspace.
+func pinIsolatedWorkspace(t *testing.T) error {
+	t.Helper()
+	if ws := os.Getenv("MPM_WORKSPACE"); ws != "" {
+		if err := ValidateTestWorkspace(ws); err != nil {
+			return err
+		}
+		return nil
+	}
+	// The temporary ROOT is validated before anything is created inside
+	// it, so a refusal happens before a single directory is made.
+	if err := ValidateTestWorkspace(os.TempDir()); err != nil {
+		return fmt.Errorf("the temporary directory root is not usable as a test workspace: %w", err)
+	}
+	pinned := t.TempDir()
+	if err := ValidateTestWorkspace(pinned); err != nil {
+		return fmt.Errorf("the pinned test workspace is not safe: %w", err)
+	}
+	t.Setenv("MPM_WORKSPACE", pinned)
+	return nil
+}
+
+// ValidateTestWorkspace reports whether ws is safe for a test to use as
+// its MPM workspace.
+//
+// A test workspace must be DISPOSABLE. The one path that is not is the
+// operator's production workspace — `$HOME/.mpm` — and anything inside
+// it.
+//
+// The rule is deliberately BLANKET:
+//
+//   - equality with the production workspace is refused;
+//   - any path INSIDE the production workspace is refused;
+//   - a path that reaches either through `..` segments or through a
+//     symlink is refused, because both are resolved before the
+//     comparison;
+//   - a path that cannot be resolved at all is refused, because an
+//     unverifiable path cannot be cleared;
+//   - an empty path is refused, because it means "no workspace given",
+//     which resolves to the production workspace.
+//
+// A SAFE preset workspace is ACCEPTED. Tests that deliberately pin a
+// disposable workspace keep their choice; the guard exists to stop an
+// INHERITED environment variable from aiming a test at production, not
+// to forbid deliberate pinning.
+//
+// This is a TEST-side guard. It is not a runtime restriction: the
+// production path (config.GetMPMDir) is untouched, and a real operator
+// who legitimately points MPM_WORKSPACE at `$HOME/.mpm` is unaffected.
+func ValidateTestWorkspace(ws string) error {
+	if strings.TrimSpace(ws) == "" {
+		return fmt.Errorf("the workspace is empty, which resolves to the production workspace")
+	}
+	prod, err := productionWorkspacePath()
+	if err != nil {
+		return err
+	}
+	prodResolved, err := canonicalPath(prod)
+	if err != nil {
+		return fmt.Errorf("the production workspace cannot be verified: %w", err)
+	}
+	wsResolved, err := canonicalPath(ws)
+	if err != nil {
+		return fmt.Errorf("the workspace cannot be verified: %w", err)
+	}
+	if pathWithin(prodResolved, wsResolved) {
+		return fmt.Errorf("the workspace %q resolves to %q, which is the production workspace or lives inside it",
+			ws, wsResolved)
+	}
+	return nil
+}
+
+// productionWorkspacePath returns the operator's production MPM
+// workspace path — `$HOME/.mpm` — WITHOUT creating it.
+//
+// config.GetMPMDir is deliberately NOT used for this: it calls
+// os.MkdirAll on the path it returns, so asking it "where is the
+// production workspace?" would CREATE the production workspace as a side
+// effect of the very check that is meant to protect it.
+func productionWorkspacePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("the home directory cannot be determined, so the production workspace cannot be identified: %w", err)
+	}
+	return filepath.Join(home, ".mpm"), nil
+}
+
+// canonicalPath resolves p to an absolute, symlink-free path.
+//
+// The path need not exist. A preset workspace that has not been created
+// yet is legitimate — several tests pin one and let the substrate create
+// it — so when the leaf does not exist, the longest existing ancestor is
+// resolved and the missing tail is re-appended.
+//
+// A path that cannot be resolved for any OTHER reason — a permission
+// error, a symlink loop — is returned as an error: an unverifiable path
+// cannot be cleared, and the guard fails closed on it.
+func canonicalPath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("cannot make %q absolute: %w", p, err)
+	}
+	abs = filepath.Clean(abs)
+
+	missing := ""
+	current := abs
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			if missing == "" {
+				return resolved, nil
+			}
+			return filepath.Join(resolved, missing), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("cannot resolve %q: %w", current, err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			// The filesystem root itself does not exist: nothing can
+			// be verified from here.
+			return "", fmt.Errorf("cannot resolve %q: %w", p, err)
+		}
+		missing = filepath.Join(filepath.Base(current), missing)
+		current = parent
+	}
+}
+
+// pathWithin reports whether candidate is parent itself or lies inside
+// it.
+//
+// The comparison is path-aware, not string-prefix: filepath.Rel emits
+// `..` segments for anything outside the parent, so a sibling whose name
+// merely shares a prefix (`/home/v/.mpm-backup` against `/home/v/.mpm`)
+// is correctly reported as OUTSIDE. A prefix comparison would get that
+// wrong, and would be wrong in the dangerous direction.
+func pathWithin(parent, candidate string) bool {
+	if parent == candidate {
+		return true
+	}
+	rel, err := filepath.Rel(parent, candidate)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return !filepath.IsAbs(rel)
 }
 
 // NewTestDM returns a hermetic DatabaseManager backed by an in-memory SQLite

@@ -12,8 +12,6 @@ package internal
 import (
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -27,12 +25,20 @@ import (
 // pinning the workspace therefore writes to the OPERATOR'S LIVE DATABASE.
 //
 // This helper pins the workspace FIRST, then opens the database, and
-// refuses to proceed if the pinned workspace is the live MPM directory.
+// refuses to proceed unless the pinned workspace is verifiably
+// disposable.
+//
+// The refusal is a CONTAINMENT check, not an equality check. An
+// equality check would be dead code: `skillPkgWorkspace` always replaces
+// the workspace with a fresh `t.TempDir()`, so it could never equal
+// `$HOME/.mpm`. A containment check is real — it also refuses a
+// workspace that lives INSIDE the production directory, which is what a
+// `TMPDIR` pointing there would produce.
 func p3DM(t *testing.T) *DatabaseManager {
 	t.Helper()
 	ws := skillPkgWorkspace(t)
-	if live := filepath.Join(os.Getenv("HOME"), ".mpm"); ws == live {
-		t.Fatalf("the test workspace resolves to the live MPM directory (%s)", ws)
+	if err := ValidateTestWorkspace(ws); err != nil {
+		t.Fatalf("the test workspace is not safe: %v", err)
 	}
 	return skillPkgDM(t)
 }
