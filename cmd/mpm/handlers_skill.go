@@ -30,7 +30,27 @@ func handleSaveSkill(args []string) int {
 		}
 	}
 	var path string
-	force := false
+	// The force flag is read through the router's canonical accessor,
+	// NOT by scanning argv.
+	//
+	// The router's parseFlags CONSUMES the `-f` / `--force` token from
+	// argv and republishes it as MPM_FORCE=1, which forceRequested()
+	// reads back. A handler that scans argv for the literal "--force"
+	// is looking for a token that by construction never arrives — the
+	// router's own contract says so.
+	//
+	// This handler DID scan argv, so `mpm save-skill --force` had no
+	// effect at all: the force path was unreachable from the CLI, and
+	// every re-save of an existing version failed with "already
+	// exists". That is a pre-existing defect (reproducible on
+	// origin/main), and it also blocked Stage P3's package-immutability
+	// work: the CLI could neither perform the legitimate force-overwrite
+	// its own help page documents nor surface the `package_immutable`
+	// refusal, because it never reached the force path at all.
+	//
+	// The argv scan is kept as an additional source so the handler
+	// still honours the token if a future router re-emits it.
+	force := forceRequested()
 	name := ""
 	version := ""
 	i := 0

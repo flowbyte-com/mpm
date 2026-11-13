@@ -19,6 +19,51 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// SkillsExclusionClause excludes skill rows from a bulk age-based hard
+// delete.
+//
+// **WHY EVERY SKILL IS EXEMPT, NOT ONLY THE PACKAGED ONES**
+//
+// This is the blanket form of operator decision **O17**, which the
+// operator approved explicitly. It is a `collection` filter on the delete
+// statement itself, so it excludes EVERY skill — packaged or not.
+//
+// The blast radius is wider than "packages", and it is stated here rather
+// than discovered by an operator: `mpm prune --older-than 90d` can no
+// longer remove ANY skill.
+//
+// That is a behaviour change for every existing skill in every workspace,
+// not only for the skills that own a package. An operator who has been
+// using `--older-than` to reclaim space from stale skills will find that
+// it silently stops doing anything for skills — no error, no warning, and
+// no count of skipped rows.
+//
+// **WHY THE BLANKET FORM AND NOT A PACKAGE-AWARE ONE**
+//
+// The alternative — `AND NOT EXISTS (SELECT 1 FROM skill_packages …)` —
+// would preserve the operator's age-based pruning for ordinary skills. It
+// is not the specification, for two reasons:
+//
+//   - it puts a per-row check inside a bulk delete, which leaves a race
+//     between the check and the delete (a package row could be created in
+//     between), and
+//   - it is a larger change to a statement that today carries exactly one
+//     exclusion clause.
+//
+// This clause mirrors the existing directive exemption
+// (DirectiveExclusionClause), which is the precedent for a
+// collection-scoped exemption in a hard delete.
+//
+// The operator can still remove a skill DELIBERATELY: `mpm skill delete`
+// soft-shreds it and `mpm skill shred` hard-deletes it, cascading to the
+// package rows and the file rows. What the exemption removes is the
+// unintentional, bulk, age-based destruction of content that exists
+// nowhere else.
+//
+// `memories.collection` is NOT NULL, so the comparison is never UNKNOWN
+// and a row with a NULL collection cannot slip past the exclusion.
+const SkillsExclusionClause = `collection != 'skills'`
+
 // validateSkillFrontmatterAndScan parses frontmatter and runs the
 // secret/poison scanner against the Skill content, resolving the phrase
 // list from the AMBIENT workspace. NO DB writes.
@@ -493,19 +538,14 @@ func (dm *DatabaseManager) SaveSkillWithInvocation(name, version, content, autho
 	// Parse frontmatter first so a malformed content string never reaches
 	// the DB layer. The contract here is that any rejected frontmatter
 	// is a 400, not a write-conflict.
-	skill, _, scanErrs, err := validateSkillFrontmatterAndScanAt(content, dm.poisonPhrasesPath())
+	//
+	// The scan and the agreement checks live in validateSkillProjection,
+	// which the tx-aware writer (SaveSkillProjectionInTx) calls too — one
+	// implementation, so the legacy path and the importer's path cannot
+	// drift apart on what a projection is allowed to be.
+	fm, err := dm.validateSkillProjection(name, version, content)
 	if err != nil {
-		return "", fmt.Errorf("save skill: %w", err)
-	}
-	if len(scanErrs) > 0 {
-		return "", fmt.Errorf("save skill: scanner blocked content: %v", scanErrs)
-	}
-	fm := skill.Frontmatter
-	if fm.Name != name {
-		return "", fmt.Errorf("frontmatter name %q does not match arg %q", fm.Name, name)
-	}
-	if fm.Version != version {
-		return "", fmt.Errorf("frontmatter version %q does not match arg %q", fm.Version, version)
+		return "", err
 	}
 
 	id, err := SkillIDForNameAndVersion(name, version)
@@ -541,33 +581,20 @@ func (dm *DatabaseManager) SaveSkillWithInvocation(name, version, content, autho
 	// Build tags / metadata. Tags: ["skill", <domain>] — domain is omitted
 	// when empty so the SKILL domain taxonomy doesn't get polluted with
 	// empty strings.
-	tags := []string{"skill"}
-	if fm.Domain != "" {
-		tags = append(tags, fm.Domain)
-	}
+	//
 	// promoted_at is intentionally JSON null (not absent) so the field
 	// shape is stable across reads — the promote task will json_set it
 	// to a real timestamp without having to first insert the key.
-	metadata := map[string]interface{}{
-		"is_latest":        true,
-		"author":           authorAgent,
-		"promoted_at":      nil,
-		"decay_floor_days": 90,
-		"content_hash":     contentHash(content),
-		// Mirror version into metadata so SaveSkill's semver-compare path
-		// can read it back without re-parsing the frontmatter. (The id
-		// also encodes it, but json_extract on a JSON column is cleaner
-		// than string surgery on skill:<name>-v<version>.)
-		"version": version,
-	}
-	metaJSON, err := json.Marshal(metadata)
-	if err != nil {
-		return "", fmt.Errorf("marshal metadata: %w", err)
-	}
+	//
+	// The new-row path rebuilds both inside the tx-aware writer; they are
+	// built here for the force path, which updates an existing row in
+	// place.
+	tags := skillRowTags(fm.Domain)
 	tagsJSON, err := json.Marshal(tags)
 	if err != nil {
 		return "", fmt.Errorf("marshal tags: %w", err)
 	}
+	metadata := skillRowMetadata(version, content, authorAgent, true)
 
 	if exists && force {
 		// In-place overwrite: same id, same row — no version flip, no new
@@ -593,49 +620,141 @@ func (dm *DatabaseManager) SaveSkillWithInvocation(name, version, content, autho
 		// filtered on `deleted_at IS NULL`, which silently no-op'd the
 		// UPDATE and left the tombstone in place — the live row would
 		// not exist after save-after-delete.
-		// Load all OTHER live rows for this name and find the semver
-		// max via highestSemver. The previous shape used
-		// `ORDER BY id DESC LIMIT 1` as a proxy for highest semver,
-		// which breaks for unequal-width semver (id-sort puts v1.9.0
-		// above v1.10.0 because '9' > '1' at the version digit).
-		otherRows, qerr := loadActiveSkillRows(db, name, id)
-		if qerr != nil {
-			return "", qerr
-		}
-		otherMax := highestSemver(otherRows)
-		isLatest := true
-		if otherMax.id != "" {
-			cmp := semver.Compare("v"+version, "v"+otherMax.version)
-			if cmp < 0 {
-				// Incoming is older than another existing version —
-				// the higher one retains is_latest=true, this one
-				// gets is_latest=false.
-				isLatest = false
-			}
-		}
-		// err == sql.ErrNoRows equivalent: no other versions, this
-		// is the only (or highest) version, is_latest=true.
+		//
+		// ─────────────────────────────────────────────────────────────
+		// R1 — THE PACKAGE-IMMUTABILITY GUARD
+		//
+		// A published package must not be overwritten through this path.
+		// The force branch replaces `memories.content` IN PLACE, under
+		// the same id, so for a packaged skill it would give one id two
+		// documents: `read` would return the new body while
+		// `read_file(SKILL.md)` returned the old bytes, `projection_sha256`
+		// would stop describing `memories.content`, and the package row,
+		// the file rows and the blobs would all still describe the
+		// previous document.
+		//
+		// So the refusal is FAIL CLOSED: nothing is written — not the
+		// content, not the metadata, not the provenance, not the
+		// manifest, not the file rows, not the blobs — and the caller is
+		// told to publish a new version instead.
+		//
+		// THE CONCURRENCY QUESTION. A check performed separately from the
+		// write is a time-of-check/time-of-use hole: a package row
+		// created between the two would let the overwrite through. So
+		// the guard and the write below share ONE transaction, and the
+		// UPDATE carries the guard's condition in its OWN WHERE clause —
+		// which makes the check and the write a single atomic statement
+		// even if the transaction's snapshot were stale. Either the
+		// guard sees the package row and refuses, or the UPDATE's
+		// condition excludes the row and nothing is written. There is no
+		// third outcome.
+		//
+		// The refusal applies to a SOFT-DELETED packaged skill too: the
+		// package row survives a tombstone (only a hard shred cascades),
+		// so the guard still finds it.
+		var guardErr error
+		txErr := dm.WithTx(func(node DBNode) error {
+			// WithTx may re-run this callback on a stale snapshot, so
+			// the per-attempt state is reset here.
+			guardErr = nil
 
-		metadata["is_latest"] = isLatest
-		metaJSON, err = json.Marshal(metadata)
-		if err != nil {
-			return "", fmt.Errorf("marshal metadata: %w", err)
+			// 1. The guard.
+			pkg, err := lookupSkillPackage(node, id)
+			if err != nil {
+				return err
+			}
+			if pkg != nil {
+				guardErr = &PackageImmutableError{
+					SkillID: id,
+					Name:    pkg.name,
+					Version: pkg.version,
+				}
+				return guardErr
+			}
+
+			// 2. is_latest, computed against the same snapshot as the
+			//    write. Load all OTHER live rows for this name and find
+			//    the semver max via highestSemver. The previous shape
+			//    used `ORDER BY id DESC LIMIT 1` as a proxy for highest
+			//    semver, which breaks for unequal-width semver (id-sort
+			//    puts v1.9.0 above v1.10.0 because '9' > '1' at the
+			//    version digit).
+			otherRows, qerr := loadActiveSkillRowsTx(node.Tx(), name, id)
+			if qerr != nil {
+				return qerr
+			}
+			otherMax := highestSemver(otherRows)
+			isLatest := true
+			if otherMax.id != "" {
+				cmp := semver.Compare("v"+version, "v"+otherMax.version)
+				if cmp < 0 {
+					// Incoming is older than another existing version —
+					// the higher one retains is_latest=true, this one
+					// gets is_latest=false.
+					isLatest = false
+				}
+			}
+			// err == sql.ErrNoRows equivalent: no other versions, this
+			// is the only (or highest) version, is_latest=true.
+
+			metadata["is_latest"] = isLatest
+			metaJSON, err := marshalSkillRowMetadata(metadata)
+			if err != nil {
+				return err
+			}
+
+			// 3. The write, with the guard's condition folded into the
+			//    statement.
+			res, err := node.ExecTracked(`
+				UPDATE memories
+				SET content = ?, tags = ?, metadata = ?, is_long_term = 1,
+				    deleted_at = NULL,
+				    updated_at = CAST(strftime('%s','now') AS INTEGER)
+				WHERE id = ?
+				  AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)
+			`, 5, content, string(tagsJSON), metaJSON, id, id)
+			if err != nil {
+				return fmt.Errorf("update skill: %w", err)
+			}
+			affected, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("update skill rows affected: %w", err)
+			}
+			if affected != 1 {
+				// Nothing was updated. Either a package row appeared
+				// between the guard and the write — the guard fires
+				// and nothing was written — or the row is gone.
+				pkg, err := lookupSkillPackage(node, id)
+				if err != nil {
+					return err
+				}
+				if pkg != nil {
+					guardErr = &PackageImmutableError{
+						SkillID: id,
+						Name:    pkg.name,
+						Version: pkg.version,
+					}
+					return guardErr
+				}
+				return fmt.Errorf("update skill: no row was updated for %s", id)
+			}
+			return nil
+		})
+		if guardErr != nil {
+			return "", guardErr
 		}
-		_, err = db.Exec(`
-			UPDATE memories
-			SET content = ?, tags = ?, metadata = ?, is_long_term = 1,
-			    deleted_at = NULL,
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?
-		`, content, string(tagsJSON), string(metaJSON), id)
-		if err != nil {
-			return "", fmt.Errorf("update skill: %w", err)
+		if txErr != nil {
+			return "", txErr
 		}
 		// D6: a force-overwrite replaces the skill's CONTENT in place.
 		// The skill's artifact_provenance row was written when the skill
 		// was first saved, so it still names the invocation that wrote
 		// the OLD content — stale attribution. Refresh it so the row
 		// describes the skill as it stands now.
+		//
+		// The refresh runs AFTER the write committed, and it opens its
+		// own short-lived transaction — it is best-effort telemetry and
+		// it must not be able to hold the content write open.
 		dm.refreshArtifactProvenance(id, artifactTypeFromCollection("skills"), ac)
 		return id, nil
 	}
@@ -643,6 +762,12 @@ func (dm *DatabaseManager) SaveSkillWithInvocation(name, version, content, autho
 	// New row path. Transaction so the flip-prior + insert stays atomic —
 	// a crash between the two would leave two is_latest=true rows for the
 	// same name, which ReadSkill would resolve nondeterministically.
+	//
+	// The write itself is the tx-aware primitive (saveSkillProjectionInTx)
+	// — the same code a future importer calls inside ITS transaction. The
+	// legacy path still owns its OWN transaction here: the transaction
+	// belongs to the CALLER of the primitive, and here the caller is this
+	// function. The primitive never begins or commits one.
 	//
 	// is_latest is semver-driven, not save-order-driven. We find the
 	// current max-version row for this name within the tx and only flip
@@ -655,81 +780,8 @@ func (dm *DatabaseManager) SaveSkillWithInvocation(name, version, content, autho
 	}
 	defer tx.Rollback()
 
-	// Load all OTHER live rows for this name and find the semver
-	// max via highestSemver. The previous shape used
-	// `ORDER BY id DESC LIMIT 1` as a proxy for highest semver,
-	// which breaks for unequal-width semver (id-sort puts v1.9.0
-	// above v1.10.0 because '9' > '1' at the version digit). With
-	// ≥2 existing versions having unequal-width semver, the proxy
-	// also picked the wrong reference for the "demote old max"
-	// UPDATE below — only the lexically-largest id was demoted,
-	// leaving the actual semver-max (e.g. v1.10.0 when v1.9.0 was
-	// the lexically-largest) still stamped is_latest=true.
-	//
-	// The flip-prior UPDATE below now iterates every row whose
-	// semver is strictly below the incoming version, not just the
-	// lexically-largest id. The whole operation stays inside the
-	// existing transaction, so the flip + INSERT remain atomic.
-	otherRows, qerr := loadActiveSkillRowsTx(tx, name, id)
-	if qerr != nil {
-		return "", qerr
-	}
-	otherMax := highestSemver(otherRows)
-	hasExisting := otherMax.id != ""
-
-	// semver.Compare requires the 'v' prefix on both arguments. The DB
-	// stores version without the prefix (YAML convention); we add it
-	// here. Prepending unconditionally is safe: the frontmatter parser
-	// already validated the semver shape, and an empty version would
-	// have failed upstream.
-	newIsLatest := true
-	if hasExisting {
-		cmp := semver.Compare("v"+version, "v"+otherMax.version)
-		switch {
-		case cmp > 0:
-			// Incoming version strictly higher — flip every other
-			// row whose semver is below the incoming version to
-			// false. This handles the unequal-width case where the
-			// lexically-largest id is NOT the semver-max.
-			for _, r := range otherRows {
-				if semver.Compare("v"+r.version, "v"+version) < 0 {
-					_, err = tx.Exec(`
-						UPDATE memories
-						SET metadata = json_set(COALESCE(metadata, '{}'), '$.is_latest', 0)
-						WHERE id = ? AND deleted_at IS NULL
-					`, r.id)
-					if err != nil {
-						return "", fmt.Errorf("flip prior is_latest: %w", err)
-					}
-				}
-			}
-		case cmp == 0:
-			// Existence check above should have caught this. Defensive.
-			return "", fmt.Errorf("save skill: version %s already exists for %s (id=%s)", version, name, otherMax.id)
-		default:
-			// cmp < 0: incoming version is older than current max — keep
-			// the higher existing row as latest, insert this one as
-			// not-latest.
-			newIsLatest = false
-		}
-	}
-
-	// Rebuild metadata with the comparison-correct is_latest flag.
-	metadata["is_latest"] = newIsLatest
-	metaJSON, err = json.Marshal(metadata)
-	if err != nil {
-		return "", fmt.Errorf("marshal metadata: %w", err)
-	}
-
-	// INSERT via saveMemoryRow — the shared scanner+INSERT primitive
-	// that backs SaveMemoryNode. Tx-aware (DBNode interface), so the
-	// INSERT lands in the same transaction as the flip-prior UPDATE
-	// above. Skills don't carry embeddings, so IVF assignment is a
-	// no-op here.
-	txDBNode := &txNode{tx: tx, dm: dm}
-	_, err = saveMemoryRow(txDBNode, dm, id, "skills", content, "", tags, metadata, nil, true, 5, "", "", "", "", ac)
-	if err != nil {
-		return "", fmt.Errorf("insert skill: %w", err)
+	if _, err := dm.saveSkillProjectionInTx(tx, name, version, content, authorAgent, ac, fm); err != nil {
+		return "", err
 	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit: %w", err)
