@@ -1778,11 +1778,28 @@ func (dm *DatabaseManager) GetMemoryStats() (map[string]interface{}, error) {
 // operator's edits are lost with it. The two flags of the same command
 // (`mpm prune --never-accessed` and `mpm prune --older-than 90d`) must
 // not disagree about the same rows.
+//
+// Skills are exempt too (operator decision O17, approved): the exclusion
+// is BLANKET, so `collection = 'skills'` rows of ANY age — packaged or
+// not — are never deleted here. A package's bytes have no second copy, so
+// an age-based delete of a packaged skill destroys content that exists
+// nowhere else; the blanket form extends that protection to ordinary
+// skills as well, because the prune cannot tell the two apart. See
+// SkillsExclusionClause for the full statement of the behaviour change
+// this causes for operators.
+//
+// The exclusion is a predicate on the DELETE statement, so the reported
+// row count stays exact: it counts the rows that were deleted, never the
+// rows the statement skipped.
+//
+// Deliberate removal is unaffected: `mpm skill delete` soft-shreds and
+// `mpm skill shred` hard-deletes, and both still work.
 func (dm *DatabaseManager) PruneOlderThan(beforeUnixSec int64) (int, error) {
 	result, err := dm.db.Exec(`
 		DELETE FROM memories
 		WHERE created_at < ? AND deleted_at IS NULL
-		  AND `+DirectiveExclusionClause,
+		  AND `+DirectiveExclusionClause+`
+		  AND `+SkillsExclusionClause,
 		beforeUnixSec)
 	if err != nil {
 		return 0, err

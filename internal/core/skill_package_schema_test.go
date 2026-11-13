@@ -950,9 +950,16 @@ func TestSkillPackagesDoNotChangeExistingBehaviour(t *testing.T) {
 		t.Errorf("a legacy skill created %d package rows; P1 is storage only", pkgs)
 	}
 
-	// The pruner still removes an old skill. O17 (the prune exemption's
-	// FORM) is an open operator decision and P1 must not decide it: the
-	// blanket `collection = 'skills'` exclusion must NOT be here yet.
+	// The pruner no longer removes an old skill.
+	//
+	// HISTORY: this assertion used to be the OPPOSITE. At P1, O17 (the
+	// prune exemption's FORM) was an open operator decision, and this test
+	// pinned that P1 had NOT decided it: the blanket
+	// `collection = 'skills'` exclusion "must NOT be here yet". The
+	// operator has since approved the BLANKET form explicitly, and P3
+	// implements it — so the assertion is inverted here rather than
+	// deleted, because the guarantee it makes is now stronger, not
+	// weaker: an age-based prune can no longer remove ANY skill.
 	if _, err := dm.ExecTracked(
 		`INSERT INTO memories (id, collection, content, created_at) VALUES ('skill:old', 'skills', 'old', 1)`, 0); err != nil {
 		t.Fatalf("insert old skill: %v", err)
@@ -965,8 +972,8 @@ func TestSkillPackagesDoNotChangeExistingBehaviour(t *testing.T) {
 	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM memories WHERE id='skill:old'`).Scan(&left); err != nil {
 		t.Fatal(err)
 	}
-	if left != 0 {
-		t.Errorf("the age-based prune left the old skill in place (removed=%d) — P1 must not implement the O17 exemption", n)
+	if left != 1 {
+		t.Errorf("the age-based prune removed the old skill (removed=%d) — O17's blanket exclusion is in force", n)
 	}
 }
 
