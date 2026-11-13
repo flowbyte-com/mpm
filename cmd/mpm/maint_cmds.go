@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // handleStats shows memory statistics
@@ -209,6 +211,10 @@ func handleExport(args []string) int {
 		fmt.Println("Usage: mpm export [options]")
 		fmt.Println("\nExport options:")
 		fs.PrintDefaults()
+		fmt.Println("\nThe JSON document is an object: {\"memories\": [...], \"packages_omitted\": {...}}.")
+		fmt.Println("\"packages_omitted\" is always present and names every skill package whose")
+		fmt.Println("CONTENT was not included — a skills export carries the projected skill row")
+		fmt.Println("only, until full package export exists. A count of 0 means nothing was omitted.")
 	}
 	if err := fs.Parse(args[1:]); err != nil {
 		return 1
@@ -222,6 +228,31 @@ func handleExport(args []string) int {
 	memories, err := dm.GetMemoriesForExport(*collection, *since, *until)
 	if err != nil {
 		return usererror.Error("Export failed: %v", err)
+	}
+
+	// The export loss marker (design §6.3, R11).
+	//
+	// A skills export carries the PROJECTED SKILL ROW only. A package's
+	// reference files, scripts and assets are not in the export until the
+	// full package export writer exists, and the bytes exist nowhere
+	// else — so the export says so, by name, rather than losing them
+	// silently.
+	//
+	// The marker is carried structurally in the JSON response AND printed
+	// as a loud notice. There is no configuration in which the loss is
+	// silent.
+	//
+	// The concrete manager is used rather than the CoreDB interface: the
+	// marker is a property of the export, not a substrate read surface,
+	// and the CLI-only operations stay off CoreDB on purpose (the same
+	// boundary TestPurge_IsNotOnCoreDB pins).
+	packageLoss := &mpminternal.SkillPackageExportLoss{Packages: []mpminternal.SkillPackageExportOmitted{}}
+	if concrete := getDBConcrete(); concrete != nil {
+		loss, err := concrete.GetSkillPackageExportLoss(*collection, *since, *until)
+		if err != nil {
+			return usererror.Error("Export failed: %v", err)
+		}
+		packageLoss = loss
 	}
 
 	var writer *csv.Writer
@@ -253,9 +284,20 @@ func handleExport(args []string) int {
 	}
 
 	if *format == "json" {
+		// The JSON document carries the loss marker. The shape is
+		// stable: `memories` is always the array of rows, and
+		// `packages_omitted` is always present with a count and the
+		// list of the packages the export did not carry.
+		//
+		// A count of zero is a positive statement — this export carried
+		// every package it could — and it keeps the response's type
+		// stable for a consumer that always reads the same two keys.
 		enc := json.NewEncoder(outputTarget)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(memories); err != nil {
+		if err := enc.Encode(map[string]interface{}{
+			"memories":         memories,
+			"packages_omitted": packageLoss,
+		}); err != nil {
 			return usererror.Error("JSON encode failed: %v", err)
 		}
 	} else if *format == "csv" {
@@ -294,6 +336,13 @@ func handleExport(args []string) int {
 		usererror.Notice("Exported %d memories to %s", len(memories), *output)
 	} else {
 		usererror.Notice("Exported %d memories", len(memories))
+	}
+
+	// The loss marker, on standard error so it never corrupts the JSON
+	// or CSV document on standard output — and loud enough that a
+	// caller who never read the response still sees it.
+	if notice := packageLoss.Notice(); notice != "" {
+		usererror.Notice("%s", notice)
 	}
 	return 0
 }

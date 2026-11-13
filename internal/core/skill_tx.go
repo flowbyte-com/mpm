@@ -192,6 +192,129 @@ func (dm *DatabaseManager) saveSkillProjectionInTx(tx *sql.Tx, name, version, co
 	return id, nil
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// RESURRECTION
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ResurrectSkillProjectionInTx revives a SOFT-DELETED skill row inside
+// the CALLER's transaction, writing the projection in place.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THIS EXISTS, AND WHY IT IS NOT THE LEGACY FORCE PATH
+//
+// A soft shred (mpm skill delete) stamps deleted_at on the skill row and
+// preserves the row for audit. The row still owns its id, so a new-row
+// INSERT against it would collide on the primary key.
+//
+// The PACKAGE IMPORT needs to revive such a row: §5.7 says a re-import
+// of the same package_hash resurrects the skill, and says so
+// EXPLICITLY — "the import path is not the legacy force path (§5.8.1),
+// so R1's refusal does not apply to it".
+//
+// This primitive is therefore NOT the legacy force path. The difference
+// is material:
+//
+//   - the legacy force path REPLACES memories.content under the same id
+//     for ANY skill, which is exactly what would give one packaged id two
+//     documents. It is refused against a packaged skill (R1).
+//   - this primitive revives a row that carries NO package, or revives a
+//     packaged row whose package_hash is UNCHANGED — so the id never
+//     ends up carrying two documents.
+//
+// The caller owns the transaction, exactly as for SaveSkillProjectionInTx:
+// this function never begins, commits or rolls back one.
+//
+// The row is revived with deleted_at = NULL, and the content, the
+// metadata's is_latest / version / content_hash and the author are
+// written. The weight and the reinforcement_count are NOT touched: they
+// encode the skill's retrieval trajectory, and a revival must not
+// destroy it.
+func (dm *DatabaseManager) ResurrectSkillProjectionInTx(tx *sql.Tx, name, version, content, authorAgent string, ac ActiveContext) (string, error) {
+	if tx == nil {
+		return "", fmt.Errorf("save skill: a caller-owned transaction is required")
+	}
+
+	// The projection is validated and SCANNED before anything is
+	// written, exactly as in the new-row path: a projection carrying a
+	// secret or a poison phrase never reaches the database, from any
+	// caller, in any transaction.
+	if _, err := dm.validateSkillProjection(name, version, content); err != nil {
+		return "", err
+	}
+
+	id, err := SkillIDForNameAndVersion(name, version)
+	if err != nil {
+		return "", fmt.Errorf("save skill: %w", err)
+	}
+
+	// The row must exist AND be soft-deleted. A live row is refused:
+	// reviving a live row would be the in-place overwrite R1 forbids.
+	var deletedAt sql.NullInt64
+	err = tx.QueryRow(`SELECT deleted_at FROM memories WHERE id = ?`, id).Scan(&deletedAt)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", fmt.Errorf("save skill: %s does not exist, so there is nothing to resurrect", id)
+	case err != nil:
+		return "", fmt.Errorf("save skill: lookup existing skill: %w", err)
+	}
+	if !deletedAt.Valid {
+		return "", fmt.Errorf("save skill: %s is not soft-deleted", id)
+	}
+
+	// is_latest is semver-driven, exactly as in the new-row path: the
+	// incoming version is compared against the other LIVE versions of the
+	// name, and the rows it outranks are flipped inside the same
+	// transaction.
+	otherRows, err := loadActiveSkillRowsTx(tx, name, id)
+	if err != nil {
+		return "", err
+	}
+	otherMax := highestSemver(otherRows)
+	newIsLatest := true
+	if otherMax.id != "" {
+		cmp := semver.Compare("v"+version, "v"+otherMax.version)
+		switch {
+		case cmp > 0:
+			for _, r := range otherRows {
+				if semver.Compare("v"+r.version, "v"+version) < 0 {
+					if _, err := tx.Exec(`
+						UPDATE memories
+						SET metadata = json_set(COALESCE(metadata, '{}'), '$.is_latest', 0)
+						WHERE id = ? AND deleted_at IS NULL
+					`, r.id); err != nil {
+						return "", fmt.Errorf("flip prior is_latest: %w", err)
+					}
+				}
+			}
+		case cmp == 0:
+			return "", fmt.Errorf("save skill: version %s already exists for %s (id=%s)", version, name, otherMax.id)
+		default:
+			newIsLatest = false
+		}
+	}
+
+	// The content and the metadata are written in place, and the
+	// tombstone is cleared. The weight and the reinforcement_count are
+	// deliberately absent from the SET clause: SQLite preserves the
+	// columns it is not told to change, and those two encode the skill's
+	// retrieval trajectory.
+	if _, err := tx.Exec(`
+		UPDATE memories
+		SET content = ?,
+		    metadata = json_set(COALESCE(metadata, '{}'),
+		        '$.is_latest', ?,
+		        '$.author', ?,
+		        '$.version', ?,
+		        '$.content_hash', ?),
+		    deleted_at = NULL,
+		    updated_at = CAST(strftime('%s','now') AS INTEGER)
+		WHERE id = ? AND deleted_at IS NOT NULL
+	`, content, boolToInt(newIsLatest), authorAgent, version, contentHash(content), id); err != nil {
+		return "", fmt.Errorf("resurrect skill: %w", err)
+	}
+	return id, nil
+}
+
 // skillRowTags builds the tag list a skill row carries.
 //
 // Tags: ["skill", <domain>] — the domain is omitted when empty so the
