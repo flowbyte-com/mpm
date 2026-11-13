@@ -740,10 +740,14 @@ var barePoolAllowlist = []barePoolEntry{
 		SQL:   "INSERT OR IGNORE INTO shared.contradiction_log (memory_id_a, memory_id_b, evidence, similarity, detected_by, detected_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
 		Why:   reasonPropagated,
 		Count: 1},
-	{File: "internal/core/skill_db.go",
-		SQL:   "UPDATE memories SET content = ?, tags = ?, metadata = ?, is_long_term = 1, deleted_at = NULL, updated_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ?",
-		Why:   reasonPropagated,
-		Count: 1},
+	// The skill force-overwrite UPDATE is no longer listed here: Stage P3
+	// moved it off the bare pool and into the caller's transaction, where
+	// it runs through ExecTracked alongside the package-immutability
+	// guard. That is the remediation this ratchet asks for — "route it
+	// through ExecTracked, or move it inside a transaction" — so the
+	// entry was deleted rather than decremented. Its successor lives in
+	// internal/core/skill_db.go, guarded by
+	// `AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)`.
 	{File: "internal/core/skill_db.go",
 		SQL:   "UPDATE memories SET deleted_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND collection = 'skills' AND deleted_at IS NULL",
 		Why:   reasonPropagated,
@@ -778,7 +782,7 @@ var barePoolAllowlist = []barePoolEntry{
 		Why:   reasonBestEffort,
 		Count: 1},
 	{File: "internal/core/web_db.go",
-		SQL:   "DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL AND",
+		SQL:   "DELETE FROM memories WHERE created_at < ? AND deleted_at IS NULL AND AND",
 		Why:   reasonBestEffort,
 		Count: 1},
 	{File: "internal/core/web_db.go",
