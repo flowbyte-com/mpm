@@ -378,7 +378,15 @@ func TestP4_B1_TheAnchorIsImmuneToALaterSwap(t *testing.T) {
 	}
 	outside, _ := p4ConfinementOutsideTree(t, base)
 
-	anchor, err := openPackageImportAnchor(root)
+	// The anchor is opened through the REAL chain — the identity is
+	// captured by the resolver and then compared against the opened
+	// descriptor — so this test exercises the production path rather
+	// than a hand-assembled one.
+	resolved, identity, err := resolvePackageImportRoot(root)
+	if err != nil {
+		t.Fatalf("resolve the root: %v", err)
+	}
+	anchor, err := openPackageImportAnchor(resolved, identity)
 	if err != nil {
 		t.Fatalf("open the anchor: %v", err)
 	}
@@ -470,6 +478,31 @@ func TestP4_B1_ADirectoryReplacedByASymlinkIsRefused(t *testing.T) {
 // TestP4_B1_AnAncestorDirectoryReplacedByASymlinkIsRefused covers the
 // ancestor case: a directory ABOVE the package root replaced by a symlink
 // to a directory that holds a different package.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THIS TEST WAS, AND WHY IT WAS VACUOUS
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The first version of this test swapped the ancestor BEFORE the import
+// started, and its outside fixture held `outside/SKILL.md` — while the
+// substituted path was `parent/pkg`. After the swap the importer looked
+// for `outside/pkg`, which DID NOT EXIST, so the import was refused with
+// `import_root_invalid` before the ancestor case was ever exercised.
+//
+// A refusal caused by a missing directory proves nothing about
+// confinement: the import would have been refused for the same reason if
+// the attacker had done nothing at all.
+//
+// The test now does two things:
+//
+//   - the outside fixture holds a MATCHING `pkg/` subtree, so the
+//     substituted path resolves to a complete, importable package; and
+//   - the swap happens in the POST-RESOLUTION WINDOW, using the same
+//     FIFO rendezvous the other identity-race tests use, so the
+//     substitution lands between the root's resolution and the anchor's
+//     open.
+//
+// The refusal is therefore caused by the identity check alone.
 func TestP4_B1_AnAncestorDirectoryReplacedByASymlinkIsRefused(t *testing.T) {
 	dm := p3DM(t)
 
@@ -483,35 +516,29 @@ func TestP4_B1_AnAncestorDirectoryReplacedByASymlinkIsRefused(t *testing.T) {
 		[]byte(p4SkillDoc("ancestor", "1.0.0", "the ORIGINAL body\n")), 0o600); err != nil {
 		t.Fatalf("write entrypoint: %v", err)
 	}
-	outside, _ := p4ConfinementOutsideTree(t, base)
 
-	// The swap: the ANCESTOR becomes a symlink to the outside tree.
-	if err := os.Rename(parent, filepath.Join(base, "parent-original")); err != nil {
-		t.Fatalf("rename the ancestor: %v", err)
-	}
-	if err := os.Symlink(outside, parent); err != nil {
-		t.Fatalf("symlink the ancestor: %v", err)
-	}
+	// The outside tree, with a MATCHING `pkg/` subtree — so the
+	// substituted path resolves to a complete package and the refusal
+	// cannot be an incidental "missing directory".
+	outside := filepath.Join(base, "outside")
+	p4IdentityRaceOutsidePkg(t, filepath.Join(outside, "pkg"))
 
-	res, err := dm.ImportSkillPackageFromDir(PackageImportOptions{Path: root})
-	if err != nil {
-		t.Logf("the import was refused (acceptable): %v (reason %q)", err, PackageImportReasonOf(err))
-		p4AssertNothingStored(t, dm, "ancestor swap")
-		return
-	}
+	preID, preContent := p4IdentityRacePreexisting(t, dm)
+	before := p4IdentityRaceCensusOf(t, dm)
 
-	// If it succeeded, the bytes must be the original package's.
-	var content string
-	if err := dm.db.QueryRow(`SELECT content FROM memories WHERE id = ?`,
-		res.SkillID).Scan(&content); err != nil {
-		t.Fatalf("read the projection: %v", err)
-	}
-	if !strings.Contains(content, "the ORIGINAL body") {
-		t.Errorf("the stored projection is not the original package's:\n%s", content)
-	}
-	if strings.Contains(content, "THIS CAME FROM OUTSIDE THE ROOT") {
-		t.Errorf("the stored projection came from OUTSIDE the import root:\n%s", content)
-	}
+	err := p4IdentityRaceImport(t, dm, root, func(t *testing.T) {
+		// The swap: the ANCESTOR becomes a symlink to the outside tree.
+		if err := os.Rename(parent, filepath.Join(base, "parent-original")); err != nil {
+			t.Fatalf("rename the ancestor: %v", err)
+		}
+		if err := os.Symlink(outside, parent); err != nil {
+			t.Fatalf("symlink the ancestor: %v", err)
+		}
+	})
+
+	// The refusal must come from the IDENTITY check, not from a missing
+	// directory.
+	p4IdentityRaceOutcome(t, dm, err, before, preID, preContent)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

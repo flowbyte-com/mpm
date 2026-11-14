@@ -21,12 +21,29 @@
 //
 // Three rules hold the boundary:
 //
-//  1. The import root is HELD OPEN as a directory descriptor, and every
-//     inspection and every read is issued RELATIVE TO THAT DESCRIPTOR
-//     (os.Root). A path is a name and a name can be re-pointed between
-//     the moment it is checked and the moment it is opened; a descriptor
-//     cannot. Replacing the root path with a symlink after the root was
-//     opened changes nothing the walk reads (§7 threat 19).
+//  1. The import root's IDENTITY IS CAPTURED AT RESOLUTION, and the
+//     descriptor the walk uses is checked against that capture. The
+//     chain is:
+//
+//        original resolved identity -> scanner preflight
+//            -> opened descriptor -> identity comparison
+//            -> confined traversal
+//
+//     A path is a name, and a name can be re-pointed at a different
+//     directory between the moment it is resolved and the moment a
+//     descriptor is opened on it. The scanner preflight sits in that
+//     window. So the identity is captured ONCE, before the preflight,
+//     and the opened descriptor is compared against THAT — never against
+//     a fresh lookup of the path, which would be a second observation
+//     taken after the substitution and would agree with it.
+//
+//     The comparison is `os.SameFile`, so any replacement between the
+//     capture and the open is refused (`changed_during_read`): the root
+//     itself, an ancestor of the root, or a symlink in either position.
+//     Once the descriptor IS open, every inspection and every read is
+//     issued RELATIVE TO IT (os.Root), so replacing the root path
+//     afterwards changes nothing the walk reads (§7 threat 19).
+//
 //     A symlinked directory is refused outright (`symlinked_directory`); a
 //     symlink whose target resolves outside the import root is refused
 //     (`path_escapes_root`).
@@ -385,7 +402,18 @@ func (dm *DatabaseManager) planPackageImport(opts PackageImportOptions, limits P
 	// recommended defaults rather than a zero limit.
 	limits = limits.withDefaults()
 
-	root, err := resolvePackageImportRoot(opts.Path)
+	// THE ROOT IS RESOLVED HERE, and its identity is CAPTURED HERE.
+	//
+	// The capture is deliberately BEFORE the scanner preflight below.
+	// The preflight is where the operator's toxic-phrase configuration is
+	// read, and it is the one step in the plan that blocks on
+	// something outside the import root — which makes it the window in
+	// which the root's path can be re-pointed at a different directory.
+	//
+	// The identity travels with the plan and is what the anchor compares
+	// the opened descriptor against, so a substitution in that window is
+	// detected rather than adopted.
+	root, identity, err := resolvePackageImportRoot(opts.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +427,7 @@ func (dm *DatabaseManager) planPackageImport(opts PackageImportOptions, limits P
 			"the toxic-phrase configuration could not be loaded: %v", err)
 	}
 
-	files, err := walkPackageTree(root, limits)
+	files, err := walkPackageTree(root, identity, limits)
 	if err != nil {
 		return nil, err
 	}
@@ -568,55 +596,122 @@ func sha256Hex(content []byte) string {
 // THE WALK
 // ─────────────────────────────────────────────────────────────────────────────
 
+// packageImportIdentity is the identity of the import root, CAPTURED at
+// resolution time.
+//
+// # WHY IT EXISTS
+//
+// A path is a NAME. Between the moment the importer resolves the
+// operator's path and the moment it opens a descriptor on it, that name
+// can be re-pointed at a different directory — a different REAL
+// directory, not merely a symlink. The scanner preflight sits exactly in
+// that window: the root is resolved first, and the toxic-phrase
+// configuration is read second.
+//
+// So the comparison that decides "is this the directory the operator
+// selected?" CANNOT be between two observations taken after the swap.
+// Both would describe the same, substituted, directory.
+//
+// The identity therefore has to be captured ONCE, at resolution, and
+// carried forward. Everything the import later opens is compared against
+// THAT capture.
+//
+// WHAT IS CAPTURED
+//
+//   - `root` — the identity of the import root itself: the DIRECTORY for
+//     a package root, the FILE for a standalone one-file package.
+//
+//   - `parent` — the identity of the root's PARENT DIRECTORY. It is
+//     captured only for a standalone one-file package, whose anchor is
+//     the parent directory rather than the root itself.
+//
+// The capture semantics MATCH the comparison they are used for, which is
+// why the two use different calls: `root` is compared against a
+// descriptor-relative `stat` of a DIRECTORY (which follows the path's
+// symlinks), and — for a standalone file — against a
+// descriptor-relative `lstat` of the file (which does NOT follow the
+// final symlink, because a standalone `SKILL.md` may itself be one).
+type packageImportIdentity struct {
+	root   os.FileInfo
+	parent os.FileInfo
+}
+
 // resolvePackageImportRoot resolves the operator's path into a package
 // root, and reports whether the import is a DIRECTORY package or a
 // standalone one-file package.
 //
+// It returns the RESOLVED path and the identity of the root AS IT IS AT
+// THIS MOMENT. The identity is the anchor for every comparison the rest
+// of the import makes: the import refuses if the path it later opens is
+// not the path it resolved here.
+//
 // A standalone `SKILL.md` is a one-file package (§13 T02): the operator
 // points at the file, and only that file is imported. Its canonical path
 // is `SKILL.md`.
-func resolvePackageImportRoot(path string) (string, error) {
-	info, err := os.Lstat(path)
+func resolvePackageImportRoot(path string) (string, packageImportIdentity, error) {
+	// ── THE RESOLUTION ──────────────────────────────────────────────
+	//
+	// The operator's own path MAY be a symlink — resolving it is
+	// reasonable, and the RESOLVED path becomes the root against which
+	// every entry is confined. `EvalSymlinks` also expands any symlinked
+	// ANCESTOR, so the resolved path names the directory the operator's
+	// path actually reaches.
+	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+		return "", packageImportIdentity{}, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+			"the import path %q could not be resolved: %v", path, err)
+	}
+
+	// ── THE CAPTURE ─────────────────────────────────────────────────
+	//
+	// `os.Stat` FOLLOWS the path's symlinks but does not OPEN the
+	// target, so it names the directory the operator's path resolves to
+	// without a FIFO ever blocking the capture. The classification
+	// below refuses the non-regular cases, and nothing here ever opens
+	// a FIFO, a device or a socket.
+	//
+	// It is taken HERE — at resolution, before the scanner preflight and
+	// before any descriptor is opened for reading. Everything the import
+	// later opens is compared against THIS.
+	captured, err := os.Stat(resolvedPath)
+	if err != nil {
+		return "", packageImportIdentity{}, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
 			"the import path %q could not be inspected: %v", path, err)
 	}
 
-	if info.Mode()&os.ModeSymlink != 0 {
-		// The operator's own path may be a symlink — resolving it is
-		// reasonable, and the RESOLVED path becomes the root against
-		// which every entry is confined.
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return "", packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
-				"the import path %q could not be resolved: %v", path, err)
-		}
-		path = resolved
-		info, err = os.Lstat(path)
-		if err != nil {
-			return "", packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
-				"the import path %q could not be inspected: %v", path, err)
-		}
+	if captured.IsDir() {
+		return resolvedPath, packageImportIdentity{root: captured}, nil
 	}
 
-	if info.IsDir() {
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return "", packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
-				"the import root %q could not be resolved: %v", path, err)
-		}
-		return resolved, nil
-	}
-
-	if info.Mode().IsRegular() {
-		if filepath.Base(path) != packageEntrypointName {
-			return "", packageImportErrorf(PackageImportReasonEntrypointNotFound, filepath.Base(path),
+	if captured.Mode().IsRegular() {
+		if filepath.Base(resolvedPath) != packageEntrypointName {
+			return "", packageImportIdentity{}, packageImportErrorf(PackageImportReasonEntrypointNotFound, filepath.Base(resolvedPath),
 				"a standalone package file must be named %s", packageEntrypointName)
 		}
-		return path, nil
+		// The file's own identity is captured WITHOUT following a final
+		// symlink, because the anchor later compares it with a
+		// descriptor-relative `lstat` of the same name — the same
+		// no-follow semantics. (`EvalSymlinks` has already expanded
+		// every symlink, so the final component is never one; the
+		// no-follow capture is about matching the comparison's
+		// semantics, not about tolerating a link.)
+		fileIdentity, err := os.Lstat(resolvedPath)
+		if err != nil {
+			return "", packageImportIdentity{}, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+				"the import path %q could not be inspected: %v", path, err)
+		}
+		// And the PARENT's identity, because the parent is the anchor
+		// for a one-file package: the file is read by name relative to
+		// the opened parent directory.
+		parent, err := os.Stat(filepath.Dir(resolvedPath))
+		if err != nil {
+			return "", packageImportIdentity{}, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+				"the import path %q could not be inspected: %v", filepath.Dir(resolvedPath), err)
+		}
+		return resolvedPath, packageImportIdentity{root: fileIdentity, parent: parent}, nil
 	}
 
-	return "", packageImportErrorf(PackageImportReasonImportRootInvalid, "",
+	return "", packageImportIdentity{}, packageImportErrorf(PackageImportReasonImportRootInvalid, "",
 		"the import path %q is neither a directory nor a regular file", path)
 }
 
@@ -625,8 +720,10 @@ func resolvePackageImportRoot(path string) (string, error) {
 // THE GUARANTEES, STATED EXACTLY
 //
 //  1. The walk is CONFINEd to the root's OPENED directory descriptor.
-//     Every inspection and every read is issued relative to it (os.Root),
-//     so the bytes come from the inode the operator selected even if the
+//     The descriptor is checked against the identity CAPTURED AT
+//     RESOLUTION, so it IS the directory the operator's path named when
+//     it was resolved. Every inspection and every read is issued relative
+//     to it (os.Root), so the bytes come from that inode even if the
 //     paths underneath it are re-pointed while the walk runs.
 //  2. A symlinked DIRECTORY is refused outright (`symlinked_directory`) —
 //     the walk does not descend into it.
@@ -641,8 +738,8 @@ func resolvePackageImportRoot(path string) (string, error) {
 //
 // The limits are enforced DURING the walk: the walk stops at the first
 // violation and never enumerates the whole tree (§7 threat 11, R12).
-func walkPackageTree(root string, limits PackageImportLimits) ([]packageImportFile, error) {
-	anchor, err := openPackageImportAnchor(root)
+func walkPackageTree(root string, identity packageImportIdentity, limits PackageImportLimits) ([]packageImportFile, error) {
+	anchor, err := openPackageImportAnchor(root, identity)
 	if err != nil {
 		return nil, err
 	}
@@ -705,17 +802,23 @@ func walkPackageTree(root string, limits PackageImportLimits) ([]packageImportFi
 // replaced by a symlink to somewhere else, and the walk then reads that
 // somewhere else while believing it is reading the root.
 //
-// The anchor closes the gap by holding the root's DIRECTORY DESCRIPTOR.
-// Every read the walk performs is issued RELATIVE TO THAT DESCRIPTOR
-// (os.Root), so the bytes come from the inode the operator selected no
-// matter what happens to the path afterwards. Replacing the root path with
-// a symlink after the anchor is opened changes nothing the walk reads.
+// The anchor closes the SECOND half of the gap by holding the root's
+// DIRECTORY DESCRIPTOR. Every read the walk performs is issued RELATIVE
+// TO THAT DESCRIPTOR (os.Root), so the bytes come from the inode the
+// operator selected no matter what happens to the path afterwards.
+// Replacing the root path with a symlink after the anchor is opened
+// changes nothing the walk reads.
 //
-// The anchor therefore establishes the invariant the design states (§7
-// threat 19): the resolved root is compared against every candidate
-// before it is read, and the comparison is not a string comparison that a
-// concurrent rename can defeat — it is a kernel-enforced resolution
-// relative to an open directory.
+// The FIRST half of the gap — between the root's RESOLUTION and the
+// anchor's OPEN — is closed by the captured identity: the anchor's
+// descriptor is compared against the identity captured at resolution,
+// not against a fresh lookup of the path. See openPackageImportAnchor.
+//
+// Together they establish the invariant the design states (§7 threat 19):
+// the directory the walk reads is the directory the operator's path named
+// when it was resolved, and the comparison is not a string comparison
+// that a concurrent rename can defeat — it is a comparison of two
+// device-and-inode observations, one captured and one opened.
 //
 // The path-based logic that remains (resolving a symlink's target so the
 // refusal can name it) NEVER READS BYTES. Every byte the importer stores
@@ -737,29 +840,40 @@ type packageImportAnchor struct {
 }
 
 // openPackageImportAnchor opens the import root and binds it to the inode
-// that was resolved.
+// that was RESOLVED.
 //
-// The identity chain is deliberate:
+// THE IDENTITY CHAIN, IN ORDER
 //
-//	expected (os.Lstat, path)  →  actual (os.Root, descriptor-relative)
+//	original resolved identity (captured at resolution)
+//	    → scanner preflight
+//	    → opened descriptor
+//	    → identity comparison
+//	    → confined traversal
 //
-// If the two disagree, the root path was re-pointed between the
-// resolution and the open, and the import is refused rather than continued
-// against an inode the operator did not select.
-func openPackageImportAnchor(resolvedPath string) (*packageImportAnchor, error) {
-	expected, err := os.Lstat(resolvedPath)
-	if err != nil {
-		return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
-			"the import root %q could not be inspected: %v", resolvedPath, err)
-	}
-	if expected.Mode()&os.ModeSymlink != 0 {
-		// The root became a symlink after it was resolved. Continuing
-		// would resolve it again, to somewhere the operator never named.
-		return nil, packageImportErrorf(PackageImportReasonChangedDuringRead, "",
-			"the import root %q was replaced by a symlink after it was resolved", resolvedPath)
+// The comparison is between the identity captured at RESOLUTION and the
+// identity of the descriptor this function opens. Both are
+// descriptor-relative observations of an inode (device + inode), never a
+// comparison of two path strings.
+//
+// It is NOT a fresh `os.Lstat` of the path. A fresh lookup would be a
+// SECOND observation taken after the window it is supposed to protect:
+// if the path was re-pointed at a different REAL directory, the fresh
+// lookup and the opened descriptor would agree, and the substitution
+// would be invisible. That is exactly the gap this function exists to
+// close.
+//
+// So the expected identity is CAPTURED — by resolvePackageImportRoot,
+// before the scanner preflight — and carried here. Any replacement
+// between the capture and the open, whether the root itself, an
+// ancestor, or a symlink, changes the inode the descriptor names and is
+// refused (`changed_during_read`).
+func openPackageImportAnchor(resolvedPath string, identity packageImportIdentity) (*packageImportAnchor, error) {
+	if identity.root == nil {
+		return nil, packageImportErrorf(PackageImportReasonImportRootInvalid, "",
+			"the import root %q has no captured identity to open against", resolvedPath)
 	}
 
-	if expected.IsDir() {
+	if identity.root.IsDir() {
 		root, err := os.OpenRoot(resolvedPath)
 		if err != nil {
 			return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
@@ -771,15 +885,15 @@ func openPackageImportAnchor(resolvedPath string) (*packageImportAnchor, error) 
 			return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
 				"the import root %q could not be inspected after opening: %v", resolvedPath, err)
 		}
-		if !os.SameFile(expected, actual) {
+		if !os.SameFile(identity.root, actual) {
 			root.Close()
 			return nil, packageImportErrorf(PackageImportReasonChangedDuringRead, "",
-				"the import root %q was replaced between the inspection and the open", resolvedPath)
+				"the import root %q was replaced between its resolution and its open", resolvedPath)
 		}
 		return &packageImportAnchor{root: root, rootPath: resolvedPath}, nil
 	}
 
-	if !expected.Mode().IsRegular() {
+	if !identity.root.Mode().IsRegular() {
 		return nil, packageImportErrorf(PackageImportReasonImportRootInvalid, "",
 			"the import path %q is neither a directory nor a regular file", resolvedPath)
 	}
@@ -787,21 +901,30 @@ func openPackageImportAnchor(resolvedPath string) (*packageImportAnchor, error) 
 	// A standalone one-file package. The anchor is the file's PARENT
 	// directory, and the file is read by name relative to it — so the read
 	// is descriptor-relative too.
+	//
+	// BOTH identities are checked: the PARENT's, because the parent is
+	// the anchor, and the FILE's, because the file is the root. A
+	// substituted parent directory is caught by the first; a substituted
+	// file inside an intact parent is caught by the second.
 	parent := filepath.Dir(resolvedPath)
 	base := filepath.Base(resolvedPath)
-	parentInfo, err := os.Lstat(parent)
-	if err != nil {
-		return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
-			"the import root %q could not be inspected: %v", parent, err)
-	}
-	if !parentInfo.IsDir() {
-		return nil, packageImportErrorf(PackageImportReasonImportRootInvalid, "",
-			"the import root %q is not inside a directory", resolvedPath)
-	}
 	root, err := os.OpenRoot(parent)
 	if err != nil {
 		return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
 			"the import root %q could not be opened: %v", parent, err)
+	}
+	if identity.parent != nil {
+		actualParent, err := root.Stat(".")
+		if err != nil {
+			root.Close()
+			return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+				"the import root %q could not be inspected after opening: %v", parent, err)
+		}
+		if !os.SameFile(identity.parent, actualParent) {
+			root.Close()
+			return nil, packageImportErrorf(PackageImportReasonChangedDuringRead, "",
+				"the import root %q was replaced between its resolution and its open", parent)
+		}
 	}
 	actual, err := root.Lstat(base)
 	if err != nil {
@@ -809,10 +932,10 @@ func openPackageImportAnchor(resolvedPath string) (*packageImportAnchor, error) 
 		return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
 			"the import root %q could not be inspected after opening: %v", resolvedPath, err)
 	}
-	if !os.SameFile(expected, actual) {
+	if !os.SameFile(identity.root, actual) {
 		root.Close()
 		return nil, packageImportErrorf(PackageImportReasonChangedDuringRead, "",
-			"the import root %q was replaced between the inspection and the open", resolvedPath)
+			"the import root %q was replaced between its resolution and its open", resolvedPath)
 	}
 	return &packageImportAnchor{root: root, rootPath: parent, file: base}, nil
 }
