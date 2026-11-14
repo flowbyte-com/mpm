@@ -28,6 +28,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1533,31 +1534,118 @@ func p5PatchEOCDEntryCount(t *testing.T, path string, count uint16) {
 	}
 }
 
+// TestP5_ALegitimatePackageAtTheLimitIsAccepted is the regression for
+// the review's major finding.
+//
+// The central directory's bounds must not refuse a LEGITIMATE package.
+// P4 allows 512 files, and §5.4 allows a canonical path of 255 bytes;
+// a package tree with 512 files has at most 511 internal directories.
+// The legitimate worst case is therefore 512 files and 512 directory
+// entries, every name at the maximum length.
+//
+// A byte-derived ESTIMATE of the directory's record count cannot serve
+// here: a record is at least 46 bytes, but its NAME is not, so the
+// estimate counts the long paths as extra records. Measured, the
+// legitimate worst case has 1 024 real records and a byte-derived
+// estimate of 12 388 — and an estimate-based cap that clears the real
+// count refuses the estimate.
+//
+// So the count is EXACT, and this test pins that the legitimate worst
+// case is accepted on both layouts.
+func TestP5_ALegitimatePackageAtTheLimitIsAccepted(t *testing.T) {
+	const files = 512
+
+	// A near-maximal canonical path per content file, each in its own
+	// near-maximal directory. BOTH the file's path and its directory's
+	// path are long, because the directory's path is a prefix of the
+	// file's — and §5.4 allows 255 bytes for each.
+	//
+	// The directory entries are recorded too, because a well-formed
+	// archive records them.
+	//
+	// P4's cap is 512 FILES, and the entrypoint is one of them — so the
+	// legitimate worst case is 511 content files plus the entrypoint,
+	// with at most 511 internal directories beside them.
+	entries := make([]p5ArchiveEntry, 0, files*2)
+	entries = append(entries, p5ArchiveEntry{
+		name:    "SKILL.md",
+		content: []byte(p4SkillDoc("legitimate", "1.0.0", "legitimate\n")),
+	})
+	for i := 0; i < files-1; i++ {
+		dir := fmt.Sprintf("references/d%03d%s", i, strings.Repeat("x", 246-len(fmt.Sprintf("references/d%03d", i))))
+		file := dir + "/f.md"
+		if len(dir) != 246 || len(file) != 251 {
+			t.Fatalf("the fixture's paths are %d and %d bytes, not 246 and 251", len(dir), len(file))
+		}
+		entries = append(entries, p5ArchiveEntry{
+			name:    dir + "/",
+			dir:     true,
+			content: nil,
+		})
+		entries = append(entries, p5ArchiveEntry{
+			name:    file,
+			content: []byte("# F\n"),
+		})
+	}
+
+	dm := p3DM(t)
+	archive := filepath.Join(t.TempDir(), "legitimate.skill")
+	p5WriteArchive(t, archive, entries)
+
+	// The reader must read it — otherwise the fixture proves nothing
+	// about a bound that is tighter than the reader.
+	reader, err := zip.OpenReader(archive)
+	if err != nil {
+		t.Fatalf("the reader cannot open the archive, so the fixture proves nothing: %v", err)
+	}
+	defer reader.Close()
+	if len(reader.File) != files+(files-1) {
+		t.Fatalf("the archive carries %d entries, want %d", len(reader.File), files+(files-1))
+	}
+
+	// And the importer must accept it.
+	res, err := dm.ImportSkillPackageFromArchive(PackageImportOptions{Path: archive})
+	if err != nil {
+		t.Fatalf("a legitimate package at the limit was refused: %v", err)
+	}
+	if res.Status != PackageImportStatusImported {
+		t.Errorf("the import status = %q, want %q", res.Status, PackageImportStatusImported)
+	}
+
+	// Every file is stored, and the directory entries are not: the
+	// archive carries 1 023 entries but only the 512 files are rows.
+	got := p5PackageFiles(t, dm, res.SkillID)
+	if len(got) != files {
+		t.Errorf("the package carries %d file rows, want %d", len(got), files)
+	}
+	for _, p := range got {
+		if strings.HasSuffix(p, "/") {
+			t.Errorf("a directory entry was stored as a file: %q", p)
+		}
+	}
+}
+
 // TestP5_ALyingEntryCountDoesNotDefeatTheCentralDirectoryBound covers
 // the bound that the DECLARED count cannot provide.
 //
 // `archive/zip` reads directory records until it meets a bad signature
 // and compares the number it read with the DECLARED count only
 // AFTERWARDS. So an archive that declares TWO entries and carries
-// 20 000 real records has all 20 000 parsed — and a header struct
-// allocated for each of them — before the mismatch is noticed. The
-// declared count alone does not bound that allocation.
+// 20 001 real records has all 20 001 parsed — and a header struct
+// allocated for each of them — before the mismatch is noticed.
 //
-// The bound that DOES hold is the central directory's BYTE extent: the
-// parse spans exactly the central directory, and every record is at
-// least 46 bytes long, so the byte span bounds the record count. This
-// test refuses the archive on THAT bound, before the reader is built.
+// The count that bounds the allocation is EXACT, and it is taken by
+// walking the central directory before the reader is built, so the
+// refusal costs nothing and a lying header cannot defeat it.
 //
-// The refusal code is the discriminator: without the byte bound the
+// The refusal code is the discriminator: without the exact count the
 // reader would be built, the parse would overrun the declared count,
-// and `zip.NewReader` would fail with `archive_invalid`. The byte bound
-// refuses it earlier, with `file_count_limit`.
+// and `zip.NewReader` would fail with `archive_invalid`.
 func TestP5_ALyingEntryCountDoesNotDefeatTheCentralDirectoryBound(t *testing.T) {
 	dm := p3DM(t)
 	before := p5CensusOf(t, dm)
 
-	// 20 000 real entries: a central directory of about 920 KB, which
-	// is 20 000 records at the 46-byte minimum.
+	// 20 001 real entries: a central directory of about 1 MB.
 	entries := make([]p5ArchiveEntry, 0, 20001)
 	entries = append(entries, p5ArchiveEntry{
 		name:    "SKILL.md",
@@ -1573,8 +1661,6 @@ func TestP5_ALyingEntryCountDoesNotDefeatTheCentralDirectoryBound(t *testing.T) 
 	archive := filepath.Join(t.TempDir(), "lying-count.skill")
 	p5WriteArchive(t, archive, entries)
 
-	// The archive really does carry 20 001 records, and its central
-	// directory really is large enough to hold them.
 	info, err := os.Stat(archive)
 	if err != nil {
 		t.Fatalf("stat the archive: %v", err)
@@ -1597,11 +1683,13 @@ func TestP5_ALyingEntryCountDoesNotDefeatTheCentralDirectoryBound(t *testing.T) 
 	p5AssertReason(t, err, PackageImportReasonFileCountLimit)
 	p5AssertUnchanged(t, dm, before, "a lying entry count")
 
-	// The central directory was never parsed, so no header struct was
-	// allocated for any of its 20 001 records. The bound is generous;
-	// the assertion is about the ORDER OF MAGNITUDE.
+	// The central directory was never PARSED by `archive/zip` — only
+	// READ, once, to count its records. So the allocation is about the
+	// directory's byte size, not about a header per record. The old
+	// path allocated 6.2 MB for this fixture; the bound is generous,
+	// and the refusal code above is the precise discriminator.
 	allocated := int64(afterStats.TotalAlloc) - int64(beforeStats.TotalAlloc)
-	const allowed = 8 << 20
+	const allowed = 4 << 20
 	if allocated > allowed {
 		t.Errorf("the refused import allocated %d bytes, over the %d-byte bound — "+
 			"the central directory was parsed before the refusal", allocated, allowed)

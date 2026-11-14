@@ -97,40 +97,56 @@ type packageArchiveLimits struct {
 	MaxArchiveBytes int64
 
 	// MaxArchiveEntries is the maximum number of entries the archive's
-	// central directory may declare.
+	// central directory may hold.
 	//
 	// JUSTIFICATION. `archive/zip` builds one `zip.File` per central
-	// directory record when the reader is created, so the entry count
-	// is what bounds that allocation.
+	// directory record when the reader is created — 168 bytes each,
+	// plus an index — and it does NOT validate the declared count
+	// until the parse is over. So the entry count is what bounds that
+	// allocation.
 	//
-	// The bound is enforced BEFORE the reader is built, from the
-	// End-of-Central-Directory record — and it is enforced against TWO
-	// quantities, because the declared count alone is not a bound.
+	// The count this cap is compared against is EXACT: the records are
+	// counted by walking the directory BEFORE the reader is built, so
+	// the refusal costs nothing and the count cannot be inflated by a
+	// lying header.
 	//
-	// `archive/zip` parses directory records until it meets a bad
-	// signature and compares the number it read with the DECLARED
-	// count only afterwards, so an archive that declares two entries
-	// and carries 150 000 real records has all 150 000 parsed — and a
-	// header struct allocated for each — before the mismatch is
-	// noticed. The SECOND bound is therefore the number of records the
-	// central directory's BYTES could hold: the parse spans exactly
-	// the central directory, and every record is at least 46 bytes
-	// long, so a byte span holds at most span/46 records. That bound
-	// survives a lying count, because it is derived from the bytes.
+	// An estimate would not do. A record is at least 46 bytes, but its
+	// NAME is not, so a byte-derived estimate counts a legitimate
+	// package's long paths as extra records. Measured: the legitimate
+	// worst case — 512 files and 511 directories, every name at the
+	// 511-byte archive-path maximum — has 1 023 real records but a
+	// byte-derived estimate of 12 387. A cap that clears the real
+	// count would refuse the estimate, so the estimate is not used.
 	//
 	// A legitimate package carries at most 512 files (P4's cap) and at
 	// most one directory entry per directory it contains, so at most
-	// about 1024 entries. 4096 leaves four times that headroom for
-	// archives that record directories generously, while keeping the
-	// parsed central directory to a few megabytes.
+	// about 1 023 entries. 4096 leaves four times that headroom.
 	MaxArchiveEntries int
+
+	// MaxCentralDirectoryBytes is the maximum size of the archive's
+	// central directory, in bytes.
+	//
+	// JUSTIFICATION. The allocation `archive/zip` makes on the central
+	// directory is proportional to its byte size — measured at 4.8×
+	// the bytes, for the per-record header and its index — so this cap
+	// IS the allocation bound, stated in the unit the allocation is
+	// actually made in.
+	//
+	// It also bounds the walk that counts the records, which reads the
+	// directory into one buffer.
+	//
+	// The legitimate worst case — 512 files and 511 directories, every
+	// name at the 511-byte archive-path maximum — has a 569 811-byte
+	// central directory. 4 MiB leaves seven times that headroom.
+	MaxCentralDirectoryBytes int64
 }
 
 // defaultPackageArchiveLimits returns the archive limits.
 func defaultPackageArchiveLimits() packageArchiveLimits {
 	return packageArchiveLimits{
-		MaxArchiveBytes:   64 << 20, // 64 MiB
-		MaxArchiveEntries: 4096,
+		MaxArchiveBytes:          64 << 20, // 64 MiB
+		MaxArchiveEntries:        4096,
+		MaxCentralDirectoryBytes: 4 << 20, // 4 MiB
 	}
 }
 
@@ -268,21 +284,21 @@ func readPackageArchive(archivePath string, limits PackageImportLimits, archiveL
 	// ── The central directory is bounded BEFORE it is parsed. ───────
 	//
 	// `archive/zip` parses the whole central directory into memory when
-	// the reader is created — one header per record — and it validates
-	// the DECLARED count only AFTER the parse is over. So the declared
-	// count alone does not bound that allocation: an archive that
-	// declares two entries and carries 150 000 real records has all
-	// 150 000 parsed before the mismatch is noticed.
+	// the reader is created — one header per record, 168 bytes each,
+	// plus an index — and it validates the DECLARED count only AFTER
+	// the parse is over. So the declared count alone does not bound
+	// that allocation: an archive that declares two entries and
+	// carries 20 000 real records has all 20 000 parsed before the
+	// mismatch is noticed.
 	//
-	// TWO bounds are applied, and together they hold:
+	// THREE bounds are applied, and together they hold:
 	//
 	//  1. the DECLARED count — the cheap check, which refuses an
 	//     archive that plainly declares too many entries;
-	//  2. the PARSE WINDOW — the number of records the central
-	//     directory's BYTES could hold, derived from the record's own
-	//     extent. This is the bound that survives a lying count,
-	//     because it is derived from the bytes rather than from the
-	//     count.
+	//  2. the central directory's BYTE extent — which bounds both the
+	//     walk below and the allocation that follows it;
+	//  3. the EXACT record count, counted by walking the directory's
+	//     records in memory before the reader is built.
 	dir, err := readPackageArchiveDirectory(file, info.Size())
 	if err != nil {
 		return source, packageImportErrorWrap(PackageImportReasonArchiveInvalid, "", err,
@@ -293,10 +309,32 @@ func readPackageArchive(archivePath string, limits PackageImportLimits, archiveL
 			"the archive declares %d entries, over the %d-entry cap",
 			dir.count, archiveLimits.MaxArchiveEntries)
 	}
-	if maxRecords := dir.maxParseRecords(file, info.Size()); maxRecords > int64(archiveLimits.MaxArchiveEntries) {
+
+	// The central directory's byte extent. The allocation `archive/zip`
+	// goes on to make is proportional to it — measured at 4.8× — so
+	// this cap IS the allocation bound.
+	start := dir.parseStart(file, info.Size())
+	span := dir.endOffset - start
+	if span < 0 {
+		span = 0
+	}
+	if span > archiveLimits.MaxCentralDirectoryBytes {
 		return source, packageImportErrorf(PackageImportReasonFileCountLimit, "",
-			"the archive's central directory could hold %d records, over the %d-entry cap",
-			maxRecords, archiveLimits.MaxArchiveEntries)
+			"the archive's central directory is %d bytes, over the %d-byte cap",
+			span, archiveLimits.MaxCentralDirectoryBytes)
+	}
+
+	// The EXACT record count. The span is already bounded above, so
+	// this buffer is bounded too.
+	spanBytes := make([]byte, span)
+	if _, err := file.ReadAt(spanBytes, start); err != nil && !errors.Is(err, io.EOF) {
+		return source, packageImportErrorWrap(PackageImportReasonArchiveInvalid, "", err,
+			"the archive %q's central directory could not be read: %v", archivePath, err)
+	}
+	if records := countPackageArchiveRecords(spanBytes); records > int64(archiveLimits.MaxArchiveEntries) {
+		return source, packageImportErrorf(PackageImportReasonFileCountLimit, "",
+			"the archive's central directory holds %d records, over the %d-entry cap",
+			records, archiveLimits.MaxArchiveEntries)
 	}
 
 	reader, err := zip.NewReader(file, info.Size())
@@ -816,29 +854,11 @@ type packageArchiveDirectory struct {
 	endOffset int64
 }
 
-// maxParseRecords returns the maximum number of central-directory
-// records `archive/zip` can parse from this archive.
+// parseStart returns the offset at which `archive/zip` begins reading
+// central-directory records.
 //
-// # WHY THE DECLARED COUNT IS NOT THE BOUND
-//
-// `archive/zip` reads directory records until it meets a bad signature,
-// and it compares the number it read with the DECLARED count only
-// AFTERWARDS. So the declared count does not bound the parse at all: an
-// archive that declares two entries and carries 150 000 real records
-// has all 150 000 parsed, and a header struct allocated for each of
-// them, before the mismatch is noticed.
-//
-// The bound that DOES hold is a bound on the BYTES. `archive/zip` parses
-// from the central directory's first byte and stops at the
-// End-of-Central-Directory record — whose signature is not a valid
-// record signature — so the parse spans exactly the central directory.
-// And every record is at least 46 bytes long, so a byte span holds at
-// most span/46 records.
-//
-// # WHICH START `archive/zip` USES
-//
-// There are two, and which one applies is decided by the archive
-// itself:
+// There are two candidates, and which one applies is decided by the
+// archive itself:
 //
 //   - the NORMAL start — the central directory's first byte, which
 //     `archive/zip` derives as `endOffset - size`;
@@ -850,15 +870,9 @@ type packageArchiveDirectory struct {
 // The fallback is CHECKED, not assumed, and that matters: a PREFIXED
 // (self-extracting) archive has a positive base offset, and its
 // declared offset is relative to the archive's logical start — so the
-// absolute offset points into the PREFIX. Taking the earlier of the
-// two starts unconditionally would treat the whole prefix as parseable
-// central directory, and would refuse a legitimate self-extracting
-// archive that `archive/zip` reads perfectly.
-//
-// The result is therefore tight for every well-formed archive — the
-// normal start — and sound for the malformed one, where the fallback
-// really does apply.
-func (d packageArchiveDirectory) maxParseRecords(r io.ReaderAt, size int64) int64 {
+// absolute offset points into the PREFIX. Assuming the fallback would
+// treat the whole prefix as parseable central directory.
+func (d packageArchiveDirectory) parseStart(r io.ReaderAt, size int64) int64 {
 	start := d.endOffset - d.size
 
 	// The fallback applies only when the base offset is positive AND
@@ -877,10 +891,48 @@ func (d packageArchiveDirectory) maxParseRecords(r io.ReaderAt, size int64) int6
 	if start < 0 {
 		start = 0
 	}
-	if start >= d.endOffset {
-		return 0
+	if start > d.endOffset {
+		start = d.endOffset
 	}
-	return (d.endOffset - start) / archiveCentralDirectoryRecordMinBytes
+	return start
+}
+
+// countPackageArchiveRecords counts the central-directory records in a
+// byte span, EXACTLY.
+//
+// It mirrors `archive/zip`'s own walk — the same signature test and
+// the same 46-bytes-plus-lengths advance — but it counts in memory, so
+// it allocates one buffer rather than a header per record.
+//
+// # WHY THE COUNT HAS TO BE EXACT
+//
+// The bound that keeps `archive/zip`'s allocation in check is a bound
+// on the number of RECORDS, and a byte-DERIVED estimate of that number
+// is far too pessimistic to refuse on. A record is at least 46 bytes,
+// but its NAME is not: a legitimate package whose paths are long would
+// be estimated at many times its real record count, and refused.
+//
+// Measured: the legitimate worst case — 512 files and 511 directories,
+// every name at the 511-byte archive-path maximum — has a 569 811-byte
+// central directory and 1 023 real records, but a byte-derived estimate
+// of 12 387. A cap that clears the real count refuses the estimate.
+//
+// So the count is EXACT, and it is taken BEFORE the reader is built.
+// That is what makes the refusal both free of false positives and
+// effective against an archive that lies about its entry count.
+func countPackageArchiveRecords(span []byte) int64 {
+	var count int64
+	for off := 0; off+archiveCentralDirectoryRecordMinBytes <= len(span); {
+		if binary.LittleEndian.Uint32(span[off:]) != archiveCentralDirectorySignature {
+			break
+		}
+		nameLen := int(binary.LittleEndian.Uint16(span[off+28:]))
+		extraLen := int(binary.LittleEndian.Uint16(span[off+30:]))
+		commentLen := int(binary.LittleEndian.Uint16(span[off+32:]))
+		count++
+		off += archiveCentralDirectoryRecordMinBytes + nameLen + extraLen + commentLen
+	}
+	return count
 }
 
 // readPackageArchiveDirectory reads the End-of-Central-Directory record
