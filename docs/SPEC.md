@@ -67,6 +67,7 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.7 [Epistemic Compaction](#67-epistemic-compaction)
    - 6.8 [Skill Package Storage (P1 — storage only)](#68-skill-package-storage-p1--storage-only)
    - 6.9 [Project-Scoped Continuity Storage (Stage 1 — storage only)](#69-project-scoped-continuity-storage-stage-1--storage-only)
+   - 6.10 [Skill Package Import (P4 — directory import and the export loss marker)](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -278,7 +279,7 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 
 Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures can be evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
 
-**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). It is **storage only**: no package can be imported, read or exported yet, and a skill saved the ordinary way is unaffected.
+**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). A package can now be imported from a directory and stored atomically; the read API, the full package export and the package CLI/MCP surfaces are still later stages, and a skill saved the ordinary way is unaffected.
 
 #### Evidence
 
@@ -1888,6 +1889,8 @@ The primary key of `skill_packages` **is** the skill id: there is no second iden
 
 **No reader, writer, importer or exporter exists for these tables.** They are created empty and stay empty. There is no CLI command, no MCP action and no agent-facing surface for packages. A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
 
+> **Stage P4 has since added the writer.** This subsection describes **stage P1**, which is storage only. The **directory importer** — the first functional multi-file import — and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The import is **internal**: no CLI command, no MCP action and no agent-facing import surface exists for it either, and the read API, the full package export and the package CLI/MCP surfaces are still later stages.
+
 The later stages — canonicalisation, the importer, the read API, the export writer, the CLI and MCP surfaces — are described in §10 of the design document and are **not** part of this change. Several operator decisions in that design (the accepted archive layouts, the binary-asset default, cross-workspace sharing) are **open**, and this stage does not decide any of them.
 
 **One of them is no longer open.** The prune exemption's *form* was decided after P1: the operator approved the **blanket** exclusion of `collection = 'skills'` from the age-based `PruneOlderThan` (operator decision **O17**), and P3 implemented it. The age-based prune therefore no longer removes ordinary skills exactly as it did before — it no longer removes **any** skill. The compatibility impact and the reasoning are in [Skills (Procedural Memory)](#skills-procedural-memory); the implementation is `SkillsExclusionClause` in `internal/core/skill_db.go`. P3 also added the package-immutability guard on the legacy write path and the transaction-aware skill writer the importer will use. The importer, the read API, the export writer and the package CLI/MCP surfaces are still later stages.
@@ -1984,6 +1987,153 @@ The four tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **ac
 They are deliberately **not** on `RuntimeCanonicalSchema`: they are declared in Go source, and the source-checked half of the allow-list is the correct one.
 
 The registration has a second, deliberate consequence: an **old** binary's allow-list does not name them, so **restoring a backup taken by the new binary with an old binary fails closed** — the old binary refuses the dump. The allow-list is not weakened to hide this. Relaxing `restore-db` to skip unknown tables with a warning would trade a loud, safe refusal for a silent, partial restore — exactly the class of failure the validator exists to prevent.
+
+---
+
+### 6.10 Skill Package Import (P4 — directory import and the export loss marker)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). **Stage P4** adds the **directory importer** — the first functional multi-file import milestone — and the **export loss marker** that keeps the existing skills export honest while full package export does not yet exist.
+
+The format and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5, §6.3, §7, §9, §10 and §13. **This section describes stage P4.**
+
+#### What P4 adds
+
+An **internal** importer — `DatabaseManager.ImportSkillPackageFromDir` — that takes an operator-selected directory containing `SKILL.md`, or a standalone `SKILL.md` as a one-file package, and stores the whole package **atomically**.
+
+It is **internal**: there is no CLI command, no MCP action and no agent-facing import surface. P4 is the storage milestone; the operator-facing command lands in a later stage.
+
+Five properties are load-bearing and are pinned by tests:
+
+**1. The import directory is untrusted input, and the walk is confined to the root's OPENED directory.** The confinement rests on an **identity chain**, and the order of that chain is the guarantee:
+
+> **original resolved identity → scanner preflight → opened descriptor → identity comparison → confined traversal**
+
+The import root is resolved **once**, and its identity — the device and inode the operator's path named at that moment — is **captured at resolution**. The capture happens **before the scanner preflight**: the preflight reads the operator's toxic-phrase configuration, which is the one step of the plan that blocks on something outside the import root, and therefore the window in which the root's path can be re-pointed. The identity then travels with the plan.
+
+The anchor **opens a descriptor** on the resolved path and **compares the opened descriptor's identity with the captured one** (`os.SameFile`). A disagreement means the path now names a different inode, and the import is refused (`changed_during_read`). Every inspection and every read is then issued **relative to that descriptor** (`os.Root`), so the bytes come from the inode the operator selected even if the paths underneath it are re-pointed while the walk runs.
+
+The comparison is against the **captured** identity, never against a fresh lookup of the path. This is the load-bearing distinction: a fresh lookup would be a *second* observation taken after the substitution, so a path re-pointed at a different **real directory** — not merely at a symlink — would produce two observations that agree with each other, and the substitution would be adopted. Any replacement between the capture and the open is therefore refused, whether it is the root itself, an **ancestor** of the root, or a symlink in either position.
+
+A **symlinked directory** is refused outright (`symlinked_directory`); a symlink whose target resolves **outside** the resolved import root is refused (`path_escapes_root`); a regular-file symlink whose target resolves **inside** the root is admitted, and its target's bytes are stored. The opened **file**'s identity and the opened **directory**'s identity are each compared with the inspected one, so a file or a directory swapped between the two is detected (`changed_during_read`). A standalone one-file package is covered equivalently: the identity of the file **and** of its parent directory — the anchor for that shape — are both captured at resolution and both compared with the opened descriptor.
+
+**2. The limits are enforced during the traversal, not after the listing.** The file-count cap is checked before the file is read; the per-file and total byte caps are checked as the bytes are read. The walk **stops at the first violation** and never materialises the whole tree — the directory listing is read in bounded batches.
+
+**3. The scanners fail closed, and the per-file scan status is truthful.** Every file is scanned before anything is stored. A file carrying a secret is refused (`scanner_secret`); a file carrying a toxic phrase is refused (`scanner_poison`). The poison scanner's configuration is an **operator-editable file**, so the importer checks that the file is **readable** before scanning: a scan that could not run must never be reported as a scan that passed, and an unreadable configuration refuses the **whole** import (`scanner_unavailable`). The stored `secret_scanned` / `poison_scanned` columns record **which scanners actually ran**: a binary asset carries `poison_scanned = 0`, a *disclosed skip* rather than a claim of safety.
+
+**4. The write is one transaction, and it is verified after the commit.** A single transaction covers the projected `memories` skill row, the prior versions' `is_latest` changes, the content-addressed blob rows, the package manifest row, the per-file rows and the transactional provenance. Validation and scanning happen **before** the transaction opens, so a rejected package writes nothing at all; a failure inside the transaction rolls the whole import back. Because the P3 transaction writer defers its read-back assertion to the caller's commit, the importer performs a **post-commit verification**: the package row, the file rows, the blob rows and the projected skill row are read back and checked. The blobs are **content-verified**: the stored bytes are re-hashed and must hash to the address the file row records, because the store is content-addressed and the sha256 column *is* the address.
+
+**5. A resurrection replaces the content, so it refreshes the attribution.** Reviving a soft-deleted skill rewrites its `memories.content` **in place**. The row's `artifact_provenance` therefore describes a writer who no longer wrote it, which is the false attribution the substrate's `refreshArtifactProvenance` exists to prevent — and which the legacy force path already avoids. The resurrection refreshes the provenance **inside the caller's transaction** (the tx-scoped `RecordArtifactProvenanceUpsert`, not `refreshArtifactProvenance`, which opens a transaction of its own and would contend with the caller's), so the content change and the attribution change commit together or not at all. A caller that supplies an `ActiveContext` with a provenance identity gets **that** identity; a caller that supplies an **empty** context gets the **ambient** identity, and the previous writer's attribution is **overwritten** rather than retained. A provenance write that fails rolls the resurrection back and is reported as `provenance_failed` — never as a successful resurrection with a stale writer.
+
+**Imported content is never executed.** A script is stored and **flagged** (`executable = 1`); there is no code path from package bytes to process execution.
+
+#### Version handling
+
+The third-party `SKILL.md` bytes are **never rewritten**. What is derived is the `memories` **projection** — the row that discovery reads — and it differs from the original by exactly one inserted frontmatter line, and only when the package declares no version.
+
+| case | effective version | `version_source` | the stored `SKILL.md` bytes | the projection |
+|---|---|---|---|---|
+| the entrypoint declares a version | the declared version | `declared` | unchanged | identical to the original (`projection_sha256 == entrypoint_sha256`) |
+| the entrypoint declares none | `1.0.0-unversioned` | `package_declares_no_version` | unchanged | carries `version: 1.0.0-unversioned` |
+| the entrypoint declares none and the operator overrides | the override | `package_declares_no_version` | unchanged | carries the override |
+
+The effective version is a **pre-release** identifier, and that is load-bearing: a pre-release sorts below the corresponding release, so a later genuine `1.0.0` of the same name wins the `is_latest` flag and both packages coexist.
+
+An effective-version override for a package that **declares** a version is **refused** (`version_override_conflict`), not silently ignored: the declared version *is* the effective one, so ignoring the operator's override would be worse than refusing it.
+
+`entrypoint_sha256` describes the **original** entrypoint bytes; `projection_sha256` describes the **projected** bytes. Both are recorded, and neither is allowed to describe the other.
+
+#### Idempotence, immutability and duplication
+
+The package's identity is the skill's own id — `skill:<name>-v<version>` — so there is no second identity space.
+
+| situation | outcome |
+|---|---|
+| the same `(name, version)` with the **same** package hash | `already_installed` — nothing is written |
+| the same `(name, version)` with a **different** package hash | `version_conflict` — **there is no force escape**; a published package is immutable |
+| the same package re-imported after a soft shred | `resurrected` — an explicit revival, not the legacy force path, so the `package_immutable` refusal does not apply to it |
+| a **soft-deleted ordinary** skill occupying the id | `resurrected` — the import revives it with the package's projection. Nothing live is overwritten: the row was already deleted, and this is the substrate's existing resurrection semantics. A **live** ordinary skill occupying the id is **refused** instead |
+| a **different** version of the same name | a new package; the prior version stays, and `is_latest` moves inside the same transaction |
+| a file whose SHA-256 already exists in the blob table | stored **once** and shared — deduplication, not a duplicate-package signal |
+| a **different** skill identity sharing content | the advisory `possible_duplicate_content` — **advisory only, never a block** |
+
+A live skill that owns **no** package and already occupies the id is **refused** (`skill_id_conflict`): the importer does not overwrite an ordinary skill in place. That is the legacy force path's behaviour, and it is exactly the mutation the package immutability refusal exists to prevent.
+
+#### The export loss marker (R11)
+
+**P4 is the first stage in which a stored skill can carry files the existing skills export does not include.** Before the full package export writer exists (stage P7), `mpm export --collection skills` carries the **projected skill row only** — a package's reference files, scripts and assets are not in the export.
+
+Those bytes exist nowhere else: the `.skill` archive is the transport, and the export writer is P7. So between P4 and P7 the skills export **is** a loss path, and the contract is that the loss is **never silent**:
+
+- the export **response** carries a structured loss marker, naming every package that was not included, with the count;
+- the CLI prints a **notice** on standard error naming the same packages.
+
+The JSON document's shape is now an **object**, not a bare array:
+
+```json
+{
+  "memories": [ ... ],
+  "packages_omitted": {
+    "count": 1,
+    "packages": [
+      {
+        "skill_id": "skill:system-prompt-writer-v1.0.0",
+        "name": "system-prompt-writer",
+        "version": "1.0.0",
+        "file_count": 3,
+        "package_hash": "…"
+      }
+    ]
+  }
+}
+```
+
+`packages_omitted` is **always present**. A count of zero is a positive statement — this export carried every package it could — and it keeps the response's type stable, so a consumer never has to branch on whether the field exists. The marker's scope mirrors the export's own filters exactly, so it names precisely the packages whose skill rows **were** exported and whose content was **not**.
+
+The CSV format is unchanged; the marker is a notice on standard error.
+
+##### The compatibility policy for the JSON shape
+
+The shape change is a **breaking change to a CLI output contract**, so it is given an explicit policy rather than being left implicit.
+
+**The structured object is the default.** It is the only shape that can carry the marker, and R11 requires the marker to be *in the response*.
+
+**`--format json-array` is the deprecated legacy shape** — a bare JSON array, the shape the export had before the marker existed. It is kept for **one release**, for consumers that cannot yet read the object.
+
+**The legacy shape is REFUSED whenever a package's content would be omitted.** A bare array has nowhere to put the loss marker, so emitting one while content is being dropped would drop those bytes **silently** — the exact failure R11 exists to prevent, and the legacy shape would reintroduce it for precisely the consumers that have not migrated. So the legacy format is available only when there is **nothing to lose**: an export of any collection other than `skills`, or a skills export in which no package exists. When a package would be omitted, the legacy format is refused with an error that **names the affected packages** and points at `--format json`. The deprecation is announced on standard error, so the document on standard output stays parseable.
+
+**The `memories` key's coupling with `mpm migrate --from` is pinned by a test.** `mpm migrate --from <export.json>` reads a `memories` array, so the export's top-level key name is a real coupling between the export writer and the migrate parser — it was incidental, and a regression test now feeds the document the export actually emits to the substrate's own JSON parser and asserts the rows come back. An export file therefore remains a valid input for `mpm migrate --from`.
+
+**The marker's stream is a recorded deviation.** The design (§6.3, T44) says the marker appears *"in the response and on standard output"*. The implementation puts the CLI notice on **standard error** (`usererror.Notice`), which is the repository convention and keeps stdout parseable — a notice on stdout would corrupt a stdout-mode JSON document. The marker is still **in the response** (the response carries it structurally), so R11's substantive requirement is met. This is a deviation from the design's literal wording and is recorded here for the design owner's confirmation.
+
+> **PROPOSAL, not an approved design change.** The compatibility policy above — the deprecated `json-array` format, the refusal when content would be omitted, and the one-release window — is a **proposal** put forward in response to the independent review of this PR. It requires **operator acceptance** before it becomes the design's contract. The structured object as the default satisfies R11 either way; what the proposal adds is the migration path for consumers of the old shape.
+
+> **A pre-existing limitation, recorded and not changed here.** `mpm export --since` / `--until` compare the INTEGER `created_at` column against a TEXT date literal, and SQLite never compares an INTEGER as greater-or-equal to a TEXT value — so **any** `--since` value matches no rows and the export is empty. This is a **pre-existing** defect in `GetMemoriesForExport` (identical at the commit before this stage), it is **not** introduced by P4, and it is **not** fixed here: the fix changes shared read-path semantics that other consumers depend on, and it belongs in its own change with its own tests. The loss marker mirrors the export's filters exactly, so the two remain consistent with each other; the consequence is that an empty export reports a count of zero.
+
+#### Provisional operator decisions — not approvals
+
+Three operator decisions in PR #222 remain **open**. P4 implements the design's **recommended** behaviour as a **provisional default**, and this section records it so it can be accepted or adjusted **before merge**. These are recommendations, **not** evidence of operator approval:
+
+| decision | open question | P4's provisional default |
+|---|---|---|
+| **O3** | binary assets | **rejected by default**; an explicit opt-in stores them, and an executable binary (ELF, PE, Mach-O — detected whatever the extension claims) is refused unless the opt-in is given. Even with the opt-in the bytes are only **stored**, never executed |
+| **O6** | file-count and byte limits | **512 files**, **32 MiB** total, **4 MiB** per file, **256 KiB** for the entrypoint. The limits are configurable per import; the zero value means the recommended default |
+| **O10** | a missing `when_to_use` | a **warning**, not a block |
+
+Two further decisions are **not** P4's to make: **O9** concerns the P5 archive layouts and does not complicate P4, and **O17** is already approved — the blanket skills prune exemption is preserved unchanged.
+
+The content-type allow-list is **explicit and closed**: `.md .txt .json .yaml .yml .sh .py .js .rb .pl .png .jpg .jpeg .svg .pdf .woff2`. An extension that is not on it is **refused** (`content_type_not_allowed`), not guessed at: an unknown extension is an unknown content type, and an unknown content type has no defined scanner coverage, so storing it would mean storing a file whose scan coverage nobody specified.
+
+#### What P4 does **not** add
+
+**No ZIP import.** That is P5, and it has its own root-derivation rules.
+
+**No full package export.** The export carries the projected skill row only, and says so (§6.10, the loss marker above). The package export writer is P7.
+
+**No agent-facing import surface.** No MCP action, no agent-facing CLI. The importer is internal; the operator-facing command is a later stage.
+
+**No new identity scheme.** The package's identity is the skill's own id. The existing skill IDs, frontmatter contract and semver ordering are reused unchanged.
+
+**No change to ordinary skills.** A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
 
 ---
 
