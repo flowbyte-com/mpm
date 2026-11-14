@@ -77,7 +77,7 @@ func NewRouter() *CommandRouter {
 		"shred":        {Name: "shred", Description: "Remove memory from active state (hard delete + cascades; not byte erasure)", MinArgs: 0},
 		"stats":        {Name: "stats", Description: "Show memory statistics", MinArgs: 0},
 		"prune":        {Name: "prune", Description: "Prune expired memories", MinArgs: 0},
-		"export":       {Name: "export", Description: "Export memories to JSON", MinArgs: 0},
+		"export":       {Name: "export", Description: "Export memories to JSON (structured object with the package loss marker)", MinArgs: 0, Help: printExportHelp},
 		"integration":  {Name: "integration", Description: "Cross-framework config emitters (export-mcp)", MinArgs: 1},
 		"maintain":     {Name: "maintain", Description: "Run self-maintenance sweep", MinArgs: 0},
 
