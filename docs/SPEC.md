@@ -2232,7 +2232,16 @@ The **path** codes are the canonical-path rules' **own** strings — the P2 path
 
 **The limits are enforced while reading**, never after a complete listing is collected. The **declared** size is checked against the per-file cap **before** the entry is decompressed, so a decompression bomb is refused without ever being materialised, and the cap is **also** enforced while the bytes are read, because a header can lie. The total-byte cap is checked as the bytes are read.
 
-The **entry count** is read from the **End-of-Central-Directory record by hand** — with ZIP64 support — **before** the central directory is parsed. This matters because `archive/zip` builds one header per central-directory record when the reader is created, so the count is only available *after* the allocation the count is supposed to bound. Reading the fixed-size EOCD record first means the bound is enforced **before** the allocation happens.
+The **entry count** is read from the **End-of-Central-Directory record by hand** — with ZIP64 support — **before** the central directory is parsed. This matters because `archive/zip` builds one header per central-directory record when the reader is created, so the count is only available *after* the allocation the count is supposed to bound.
+
+**The declared count alone is not a bound, and the implementation does not pretend that it is.** `archive/zip` reads directory records until it meets a bad signature and compares the number it read with the **declared** count only *afterwards*, so an archive that declares two entries and carries 150 000 real records has all 150 000 parsed — and a header struct allocated for each — before the mismatch is noticed.
+
+So the bound is applied to **two** quantities, and together they hold:
+
+1. the **declared** count — the cheap check, which refuses an archive that plainly declares too many entries;
+2. the **parse window** — the number of records the central directory's **bytes** could hold. The parse spans exactly the central directory, and every central-directory record is at least 46 bytes long, so a byte span holds at most `span / 46` records. This bound is derived from the directory's **extent** rather than from its **record count**, so it survives a lying count.
+
+The parse window is computed from the End-of-Central-Directory record's own fields, and it is **tight for every well-formed archive**. A ZIP64 locator's offset is resolved **absolutely**, exactly as `archive/zip` resolves it, so a prefixed (self-extracting) ZIP64 archive is refused rather than mis-parsed — the same behaviour `archive/zip` itself has, and it fails closed.
 
 #### The limits and their justification
 
@@ -2245,7 +2254,7 @@ P5 adds exactly **two** archive-level limits, and both are stated with their rea
 | `MaxArchiveBytes` | **64 MiB** | The on-disk size bounds the **central directory**, which `archive/zip` parses eagerly into one header per entry, and bounds the compressed payload a single entry may carry. A legitimate archive holds at most 32 MiB of content; DEFLATE never expands and STORED entries are the same size as their content, so 64 MiB — twice the content cap — accommodates every legitimate archive with room for the central directory and the local headers, while refusing an archive whose size is driven by something other than package content. |
 | `MaxArchiveEntries` | **4096** | The entry count is what bounds `archive/zip`'s eager per-entry header allocation. A legitimate package carries at most 512 files plus at most one directory entry per directory it contains, so at most about **1024** entries; 4096 leaves four times that headroom for archives that record directories generously, while keeping the parsed central directory to a few megabytes. |
 
-Both limits are **read before the allocation they bound** — the file size before the archive is opened for parsing, the entry count before the central directory is parsed.
+Both limits are **read before the allocation they bound** — the file size before the archive is opened for parsing, and the entry count (against **both** the declared count and the parse window) before the central directory is parsed.
 
 #### The reason codes P5 adds
 

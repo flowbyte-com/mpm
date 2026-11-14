@@ -101,15 +101,28 @@ type packageArchiveLimits struct {
 	//
 	// JUSTIFICATION. `archive/zip` builds one `zip.File` per central
 	// directory record when the reader is created, so the entry count
-	// is what bounds that allocation — and it is read from the
-	// End-of-Central-Directory record BEFORE the reader is built, so
-	// the bound is enforced before the allocation happens.
+	// is what bounds that allocation.
 	//
-	// A legitimate package carries at most 512 files (P4's cap) and
-	// at most one directory entry per directory it contains, so at
-	// most about 1024 entries. 4096 leaves four times that headroom
-	// for archives that record directories generously, while keeping
-	// the parsed central directory to a few megabytes.
+	// The bound is enforced BEFORE the reader is built, from the
+	// End-of-Central-Directory record — and it is enforced against TWO
+	// quantities, because the declared count alone is not a bound.
+	//
+	// `archive/zip` parses directory records until it meets a bad
+	// signature and compares the number it read with the DECLARED
+	// count only afterwards, so an archive that declares two entries
+	// and carries 150 000 real records has all 150 000 parsed — and a
+	// header struct allocated for each — before the mismatch is
+	// noticed. The SECOND bound is therefore the number of records the
+	// central directory's BYTES could hold: the parse spans exactly
+	// the central directory, and every record is at least 46 bytes
+	// long, so a byte span holds at most span/46 records. That bound
+	// survives a lying count, because it is derived from the bytes.
+	//
+	// A legitimate package carries at most 512 files (P4's cap) and at
+	// most one directory entry per directory it contains, so at most
+	// about 1024 entries. 4096 leaves four times that headroom for
+	// archives that record directories generously, while keeping the
+	// parsed central directory to a few megabytes.
 	MaxArchiveEntries int
 }
 
@@ -252,22 +265,38 @@ func readPackageArchive(archivePath string, limits PackageImportLimits, archiveL
 	}
 	defer file.Close()
 
-	// ── The entry count is read BEFORE the central directory is parsed.
+	// ── The central directory is bounded BEFORE it is parsed. ───────
 	//
-	// `archive/zip` builds one header per central-directory record when
-	// the reader is created, so the count is what bounds that
-	// allocation. Reading it from the End-of-Central-Directory record
-	// first means the bound is enforced before the allocation happens,
-	// not after it.
-	count, err := archiveEntryCount(file, info.Size())
+	// `archive/zip` parses the whole central directory into memory when
+	// the reader is created — one header per record — and it validates
+	// the DECLARED count only AFTER the parse is over. So the declared
+	// count alone does not bound that allocation: an archive that
+	// declares two entries and carries 150 000 real records has all
+	// 150 000 parsed before the mismatch is noticed.
+	//
+	// TWO bounds are applied, and together they hold:
+	//
+	//  1. the DECLARED count — the cheap check, which refuses an
+	//     archive that plainly declares too many entries;
+	//  2. the PARSE WINDOW — the number of records the central
+	//     directory's BYTES could hold, derived from the record's own
+	//     extent. This is the bound that survives a lying count,
+	//     because it is derived from the bytes rather than from the
+	//     count.
+	dir, err := readPackageArchiveDirectory(file, info.Size())
 	if err != nil {
 		return source, packageImportErrorWrap(PackageImportReasonArchiveInvalid, "", err,
 			"the archive %q has no usable central directory: %v", archivePath, err)
 	}
-	if count > uint64(archiveLimits.MaxArchiveEntries) {
+	if dir.count > uint64(archiveLimits.MaxArchiveEntries) {
 		return source, packageImportErrorf(PackageImportReasonFileCountLimit, "",
 			"the archive declares %d entries, over the %d-entry cap",
-			count, archiveLimits.MaxArchiveEntries)
+			dir.count, archiveLimits.MaxArchiveEntries)
+	}
+	if maxRecords := dir.maxParseRecords(); maxRecords > int64(archiveLimits.MaxArchiveEntries) {
+		return source, packageImportErrorf(PackageImportReasonFileCountLimit, "",
+			"the archive's central directory could hold %d records, over the %d-entry cap",
+			maxRecords, archiveLimits.MaxArchiveEntries)
 	}
 
 	reader, err := zip.NewReader(file, info.Size())
@@ -424,7 +453,7 @@ func readPackageArchiveEntries(reader *zip.Reader, limits PackageImportLimits) (
 				"the archive entry %q is a %s, not a regular file", zf.Name, zf.Mode().Type())
 		}
 
-		// ── An encrypted entry cannot be validated. ─────────────────
+		// ── 3. An encrypted entry cannot be validated. ─────────────
 		//
 		// Two flags are honoured: the traditional PKWARE encryption
 		// bit and the "strong encryption" bit that supersedes it.
@@ -435,13 +464,13 @@ func readPackageArchiveEntries(reader *zip.Reader, limits PackageImportLimits) (
 				"the archive entry %q is encrypted, so its bytes cannot be validated", zf.Name)
 		}
 
-		// ── 3. The file-count cap, before the bytes are read. ───────
+		// ── 4. The file-count cap, before the bytes are read. ───────
 		if len(entries)+1 > limits.MaxFiles {
 			return nil, packageImportErrorf(PackageImportReasonFileCountLimit, zf.Name,
 				"the package carries more than %d files", limits.MaxFiles)
 		}
 
-		// ── 4. The canonical-path rules, on the archive-relative path.
+		// ── 5. The canonical-path rules, on the archive-relative path.
 		//
 		// The name is registered in the set, so a duplicate, a unicode
 		// collision and a case collision are all refused here — before
@@ -456,7 +485,7 @@ func readPackageArchiveEntries(reader *zip.Reader, limits PackageImportLimits) (
 			return nil, packageImportArchivePathError(zf.Name, err)
 		}
 
-		// ── 5. The DECLARED size, before the bytes are produced. ───
+		// ── 6. The DECLARED size, before the bytes are produced. ───
 		//
 		// This is the decompression-bomb defence: the declared size is
 		// refused outright, so the entry is never decompressed at all.
@@ -468,7 +497,7 @@ func readPackageArchiveEntries(reader *zip.Reader, limits PackageImportLimits) (
 				zf.Name, zf.UncompressedSize64, limits.MaxFileBytes)
 		}
 
-		// ── 6. The bytes, bounded. ──────────────────────────────────
+		// ── 7. The bytes, bounded. ──────────────────────────────────
 		content, err := readPackageArchiveEntryBytes(zf, limits.MaxFileBytes)
 		if err != nil {
 			return nil, err
@@ -746,34 +775,114 @@ const (
 	archiveEOCDMinSize           = 22
 	archiveEOCDMaxComment        = 0xffff
 	archiveEOCDCountOffset       = 10
+	archiveEOCDSizeOffset        = 12
+	archiveEOCDOffsetOffset      = 16
 	archiveZip64LocatorSignature = 0x07064b50
 	archiveZip64LocatorSize      = 20
 	archiveZip64EOCDSignature    = 0x06064b50
 	archiveZip64EOCDCountOffset  = 32
+	archiveZip64EOCDSizeOffset   = 40
+	archiveZip64EOCDOffsetOffset = 48
+
+	// archiveCentralDirectoryRecordMinBytes is the fixed size of a
+	// central-directory file header, without its name, its extra field
+	// or its comment.
+	//
+	// Every record is AT LEAST this long, so a byte span holds at most
+	// span/this records. That is what turns a byte bound into an entry
+	// bound.
+	archiveCentralDirectoryRecordMinBytes = 46
 )
 
-// archiveEntryCount reads the number of entries an archive's central
-// directory declares.
+// packageArchiveDirectory is the archive's central directory, as the
+// End-of-Central-Directory record declares it.
+type packageArchiveDirectory struct {
+	// count is the DECLARED number of entries.
+	count uint64
+
+	// size is the central directory's byte size, as declared.
+	size int64
+
+	// offset is the central directory's offset, as declared.
+	offset int64
+
+	// endOffset is the absolute offset of the End-of-Central-Directory
+	// record — for a ZIP64 archive, the ZIP64 record, which is where
+	// the central directory really ends.
+	endOffset int64
+}
+
+// maxParseRecords returns the maximum number of central-directory
+// records `archive/zip` can parse from this archive.
+//
+// # WHY THE DECLARED COUNT IS NOT THE BOUND
+//
+// `archive/zip` reads directory records until it meets a bad signature,
+// and it compares the number it read with the DECLARED count only
+// AFTERWARDS. So the declared count does not bound the parse at all: an
+// archive that declares two entries and carries 150 000 real records
+// has all 150 000 parsed, and a header struct allocated for each of
+// them, before the mismatch is noticed.
+//
+// The bound that DOES hold is a bound on the BYTES. `archive/zip` parses
+// from the central directory's first byte and stops at the
+// End-of-Central-Directory record — whose signature is not a valid
+// record signature — so the parse spans exactly the central directory.
+// And every record is at least 46 bytes long, so a byte span holds at
+// most span/46 records.
+//
+// The parse's START is derived from the declared directory size:
+// `archive/zip` computes it as `endOffset - size`. It also has a
+// fallback — for an archive whose declared offsets are inconsistent, it
+// may parse from the declared offset instead — so the sound start is
+// the EARLIER of the two.
+//
+// The result is tight for every well-formed archive, and it holds even
+// when the declared count is a lie, because it is derived from the
+// central directory's BYTES rather than from its record count.
+func (d packageArchiveDirectory) maxParseRecords() int64 {
+	start := d.endOffset - d.size
+	if d.offset < start {
+		// The inconsistent-offsets fallback: `archive/zip` may parse
+		// from the declared offset instead, which is earlier.
+		start = d.offset
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start >= d.endOffset {
+		return 0
+	}
+	return (d.endOffset - start) / archiveCentralDirectoryRecordMinBytes
+}
+
+// readPackageArchiveDirectory reads the End-of-Central-Directory record
+// and returns the archive's central directory.
 //
 // # WHY IT IS READ BY HAND
 //
 // `archive/zip` parses the whole central directory into memory when the
-// reader is built — one header per record — so the entry count is only
-// available AFTER the allocation the count is supposed to bound. A ZIP
-// whose central directory is a few megabytes of minimal records names
-// hundreds of thousands of entries, and the parse allocates a header for
-// every one of them.
+// reader is created — one header per record — and it does NOT validate
+// the declared count until the parse is over. So the only way to bound
+// that allocation is to read the record that describes the directory's
+// extent FIRST, and refuse before the reader is built.
 //
-// So the count is read from the End-of-Central-Directory record FIRST.
-// That record is fixed-size and sits at a known place near the end of the
+// The record is fixed-size and sits at a known place near the end of the
 // file, so it can be read without parsing anything.
 //
-// ZIP64 is handled: when the 16-bit count is saturated, the real count
-// lives in the ZIP64 End-of-Central-Directory record, which the locator
-// that precedes the EOCD points at.
-func archiveEntryCount(r io.ReaderAt, size int64) (uint64, error) {
+// ZIP64 is handled: when the 16-bit count or either 32-bit offset is
+// saturated, the real values live in the ZIP64 End-of-Central-Directory
+// record, which the locator that precedes the EOCD points at.
+//
+// A ZIP64 locator's offset is resolved ABSOLUTELY, exactly as
+// `archive/zip` resolves it. A prefixed (self-extracting) ZIP64 archive
+// is therefore refused rather than mis-parsed — the same behaviour
+// `archive/zip` itself has, and it fails closed.
+func readPackageArchiveDirectory(r io.ReaderAt, size int64) (packageArchiveDirectory, error) {
+	var dir packageArchiveDirectory
+
 	if size < archiveEOCDMinSize {
-		return 0, fmt.Errorf("the archive is too small to be a ZIP file")
+		return dir, fmt.Errorf("the archive is too small to be a ZIP file")
 	}
 
 	// The EOCD is at the end of the file, but a comment of up to 65535
@@ -787,42 +896,65 @@ func archiveEntryCount(r io.ReaderAt, size int64) (uint64, error) {
 	}
 	buf := make([]byte, window)
 	if _, err := r.ReadAt(buf, size-window); err != nil && !errors.Is(err, io.EOF) {
-		return 0, err
+		return dir, err
 	}
 
 	index := archiveFindEOCD(buf)
 	if index < 0 {
-		return 0, fmt.Errorf("no end-of-central-directory record was found")
+		return dir, fmt.Errorf("no end-of-central-directory record was found")
 	}
 	record := buf[index:]
+	dir.endOffset = size - window + int64(index)
 
-	count := binary.LittleEndian.Uint16(record[archiveEOCDCountOffset:])
-	if count != 0xffff {
-		return uint64(count), nil
+	dir.count = uint64(binary.LittleEndian.Uint16(record[archiveEOCDCountOffset:]))
+	dir.size = int64(binary.LittleEndian.Uint32(record[archiveEOCDSizeOffset:]))
+	dir.offset = int64(binary.LittleEndian.Uint32(record[archiveEOCDOffsetOffset:]))
+
+	// ZIP64: any of the three saturated fields means the real values
+	// live in the ZIP64 record.
+	if dir.count == 0xffff || dir.size == 0xffffffff || dir.offset == 0xffffffff {
+		size64, offset64, count64, end64, err := readPackageArchiveDirectory64(r, buf, index, size)
+		if err != nil {
+			return dir, err
+		}
+		dir.count = count64
+		dir.size = size64
+		dir.offset = offset64
+		dir.endOffset = end64
 	}
+	return dir, nil
+}
 
-	// ZIP64: the 16-bit count is saturated, so the real count is in the
-	// ZIP64 End-of-Central-Directory record. The locator that precedes
-	// the EOCD points at it.
+// readPackageArchiveDirectory64 reads the ZIP64 End-of-Central-Directory
+// record and its locator.
+//
+// The locator sits immediately before the plain EOCD record and points
+// at the ZIP64 record, whose own offset is the end of the central
+// directory.
+func readPackageArchiveDirectory64(r io.ReaderAt, buf []byte, index int, size int64) (dirSize int64, dirOffset int64, count uint64, endOffset int64, err error) {
 	if index < archiveZip64LocatorSize {
-		return 0, fmt.Errorf("the archive declares a ZIP64 entry count but carries no locator")
+		return 0, 0, 0, 0, fmt.Errorf("the archive declares ZIP64 fields but carries no locator")
 	}
 	locator := buf[index-archiveZip64LocatorSize:]
 	if binary.LittleEndian.Uint32(locator) != archiveZip64LocatorSignature {
-		return 0, fmt.Errorf("the archive declares a ZIP64 entry count but carries no locator")
+		return 0, 0, 0, 0, fmt.Errorf("the archive declares ZIP64 fields but carries no locator")
 	}
 	offset := int64(binary.LittleEndian.Uint64(locator[8:]))
-	if offset < 0 || offset+archiveZip64EOCDCountOffset+8 > size {
-		return 0, fmt.Errorf("the archive's ZIP64 locator points outside the archive")
+	if offset < 0 || offset+archiveZip64EOCDOffsetOffset+8 > size {
+		return 0, 0, 0, 0, fmt.Errorf("the archive's ZIP64 locator points outside the archive")
 	}
-	var record64 [archiveZip64EOCDCountOffset + 8]byte
+	var record64 [archiveZip64EOCDOffsetOffset + 8]byte
 	if _, err := r.ReadAt(record64[:], offset); err != nil {
-		return 0, err
+		return 0, 0, 0, 0, err
 	}
 	if binary.LittleEndian.Uint32(record64[:]) != archiveZip64EOCDSignature {
-		return 0, fmt.Errorf("the archive's ZIP64 end-of-central-directory record is malformed")
+		return 0, 0, 0, 0, fmt.Errorf("the archive's ZIP64 end-of-central-directory record is malformed")
 	}
-	return binary.LittleEndian.Uint64(record64[archiveZip64EOCDCountOffset:]), nil
+	return int64(binary.LittleEndian.Uint64(record64[archiveZip64EOCDSizeOffset:])),
+		int64(binary.LittleEndian.Uint64(record64[archiveZip64EOCDOffsetOffset:])),
+		binary.LittleEndian.Uint64(record64[archiveZip64EOCDCountOffset:]),
+		offset,
+		nil
 }
 
 // archiveFindEOCD returns the offset of the End-of-Central-Directory

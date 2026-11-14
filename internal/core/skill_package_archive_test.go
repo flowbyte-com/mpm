@@ -162,12 +162,17 @@ func p5PatchCreatorByte(t *testing.T, path string) {
 	}
 }
 
-// p5PatchCentralDirectory patches one field of the FIRST central-directory
-// record, so a fixture can LIE about an entry.
+// p5PatchCentralDirectoryAt patches one field of the NTH
+// central-directory record, so a fixture can LIE about an entry.
 //
 // `fieldOffset` is the field's offset inside the central-directory
 // record, and `value` is its new little-endian content.
-func p5PatchCentralDirectory(t *testing.T, path string, fieldOffset int, value uint32) {
+//
+// The records are walked from the central directory's own offset, which
+// the End-of-Central-Directory record carries, and each record's length
+// is its fixed 46 bytes plus its name, its extra field and its
+// comment.
+func p5PatchCentralDirectoryAt(t *testing.T, path string, index int, fieldOffset int, value uint32) {
 	t.Helper()
 
 	data, err := os.ReadFile(path)
@@ -179,10 +184,21 @@ func p5PatchCentralDirectory(t *testing.T, path string, fieldOffset int, value u
 		t.Fatalf("the archive has no end-of-central-directory record")
 	}
 	cdOffset := int(binary.LittleEndian.Uint32(data[eocd+16:]))
-	if binary.LittleEndian.Uint32(data[cdOffset:]) != 0x02014b50 {
-		t.Fatalf("the central directory does not start with a record")
+
+	record := cdOffset
+	for i := 0; i < index; i++ {
+		if binary.LittleEndian.Uint32(data[record:]) != 0x02014b50 {
+			t.Fatalf("the archive's central-directory record %d is missing", i)
+		}
+		nameLen := int(binary.LittleEndian.Uint16(data[record+28:]))
+		extraLen := int(binary.LittleEndian.Uint16(data[record+30:]))
+		commentLen := int(binary.LittleEndian.Uint16(data[record+32:]))
+		record += 46 + nameLen + extraLen + commentLen
 	}
-	binary.LittleEndian.PutUint32(data[cdOffset+fieldOffset:], value)
+	if binary.LittleEndian.Uint32(data[record:]) != 0x02014b50 {
+		t.Fatalf("the archive's central-directory record %d is missing", index)
+	}
+	binary.LittleEndian.PutUint32(data[record+fieldOffset:], value)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write the patched archive: %v", err)
 	}
@@ -190,8 +206,12 @@ func p5PatchCentralDirectory(t *testing.T, path string, fieldOffset int, value u
 
 // The central-directory record's field offsets.
 const (
+	// p5CDUncompressedSize is the record's uncompressed-size field.
 	p5CDUncompressedSize = 24
-	p5CDCrc32            = 16
+
+	// p5CDGeneralPurposeFlags is the record's general-purpose bit flag
+	// field, which carries the encryption flag.
+	p5CDGeneralPurposeFlags = 8
 )
 
 // p5FlipEntryPayloadByte flips one byte of the NTH entry's payload.
@@ -383,21 +403,29 @@ func p5RawPaths(t *testing.T, dm *DatabaseManager, skillID string) []string {
 }
 
 // p5Census is the row census of the tables an import writes.
+//
+// It covers EVERY table an import touches: the package row, the file
+// rows, the blob rows, the projected skill row and the transactional
+// provenance. A census that omitted one of them would let a refusal
+// that wrote that one table pass unnoticed, so the coverage is
+// asserted here rather than assumed.
 type p5Census struct {
-	packages int
-	files    int
-	blobs    int
-	skills   int
+	packages   int
+	files      int
+	blobs      int
+	skills     int
+	provenance int
 }
 
 // p5CensusOf reads the census.
 func p5CensusOf(t *testing.T, dm *DatabaseManager) p5Census {
 	t.Helper()
 	c := p5Census{
-		packages: p4Count(t, dm, `SELECT COUNT(*) FROM skill_packages`),
-		files:    p4Count(t, dm, `SELECT COUNT(*) FROM skill_package_files`),
-		blobs:    p4Count(t, dm, `SELECT COUNT(*) FROM skill_package_blobs`),
-		skills:   p4Count(t, dm, `SELECT COUNT(*) FROM memories WHERE collection = 'skills'`),
+		packages:   p4Count(t, dm, `SELECT COUNT(*) FROM skill_packages`),
+		files:      p4Count(t, dm, `SELECT COUNT(*) FROM skill_package_files`),
+		blobs:      p4Count(t, dm, `SELECT COUNT(*) FROM skill_package_blobs`),
+		skills:     p4Count(t, dm, `SELECT COUNT(*) FROM memories WHERE collection = 'skills'`),
+		provenance: p4Count(t, dm, `SELECT COUNT(*) FROM artifact_provenance`),
 	}
 	return c
 }
@@ -1259,6 +1287,11 @@ func TestP5_AMalformedArchiveIsRefused(t *testing.T) {
 // to read, so a header that lies about its payload produces a structure
 // the reader cannot make sense of. The refusal is `archive_invalid`, not
 // `size_limit`: the archive is malformed, not merely large.
+//
+// The lie is on the SECOND entry — the 200 000-byte reference file —
+// and only on that one. The entrypoint is left honest, so the refusal
+// is provoked by the entry T21 describes and not by an incidental
+// change to the package's entrypoint.
 func TestP5_ALyingHeaderIsRefused(t *testing.T) {
 	dm := p3DM(t)
 	before := p5CensusOf(t, dm)
@@ -1268,10 +1301,9 @@ func TestP5_ALyingHeaderIsRefused(t *testing.T) {
 		{name: "SKILL.md", content: []byte(p4SkillDoc("lying", "1.0.0", "lying\n"))},
 		{name: "references/big.md", content: bytes.Repeat([]byte("A"), 200_000)},
 	})
-	// The SECOND central-directory record is the reference file: the
-	// entrypoint is the first.
-	p5PatchCentralDirectory(t, archive, p5CDUncompressedSize, 10)
-	p5PatchSecondCentralDirectory(t, archive, p5CDUncompressedSize, 10)
+	// ONLY the second central-directory record — the reference file — is
+	// patched. The entrypoint's own record is untouched.
+	p5PatchCentralDirectoryAt(t, archive, 1, p5CDUncompressedSize, 10)
 
 	_, err := dm.ImportSkillPackageFromArchive(PackageImportOptions{Path: archive})
 	p5AssertReason(t, err, PackageImportReasonArchiveInvalid)
@@ -1433,30 +1465,81 @@ func p5PatchEOCDEntryCount(t *testing.T, path string, count uint16) {
 	}
 }
 
-// p5PatchSecondCentralDirectory patches one field of the SECOND
-// central-directory record.
-func p5PatchSecondCentralDirectory(t *testing.T, path string, fieldOffset int, value uint32) {
-	t.Helper()
-	data, err := os.ReadFile(path)
+// TestP5_ALyingEntryCountDoesNotDefeatTheCentralDirectoryBound covers
+// the bound that the DECLARED count cannot provide.
+//
+// `archive/zip` reads directory records until it meets a bad signature
+// and compares the number it read with the DECLARED count only
+// AFTERWARDS. So an archive that declares TWO entries and carries
+// 20 000 real records has all 20 000 parsed — and a header struct
+// allocated for each of them — before the mismatch is noticed. The
+// declared count alone does not bound that allocation.
+//
+// The bound that DOES hold is the central directory's BYTE extent: the
+// parse spans exactly the central directory, and every record is at
+// least 46 bytes long, so the byte span bounds the record count. This
+// test refuses the archive on THAT bound, before the reader is built.
+//
+// The refusal code is the discriminator: without the byte bound the
+// reader would be built, the parse would overrun the declared count,
+// and `zip.NewReader` would fail with `archive_invalid`. The byte bound
+// refuses it earlier, with `file_count_limit`.
+func TestP5_ALyingEntryCountDoesNotDefeatTheCentralDirectoryBound(t *testing.T) {
+	dm := p3DM(t)
+	before := p5CensusOf(t, dm)
+
+	// 20 000 real entries: a central directory of about 920 KB, which
+	// is 20 000 records at the 46-byte minimum.
+	entries := make([]p5ArchiveEntry, 0, 20001)
+	entries = append(entries, p5ArchiveEntry{
+		name:    "SKILL.md",
+		content: []byte(p4SkillDoc("lying-count", "1.0.0", "lying\n")),
+	})
+	for i := 0; i < 20000; i++ {
+		entries = append(entries, p5ArchiveEntry{
+			name:    "references/f" + p5Itoa(i) + ".md",
+			content: []byte("# F\n"),
+		})
+	}
+
+	archive := filepath.Join(t.TempDir(), "lying-count.skill")
+	p5WriteArchive(t, archive, entries)
+
+	// The archive really does carry 20 001 records, and its central
+	// directory really is large enough to hold them.
+	info, err := os.Stat(archive)
 	if err != nil {
-		t.Fatalf("read the archive: %v", err)
+		t.Fatalf("stat the archive: %v", err)
 	}
-	eocd := bytes.LastIndex(data, []byte{0x50, 0x4b, 0x05, 0x06})
-	if eocd < 0 {
-		t.Fatalf("the archive has no end-of-central-directory record")
+	if info.Size() < 900_000 {
+		t.Fatalf("the fixture is too small to prove anything: %d bytes", info.Size())
 	}
-	cdOffset := int(binary.LittleEndian.Uint32(data[eocd+16:]))
-	firstNameLen := int(binary.LittleEndian.Uint16(data[cdOffset+28:]))
-	firstExtraLen := int(binary.LittleEndian.Uint16(data[cdOffset+30:]))
-	firstCommentLen := int(binary.LittleEndian.Uint16(data[cdOffset+32:]))
-	second := cdOffset + 46 + firstNameLen + firstExtraLen + firstCommentLen
-	if binary.LittleEndian.Uint32(data[second:]) != 0x02014b50 {
-		t.Fatalf("the second central-directory record is missing")
+
+	// The lie: the EOCD declares TWO entries.
+	p5PatchEOCDEntryCount(t, archive, 2)
+
+	var beforeStats runtime.MemStats
+	runtime.ReadMemStats(&beforeStats)
+
+	_, err = dm.ImportSkillPackageFromArchive(PackageImportOptions{Path: archive})
+
+	var afterStats runtime.MemStats
+	runtime.ReadMemStats(&afterStats)
+
+	p5AssertReason(t, err, PackageImportReasonFileCountLimit)
+	p5AssertUnchanged(t, dm, before, "a lying entry count")
+
+	// The central directory was never parsed, so no header struct was
+	// allocated for any of its 20 001 records. The bound is generous;
+	// the assertion is about the ORDER OF MAGNITUDE.
+	allocated := int64(afterStats.TotalAlloc) - int64(beforeStats.TotalAlloc)
+	const allowed = 8 << 20
+	if allocated > allowed {
+		t.Errorf("the refused import allocated %d bytes, over the %d-byte bound — "+
+			"the central directory was parsed before the refusal", allocated, allowed)
 	}
-	binary.LittleEndian.PutUint32(data[second+fieldOffset:], value)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write the patched archive: %v", err)
-	}
+	t.Logf("the refused import allocated %d bytes for a %d-byte archive with 20 001 records",
+		allocated, info.Size())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1689,7 +1772,7 @@ func TestP5_AnEncryptedEntryIsRefused(t *testing.T) {
 		{name: "references/secret.md", content: []byte("# encrypted\n")},
 	})
 	// Set the encryption bit on the second central-directory record.
-	p5PatchSecondCentralDirectory(t, archive, 8, 0x0001)
+	p5PatchCentralDirectoryAt(t, archive, 1, p5CDGeneralPurposeFlags, 0x0001)
 
 	_, err := dm.ImportSkillPackageFromArchive(PackageImportOptions{Path: archive})
 	p5AssertReason(t, err, PackageImportReasonArchiveEncrypted)
