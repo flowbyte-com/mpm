@@ -279,6 +279,29 @@ func PackagePathReasonOf(err error) PackagePathReason {
 // that was broken. The function never returns a partially-canonicalised
 // path: on error the returned string is empty.
 func CanonicalPackagePath(raw string) (string, error) {
+	return canonicalPackagePathWithBudget(raw, MaxPackagePathDepth, MaxPackagePathBytes)
+}
+
+// canonicalPackagePathWithBudget canonicalises one raw name under §5.4's
+// rules with an explicit depth and length budget.
+//
+// # WHY THE BUDGET IS A PARAMETER
+//
+// §5.4's rules are stated against the CANONICAL path, and a canonical
+// path is relative to the PACKAGE root. The depth and length limits are
+// therefore the package root's limits.
+//
+// The ZIP path (§5.3.1) canonicalises a path that is relative to the
+// ARCHIVE root instead: in the wrapped layout the archive path carries
+// the wrapper segment, which is not part of any canonical path. That
+// path is canonicalised with a budget that leaves room for the wrapper,
+// and the stripped path is canonicalised again with the package's own
+// budget — so every stored path is judged by the package's limits, and
+// the flat and wrapped layouts stay equivalent.
+//
+// The public function's behaviour is UNCHANGED: the budget it passes is
+// the design's.
+func canonicalPackagePathWithBudget(raw string, maxDepth, maxBytes int) (string, error) {
 	// ── Phase 1: character-level rules, on the raw name ──────────────
 	if raw == "" {
 		return "", &PackagePathError{Reason: PackagePathReasonEmpty, Path: raw}
@@ -329,10 +352,10 @@ func CanonicalPackagePath(raw string) (string, error) {
 			return "", &PackagePathError{Reason: PackagePathReasonTraversal, Path: raw}
 		}
 	}
-	if len(canonical) > MaxPackagePathBytes {
+	if len(canonical) > maxBytes {
 		return "", &PackagePathError{Reason: PackagePathReasonTooLong, Path: raw}
 	}
-	if len(segments) > MaxPackagePathDepth {
+	if len(segments) > maxDepth {
 		return "", &PackagePathError{Reason: PackagePathReasonTooDeep, Path: raw}
 	}
 	return canonical, nil
@@ -408,7 +431,30 @@ func NewPackagePathSet() *PackagePathSet {
 // occupies a slot, so a caller that continues after a refusal cannot be
 // misled by a half-registered path.
 func (s *PackagePathSet) Add(raw string) (string, error) {
-	canonical, err := CanonicalPackagePath(raw)
+	return s.AddWithBudget(raw, MaxPackagePathDepth, MaxPackagePathBytes)
+}
+
+// AddWithBudget is Add with an explicit depth and length budget.
+//
+// # WHY THE BUDGET IS A PARAMETER
+//
+// The ZIP path (§5.3.1) registers the archive-relative names, because
+// §5.3.1 rule 2 canonicalises the entries BEFORE the package root is
+// derived — and the duplicate, unicode-collision and case-collision
+// refusals must be reached before the entrypoint's uniqueness is
+// considered, because "two entries with the same canonical path" is a
+// DIFFERENT refusal from "two entrypoints".
+//
+// An archive-relative name may carry the single wrapper segment that
+// the package's canonical path does not, so it is registered with a
+// budget that leaves room for it. The budget is the same one the
+// canonicalisation uses, so the set and the canonicaliser agree on what
+// a name is.
+//
+// The collision rules are UNCHANGED: a budget changes which names are
+// well-formed, never which names collide.
+func (s *PackagePathSet) AddWithBudget(raw string, maxDepth, maxBytes int) (string, error) {
+	canonical, err := canonicalPackagePathWithBudget(raw, maxDepth, maxBytes)
 	if err != nil {
 		return "", err
 	}

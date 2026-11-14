@@ -161,7 +161,201 @@ const (
 	// walk's inspection and the read, so the bytes that were inspected
 	// are not the bytes that would be stored (§7 threat 19).
 	PackageImportReasonChangedDuringRead PackageImportReason = "changed_during_read"
+
+	// ─────────────────────────────────────────────────────────────────────
+	// THE ARCHIVE CODES — Stage P5
+	// ─────────────────────────────────────────────────────────────────────
+	//
+	// The codes below are the ZIP path's own vocabulary (§7.1, §5.3.1,
+	// §13 T13–T22, T26, T35, T48). They are ADDITIVE: the directory
+	// path's codes are unchanged, and every code the directory path
+	// already had keeps its meaning.
+
+	// PackageImportReasonArchiveInvalid — the archive's STRUCTURE is not
+	// usable: it is not a ZIP at all, its central directory is truncated
+	// or malformed, an entry declares a size that its payload does not
+	// match, an entry uses a compression method that cannot be validated
+	// safely, or the archive is cut short mid-entry.
+	//
+	// It is the archive-level analogue of `read_failed`: the bytes
+	// could not be obtained in a form the importer can trust. The
+	// specific cause is carried in the Detail.
+	PackageImportReasonArchiveInvalid PackageImportReason = "archive_invalid"
+
+	// PackageImportReasonChecksumMismatch — an entry's bytes did not
+	// match the CRC-32 the archive declares for them (§13 T22).
+	//
+	// Detecting it requires reading the entry to EOF, which the importer
+	// does: the CRC is only computed over the bytes that were actually
+	// produced.
+	PackageImportReasonChecksumMismatch PackageImportReason = "checksum_mismatch"
+
+	// PackageImportReasonPathOutsideRoot — a file entry does not lie
+	// under the derived package root (§5.3.1 rule 5).
+	//
+	// In the flat layout the root is the archive root and the rule is a
+	// no-op. In the wrapped layout it is what makes the wrapper a
+	// wrapper rather than one directory among several: an entry beside
+	// the wrapper belongs to a different tree, and nothing is dropped
+	// silently.
+	PackageImportReasonPathOutsideRoot PackageImportReason = "path_outside_root"
+
+	// PackageImportReasonUnsupportedArchiveLayout — the archive's
+	// package root is neither the archive root nor a SINGLE enclosing
+	// directory, so the archive is neither of the two accepted layouts
+	// (O9, §5.3.1).
+	//
+	// A root deeper than one segment means the package is wrapped in
+	// more than one directory. O9 accepts exactly two shapes — the flat
+	// layout and the single-wrapper layout — and a deeper root is a
+	// third shape, so it is refused rather than silently reinterpreted.
+	PackageImportReasonUnsupportedArchiveLayout PackageImportReason = "unsupported_archive_layout"
+
+	// PackageImportReasonArchiveEncrypted — an entry is encrypted, so
+	// its bytes cannot be validated by the scanners that guard every
+	// stored byte.
+	//
+	// The importer cannot read an encrypted entry, and it cannot prove
+	// anything about what it holds, so it refuses rather than storing
+	// bytes it never inspected.
+	PackageImportReasonArchiveEncrypted PackageImportReason = "archive_encrypted"
+
+	// ─────────────────────────────────────────────────────────────────────
+	// THE PATH CODES — the canonical-path rules, carried verbatim
+	// ─────────────────────────────────────────────────────────────────────
+	//
+	// The ZIP path reports the canonical-path rules (§5.4) with the
+	// SAME codes §5.4 and §7 name — `path_traversal` (§7 threat 1,
+	// T13), `absolute_path` (threat 2, T14), `drive_letter_prefix`
+	// (threat 4, T15), `duplicate_path` (threat 6, T17),
+	// `path_case_collision` (threat 7, T18) and
+	// `path_unicode_collision` (threat 8, T19).
+	//
+	// The codes are the P2 path reasons' own strings, so a caller
+	// branches on one vocabulary rather than on a second encoding of
+	// the same rule. packageImportReasonForPathReason is the TOTAL
+	// mapping between the two.
+
+	// PackageImportReasonPathEmpty — the entry's name was empty.
+	PackageImportReasonPathEmpty PackageImportReason = "empty_path"
+
+	// PackageImportReasonPathNUL — the entry's name carried a NUL byte.
+	PackageImportReasonPathNUL PackageImportReason = "nul_byte"
+
+	// PackageImportReasonPathControlCharacter — the entry's name carried
+	// a control character.
+	PackageImportReasonPathControlCharacter PackageImportReason = "control_character"
+
+	// PackageImportReasonPathUNC — the entry's name began with the UNC
+	// shape `\\server\share`.
+	PackageImportReasonPathUNC PackageImportReason = "unc_path"
+
+	// PackageImportReasonPathDriveLetter — the entry's name began with a
+	// drive-letter prefix such as `C:` (§7 threat 4, T15).
+	PackageImportReasonPathDriveLetter PackageImportReason = "drive_letter_prefix"
+
+	// PackageImportReasonPathAbsolute — the entry's name began with `/`,
+	// making it an absolute path (§7 threat 2, T14).
+	PackageImportReasonPathAbsolute PackageImportReason = "absolute_path"
+
+	// PackageImportReasonPathBackslash — the entry's name carried a
+	// backslash. A canonical path is POSIX-separated; a backslash is
+	// never a separator (§7 threat 4).
+	PackageImportReasonPathBackslash PackageImportReason = "backslash_separator"
+
+	// PackageImportReasonPathTrailingSlash — the entry's name ended with
+	// `/`. A directory entry is SKIPPED rather than refused, so this
+	// code is reachable only for a name that ends with a slash and is
+	// not a directory entry.
+	PackageImportReasonPathTrailingSlash PackageImportReason = "trailing_slash"
+
+	// PackageImportReasonPathEmptySegment — the entry's name carried an
+	// empty path segment, i.e. `//`.
+	PackageImportReasonPathEmptySegment PackageImportReason = "empty_path_segment"
+
+	// PackageImportReasonPathDotSegment — the entry's name carried a `.`
+	// segment.
+	PackageImportReasonPathDotSegment PackageImportReason = "dot_segment"
+
+	// PackageImportReasonPathTraversal — the entry's name carried a `..`
+	// segment. This is the ZIP-slip refusal (§7 threat 1, T13).
+	PackageImportReasonPathTraversal PackageImportReason = "path_traversal"
+
+	// PackageImportReasonPathTooLong — the canonical path exceeded
+	// MaxPackagePathBytes bytes (§5.4).
+	PackageImportReasonPathTooLong PackageImportReason = "path_too_long"
+
+	// PackageImportReasonPathTooDeep — the canonical path exceeded
+	// MaxPackagePathDepth segments (§5.4).
+	PackageImportReasonPathTooDeep PackageImportReason = "path_too_deep"
+
+	// PackageImportReasonPathDuplicate — two entries carried the SAME
+	// canonical path (§7 threat 6, T17).
+	PackageImportReasonPathDuplicate PackageImportReason = "duplicate_path"
+
+	// PackageImportReasonPathUnicodeCollision — two entries carried
+	// DIFFERENT names that normalise to the same NFC form (§7 threat 8,
+	// T19).
+	PackageImportReasonPathUnicodeCollision PackageImportReason = "path_unicode_collision"
+
+	// PackageImportReasonPathCaseCollision — two canonical paths differ
+	// only by ASCII case (§7 threat 7, T18).
+	PackageImportReasonPathCaseCollision PackageImportReason = "path_case_collision"
 )
+
+// packageImportReasonForPathReason maps a canonical-path refusal onto
+// the import vocabulary.
+//
+// The mapping is TOTAL: every reason §5.4 can produce has an import
+// counterpart, so an archive entry's path refusal is always classified
+// with the rule's own code rather than with a generic one. The two
+// vocabularies share their strings for the path rules, so the mapping is
+// a renaming rather than a translation — which is what lets a caller
+// branch on `path_traversal` without knowing which import path produced
+// it.
+func packageImportReasonForPathReason(reason PackagePathReason) PackageImportReason {
+	switch reason {
+	case PackagePathReasonEmpty:
+		return PackageImportReasonPathEmpty
+	case PackagePathReasonInvalidUTF8:
+		return PackageImportReasonInvalidUTF8
+	case PackagePathReasonNUL:
+		return PackageImportReasonPathNUL
+	case PackagePathReasonControlCharacter:
+		return PackageImportReasonPathControlCharacter
+	case PackagePathReasonUNC:
+		return PackageImportReasonPathUNC
+	case PackagePathReasonDriveLetter:
+		return PackageImportReasonPathDriveLetter
+	case PackagePathReasonAbsolute:
+		return PackageImportReasonPathAbsolute
+	case PackagePathReasonBackslash:
+		return PackageImportReasonPathBackslash
+	case PackagePathReasonTrailingSlash:
+		return PackageImportReasonPathTrailingSlash
+	case PackagePathReasonEmptySegment:
+		return PackageImportReasonPathEmptySegment
+	case PackagePathReasonDotSegment:
+		return PackageImportReasonPathDotSegment
+	case PackagePathReasonTraversal:
+		return PackageImportReasonPathTraversal
+	case PackagePathReasonTooLong:
+		return PackageImportReasonPathTooLong
+	case PackagePathReasonTooDeep:
+		return PackageImportReasonPathTooDeep
+	case PackagePathReasonDuplicate:
+		return PackageImportReasonPathDuplicate
+	case PackagePathReasonUnicodeCollision:
+		return PackageImportReasonPathUnicodeCollision
+	case PackagePathReasonCaseCollision:
+		return PackageImportReasonPathCaseCollision
+	default:
+		// An unknown reason is a bug in the mapping, not in the input.
+		// The generic code keeps the refusal classified rather than
+		// letting it escape as an unclassified error.
+		return PackageImportReasonPathInvalid
+	}
+}
 
 // PackageImportError is the typed refusal returned by the package
 // importer.

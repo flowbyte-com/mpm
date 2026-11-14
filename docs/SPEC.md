@@ -2135,6 +2135,154 @@ The content-type allow-list is **explicit and closed**: `.md .txt .json .yaml .y
 
 **No change to ordinary skills.** A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
 
+### 6.11 Skill Package Archive Import (P5 — the `.skill` ZIP adapter)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** is specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). **Stage P5** adds the **archive importer** — the `.skill` ZIP adapter — and it is the second half of the same pipeline.
+
+The format and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5.3, §5.3.1, §5.4, §4.4 Rule 2, §7, §7.1, §10, §12.2 and §13. **This section describes stage P5.**
+
+#### What P5 adds
+
+An **internal** importer — `DatabaseManager.ImportSkillPackageFromArchive` — that takes an operator-selected `.skill` ZIP archive and stores the whole package **atomically**, through the **same** plan, the **same** transaction and the **same** post-commit verification the directory path uses.
+
+It is **internal**, exactly as the P4 importer is: there is no CLI command, no MCP action and no agent-facing import surface. The operator-facing command lands in a later stage (P8).
+
+The P5 property that everything else serves is **equivalence**: the same logical package produces the **same** canonical identity, the **same** file rows, the **same** per-file hashes, the **same** `package_hash` and the **same** stored content, whether it arrived as a directory or as a ZIP. The two layouts of the archive — flat and wrapped — produce **byte-identical** packages except for the display-only `raw_path`.
+
+#### The ingestion architecture — one boundary, not two importers
+
+P5 is an **adapter**, not a second importer. The pipeline is:
+
+```
+ZIP archive
+    ↓  readPackageArchive          ← the ADAPTER: this is all P5 adds
+       · open + identity check
+       · EOCD pre-scan (entry count)
+       · per-entry: type / encryption / count / path / size
+       · read the bytes (bounded)
+    ↓  packageImportSource          ← the SHARED validated representation
+    ↓  planPackageImportFiles       ← P4's planner, unchanged
+       · entrypoint cap · version derivation · semver · name
+       · secret + poison scans · binary/executable rules
+       · manifest · per-file hashes · package hash · identity
+    ↓  commitPackageImport          ← P4's transaction, unchanged
+    ↓  verifyPackageImport          ← P4's post-commit verification, unchanged
+```
+
+The boundary is drawn **after** the bytes are in memory, because that is where the two paths genuinely converge: once the bytes exist, the rules that decide whether a package may be stored are the **same** rules, and they are the rules the directory path has always applied. Every rule the mission lists as "reuse P4" — the frontmatter contract, the canonical path validation, the secret and poison scans, the binary and executable handling, the hashing and the manifest, the identity and semver, the idempotence and version-conflict rules, the transactional projection and provenance, the blob dedup and the post-commit verification — is applied **once**, in one place.
+
+P4's planner was **split** to make that boundary explicit and testable. `planPackageImport` (the directory path) resolves the root, runs the scanner preflight, walks the tree and selects the entrypoint; it then hands a `packageImportSource` to `planPackageImportFiles`, which is the **whole** of the remaining logic. No rule was duplicated, and no protection was weakened.
+
+**No package byte ever reaches the filesystem.** The archive is read **directly into the shared representation**; there is no temporary extraction tree, so there is nothing to clean up and no window in which an extracted file exists outside the database. This is **Rule 2** (§4.4) honoured literally, and it is what makes the next section's asymmetry safe.
+
+#### The accepted layouts (O9) and the root derivation
+
+**Exactly two** archive layouts are accepted, per the operator's decision **O9**:
+
+| layout | shape | the package root |
+|---|---|---|
+| **flat** | `SKILL.md` at the archive's top level | the archive root |
+| **wrapped** | one enclosing directory holding the whole package | that directory |
+
+The root is derived from the **entrypoint's parent directory** (§5.3.1) — never from a count of directories. The derivation is **order-independent** and **hash-neutral**: a flat archive and a wrapped archive carrying the same package produce the **same** `package_hash`, and only the display-only `raw_path` differs.
+
+The derivation is **not** a directory count, and that is load-bearing: a flat package may carry `references/`, `scripts/`, `assets/` and any number of other directories beside its entrypoint — those are **content directories of that package**, not competing roots. What is refused is a genuinely **competing package root**: more than one `SKILL.md` (`ambiguous_package_root`).
+
+The rules are applied in the design's order:
+
+1. **directory entries are skipped** — an entry whose name ends in `/` or whose attributes carry the MS-DOS directory bit is not a file, is not stored and does not participate in the derivation;
+2. **the remaining entries are canonicalised** — and a duplicate, a unicode collision or a case collision is refused here, **before** the entrypoint's uniqueness is considered;
+3. **the entrypoint is the file entry whose base name is exactly `SKILL.md`** — more than one is `ambiguous_package_root`; none is `entrypoint_not_found`;
+4. **the package root is the entrypoint's parent directory**;
+5. **every file entry must lie under the root** (`path_outside_root`) — otherwise an entry beside the wrapper belongs to a different tree, and nothing is dropped silently;
+6. **the root segment is stripped by whole segment**, and the root itself is never stored — so `pkg-extra/x.md` is *outside* a root of `pkg`, not a sibling of `pkg`;
+7. **the derivation is order-independent** — it uses the complete entry set, and the files are sorted by canonical path, so two archives carrying the same entries in a different order produce identical rows, manifests and hashes.
+
+#### The security model — Rule 2 is the boundary, not the entry-type check
+
+An archive entry's **type** is determined by an attacker-chosen header byte — the central directory's creator byte — so the type check is available only for a Unix-attribute archive:
+
+| creator byte | a symlink / FIFO / device entry |
+|---|---|
+| **Unix** (3), **macOS** (19) | **refused** (`unsupported_entry_type`) |
+| **FAT** (0), **NTFS** (11), **VFAT** (14) | **degrades to a regular file**, and the import **succeeds** |
+
+That asymmetry is deliberate and safe **because of Rule 2** (§4.4): an import writes the bytes into a database column and never materialises them as a file. There is no filesystem object for a symlink to escape into, and no code path connects package content to execution. The entry-type check is **defence in depth**; Rule 2 is the boundary.
+
+The **directory** entry is the exception, and it is detected under **both** creator bytes: a name ending in `/` identifies it on its own, and the MS-DOS directory attribute is a second, independent signal.
+
+The rest of the hostile-archive handling:
+
+| threat | refusal |
+|---|---|
+| a `..` segment (ZIP-slip) | `path_traversal` |
+| a leading `/` | `absolute_path` |
+| a drive-letter prefix (`C:`) | `drive_letter_prefix` |
+| a UNC prefix | `unc_path` |
+| a backslash separator | `backslash_separator` |
+| a NUL byte or a control character | `nul_byte` / `control_character` |
+| a `.` segment, an empty segment, a trailing slash | `dot_segment` / `empty_path_segment` / `trailing_slash` |
+| two entries with the same canonical path | `duplicate_path` |
+| two paths differing only by ASCII case | `path_case_collision` |
+| two paths differing only by Unicode normalisation form | `path_unicode_collision` |
+| an encrypted entry | `archive_encrypted` |
+| a malformed structure, a truncated entry, a CRC failure | `archive_invalid` / `checksum_mismatch` |
+
+The **path** codes are the canonical-path rules' **own** strings — the P2 path reasons, carried verbatim — so a caller branches on one vocabulary rather than on a second encoding of the same rule.
+
+**The limits are enforced while reading**, never after a complete listing is collected. The **declared** size is checked against the per-file cap **before** the entry is decompressed, so a decompression bomb is refused without ever being materialised, and the cap is **also** enforced while the bytes are read, because a header can lie. The total-byte cap is checked as the bytes are read.
+
+The **entry count** is read from the **End-of-Central-Directory record by hand** — with ZIP64 support — **before** the central directory is parsed. This matters because `archive/zip` builds one header per central-directory record when the reader is created, so the count is only available *after* the allocation the count is supposed to bound. Reading the fixed-size EOCD record first means the bound is enforced **before** the allocation happens.
+
+#### The limits and their justification
+
+The package's **content** limits are P4's, unchanged: **512 files**, **32 MiB** total, **4 MiB** per file, **256 KiB** for the entrypoint (O6). The archive path inherits them exactly, which is what makes the directory/ZIP equivalence hold.
+
+P5 adds exactly **two** archive-level limits, and both are stated with their reason:
+
+| limit | value | justification |
+|---|---|---|
+| `MaxArchiveBytes` | **64 MiB** | The on-disk size bounds the **central directory**, which `archive/zip` parses eagerly into one header per entry, and bounds the compressed payload a single entry may carry. A legitimate archive holds at most 32 MiB of content; DEFLATE never expands and STORED entries are the same size as their content, so 64 MiB — twice the content cap — accommodates every legitimate archive with room for the central directory and the local headers, while refusing an archive whose size is driven by something other than package content. |
+| `MaxArchiveEntries` | **4096** | The entry count is what bounds `archive/zip`'s eager per-entry header allocation. A legitimate package carries at most 512 files plus at most one directory entry per directory it contains, so at most about **1024** entries; 4096 leaves four times that headroom for archives that record directories generously, while keeping the parsed central directory to a few megabytes. |
+
+Both limits are **read before the allocation they bound** — the file size before the archive is opened for parsing, the entry count before the central directory is parsed.
+
+#### The reason codes P5 adds
+
+The refusal vocabulary is **closed**. P5's additions are **additive** — every code the directory path already had keeps its meaning:
+
+| code | meaning |
+|---|---|
+| `archive_invalid` | the archive's structure is unusable: not a ZIP, a truncated or malformed central directory, an entry whose declared size does not match its payload, or an entry cut short mid-stream |
+| `checksum_mismatch` | an entry's bytes did not match the CRC-32 the archive declares |
+| `path_outside_root` | a file entry does not lie under the derived package root (§5.3.1 rule 5) |
+| `unsupported_archive_layout` | the package root is neither the archive root nor a **single** enclosing directory |
+| `archive_encrypted` | an entry is encrypted, so its bytes cannot be validated by the scanners that guard every stored byte |
+
+The path rules are reported with the **P2 path reasons verbatim** — `path_traversal`, `absolute_path`, `drive_letter_prefix`, `duplicate_path`, `path_case_collision`, `path_unicode_collision`, `nul_byte`, `control_character`, `backslash_separator`, `unc_path`, `dot_segment`, `empty_path_segment`, `trailing_slash`, `empty_path`, `path_too_long`, `path_too_deep` — and the mapping between the two vocabularies is **total**.
+
+Every refusal on the archive path is **fail closed** in the same sense the directory path's refusals are: validation and scanning happen **before** the transaction opens, so a rejected archive writes **nothing** — no package row, no file row, no blob row, no projection, no provenance row.
+
+#### The deviation — a nested wrapper is refused
+
+§5.3.1's derivation would accept a package root **deeper than one segment** and treat the entrypoint's whole parent path as the root. **O9 accepts exactly two shapes** — the flat layout and the single-wrapper layout — so a root two segments deep is a **third** shape, and it is **refused** (`unsupported_archive_layout`) rather than silently reinterpreted.
+
+This is the one place where the implementation is **narrower** than the design's derivation. The narrower rule is the operator's O9 instruction, and it is recorded here for the design owner's confirmation.
+
+#### What P5 does **not** add
+
+**No read APIs.** The package's read surface is P6.
+
+**No export writer.** The `.skill` archive is the *transport*; the writer that produces one is P7.
+
+**No CLI or MCP surface.** The importer is internal, exactly as P4's is. The operator-facing command is P8.
+
+**No promotion or garbage collection.** P9.
+
+**No second package database.** The storage is the one specified in §6.8, and the archive path writes to it through the same transaction as the directory path.
+
+**No change to P4's rules.** Every protection the directory path applies — the confinement and the identity chain, the scanner preflight, the limits, the secret and poison scans, the binary and executable rules, the version derivation, the idempotence and version-conflict rules, the transactional projection and provenance, the blob dedup and the post-commit verification — is applied to an archive import **unchanged**. The archive path adds a way to **obtain** the bytes; it does not add a way to **decide** whether they may be stored.
+
 ---
 
 ## 7. Core Stability
