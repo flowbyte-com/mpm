@@ -1447,6 +1447,74 @@ func TestP5_TheArchiveEntryCountIsBounded(t *testing.T) {
 	p5AssertUnchanged(t, dm, before, "too many declared entries")
 }
 
+// TestP5_APrefixedArchiveIsNotRefusedByTheCentralDirectoryBound guards
+// the bound against a FALSE POSITIVE.
+//
+// A PREFIXED (self-extracting) archive — an executable blob with the
+// ZIP appended — is a well-formed ZIP, and `archive/zip` reads it
+// perfectly. Its declared central-directory offset is RELATIVE to the
+// archive's logical start, so the absolute offset points into the
+// PREFIX, and its base offset is positive.
+//
+// `archive/zip` handles that by re-reading the record at the declared
+// offset: the bytes there are prefix garbage, not a central-directory
+// header, so the fallback does NOT apply and the parse starts at the
+// central directory's real first byte.
+//
+// A bound that assumed the fallback applies — by taking the earlier of
+// the two candidate starts unconditionally — would treat the whole
+// prefix as parseable central directory and REFUSE a legitimate
+// archive. This test pins that it does not.
+func TestP5_APrefixedArchiveIsNotRefusedByTheCentralDirectoryBound(t *testing.T) {
+	dm := p3DM(t)
+
+	// A ZIP with one entry.
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	w, err := zw.Create("SKILL.md")
+	if err != nil {
+		t.Fatalf("create the archive entry: %v", err)
+	}
+	if _, err := w.Write([]byte(p4SkillDoc("prefixed", "1.0.0", "prefixed\n"))); err != nil {
+		t.Fatalf("write the archive entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close the archive: %v", err)
+	}
+
+	// The self-extracting prefix: 4 MiB of executable blob.
+	prefix := bytes.Repeat([]byte("MZ"), 2<<20)
+	archive := filepath.Join(t.TempDir(), "prefixed.skill")
+	if err := os.WriteFile(archive, append(prefix, zipBuf.Bytes()...), 0o600); err != nil {
+		t.Fatalf("write the prefixed archive: %v", err)
+	}
+
+	// `archive/zip` itself must read it — otherwise the fixture proves
+	// nothing about a bound that is tighter than the reader.
+	reader, err := zip.OpenReader(archive)
+	if err != nil {
+		t.Fatalf("the reader cannot open the prefixed archive, so the fixture proves nothing: %v", err)
+	}
+	defer reader.Close()
+	if len(reader.File) != 1 {
+		t.Fatalf("the prefixed archive carries %d entries, want 1", len(reader.File))
+	}
+
+	// And the importer must accept it.
+	res, err := dm.ImportSkillPackageFromArchive(PackageImportOptions{Path: archive})
+	if err != nil {
+		t.Fatalf("a legitimate prefixed archive was refused: %v", err)
+	}
+	if res.Status != PackageImportStatusImported {
+		t.Errorf("the import status = %q, want %q", res.Status, PackageImportStatusImported)
+	}
+	want := []string{"SKILL.md"}
+	got := p5PackageFiles(t, dm, res.SkillID)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("the package's file rows = %v, want %v", got, want)
+	}
+}
+
 // p5PatchEOCDEntryCount rewrites the End-of-Central-Directory record's
 // entry count.
 func p5PatchEOCDEntryCount(t *testing.T, path string, count uint16) {

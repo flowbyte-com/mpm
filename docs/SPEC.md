@@ -2241,7 +2241,9 @@ So the bound is applied to **two** quantities, and together they hold:
 1. the **declared** count — the cheap check, which refuses an archive that plainly declares too many entries;
 2. the **parse window** — the number of records the central directory's **bytes** could hold. The parse spans exactly the central directory, and every central-directory record is at least 46 bytes long, so a byte span holds at most `span / 46` records. This bound is derived from the directory's **extent** rather than from its **record count**, so it survives a lying count.
 
-The parse window is computed from the End-of-Central-Directory record's own fields, and it is **tight for every well-formed archive**. A ZIP64 locator's offset is resolved **absolutely**, exactly as `archive/zip` resolves it, so a prefixed (self-extracting) ZIP64 archive is refused rather than mis-parsed — the same behaviour `archive/zip` itself has, and it fails closed.
+The parse window is computed from the End-of-Central-Directory record's own fields. There are **two** possible parse starts, and which one applies is decided by the archive itself: the **normal** start (the central directory's first byte) and a **fallback** start (the declared offset), which `archive/zip` uses only for an archive whose declared offsets are inconsistent — and only when a valid central-directory header really is at that offset. The fallback is **checked**, not assumed, because a **prefixed (self-extracting)** archive's declared offset is relative to the archive's logical start and so points into the prefix; assuming the fallback would treat the whole prefix as parseable central directory and would refuse a legitimate self-extracting archive that `archive/zip` reads perfectly.
+
+A ZIP64 locator's offset is resolved **absolutely**, exactly as `archive/zip` resolves it, so a prefixed ZIP64 archive is refused rather than mis-parsed — the same behaviour `archive/zip` itself has, and it fails closed.
 
 #### The limits and their justification
 

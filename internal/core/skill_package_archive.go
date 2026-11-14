@@ -293,7 +293,7 @@ func readPackageArchive(archivePath string, limits PackageImportLimits, archiveL
 			"the archive declares %d entries, over the %d-entry cap",
 			dir.count, archiveLimits.MaxArchiveEntries)
 	}
-	if maxRecords := dir.maxParseRecords(); maxRecords > int64(archiveLimits.MaxArchiveEntries) {
+	if maxRecords := dir.maxParseRecords(file, info.Size()); maxRecords > int64(archiveLimits.MaxArchiveEntries) {
 		return source, packageImportErrorf(PackageImportReasonFileCountLimit, "",
 			"the archive's central directory could hold %d records, over the %d-entry cap",
 			maxRecords, archiveLimits.MaxArchiveEntries)
@@ -792,6 +792,10 @@ const (
 	// span/this records. That is what turns a byte bound into an entry
 	// bound.
 	archiveCentralDirectoryRecordMinBytes = 46
+
+	// archiveCentralDirectorySignature is the signature of a
+	// central-directory file header.
+	archiveCentralDirectorySignature = 0x02014b50
 )
 
 // packageArchiveDirectory is the archive's central directory, as the
@@ -831,22 +835,45 @@ type packageArchiveDirectory struct {
 // And every record is at least 46 bytes long, so a byte span holds at
 // most span/46 records.
 //
-// The parse's START is derived from the declared directory size:
-// `archive/zip` computes it as `endOffset - size`. It also has a
-// fallback — for an archive whose declared offsets are inconsistent, it
-// may parse from the declared offset instead — so the sound start is
-// the EARLIER of the two.
+// # WHICH START `archive/zip` USES
 //
-// The result is tight for every well-formed archive, and it holds even
-// when the declared count is a lie, because it is derived from the
-// central directory's BYTES rather than from its record count.
-func (d packageArchiveDirectory) maxParseRecords() int64 {
+// There are two, and which one applies is decided by the archive
+// itself:
+//
+//   - the NORMAL start — the central directory's first byte, which
+//     `archive/zip` derives as `endOffset - size`;
+//   - the FALLBACK start — the declared offset. `archive/zip` uses it
+//     only for an archive whose declared offsets are inconsistent: it
+//     re-reads the record at the declared offset and, if a valid
+//     central-directory header really is there, parses from THERE.
+//
+// The fallback is CHECKED, not assumed, and that matters: a PREFIXED
+// (self-extracting) archive has a positive base offset, and its
+// declared offset is relative to the archive's logical start — so the
+// absolute offset points into the PREFIX. Taking the earlier of the
+// two starts unconditionally would treat the whole prefix as parseable
+// central directory, and would refuse a legitimate self-extracting
+// archive that `archive/zip` reads perfectly.
+//
+// The result is therefore tight for every well-formed archive — the
+// normal start — and sound for the malformed one, where the fallback
+// really does apply.
+func (d packageArchiveDirectory) maxParseRecords(r io.ReaderAt, size int64) int64 {
 	start := d.endOffset - d.size
-	if d.offset < start {
-		// The inconsistent-offsets fallback: `archive/zip` may parse
-		// from the declared offset instead, which is earlier.
-		start = d.offset
+
+	// The fallback applies only when the base offset is positive AND
+	// the bytes at the declared offset really are a central-directory
+	// record. `archive/zip` reads exactly those four bytes to decide,
+	// so this reads exactly the same four bytes.
+	if d.endOffset-d.size-d.offset > 0 && d.offset >= 0 && d.offset+4 <= size {
+		var sig [4]byte
+		if _, err := r.ReadAt(sig[:], d.offset); err == nil {
+			if binary.LittleEndian.Uint32(sig[:]) == archiveCentralDirectorySignature {
+				start = d.offset
+			}
+		}
 	}
+
 	if start < 0 {
 		start = 0
 	}
