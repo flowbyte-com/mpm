@@ -199,25 +199,112 @@ func parseDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
+// exportUsage is the usage line the export help page prints.
+const exportUsage = "mpm export [options]"
+
+// exportProse is the part of the export help page that is not an option
+// list.
+//
+// It is where the JSON document's SHAPE is documented, because the shape
+// is a contract a consumer has to know and the option list cannot carry
+// it. The prose is reachable from `mpm export --help`, `mpm export -h`
+// and `mpm help export` — the router's own help interception reaches this
+// page for all three. (The handler's own fs.Usage is NOT the place: the
+// router validates the options before the handler is entered, so an
+// fs.Usage attached to the handler's flagset is never printed.)
+const exportProse = `The JSON document is an OBJECT, not a bare array:
+
+  {"memories": [ ... ], "packages_omitted": { "count": N, "packages": [ ... ] }}
+
+"packages_omitted" is ALWAYS present. It names every skill package whose
+CONTENT was not included: a skills export carries the projected skill row
+only, until full package export exists, and those bytes exist nowhere
+else. A count of 0 means nothing was omitted.
+
+"memories" is the same key mpm migrate --from reads, so an export file
+remains a valid input for "mpm migrate --from <file>".
+
+The CSV format is unchanged. The loss marker is a notice on standard error,
+so it never corrupts the document on standard output.
+
+--format json-array is the DEPRECATED legacy shape: a bare JSON array,
+with no room for the loss marker. It is refused whenever a package would
+be omitted, because emitting the old shape then would drop package content
+silently — the one thing R11 exists to prevent. It is kept for one release
+for consumers that cannot yet read the object, and it will be removed.`
+
+// exportOpts holds the export command's parsed options.
+//
+// The handler's flag set and the help page are built from ONE declaration
+// (exportOptions), so the advertised option set and the accepted option
+// set cannot disagree — which is what the command's own help contract
+// requires.
+type exportOpts struct {
+	format     string
+	collection string
+	since      string
+	until      string
+	output     string
+}
+
+// exportOptions declares every option the export command accepts.
+func exportOptions(o *exportOpts) []OptionSpec {
+	return []OptionSpec{
+		HelpOption,
+		{Name: "format", Usage: "Output format", Kind: OptString, String: &o.format,
+			ValueName: "json|csv|json-array", DefaultText: "default json"},
+		{Name: "collection", Usage: "Filter by collection", Kind: OptString, String: &o.collection, ValueName: "name"},
+		{Name: "since", Usage: "Export memories since date", Kind: OptString, String: &o.since, ValueName: "YYYY-MM-DD"},
+		{Name: "until", Usage: "Export memories until date", Kind: OptString, String: &o.until, ValueName: "YYYY-MM-DD"},
+		{Name: "output", Usage: "Output file", Kind: OptString, String: &o.output, ValueName: "path"},
+	}
+}
+
+// printExportHelp renders the export command's own help page.
+func printExportHelp() int {
+	o := &exportOpts{format: "json"}
+	return PrintHelpPage(exportUsage, exportOptions(o), exportProse)
+}
+
+// exportLegacyArrayFormat is the DEPRECATED bare-array JSON format.
+//
+// It exists for one release, for consumers that cannot yet read the
+// structured object. It is REFUSED whenever the export would omit a
+// package's content, because emitting the legacy shape then would drop
+// those bytes silently — the exact loss R11 exists to make loud.
+const exportLegacyArrayFormat = "json-array"
+
 // handleExport exports memories to JSON/CSV
 func handleExport(args []string) int {
-	fs := flag.NewFlagSet("export", flag.ContinueOnError)
-	format := fs.String("format", "json", "Output format: json, csv")
-	collection := fs.String("collection", "", "Filter by collection")
-	since := fs.String("since", "", "Export memories since date (YYYY-MM-DD)")
-	until := fs.String("until", "", "Export memories until date (YYYY-MM-DD)")
-	output := fs.String("output", "", "Output file (default: stdout)")
-	fs.Usage = func() {
-		fmt.Println("Usage: mpm export [options]")
-		fmt.Println("\nExport options:")
-		fs.PrintDefaults()
-		fmt.Println("\nThe JSON document is an object: {\"memories\": [...], \"packages_omitted\": {...}}.")
-		fmt.Println("\"packages_omitted\" is always present and names every skill package whose")
-		fmt.Println("CONTENT was not included — a skills export carries the projected skill row")
-		fmt.Println("only, until full package export exists. A count of 0 means nothing was omitted.")
+	// A help request must never export, and must never mutate. The
+	// router intercepts the top-level `mpm export --help`, but the nested
+	// `mpm ops export --help` reaches this handler with the router's
+	// rewritten "help" token — so the handler short-circuits on it too.
+	if requireHelpShortCircuit(args, func() { printExportHelp() }) {
+		return 0
 	}
+
+	var o exportOpts
+	o.format = "json"
+	opts := exportOptions(&o)
+
+	fs := flag.NewFlagSet("export", flag.ContinueOnError)
+	fs.SetOutput(discardWriter{})
+	RegisterOptions(fs, opts)
+
+	// The router has already consumed -h/--help.
+	if rc := RejectUnknownOptionInArgs("export", exportUsage, opts, args[1:]); rc != 0 {
+		return rc
+	}
+
 	if err := fs.Parse(args[1:]); err != nil {
-		return 1
+		return usererror.Error("export: %v", err)
+	}
+
+	switch o.format {
+	case "json", "csv", exportLegacyArrayFormat:
+	default:
+		return usererror.Error("Unknown export format %q: expected json, csv or %s", o.format, exportLegacyArrayFormat)
 	}
 
 	dm := getDB()
@@ -225,7 +312,7 @@ func handleExport(args []string) int {
 		return 1
 	}
 
-	memories, err := dm.GetMemoriesForExport(*collection, *since, *until)
+	memories, err := dm.GetMemoriesForExport(o.collection, o.since, o.until)
 	if err != nil {
 		return usererror.Error("Export failed: %v", err)
 	}
@@ -248,11 +335,33 @@ func handleExport(args []string) int {
 	// boundary TestPurge_IsNotOnCoreDB pins).
 	packageLoss := &mpminternal.SkillPackageExportLoss{Packages: []mpminternal.SkillPackageExportOmitted{}}
 	if concrete := getDBConcrete(); concrete != nil {
-		loss, err := concrete.GetSkillPackageExportLoss(*collection, *since, *until)
+		loss, err := concrete.GetSkillPackageExportLoss(o.collection, o.since, o.until)
 		if err != nil {
 			return usererror.Error("Export failed: %v", err)
 		}
 		packageLoss = loss
+	}
+
+	// ── The DEPRECATED bare-array format is refused when it would lose
+	// package content. ──────────────────────────────────────────────────
+	//
+	// A bare JSON array has nowhere to carry the loss marker. Emitting
+	// one while a package's content is being omitted would drop those
+	// bytes SILENTLY — the exact failure R11 exists to prevent, and the
+	// legacy shape would reintroduce it for exactly the consumers that
+	// have not migrated yet.
+	//
+	// So the legacy format is available ONLY when there is nothing to
+	// lose. That is the safe form of a compatibility shim: a consumer
+	// that cannot read the object keeps working for every export that is
+	// complete, and is given a clear error — not silent data loss — for
+	// the one export that is not.
+	if o.format == exportLegacyArrayFormat && packageLoss.Count > 0 {
+		return usererror.Error(
+			"the legacy %q format cannot carry the package loss marker, and this export "+
+				"omits the CONTENT of %d skill package(s): %s. Use --format json, which "+
+				"names every omitted package.",
+			exportLegacyArrayFormat, packageLoss.Count, packageLoss.Notice())
 	}
 
 	var writer *csv.Writer
@@ -264,13 +373,13 @@ func handleExport(args []string) int {
 	outputTarget := io.Writer(os.Stdout)
 	usedFile := false
 
-	if *output != "" {
+	if o.output != "" {
 		// Defect B (2026-09-13 acceptance): pre-fix the JSON path
 		// hardcoded os.Stdout regardless of --output. The output file
 		// was created and truncated but nothing was ever written to
 		// it — a 0-byte file with stdout JSON next to it. The fix
 		// routes the writer to the file when --output is set.
-		outputFile, err = os.Create(*output)
+		outputFile, err = os.Create(o.output)
 		if err != nil {
 			return usererror.Error("Cannot create output file: %v", err)
 		}
@@ -278,12 +387,12 @@ func handleExport(args []string) int {
 		outputTarget = outputFile
 		usedFile = true
 
-		if *format == "csv" {
+		if o.format == "csv" {
 			writer = csv.NewWriter(outputFile)
 		}
 	}
 
-	if *format == "json" {
+	if o.format == "json" {
 		// The JSON document carries the loss marker. The shape is
 		// stable: `memories` is always the array of rows, and
 		// `packages_omitted` is always present with a count and the
@@ -300,7 +409,19 @@ func handleExport(args []string) int {
 		}); err != nil {
 			return usererror.Error("JSON encode failed: %v", err)
 		}
-	} else if *format == "csv" {
+	} else if o.format == exportLegacyArrayFormat {
+		// The DEPRECATED bare array — the shape the export had before the
+		// loss marker existed. It is only reachable when nothing is
+		// omitted (the refusal above), so it is never a silent loss.
+		//
+		// It is kept for one release for consumers that cannot yet read
+		// the structured object, and it will be removed.
+		enc := json.NewEncoder(outputTarget)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(memories); err != nil {
+			return usererror.Error("JSON encode failed: %v", err)
+		}
+	} else if o.format == "csv" {
 		if writer == nil {
 			writer = csv.NewWriter(outputTarget)
 		}
@@ -333,7 +454,7 @@ func handleExport(args []string) int {
 	}
 
 	if usedFile {
-		usererror.Notice("Exported %d memories to %s", len(memories), *output)
+		usererror.Notice("Exported %d memories to %s", len(memories), o.output)
 	} else {
 		usererror.Notice("Exported %d memories", len(memories))
 	}
@@ -343,6 +464,17 @@ func handleExport(args []string) int {
 	// caller who never read the response still sees it.
 	if notice := packageLoss.Notice(); notice != "" {
 		usererror.Notice("%s", notice)
+	}
+
+	// The deprecation notice for the legacy shape. It goes to standard
+	// error for the same reason the loss marker does: standard output
+	// carries the document, and the document must stay parseable.
+	if o.format == exportLegacyArrayFormat {
+		usererror.Notice(
+			"WARNING: --format %s is DEPRECATED and will be removed in a future release. "+
+				"It emits the legacy bare array, which cannot carry the package loss marker. "+
+				"Use --format json, which names every omitted package.",
+			exportLegacyArrayFormat)
 	}
 	return 0
 }

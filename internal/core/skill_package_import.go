@@ -21,9 +21,14 @@
 //
 // Three rules hold the boundary:
 //
-//  1. The walk uses os.Lstat and NEVER follows a symlink. A symlinked
-//     directory is refused outright (`symlinked_directory`); a symlink
-//     whose target resolves outside the import root is refused
+//  1. The import root is HELD OPEN as a directory descriptor, and every
+//     inspection and every read is issued RELATIVE TO THAT DESCRIPTOR
+//     (os.Root). A path is a name and a name can be re-pointed between
+//     the moment it is checked and the moment it is opened; a descriptor
+//     cannot. Replacing the root path with a symlink after the root was
+//     opened changes nothing the walk reads (§7 threat 19).
+//     A symlinked directory is refused outright (`symlinked_directory`); a
+//     symlink whose target resolves outside the import root is refused
 //     (`path_escapes_root`).
 //  2. Every byte read is bounded. The per-file, total and entrypoint caps
 //     are checked AS bytes are read, so a file that grows after it was
@@ -180,6 +185,18 @@ type PackageImportOptions struct {
 	// AuthorAgent is the agent recorded as the author of the projected
 	// skill row. It defaults to "operator".
 	AuthorAgent string
+
+	// ActiveContext is the caller's provenance identity for this import.
+	//
+	// It is OPTIONAL. The zero value means "no identity supplied", and
+	// the import is then attributed to the ambient operator identity
+	// rather than to the agent that wrote whatever the import replaces.
+	//
+	// It matters for a RESURRECTION: the import replaces the content of
+	// an existing row in place, so the row's provenance is refreshed to
+	// describe the importing invocation. Supplying this context is how a
+	// caller says "this invocation wrote the content".
+	ActiveContext ActiveContext
 }
 
 // PackageImportResult is the outcome of a successful import.
@@ -306,7 +323,7 @@ func (dm *DatabaseManager) ImportSkillPackageFromDir(opts PackageImportOptions) 
 	}
 
 	// ── Phase 2: the single transaction. ────────────────────────────────
-	result, err := dm.commitPackageImport(plan, author)
+	result, err := dm.commitPackageImport(plan, author, opts.ActiveContext)
 	if err != nil {
 		return nil, err
 	}
@@ -607,49 +624,60 @@ func resolvePackageImportRoot(path string) (string, error) {
 //
 // THE GUARANTEES, STATED EXACTLY
 //
-//  1. The walk never follows a symlink. Every entry is inspected with
-//     os.Lstat, never os.Stat.
+//  1. The walk is CONFINEd to the root's OPENED directory descriptor.
+//     Every inspection and every read is issued relative to it (os.Root),
+//     so the bytes come from the inode the operator selected even if the
+//     paths underneath it are re-pointed while the walk runs.
 //  2. A symlinked DIRECTORY is refused outright (`symlinked_directory`) —
 //     the walk does not descend into it.
 //  3. A symlink whose target resolves OUTSIDE the resolved import root is
 //     refused (`path_escapes_root`).
 //  4. Every file's bytes are read through a limited reader, so a file
 //     that grows after it was inspected cannot exceed the cap.
-//  5. The file is re-inspected immediately before it is opened, and the
-//     OPENED file's identity is compared with the inspected one, so a
-//     file swapped between the two is detected
+//  5. The opened file's identity is compared with the inspected one, and
+//     the opened DIRECTORY's identity is compared with the inspected one,
+//     so a file or a directory swapped between the two is detected
 //     (`changed_during_read`).
 //
 // The limits are enforced DURING the walk: the walk stops at the first
 // violation and never enumerates the whole tree (§7 threat 11, R12).
 func walkPackageTree(root string, limits PackageImportLimits) ([]packageImportFile, error) {
-	rootInfo, err := os.Stat(root)
+	anchor, err := openPackageImportAnchor(root)
 	if err != nil {
-		return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
-			"the import root %q could not be inspected: %v", root, err)
+		return nil, err
 	}
+	defer anchor.Close()
 
 	// A standalone one-file package: the root IS the entrypoint.
-	if rootInfo.Mode().IsRegular() {
-		content, size, err := readPackageFile(root, limits.MaxFileBytes)
+	if anchor.file != "" {
+		content, size, err := anchor.readFile(anchor.file, limits.MaxFileBytes)
 		if err != nil {
 			return nil, err
 		}
 		return []packageImportFile{{
 			canonicalPath: packageEntrypointName,
 			rawPath:       packageEntrypointName,
-			absPath:       root,
+			absPath:       filepath.Join(anchor.rootPath, anchor.file),
 			sizeBytes:     size,
 			content:       content,
 			sha256:        sha256Hex(content),
 		}}, nil
 	}
 
+	// The root directory itself, opened THROUGH the anchor, so the listing
+	// comes from the anchored inode and not from the path.
+	rootDir, err := anchor.root.Open(".")
+	if err != nil {
+		return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+			"the import root %q could not be opened: %v", anchor.rootPath, err)
+	}
+	defer rootDir.Close()
+
 	var files []packageImportFile
 	var totalBytes int64
 	paths := NewPackagePathSet()
 
-	err = walkPackageDir(root, root, limits, paths, &files, &totalBytes, 0)
+	err = walkPackageDir(anchor, rootDir, ".", limits, paths, &files, &totalBytes, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -660,30 +688,174 @@ func walkPackageTree(root string, limits PackageImportLimits) ([]packageImportFi
 	return files, nil
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ANCHOR — a file-descriptor-relative handle on the import root
+// ─────────────────────────────────────────────────────────────────────────────
+
+// packageImportAnchor is the import root, held OPEN.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THE ROOT IS AN OPENED DIRECTORY AND NOT A PATH
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A path is a NAME, and a name can be re-pointed between the moment it is
+// checked and the moment it is opened. That window is the whole of the
+// confinement problem: resolving the root with filepath.EvalSymlinks and
+// then walking it by path leaves a gap in which the root path can be
+// replaced by a symlink to somewhere else, and the walk then reads that
+// somewhere else while believing it is reading the root.
+//
+// The anchor closes the gap by holding the root's DIRECTORY DESCRIPTOR.
+// Every read the walk performs is issued RELATIVE TO THAT DESCRIPTOR
+// (os.Root), so the bytes come from the inode the operator selected no
+// matter what happens to the path afterwards. Replacing the root path with
+// a symlink after the anchor is opened changes nothing the walk reads.
+//
+// The anchor therefore establishes the invariant the design states (§7
+// threat 19): the resolved root is compared against every candidate
+// before it is read, and the comparison is not a string comparison that a
+// concurrent rename can defeat — it is a kernel-enforced resolution
+// relative to an open directory.
+//
+// The path-based logic that remains (resolving a symlink's target so the
+// refusal can name it) NEVER READS BYTES. Every byte the importer stores
+// comes from an os.Root operation, which is what makes the confinement
+// invariant hold even while the paths are being re-pointed underneath it.
+type packageImportAnchor struct {
+	// root is the anchored directory. Every read is relative to it.
+	root *os.Root
+
+	// rootPath is the RESOLVED path the anchor was opened from. It is
+	// used for messages and for the path-based classification of a
+	// symlink's target — never to read bytes.
+	rootPath string
+
+	// file is the name of the single file to import when the import root
+	// is a standalone SKILL.md rather than a directory. It is empty for a
+	// directory root.
+	file string
+}
+
+// openPackageImportAnchor opens the import root and binds it to the inode
+// that was resolved.
+//
+// The identity chain is deliberate:
+//
+//	expected (os.Lstat, path)  →  actual (os.Root, descriptor-relative)
+//
+// If the two disagree, the root path was re-pointed between the
+// resolution and the open, and the import is refused rather than continued
+// against an inode the operator did not select.
+func openPackageImportAnchor(resolvedPath string) (*packageImportAnchor, error) {
+	expected, err := os.Lstat(resolvedPath)
+	if err != nil {
+		return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+			"the import root %q could not be inspected: %v", resolvedPath, err)
+	}
+	if expected.Mode()&os.ModeSymlink != 0 {
+		// The root became a symlink after it was resolved. Continuing
+		// would resolve it again, to somewhere the operator never named.
+		return nil, packageImportErrorf(PackageImportReasonChangedDuringRead, "",
+			"the import root %q was replaced by a symlink after it was resolved", resolvedPath)
+	}
+
+	if expected.IsDir() {
+		root, err := os.OpenRoot(resolvedPath)
+		if err != nil {
+			return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+				"the import root %q could not be opened: %v", resolvedPath, err)
+		}
+		actual, err := root.Stat(".")
+		if err != nil {
+			root.Close()
+			return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+				"the import root %q could not be inspected after opening: %v", resolvedPath, err)
+		}
+		if !os.SameFile(expected, actual) {
+			root.Close()
+			return nil, packageImportErrorf(PackageImportReasonChangedDuringRead, "",
+				"the import root %q was replaced between the inspection and the open", resolvedPath)
+		}
+		return &packageImportAnchor{root: root, rootPath: resolvedPath}, nil
+	}
+
+	if !expected.Mode().IsRegular() {
+		return nil, packageImportErrorf(PackageImportReasonImportRootInvalid, "",
+			"the import path %q is neither a directory nor a regular file", resolvedPath)
+	}
+
+	// A standalone one-file package. The anchor is the file's PARENT
+	// directory, and the file is read by name relative to it — so the read
+	// is descriptor-relative too.
+	parent := filepath.Dir(resolvedPath)
+	base := filepath.Base(resolvedPath)
+	parentInfo, err := os.Lstat(parent)
+	if err != nil {
+		return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+			"the import root %q could not be inspected: %v", parent, err)
+	}
+	if !parentInfo.IsDir() {
+		return nil, packageImportErrorf(PackageImportReasonImportRootInvalid, "",
+			"the import root %q is not inside a directory", resolvedPath)
+	}
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+			"the import root %q could not be opened: %v", parent, err)
+	}
+	actual, err := root.Lstat(base)
+	if err != nil {
+		root.Close()
+		return nil, packageImportErrorWrap(PackageImportReasonImportRootInvalid, "", err,
+			"the import root %q could not be inspected after opening: %v", resolvedPath, err)
+	}
+	if !os.SameFile(expected, actual) {
+		root.Close()
+		return nil, packageImportErrorf(PackageImportReasonChangedDuringRead, "",
+			"the import root %q was replaced between the inspection and the open", resolvedPath)
+	}
+	return &packageImportAnchor{root: root, rootPath: parent, file: base}, nil
+}
+
+// Close releases the anchor.
+func (a *packageImportAnchor) Close() {
+	if a != nil && a.root != nil {
+		_ = a.root.Close()
+	}
+}
+
+// absPath renders the anchor-relative POSIX path back into the resolved
+// root's path space. It is used for MESSAGES and for the path-based
+// classification of a symlink's target — never to read bytes.
+func (a *packageImportAnchor) absPath(rel string) string {
+	if rel == "." || rel == "" {
+		return a.rootPath
+	}
+	return filepath.Join(a.rootPath, filepath.FromSlash(rel))
+}
+
 // walkPackageDir is the recursive walk.
 //
 // The directory listing is read in BATCHES rather than in one call, so a
 // directory holding millions of entries is never materialised: the walk
 // stops at the limit instead of enumerating the tree (§7 threat 11).
-func walkPackageDir(root, dir string, limits PackageImportLimits, paths *PackagePathSet, files *[]packageImportFile, totalBytes *int64, depth int) error {
+//
+// `dir` is the ALREADY-OPENED directory, and `rel` is its path relative to
+// the anchor. The listing therefore comes from the descriptor, so a
+// directory replaced by a symlink after it was opened cannot change what
+// the walk enumerates.
+func walkPackageDir(anchor *packageImportAnchor, dir *os.File, rel string, limits PackageImportLimits, paths *PackagePathSet, files *[]packageImportFile, totalBytes *int64, depth int) error {
 	if depth > MaxPackagePathDepth {
 		return packageImportErrorf(PackageImportReasonPathInvalid, "",
 			"the import tree is deeper than %d segments", MaxPackagePathDepth)
 	}
 
-	f, err := os.Open(dir)
-	if err != nil {
-		return packageImportErrorWrap(PackageImportReasonReadFailed, "", err,
-			"the directory %q could not be opened: %v", dir, err)
-	}
-	defer f.Close()
-
 	for {
 		// A bounded batch keeps the listing small. The loop ends when
 		// the batch comes back empty.
-		entries, err := f.ReadDir(64)
+		entries, err := dir.ReadDir(64)
 		for _, entry := range entries {
-			if err2 := walkPackageEntry(root, dir, entry, limits, paths, files, totalBytes, depth); err2 != nil {
+			if err2 := walkPackageEntry(anchor, dir, rel, entry, limits, paths, files, totalBytes, depth); err2 != nil {
 				return err2
 			}
 		}
@@ -692,7 +864,7 @@ func walkPackageDir(root, dir string, limits PackageImportLimits, paths *Package
 				return nil
 			}
 			return packageImportErrorWrap(PackageImportReasonReadFailed, "", err,
-				"the directory %q could not be listed: %v", dir, err)
+				"the directory %q could not be listed: %v", rel, err)
 		}
 		if len(entries) == 0 {
 			return nil
@@ -701,27 +873,50 @@ func walkPackageDir(root, dir string, limits PackageImportLimits, paths *Package
 }
 
 // walkPackageEntry handles one entry of a directory.
-func walkPackageEntry(root, dir string, entry fs.DirEntry, limits PackageImportLimits, paths *PackagePathSet, files *[]packageImportFile, totalBytes *int64, depth int) error {
+//
+// `rel` is the directory's path relative to the anchor, POSIX-separated.
+// The entry's own path relative to the anchor is `rel/name`.
+//
+// EVERY inspection and EVERY read here is issued RELATIVE TO THE ANCHOR's
+// open directory descriptor, so the walk reads the inode the operator
+// selected even if the paths underneath it are re-pointed while the walk
+// runs.
+func walkPackageEntry(anchor *packageImportAnchor, dir *os.File, rel string, entry fs.DirEntry, limits PackageImportLimits, paths *PackagePathSet, files *[]packageImportFile, totalBytes *int64, depth int) error {
 	name := entry.Name()
-	abs := filepath.Join(dir, name)
+	childRel := name
+	if rel != "." && rel != "" {
+		childRel = rel + "/" + name
+	}
 
 	// The raw path is relative to the import root, POSIX-separated. It
 	// is DISPLAY-ONLY (§5.4): the canonical path is the identity.
-	rel, err := filepath.Rel(root, abs)
-	if err != nil {
-		return packageImportErrorWrap(PackageImportReasonPathInvalid, name, err,
-			"the path %q could not be made relative to the import root: %v", abs, err)
-	}
-	rawPath := filepath.ToSlash(rel)
+	rawPath := childRel
 
-	info, err := os.Lstat(abs)
+	// The inspection is descriptor-relative and does NOT follow a symlink.
+	info, err := anchor.root.Lstat(childRel)
 	if err != nil {
 		return packageImportErrorWrap(PackageImportReasonReadFailed, rawPath, err,
 			"the entry %q could not be inspected: %v", rawPath, err)
 	}
 
+	// The bytes to read, and the identity they are expected to have.
+	//
+	// `readRel` is the anchor-relative path the bytes are read FROM, and
+	// `expected` is the identity the opened file must have. For an
+	// ordinary file they are the same path; for an admitted symlink they
+	// are the symlink's RESOLVED target, expressed relative to the anchor
+	// so the read is still descriptor-relative.
+	readRel := childRel
+	expected := info
+
 	// ── A symlink is never followed blindly. ──────────────────────────
 	if info.Mode()&os.ModeSymlink != 0 {
+		// The target is resolved so the refusal can NAME it and so its
+		// type can be classified. This resolution is PATH-BASED and can
+		// be raced — but it never reads bytes, and the read that follows
+		// is issued through the anchor. A raced resolution can therefore
+		// produce a different refusal REASON, never an escape.
+		abs := anchor.absPath(childRel)
 		resolved, err := filepath.EvalSymlinks(abs)
 		if err != nil {
 			return packageImportErrorWrap(PackageImportReasonPathEscapesRoot, rawPath, err,
@@ -731,6 +926,13 @@ func walkPackageEntry(root, dir string, entry fs.DirEntry, limits PackageImportL
 		if err != nil {
 			return packageImportErrorWrap(PackageImportReasonPathEscapesRoot, rawPath, err,
 				"the symlink %q does not resolve to a readable target: %v", rawPath, err)
+		}
+		// The target is admitted only when it resolves INSIDE the import
+		// root. This is the classification; the read below is confined by
+		// the anchor regardless of what this check concludes.
+		if !pathWithinPackageRoot(anchor.rootPath, resolved) {
+			return packageImportErrorf(PackageImportReasonPathEscapesRoot, rawPath,
+				"the symlink %q resolves to %q, which is outside the import root", rawPath, resolved)
 		}
 		if resolvedInfo.IsDir() {
 			// The walk refuses to descend into a symlinked directory
@@ -742,23 +944,46 @@ func walkPackageEntry(root, dir string, entry fs.DirEntry, limits PackageImportL
 			return packageImportErrorf(PackageImportReasonUnsupportedEntryType, rawPath,
 				"the entry %q is a symlink to a %s", rawPath, resolvedInfo.Mode().Type())
 		}
-		// The target is a regular file. It is admitted only when it
-		// resolves INSIDE the import root.
-		if !pathWithinPackageRoot(root, resolved) {
-			return packageImportErrorf(PackageImportReasonPathEscapesRoot, rawPath,
-				"the symlink %q resolves to %q, which is outside the import root", rawPath, resolved)
+		// The target is a regular file inside the root. It is read
+		// through the anchor, by the path the target has RELATIVE TO THE
+		// ROOT — a relative path with no `..`, so the anchor's own
+		// confinement decides whether it can be read at all.
+		targetRel, err := filepath.Rel(anchor.rootPath, resolved)
+		if err != nil {
+			return packageImportErrorWrap(PackageImportReasonPathEscapesRoot, rawPath, err,
+				"the symlink %q could not be made relative to the import root: %v", rawPath, err)
 		}
-		abs = resolved
-		info = resolvedInfo
+		readRel = filepath.ToSlash(targetRel)
+		expected = resolvedInfo
 	}
 
 	// ── A directory is descended into. ────────────────────────────────
 	if info.IsDir() {
-		return walkPackageDir(root, abs, limits, paths, files, totalBytes, depth+1)
+		// The directory is opened THROUGH the anchor, and the OPENED
+		// directory's identity is compared with the inspected one. A
+		// directory replaced between the two is detected
+		// (`changed_during_read`), and the listing that follows comes
+		// from the opened descriptor, so it cannot be re-pointed either.
+		sub, err := anchor.root.Open(childRel)
+		if err != nil {
+			return packageImportErrorWrap(PackageImportReasonReadFailed, rawPath, err,
+				"the directory %q could not be opened: %v", rawPath, err)
+		}
+		defer sub.Close()
+		subInfo, err := sub.Stat()
+		if err != nil {
+			return packageImportErrorWrap(PackageImportReasonReadFailed, rawPath, err,
+				"the directory %q could not be inspected after opening: %v", rawPath, err)
+		}
+		if !os.SameFile(info, subInfo) {
+			return packageImportErrorf(PackageImportReasonChangedDuringRead, rawPath,
+				"the directory %q was replaced between the inspection and the read", rawPath)
+		}
+		return walkPackageDir(anchor, sub, childRel, limits, paths, files, totalBytes, depth+1)
 	}
 
 	// ── Anything that is not a regular file is refused. ───────────────
-	if !info.Mode().IsRegular() {
+	if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
 		return packageImportErrorf(PackageImportReasonUnsupportedEntryType, rawPath,
 			"the entry %q is a %s, not a regular file", rawPath, info.Mode().Type())
 	}
@@ -771,12 +996,12 @@ func walkPackageEntry(root, dir string, entry fs.DirEntry, limits PackageImportL
 
 	// ── The per-file cap is checked against the INSPECTED size, and
 	// again against the bytes actually read. ──────────────────────────
-	if info.Size() > limits.MaxFileBytes {
+	if expected.Size() > limits.MaxFileBytes {
 		return packageImportErrorf(PackageImportReasonSizeLimit, rawPath,
-			"the file is %d bytes, over the %d-byte cap", info.Size(), limits.MaxFileBytes)
+			"the file is %d bytes, over the %d-byte cap", expected.Size(), limits.MaxFileBytes)
 	}
 
-	content, size, err := readPackageFile(abs, limits.MaxFileBytes)
+	content, size, err := anchor.readFile(readRel, limits.MaxFileBytes)
 	if err != nil {
 		return err
 	}
@@ -799,12 +1024,73 @@ func walkPackageEntry(root, dir string, entry fs.DirEntry, limits PackageImportL
 	*files = append(*files, packageImportFile{
 		canonicalPath: canonical,
 		rawPath:       rawPath,
-		absPath:       abs,
+		absPath:       anchor.absPath(childRel),
 		sizeBytes:     size,
 		content:       content,
 		sha256:        sha256Hex(content),
 	})
 	return nil
+}
+
+// readFile reads one file THROUGH THE ANCHOR.
+//
+// The read is descriptor-relative: the file is opened relative to the
+// anchor's open directory, so it is a file the operator's directory
+// actually holds — not a file a concurrent rename re-pointed the path at.
+//
+// The opened file's identity is compared with the inspected one, so a file
+// replaced between the inspection and the read is detected
+// (`changed_during_read`). The bytes are read from the OPENED descriptor,
+// so they cannot change under the reader either.
+func (a *packageImportAnchor) readFile(rel string, maxBytes int64) ([]byte, int64, error) {
+	info, err := a.root.Lstat(rel)
+	if err != nil {
+		return nil, 0, packageImportErrorWrap(PackageImportReasonReadFailed, "", err,
+			"the file %q could not be inspected: %v", rel, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, 0, packageImportErrorf(PackageImportReasonUnsupportedEntryType, "",
+			"the file %q is a symlink", rel)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, 0, packageImportErrorf(PackageImportReasonUnsupportedEntryType, "",
+			"the file %q is not a regular file", rel)
+	}
+
+	f, err := a.root.Open(rel)
+	if err != nil {
+		return nil, 0, packageImportErrorWrap(PackageImportReasonReadFailed, "", err,
+			"the file %q could not be opened: %v", rel, err)
+	}
+	defer f.Close()
+
+	opened, err := f.Stat()
+	if err != nil {
+		return nil, 0, packageImportErrorWrap(PackageImportReasonReadFailed, "", err,
+			"the file %q could not be inspected after opening: %v", rel, err)
+	}
+	if !os.SameFile(info, opened) {
+		return nil, 0, packageImportErrorf(PackageImportReasonChangedDuringRead, "",
+			"the file %q was replaced between the inspection and the read", rel)
+	}
+	if !opened.Mode().IsRegular() {
+		return nil, 0, packageImportErrorf(PackageImportReasonUnsupportedEntryType, "",
+			"the file %q is not a regular file", rel)
+	}
+
+	// The bounded read: one byte past the cap is enough to know the cap
+	// was exceeded, and the file is never read whole.
+	limited := io.LimitReader(f, maxBytes+1)
+	content, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, 0, packageImportErrorWrap(PackageImportReasonReadFailed, "", err,
+			"the file %q could not be read: %v", rel, err)
+	}
+	if int64(len(content)) > maxBytes {
+		return nil, 0, packageImportErrorf(PackageImportReasonSizeLimit, "",
+			"the file %q is over the %d-byte cap", rel, maxBytes)
+	}
+	return content, int64(len(content)), nil
 }
 
 // pathWithinPackageRoot reports whether candidate lies inside root.
@@ -827,57 +1113,4 @@ func pathWithinPackageRoot(root, candidate string) bool {
 		return false
 	}
 	return !filepath.IsAbs(rel)
-}
-
-// readPackageFile reads a file's bytes under a hard cap.
-//
-// The read is bounded, so a file that grew after it was inspected cannot
-// exceed the cap; and the file is re-inspected immediately before it is
-// opened, and the OPENED file's identity is compared with the inspected
-// one, so a file swapped between the inspection and the read is detected.
-func readPackageFile(abs string, maxBytes int64) ([]byte, int64, error) {
-	info, err := os.Lstat(abs)
-	if err != nil {
-		return nil, 0, packageImportErrorWrap(PackageImportReasonReadFailed, "", err,
-			"the file %q could not be inspected: %v", abs, err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, 0, packageImportErrorf(PackageImportReasonUnsupportedEntryType, "",
-			"the file %q is not a regular file", abs)
-	}
-
-	f, err := os.Open(abs)
-	if err != nil {
-		return nil, 0, packageImportErrorWrap(PackageImportReasonReadFailed, "", err,
-			"the file %q could not be opened: %v", abs, err)
-	}
-	defer f.Close()
-
-	opened, err := f.Stat()
-	if err != nil {
-		return nil, 0, packageImportErrorWrap(PackageImportReasonReadFailed, "", err,
-			"the file %q could not be inspected after opening: %v", abs, err)
-	}
-	if !os.SameFile(info, opened) {
-		return nil, 0, packageImportErrorf(PackageImportReasonChangedDuringRead, "",
-			"the file %q was replaced between the inspection and the read", abs)
-	}
-	if !opened.Mode().IsRegular() {
-		return nil, 0, packageImportErrorf(PackageImportReasonUnsupportedEntryType, "",
-			"the file %q is not a regular file", abs)
-	}
-
-	// The bounded read: one byte past the cap is enough to know the cap
-	// was exceeded, and the file is never read whole.
-	limited := io.LimitReader(f, maxBytes+1)
-	content, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, 0, packageImportErrorWrap(PackageImportReasonReadFailed, "", err,
-			"the file %q could not be read: %v", abs, err)
-	}
-	if int64(len(content)) > maxBytes {
-		return nil, 0, packageImportErrorf(PackageImportReasonSizeLimit, "",
-			"the file %q is over the %d-byte cap", abs, maxBytes)
-	}
-	return content, int64(len(content)), nil
 }

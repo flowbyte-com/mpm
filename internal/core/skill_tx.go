@@ -229,6 +229,14 @@ func (dm *DatabaseManager) saveSkillProjectionInTx(tx *sql.Tx, name, version, co
 // written. The weight and the reinforcement_count are NOT touched: they
 // encode the skill's retrieval trajectory, and a revival must not
 // destroy it.
+//
+// The row's ARTIFACT PROVENANCE is refreshed in the same transaction. The
+// resurrection REPLACES the content, so the row's previous attribution
+// describes a writer who no longer wrote it; leaving it in place would be
+// false attribution — the failure refreshArtifactProvenance exists to
+// prevent. The refresh is tx-scoped (RecordArtifactProvenanceUpsert), not
+// refreshArtifactProvenance, because the latter opens its own
+// transaction and would contend with the caller's.
 func (dm *DatabaseManager) ResurrectSkillProjectionInTx(tx *sql.Tx, name, version, content, authorAgent string, ac ActiveContext) (string, error) {
 	if tx == nil {
 		return "", fmt.Errorf("save skill: a caller-owned transaction is required")
@@ -312,7 +320,85 @@ func (dm *DatabaseManager) ResurrectSkillProjectionInTx(tx *sql.Tx, name, versio
 	`, content, boolToInt(newIsLatest), authorAgent, version, contentHash(content), id); err != nil {
 		return "", fmt.Errorf("resurrect skill: %w", err)
 	}
+
+	// ── The provenance is refreshed, INSIDE this transaction. ──────────
+	//
+	// The content of this row has just been REPLACED. The row's
+	// artifact_provenance row therefore describes a writer who no longer
+	// wrote it — which is exactly the false attribution the substrate's
+	// refreshArtifactProvenance exists to prevent ("the row describing
+	// the FIRST writer while the artifact's content belongs to the LATEST
+	// one").
+	//
+	// The legacy force path calls refreshArtifactProvenance for the same
+	// in-place rewrite. It cannot be called HERE: it opens its OWN
+	// transaction, which would contend with the caller's already-open
+	// write transaction on the same *sql.DB. The tx-scoped upsert is used
+	// instead, so the content change and the attribution change commit
+	// together or not at all.
+	if err := dm.refreshSkillProvenanceInTx(tx, id, ac); err != nil {
+		return "", err
+	}
 	return id, nil
+}
+
+// errSkillProvenanceRefresh marks a failure to refresh a skill's artifact
+// provenance.
+//
+// It is a distinct error so the import path can classify it separately
+// from a frontmatter refusal: the document was fine, but the attribution
+// could not be written, so the resurrection is rolled back rather than
+// reported as a successful resurrection with a stale writer.
+var errSkillProvenanceRefresh = errors.New("skill provenance refresh failed")
+
+// refreshSkillProvenanceInTx rewrites the artifact provenance of a skill
+// row inside the CALLER's transaction.
+//
+// The attribution must describe the writer of the CURRENT content. A
+// resurrection replaces the content in place, so the previous attribution
+// is obsolete and is overwritten rather than retained.
+//
+// The identity resolution is the substrate's own:
+//
+//   - a caller that supplies an ActiveContext with a provenance identity
+//     gets THAT identity — the invocation that produced the new content;
+//   - a caller that supplies an EMPTY ActiveContext gets the AMBIENT
+//     identity (the operator's), which is accurate: the content was
+//     rewritten by an operator action, not by the agent that wrote the
+//     original document.
+//
+// An empty context does NOT leave the previous attribution in place. The
+// upsert's refresh clause overwrites every identity column, so the
+// obsolete writer is cleared and the row says "unknown" rather than
+// naming somebody who did not write the content.
+//
+// A failure is RETURNED, not logged and swallowed: the caller must not
+// report a successful resurrection whose attribution is wrong.
+func (dm *DatabaseManager) refreshSkillProvenanceInTx(tx *sql.Tx, id string, ac ActiveContext) error {
+	if tx == nil {
+		return fmt.Errorf("save skill: a caller-owned transaction is required")
+	}
+	if id == "" {
+		return nil
+	}
+
+	prov := dm.provenanceForWrite(ac)
+	if prov == nil {
+		// No identity could be resolved at all. The row's attribution is
+		// still obsolete, so it is replaced with the explicit "unknown"
+		// identity rather than left naming the previous writer.
+		prov = &EffectiveProvenance{ActorKind: "unknown"}
+	}
+
+	res := dm.RecordArtifactProvenanceUpsert(tx, id, artifactTypeFromCollection("skills"), prov, true)
+	if !res.Recorded {
+		reason := res.ValidationReason
+		if reason == "" {
+			reason = res.SQLError
+		}
+		return fmt.Errorf("%w: %s could not be refreshed: %s", errSkillProvenanceRefresh, id, reason)
+	}
+	return nil
 }
 
 // skillRowTags builds the tag list a skill row carries.

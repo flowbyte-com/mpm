@@ -57,6 +57,20 @@ const (
 	// resolved import root (§7 threat 19, T46).
 	PackageImportReasonPathEscapesRoot PackageImportReason = "path_escapes_root"
 
+	// PackageImportReasonProvenanceFailed — the resurrection could not
+	// write the row's artifact provenance, so the import was rolled back.
+	//
+	// It is deliberately NOT `frontmatter_invalid`: the document was
+	// accepted, and what failed was the attribution. Reporting it as a
+	// frontmatter refusal would tell the operator their package was
+	// malformed when it was not.
+	//
+	// The refusal exists because the resurrection REPLACES the content of
+	// an existing row. Leaving the previous writer's attribution in place
+	// would be false attribution, and reporting a success with a stale
+	// attribution would be a false success.
+	PackageImportReasonProvenanceFailed PackageImportReason = "provenance_failed"
+
 	// PackageImportReasonUnsupportedEntryType — an entry was neither a
 	// regular file nor a directory: a FIFO, a device or a socket
 	// (§7.1).

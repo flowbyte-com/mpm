@@ -280,7 +280,7 @@ var errPackageImportNoWrite = errors.New("package import: no write required")
 // reference them), then the projected skill row (the package row
 // references it), then the package row (the file rows reference it), then
 // the file rows.
-func (dm *DatabaseManager) commitPackageImport(plan *packageImportPlan, author string) (*PackageImportResult, error) {
+func (dm *DatabaseManager) commitPackageImport(plan *packageImportPlan, author string, ac ActiveContext) (*PackageImportResult, error) {
 	skillID, err := SkillIDForNameAndVersion(plan.name, plan.effectiveVersion)
 	if err != nil {
 		return nil, packageImportErrorf(PackageImportReasonNameInvalid, packageEntrypointName, "%v", err)
@@ -333,7 +333,7 @@ func (dm *DatabaseManager) commitPackageImport(plan *packageImportPlan, author s
 			// The package was soft-shredded. The re-import RESURRECTS
 			// it (§5.7): the import path is not the legacy force path,
 			// so R1's refusal does not apply to it.
-			if err := dm.resurrectPackageProjection(tx, skillID, plan, author); err != nil {
+			if err := dm.resurrectPackageProjection(tx, skillID, plan, author, ac); err != nil {
 				return err
 			}
 			result.Status = PackageImportStatusResurrected
@@ -361,7 +361,7 @@ func (dm *DatabaseManager) commitPackageImport(plan *packageImportPlan, author s
 			// Nothing live is overwritten: the row was already
 			// deleted, so there is no live document to lose. A LIVE
 			// ordinary skill occupying the id is refused above.
-			if err := dm.resurrectPackageProjection(tx, skillID, plan, author); err != nil {
+			if err := dm.resurrectPackageProjection(tx, skillID, plan, author, ac); err != nil {
 				return err
 			}
 			result.Status = PackageImportStatusResurrected
@@ -376,7 +376,7 @@ func (dm *DatabaseManager) commitPackageImport(plan *packageImportPlan, author s
 		// scanner guarantees, the content hash, the FTS indexing and the
 		// artifact provenance all land inside this transaction.
 		if _, err := dm.SaveSkillProjectionInTx(tx, plan.name, plan.effectiveVersion,
-			plan.projection, author, ActiveContext{}); err != nil {
+			plan.projection, author, ac); err != nil {
 			return packageImportErrorf(PackageImportReasonFrontmatterInvalid, packageEntrypointName,
 				"the projected skill document was refused: %v", err)
 		}
@@ -479,9 +479,17 @@ func (dm *DatabaseManager) packageDuplicateContentAdvisories(skillID string, fil
 // It is the import path's revival: the row carries either no package at
 // all, or a package whose hash is UNCHANGED, so the id never ends up
 // carrying two documents.
-func (dm *DatabaseManager) resurrectPackageProjection(tx *sql.Tx, skillID string, plan *packageImportPlan, author string) error {
+func (dm *DatabaseManager) resurrectPackageProjection(tx *sql.Tx, skillID string, plan *packageImportPlan, author string, ac ActiveContext) error {
 	if _, err := dm.ResurrectSkillProjectionInTx(tx, plan.name, plan.effectiveVersion,
-		plan.projection, author, ActiveContext{}); err != nil {
+		plan.projection, author, ac); err != nil {
+		// A provenance failure is NOT a frontmatter failure, and the two
+		// must not share a reason code: one says "the document was
+		// refused", the other says "the attribution could not be
+		// written, so the resurrection is rolled back".
+		if errors.Is(err, errSkillProvenanceRefresh) {
+			return packageImportErrorf(PackageImportReasonProvenanceFailed, packageEntrypointName,
+				"the resurrected skill's provenance could not be refreshed: %v", err)
+		}
 		return packageImportErrorf(PackageImportReasonFrontmatterInvalid, packageEntrypointName,
 			"the projected skill document was refused: %v", err)
 	}
@@ -680,11 +688,20 @@ func (dm *DatabaseManager) verifyPackageImport(result *PackageImportResult) erro
 	}
 
 	// The blobs: every file's blob must be present, with the size the
-	// file row records.
+	// file row records — AND with the content the recorded address names.
+	//
+	// The store is CONTENT-ADDRESSED: the sha256 column IS the address.
+	// Checking presence and size alone does not establish that the
+	// stored bytes hash to their recorded address, so the bytes are
+	// re-hashed here. The blob is the package's single copy of those
+	// bytes, and the file row's sha256 is what a later reader will use
+	// to find them — a blob whose bytes do not hash to its address is a
+	// corrupt package that no later read would detect.
 	for _, f := range result.Files {
 		var size int64
-		err := dm.db.QueryRow(`SELECT size_bytes FROM skill_package_blobs WHERE sha256 = ?`,
-			f.SHA256).Scan(&size)
+		var stored []byte
+		err := dm.db.QueryRow(`SELECT size_bytes, content FROM skill_package_blobs WHERE sha256 = ?`,
+			f.SHA256).Scan(&size, &stored)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("package import verification: the blob for %q is missing after the commit", f.Path)
 		}
@@ -694,6 +711,10 @@ func (dm *DatabaseManager) verifyPackageImport(result *PackageImportResult) erro
 		if size != f.SizeBytes {
 			return fmt.Errorf("package import verification: the blob for %q is %d bytes, want %d",
 				f.Path, size, f.SizeBytes)
+		}
+		if actual := sha256Hex(stored); actual != f.SHA256 {
+			return fmt.Errorf("package import verification: the blob for %q hashes to %s, not the recorded %s",
+				f.Path, actual, f.SHA256)
 		}
 	}
 
