@@ -876,28 +876,31 @@ type packageArchiveDirectory struct {
 //     `archive/zip` derives as `endOffset - size`;
 //   - the FALLBACK start — the declared offset. `archive/zip` uses it
 //     only for an archive whose declared offsets are inconsistent: it
-//     re-reads the record at the declared offset and, if a valid
-//     central-directory header really is there, parses from THERE.
+//     re-reads the record at the declared offset and, if that record
+//     PARSES, parses from THERE.
 //
-// The fallback is CHECKED, not assumed, and that matters: a PREFIXED
-// (self-extracting) archive has a positive base offset, and its
-// declared offset is relative to the archive's logical start — so the
-// absolute offset points into the PREFIX. Assuming the fallback would
-// treat the whole prefix as parseable central directory.
+// The fallback is CHECKED, not assumed, and the check mirrors
+// `archive/zip`'s own exactly — a COMPLETE central-directory header,
+// not merely its signature. That matters in both directions:
+//
+//   - a PREFIXED (self-extracting) archive has a positive base offset,
+//     and its declared offset is relative to the archive's logical
+//     start — so the absolute offset points into the PREFIX. Assuming
+//     the fallback would treat the whole prefix as parseable central
+//     directory;
+//   - a CRAFTED header before the real central directory, carrying the
+//     right signature but lengths that run past the end of the file,
+//     makes the full parse FAIL. `archive/zip` then parses from the
+//     normal start — and so must this, or the count taken here would
+//     be lower than the count the reader actually parses.
 func (d packageArchiveDirectory) parseStart(r io.ReaderAt, size int64) int64 {
 	start := d.endOffset - d.size
 
 	// The fallback applies only when the base offset is positive AND
-	// the bytes at the declared offset really are a central-directory
-	// record. `archive/zip` reads exactly those four bytes to decide,
-	// so this reads exactly the same four bytes.
-	if d.endOffset-d.size-d.offset > 0 && d.offset >= 0 && d.offset+4 <= size {
-		var sig [4]byte
-		if _, err := r.ReadAt(sig[:], d.offset); err == nil {
-			if binary.LittleEndian.Uint32(sig[:]) == archiveCentralDirectorySignature {
-				start = d.offset
-			}
-		}
+	// the record at the declared offset parses as a complete
+	// central-directory header — the same test `archive/zip` makes.
+	if d.endOffset-d.size-d.offset > 0 && d.centralDirectoryHeaderParses(r, size) {
+		start = d.offset
 	}
 
 	if start < 0 {
@@ -907,6 +910,36 @@ func (d packageArchiveDirectory) parseStart(r io.ReaderAt, size int64) int64 {
 		start = d.endOffset
 	}
 	return start
+}
+
+// centralDirectoryHeaderParses reports whether a complete
+// central-directory header sits at the declared offset.
+//
+// It mirrors `archive/zip`'s `readDirectoryHeader` success condition:
+// the 46-byte fixed header must be readable, its signature must be the
+// central-directory one, and the name, extra field and comment it
+// declares must be readable too.
+//
+// The signature ALONE is not enough. A crafted header with the right
+// signature but lengths that run past the end of the file is not a
+// header `archive/zip` can parse, so it must not move the parse start
+// here either.
+func (d packageArchiveDirectory) centralDirectoryHeaderParses(r io.ReaderAt, size int64) bool {
+	const headerLen = archiveCentralDirectoryRecordMinBytes
+	if d.offset < 0 || d.offset+headerLen > size {
+		return false
+	}
+	var header [headerLen]byte
+	if _, err := r.ReadAt(header[:], d.offset); err != nil {
+		return false
+	}
+	if binary.LittleEndian.Uint32(header[:]) != archiveCentralDirectorySignature {
+		return false
+	}
+	nameLen := int64(binary.LittleEndian.Uint16(header[28:]))
+	extraLen := int64(binary.LittleEndian.Uint16(header[30:]))
+	commentLen := int64(binary.LittleEndian.Uint16(header[32:]))
+	return d.offset+headerLen+nameLen+extraLen+commentLen <= size
 }
 
 // countPackageArchiveRecords counts the central-directory records in a

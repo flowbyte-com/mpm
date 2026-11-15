@@ -1518,6 +1518,68 @@ func TestP5_APrefixedArchiveIsNotRefusedByTheCentralDirectoryBound(t *testing.T)
 	}
 }
 
+// p5WriteCraftedHeaderArchive writes an archive whose central
+// directory is declared with INCONSISTENT offsets, and whose declared
+// offset points at a CRAFTED header.
+//
+// The crafted header carries the central-directory signature but
+// declares name, extra-field and comment lengths that run past the end
+// of the file. `archive/zip` therefore cannot PARSE it, so it does not
+// apply its inconsistent-offsets fallback and parses from the normal
+// start — the real central directory.
+//
+// An implementation that tests only the four-byte SIGNATURE would move
+// the parse start to the crafted header, count one record, and so
+// under-count the reader by the whole central directory. That is the
+// shape this fixture exists for.
+func p5WriteCraftedHeaderArchive(t *testing.T, path string, records int) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for i := 0; i < records; i++ {
+		w, err := zw.Create("references/f" + p5Itoa(i) + ".md")
+		if err != nil {
+			t.Fatalf("create the archive entry: %v", err)
+		}
+		if _, err := w.Write([]byte("# F\n")); err != nil {
+			t.Fatalf("write the archive entry: %v", err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close the archive: %v", err)
+	}
+	data := buf.Bytes()
+
+	eocd := bytes.LastIndex(data, []byte{0x50, 0x4b, 0x05, 0x06})
+	cdOffset := int(binary.LittleEndian.Uint32(data[eocd+16:]))
+
+	// The crafted header: the right signature, absurd lengths.
+	crafted := make([]byte, 46)
+	binary.LittleEndian.PutUint32(crafted[0:], 0x02014b50)
+	binary.LittleEndian.PutUint16(crafted[28:], 0xffff)
+	binary.LittleEndian.PutUint16(crafted[30:], 0xffff)
+	binary.LittleEndian.PutUint16(crafted[32:], 0xffff)
+
+	// Splice it into the local-header region, well before the real
+	// central directory.
+	const insertAt = 500
+	out := make([]byte, 0, len(data)+len(crafted))
+	out = append(out, data[:insertAt]...)
+	out = append(out, crafted...)
+	out = append(out, data[insertAt:]...)
+
+	newEOCD := eocd + len(crafted)
+	// Declare the offset at the crafted header, and the size so that
+	// `endOffset - size` is the REAL central directory's start.
+	binary.LittleEndian.PutUint32(out[newEOCD+16:], uint32(insertAt))
+	binary.LittleEndian.PutUint32(out[newEOCD+12:], uint32(newEOCD-(cdOffset+len(crafted))))
+
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write the crafted archive: %v", err)
+	}
+}
+
 // TestP5_TheCentralDirectoryCountMatchesTheReader pins the count to
 // the reader's OWN count.
 //
@@ -1525,17 +1587,19 @@ func TestP5_APrefixedArchiveIsNotRefusedByTheCentralDirectoryBound(t *testing.T)
 // `archive/zip` will actually parse. The walk therefore covers exactly
 // the window `archive/zip` reads — from the parse start to the end of
 // the file — and uses the same signature test and the same
-// 46-bytes-plus-lengths advance.
+// 46-bytes-plus-lengths advance. The parse start itself is decided by
+// the same test `archive/zip` uses: a COMPLETE central-directory
+// header, not merely its signature.
 //
 // This test compares the two counts, directly, over a range of archive
-// shapes: the ordinary ones and the awkward ones (directory entries,
-// maximum-length names, extra fields, a trailing comment, a prefixed
-// archive).
+// shapes: the ordinary ones, and the awkward ones — directory
+// entries, maximum-length names, many entries, a prefixed archive, and
+// an archive whose declared offsets are inconsistent and point at a
+// crafted header.
 //
-// For a well-formed archive the two counts are EQUAL. For a malformed
-// one the importer's count is never LOWER — the walk's window is
-// `archive/zip`'s, so it can only see more, and the bound is only ever
-// conservative.
+// The counts must be EQUAL. A count that is lower than the reader's
+// would under-bound the allocation; a count that is higher is
+// conservative and harmless, but there is no reason for it.
 func TestP5_TheCentralDirectoryCountMatchesTheReader(t *testing.T) {
 	// A range of shapes.
 	shapes := []struct {
@@ -1578,41 +1642,54 @@ func TestP5_TheCentralDirectoryCountMatchesTheReader(t *testing.T) {
 		t.Run(shape.name, func(t *testing.T) {
 			archive := filepath.Join(t.TempDir(), "shape.skill")
 			p5WriteArchive(t, archive, shape.entries)
-
-			// The reader's count.
-			reader, err := zip.OpenReader(archive)
-			if err != nil {
-				t.Fatalf("open the archive: %v", err)
-			}
-			defer reader.Close()
-
-			// The importer's count, over the same window.
-			f, err := os.Open(archive)
-			if err != nil {
-				t.Fatalf("open the archive: %v", err)
-			}
-			defer f.Close()
-			info, err := f.Stat()
-			if err != nil {
-				t.Fatalf("stat the archive: %v", err)
-			}
-
-			dir, err := readPackageArchiveDirectory(f, info.Size())
-			if err != nil {
-				t.Fatalf("read the central directory: %v", err)
-			}
-			start := dir.parseStart(f, info.Size())
-			window := make([]byte, info.Size()-start)
-			if _, err := f.ReadAt(window, start); err != nil && !errors.Is(err, io.EOF) {
-				t.Fatalf("read the parse window: %v", err)
-			}
-			got := countPackageArchiveRecords(window)
-
-			if got != int64(len(reader.File)) {
-				t.Errorf("the walk counted %d records, the reader parsed %d — they must agree",
-					got, len(reader.File))
-			}
+			p5AssertCountsMatch(t, archive)
 		})
+	}
+
+	t.Run("inconsistent offsets pointing at a crafted header", func(t *testing.T) {
+		archive := filepath.Join(t.TempDir(), "crafted.skill")
+		p5WriteCraftedHeaderArchive(t, archive, 100)
+		p5AssertCountsMatch(t, archive)
+	})
+}
+
+// p5AssertCountsMatch asserts that the importer's record count and the
+// reader's record count are the same.
+func p5AssertCountsMatch(t *testing.T, archive string) {
+	t.Helper()
+
+	// The reader's count.
+	reader, err := zip.OpenReader(archive)
+	if err != nil {
+		t.Fatalf("open the archive: %v", err)
+	}
+	defer reader.Close()
+
+	// The importer's count, over the reader's own window.
+	f, err := os.Open(archive)
+	if err != nil {
+		t.Fatalf("open the archive: %v", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("stat the archive: %v", err)
+	}
+
+	dir, err := readPackageArchiveDirectory(f, info.Size())
+	if err != nil {
+		t.Fatalf("read the central directory: %v", err)
+	}
+	start := dir.parseStart(f, info.Size())
+	window := make([]byte, info.Size()-start)
+	if _, err := f.ReadAt(window, start); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("read the parse window: %v", err)
+	}
+	got := countPackageArchiveRecords(window)
+
+	if got != int64(len(reader.File)) {
+		t.Errorf("the walk counted %d records, the reader parsed %d — they must agree",
+			got, len(reader.File))
 	}
 }
 
@@ -1646,8 +1723,8 @@ func p5PatchEOCDEntryCount(t *testing.T, path string, count uint16) {
 // A byte-derived ESTIMATE of the directory's record count cannot serve
 // here: a record is at least 46 bytes, but its NAME is not, so the
 // estimate counts the long paths as extra records. Measured, the
-// legitimate worst case has 1 024 real records and a byte-derived
-// estimate of 12 388 — and an estimate-based cap that clears the real
+// legitimate worst case has 1 023 real records and a byte-derived
+// estimate of 6 555 — and an estimate-based cap that clears the real
 // count refuses the estimate.
 //
 // So the count is EXACT, and this test pins that the legitimate worst
