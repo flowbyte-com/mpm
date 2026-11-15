@@ -941,11 +941,23 @@ func loadPackageContext(ctx context.Context, tx *sql.Tx, skillID string) (*packa
 	// The importer validates every manifest before it writes one, so a
 	// stored manifest that fails validation can only have come from a
 	// tampered store. The reader refuses it on the manifest module's own
-	// rules rather than on a second set of them — the duplicate
-	// path, the non-canonical path, the empty content type, the invalid
-	// role, the missing entrypoint and the entrypoint's hash
-	// disagreement are all decided by the SAME primitive the importer
-	// used.
+	// rules rather than on a second set of them. The rules are:
+	//
+	//   - the format;
+	//   - the name, and the version (valid semver);
+	//   - the version provenance — the override record (its effective
+	//     version IS the version, its reason is a known one, it is valid
+	//     semver) and the declared version;
+	//   - the well-formedness of `entrypoint_sha256` and of
+	//     `projection_sha256`;
+	//   - the entrypoint — canonical, and carried by exactly one file;
+	//   - for every file: a canonical path that appears once, a
+	//     well-formed SHA-256, a non-negative size, a non-empty content
+	//     type, and a known role;
+	//   - the entrypoint file's role, and its hash against
+	//     `entrypoint_sha256`.
+	//
+	// They are all decided by the SAME primitive the importer used.
 	//
 	// Refusing here, rather than on each read path, is what makes the
 	// listing and the read agree: both load the package through this
