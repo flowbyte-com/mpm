@@ -2110,7 +2110,7 @@ The shape change is a **breaking change to a CLI output contract**, so it is giv
 
 > **PROPOSAL, not an approved design change.** The compatibility policy above — the deprecated `json-array` format, the refusal when content would be omitted, and the one-release window — is a **proposal** put forward in response to the independent review of this PR. It requires **operator acceptance** before it becomes the design's contract. The structured object as the default satisfies R11 either way; what the proposal adds is the migration path for consumers of the old shape.
 
-> **A pre-existing limitation, recorded and not changed here.** `mpm export --since` / `--until` compare the INTEGER `created_at` column against a TEXT date literal, and SQLite never compares an INTEGER as greater-or-equal to a TEXT value — so **any** `--since` value matches no rows and the export is empty. This is a **pre-existing** defect in `GetMemoriesForExport` (identical at the commit before this stage), it is **not** introduced by P4, and it is **not** fixed here: the fix changes shared read-path semantics that other consumers depend on, and it belongs in its own change with its own tests. The loss marker mirrors the export's filters exactly, so the two remain consistent with each other; the consequence is that an empty export reports a count of zero.
+> **A pre-existing limitation, recorded and not changed here.** `mpm export --since` / `--until` compare the INTEGER `created_at` column against a TEXT date literal, and SQLite never compares an INTEGER against a TEXT value in the way the comparison intends — so **any** `--since` value matches no rows (the export is empty) and **any** `--until` value matches **every** row (the filter does nothing). This is a **pre-existing** defect in `GetMemoriesForExport` (identical at the commit before this stage), it is **not** introduced by P4 or by P7, and it is **not** fixed here: the fix changes shared read-path semantics that other consumers depend on, and it belongs in its own change with its own tests. Both the loss marker (P4) and the package scope (P7) mirror the export's filters **exactly** — the same comparison, against the same column — so the two surfaces cannot disagree about which packages this export covers, and no package is dropped relative to the selected rows. The consequence is that a date-filtered export is empty, with a notice on standard error.
 
 #### Provisional operator decisions — not approvals
 
@@ -2659,7 +2659,7 @@ Everything that could vary between two exports is pinned:
 | **timestamp** | every entry carries **1980-01-01 00:00:00 UTC** — the ZIP epoch, and the earliest instant a DOS timestamp can express |
 | **permissions** | `0644`; `0755` for a file the manifest marks executable |
 | **compression** | **`Store`** — no compression at all |
-| **header fields** | no extra field of the writer's own, no comment, no archive comment |
+| **header fields** | no extra field of the **caller's** own, no comment, no archive comment — Go's `archive/zip` writer appends its own Info-ZIP extended-timestamp field (`0x5455`) to every entry, and that field's value is the pinned epoch, so it is part of the deterministic shape |
 | **content** | the **original** package bytes, never the derived projection |
 
 **The compression choice is load-bearing, and it is measured rather than assumed.** Go's DEFLATE output is **not stable across Go releases**: the same bytes compressed by Go **1.26.6** and by Go **1.27.3** produce archives of **395** and **396** bytes, with **different digests** (`f3187b20…` and `a1f5b1ab…`). A deflate archive's identity would therefore depend on the **toolchain** that produced it, which defeats the purpose of a deterministic transport. `Store` makes the archive's bytes a function of the package's bytes and the pinned header fields alone, so the same package exports to the same bytes on **every** Go release. The cost is size: an archive is the sum of its files rather than a compressed fraction of it.
@@ -2684,9 +2684,15 @@ The round trip is pinned across: a version-declaring package; a **versionless** 
 
 #### The legacy single-document skill
 
-An ordinary skill — one with no package — exports as a **one-file** `.skill` archive: a single `SKILL.md` entry holding the skill's own bytes. The archive is a valid package for the P5 importer, which is what makes an ordinary skill movable by the same transport a package uses.
+An ordinary skill — one with no package — can be exported as a **one-file** `.skill` archive: a single `SKILL.md` entry holding the skill's own bytes. The archive is a valid package for the P5 importer, which is what makes an ordinary skill movable by the same transport a package uses.
 
-**The transport adaptation is named, not glossed.** The archive carries the skill's **original** document. On the way back in, the importer derives a projection from it: a document that declares a version projects to itself, so the round trip is byte-exact; a document that declares **no** version is given the effective version `1.0.0-unversioned` and the projection carries one inserted `version:` line. That insertion is the **importer's** rule (§5.2), not a rewrite by the exporter. The exporter changes no document and writes nothing to the database.
+**This is an internal interface, not a surface.** `ExportSkillDocument` is part of the export interface P8 calls; `mpm export` does not use it yet, and the batch export carries **packages**, not ordinary skills. The claim it makes is deliberately narrow, and it is **refused** rather than approximated whenever the narrow claim does not hold:
+
+- a **packaged** skill is **refused**. The skill's row holds the **projection** of its package — the original plus, for a package that declares no version, one inserted `version:` line — and the package's other files (references, scripts, assets) live in their own rows and blobs. A one-file archive built from the row would carry the projection rather than the original bytes and would omit every other file, so the package would come back a **different** package, or no package at all. That is the silent loss §6.3 exists to prevent, so the exporter refuses and names the way out: export the package.
+
+**The transport adaptation is named, not glossed.** The archive carries the skill's **original** document — the bytes the skill's row holds, which for an ordinary skill **are** the original document. On the way back in, the importer derives a projection from it, and because a document that declares a version projects to itself, the round trip is byte-exact.
+
+There is **no versionless case** in this transport. The substrate **refuses** to store a skill whose document declares no version (§5.2's frontmatter rule, enforced at the door by `SaveSkill`), so every skill in the store declares a version, the one-file archive always carries one, and the exporter never has to insert a line. The `1.0.0-unversioned` effective version belongs to the **package** path, where the importer inserts it into the projection it stores; it is not something the one-file export invents. The exporter changes no document and writes nothing to the database.
 
 #### The complete skills export
 
@@ -2722,6 +2728,8 @@ The refusals happen **before anything is written**, so a refused export has writ
 
 So the consumer **refuses**, with a diagnostic that says what is missing and where it is. The complete import path — the document's archives imported as packages — belongs with the package import surface (**P8**), not with the memory migration, so it is **deferred deliberately** rather than half-built. A document that carries the `package_archives` key with a **count of zero** is a complete export of a workspace with no packages, and it is imported normally.
 
+**A MALFORMED index is refused too.** The index's count decides whether the document carries packages, so an index whose count cannot be read leaves that number **unknown** — and an unknown number is not zero. A string count, a fractional count, a missing count, a null count, and an index that is not an object at all are all refused, with a diagnostic that says the index is malformed. The safe reading of an unreadable index is the one that refuses; treating it as "no packages" would be a fail-open in a fail-closed design.
+
 #### The filesystem safety
 
 Archives and export metadata are written through **private staging paths**:
@@ -2732,14 +2740,17 @@ Archives and export metadata are written through **private staging paths**:
 - A **symlink** is never followed: the output path and the sibling directory are inspected **without** following links, and a symlink in either place is refused.
 - An existing sibling directory that holds files is **refused**. An export never silently overwrites an archive.
 - Every **published** archive's digest is verified by reading it **back** from the published location.
+- The **document** keeps the mode the export has always written — `0644`, as `os.Create` produced it — while the **archives** stay private (`0600`, inside a `0700` directory): the document is a shareable artefact, and the packages' contents are not.
 
 **The publication is NOT one atomic operation, and the design does not pretend otherwise.** The directory is published by a rename and the document by a second rename. The **order** makes the intermediate state harmless: the **directory is published first** and the **document second**, so a document is never published pointing at archives that are not there — a lie the consumer could not detect. The reverse — a directory with no document — points at nothing, and the recovery is to remove the directory and run the export again.
 
 **The recovery path is tested, not assumed.** An interruption between the two renames leaves a directory of archives and no document. The test asserts that the archives the interruption left behind are **intact and importable** — the interruption damaged nothing — that the next export **refuses** to run into that directory and says how to recover, and that removing the directory and running the export again succeeds.
 
+**A partial publication is reported honestly.** Every failure that happens *after* the directory rename says so: the error names the published directory, says it holds this export's archives, and says to remove it and run the export again. An error that said only "the export failed" would leave the operator with a directory they did not know was there.
+
 #### What P7 does **not** add
 
-**No `mpm skill export` command and no new `mpm_skills` MCP actions.** Those belong to **P8**. P7 extends the existing `mpm export` command, because complete skills export is explicitly part of the P7 contract, and it exposes an **internal export interface** — `ExportSkillPackage` and `ExportSkillPackages` — that P8's CLI and MCP surfaces call directly.
+**No `mpm skill export` command and no new `mpm_skills` MCP actions.** Those belong to **P8**. P7 extends the existing `mpm export` command, because complete skills export is explicitly part of the P7 contract, and it exposes an **internal export interface** — `ExportSkillPackage` (one package), `ExportSkillPackages` (a set, for the batch export) and `ExportSkillDocument` (an ordinary skill, as a one-file archive) — that P8's CLI and MCP surfaces call directly. None of the three is reachable from a command yet: `mpm export` uses the first two, and the third is P8's.
 
 **No new multi-package ZIP format.** One archive carries one package. The batch export's archives are separate files beside the document, named by the document's index.
 

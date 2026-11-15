@@ -250,16 +250,36 @@ func (dm *DatabaseManager) countSkillPackages() (int, error) {
 // the reason it could not be carried, because "this package is missing"
 // and "this package is missing BECAUSE its blob is gone" are different
 // facts and only the second is actionable.
+//
+// The opening sentence depends on WHY the package was not carried. For
+// most reasons the projected row WAS exported and the package's files
+// were not; for `skill_row_not_exported` the row was not exported
+// either, and saying otherwise would misdescribe what the operator has.
 func (l *SkillPackageExportLoss) Notice() string {
-	if l == nil || l.Count == 0 {
+	if l == nil {
 		return ""
 	}
-	lines := make([]string, 0, l.Count+1)
+	if l.Count == 0 {
+		// Nothing was lost, so there is no WARNING. The scope is
+		// still stated: "carried 12 of 12" is a positive claim about
+		// a known denominator, and it is what distinguishes a
+		// COMPLETE export from an empty one.
+		if l.Scope.Selected == 0 {
+			return ""
+		}
+		return fmt.Sprintf(
+			"this export carried %d of %d selected skill package(s); %d package(s) are in the store",
+			l.Scope.Carried, l.Scope.Selected, l.Scope.Total)
+	}
+	lines := make([]string, 0, l.Count+2)
 	lines = append(lines, fmt.Sprintf(
-		"WARNING: this export could NOT carry %d skill package(s). "+
-			"The projected skill rows were exported; the packages' reference files, scripts and assets were NOT. "+
-			"These bytes are not in this export.",
-		l.Count))
+		"WARNING: this export could NOT carry %d skill package(s). %s",
+		l.Count, l.omissionSummary()))
+	if l.Scope.Total > 0 || l.Scope.Selected > 0 {
+		lines = append(lines, fmt.Sprintf(
+			"  scope: %d package(s) in the store, %d selected by this export, %d carried",
+			l.Scope.Total, l.Scope.Selected, l.Scope.Carried))
+	}
 	for _, p := range l.Packages {
 		reason := p.Reason
 		if reason == "" {
@@ -270,4 +290,22 @@ func (l *SkillPackageExportLoss) Notice() string {
 			p.SkillID, p.Version, p.FileCount, p.PackageHash, reason))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// omissionSummary renders the one sentence that says WHAT was not
+// carried.
+//
+// The sentence is per-reason, because the reasons differ in what the
+// operator is missing: `skill_row_not_exported` means the projected
+// row is missing too, and every other reason means the row is there
+// and the package's files are not.
+func (l *SkillPackageExportLoss) omissionSummary() string {
+	for _, p := range l.Packages {
+		if p.Reason == "skill_row_not_exported" {
+			return "The projected skill rows were NOT exported for them either. " +
+				"These bytes are not in this export."
+		}
+	}
+	return "The projected skill rows were exported; the packages' reference files, " +
+		"scripts and assets were NOT. These bytes are not in this export."
 }

@@ -252,7 +252,22 @@ func (dm *DatabaseManager) IngestFromJsonFile(sourcePath, importBatch string, dr
 	// imported as packages — belongs with the package import surface,
 	// not with the memory migration. Until it exists, the consumer says
 	// so instead of quietly losing the packages.
-	if count, directory, ok := jsonPackageArchiveIndex([]byte(content)); ok && count > 0 {
+	//
+	// A MALFORMED index is refused too. The index's count decides
+	// whether the document carries packages, so an index whose count
+	// cannot be read leaves the number of packages UNKNOWN — and an
+	// unknown number is not zero. Treating a malformed index as "no
+	// packages" would be a fail-open in a fail-closed design.
+	count, directory, present, readable := jsonPackageArchiveIndex([]byte(content))
+	switch {
+	case present && !readable:
+		return nil, fmt.Errorf(
+			"%s carries a MALFORMED package-archive index, so the number of skill packages it carries cannot be read; "+
+				"this importer reads only the document's projected rows, so importing it would risk silently dropping "+
+				"every package's reference files, scripts and assets. Import the .skill archives themselves, or export a "+
+				"document that carries a readable archive index",
+			sourcePath)
+	case present && count > 0:
 		return nil, fmt.Errorf(
 			"%s carries %d skill package archive(s) in %q; this importer reads only the document's projected rows, "+
 				"so importing it would silently drop every package's reference files, scripts and assets. "+

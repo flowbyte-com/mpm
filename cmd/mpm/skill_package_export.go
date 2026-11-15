@@ -231,9 +231,17 @@ func publishPackageExport(target packageExportTarget, archives []*mpminternal.Pa
 	//
 	// It is written to a temporary name and RENAMED over the output, so
 	// the output is never truncated before its content is complete.
+	//
+	// EVERY failure from here on leaves the package directory
+	// PUBLISHED. The error says so, and says how to recover: the
+	// directory is a complete set of archives that simply has no
+	// document beside it, and the next export refuses to run into it
+	// until it is removed. An error that said only "the export failed"
+	// would leave the operator with a directory they did not know was
+	// there.
 	documentTemp, err := os.CreateTemp(parent, ".mpm-export-document-")
 	if err != nil {
-		return fmt.Errorf("stage the export document: %w", err)
+		return publishedDirectoryError(err, target.DirectoryPath, "stage the export document")
 	}
 	documentTempName := documentTemp.Name()
 	documentPublished := false
@@ -244,13 +252,28 @@ func publishPackageExport(target packageExportTarget, archives []*mpminternal.Pa
 	}()
 	if _, err := documentTemp.Write(document); err != nil {
 		documentTemp.Close()
-		return fmt.Errorf("write the export document: %w", err)
+		return publishedDirectoryError(err, target.DirectoryPath, "write the export document")
 	}
 	if err := documentTemp.Close(); err != nil {
-		return fmt.Errorf("close the export document: %w", err)
+		return publishedDirectoryError(err, target.DirectoryPath, "close the export document")
+	}
+	// The document's mode is the one the export has always written:
+	// 0644, as `os.Create` produced it. The temporary file is 0600
+	// because that is what a temporary file is, so the mode is set
+	// explicitly before the rename — an export document is a
+	// shareable artefact, and its mode changing silently would be a
+	// behaviour change an operator would only notice when a colleague
+	// could not read the file.
+	//
+	// The ARCHIVES stay private (0600, inside a 0700 directory): they
+	// are the packages' contents, and the directory is the private
+	// half of the export.
+	if err := os.Chmod(documentTempName, 0o644); err != nil {
+		return publishedDirectoryError(err, target.DirectoryPath, "set the export document's mode")
 	}
 	if err := os.Rename(documentTempName, target.DocumentPath); err != nil {
-		return fmt.Errorf("publish the export document %q: %w", target.DocumentPath, err)
+		return publishedDirectoryError(err, target.DirectoryPath,
+			fmt.Sprintf("publish the export document %q", target.DocumentPath))
 	}
 	documentPublished = true
 
@@ -264,15 +287,42 @@ func publishPackageExport(target packageExportTarget, archives []*mpminternal.Pa
 		published_ := filepath.Join(target.DirectoryPath, archive.FileName)
 		content, err := os.ReadFile(published_)
 		if err != nil {
-			return fmt.Errorf("read back the published archive %q: %w", published_, err)
+			return fmt.Errorf(
+				"read back the published archive %q: %w\n"+
+					"NOTE: the export was published at %q, but it could not be verified. "+
+					"Check the directory before trusting it.",
+				published_, err, target.DocumentPath)
 		}
 		sum := sha256.Sum256(content)
 		if got := hex.EncodeToString(sum[:]); got != archive.SHA256 {
-			return fmt.Errorf("the published archive %q hashes to %s, want %s",
-				published_, got, archive.SHA256)
+			return fmt.Errorf(
+				"the published archive %q hashes to %s, want %s\n"+
+					"NOTE: the export was published at %q, but it could not be verified. "+
+					"Check the directory before trusting it.",
+				published_, got, archive.SHA256, target.DocumentPath)
 		}
 	}
 	return nil
+}
+
+// publishedDirectoryError renders the error for a failure that happens
+// AFTER the package directory has been published.
+//
+// The publication is two renames, and the first one has already
+// happened by the time these failures occur. So the directory is on
+// disk, holding a complete set of archives, with no document beside
+// it.
+//
+// The error says so, and says how to recover: remove the directory and
+// run the export again. An error that said only "the export failed"
+// would leave the operator with a directory they did not know was
+// there — and the next export would refuse to run into it.
+func publishedDirectoryError(err error, directory, cause string) error {
+	return fmt.Errorf(
+		"%s: %w\n"+
+			"NOTE: the package directory %q was published, and it holds this export's "+
+			"archives. Remove it and run the export again.",
+		cause, err, directory)
 }
 
 // refuseNonEmptyPackageDirectory refuses a package directory that
@@ -345,28 +395,13 @@ func encodePackageExportDocument(
 		"packages_omitted": loss,
 		"package_archives": index,
 	}
-	var buf writeBuffer
+	var buf bytes.Buffer
 	encoder := json.NewEncoder(&buf)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(document); err != nil {
 		return nil, fmt.Errorf("encode the export document: %w", err)
 	}
 	return buf.Bytes(), nil
-}
-
-// writeBuffer is a tiny in-memory writer, so the document can be
-// rendered BEFORE anything is published.
-type writeBuffer struct {
-	data []byte
-}
-
-func (b *writeBuffer) Write(p []byte) (int, error) {
-	b.data = append(b.data, p...)
-	return len(p), nil
-}
-
-func (b *writeBuffer) Bytes() []byte {
-	return b.data
 }
 
 // encodeExportJSON renders a value as the export's JSON encoding.

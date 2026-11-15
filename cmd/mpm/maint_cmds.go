@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -467,6 +468,15 @@ func handleExport(args []string) int {
 	if packageLoss.Packages == nil {
 		packageLoss.Packages = []mpminternal.SkillPackageExportOmitted{}
 	}
+	// The omissions are sorted GLOBALLY, by skill id. They arrive from
+	// two sources — the scope's own omissions and the exporter's
+	// failures — and each is sorted on its own, so without this the
+	// two lists would interleave differently depending on which source
+	// an omission came from. One order for the whole list makes the
+	// report reproducible.
+	sort.SliceStable(packageLoss.Packages, func(i, j int) bool {
+		return packageLoss.Packages[i].SkillID < packageLoss.Packages[j].SkillID
+	})
 
 	// ── The DOCUMENT. ──────────────────────────────────────────────────
 	//

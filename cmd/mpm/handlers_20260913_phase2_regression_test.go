@@ -82,25 +82,63 @@ func TestMemoryWriter_InterfaceHasFindPromotionByLineage(t *testing.T) {
 // full, in memory, and written through an ATOMIC writer (a temporary
 // name and a rename), so the output is never truncated before its
 // content is known to be complete. The defect's intent is unchanged, so
-// the pin is restated against the new shape — and the behavioural
-// companion (an export with --output writes NOTHING to standard output)
-// lives in skill_package_export_cli_test.go.
+// the pin is restated against the new shape.
+//
+// THE PIN IS ABOUT THE FUNCTION, NOT THE FILE. A whole-file grep would
+// be satisfied by a string in a comment, or in a function the export
+// does not use — so the assertion is made against `handleExport`'s own
+// body. The BEHAVIOURAL companion — an export with --output writes
+// NOTHING to standard output — lives in skill_package_export_cli_test.go,
+// and it is the load-bearing one: this pin catches the shape, that one
+// catches the effect.
 func TestExportOutputFile_RoutesToFileNotStdout(t *testing.T) {
-	src := readServiceSource(t, "maint_cmds.go")
+	body := goFunctionBody(t, readServiceSource(t, "maint_cmds.go"), "handleExport")
 	// The document reaches the --output path through the atomic
 	// writer.
-	if !strings.Contains(src, "writeFileAtomically(o.output, document)") {
+	if !strings.Contains(body, "writeFileAtomically(o.output, document)") {
 		t.Fatalf("handleExport must route the document to --output through writeFileAtomically (defect B)")
 	}
 	// Standard output is written only when there is no output path.
-	if !strings.Contains(src, "os.Stdout.Write(document)") {
+	if !strings.Contains(body, "os.Stdout.Write(document)") {
 		t.Fatalf("handleExport must write the document to standard output when no --output is given")
 	}
 	// Before patch: encoder hardcoded os.Stdout. The patch removes
 	// that line.
-	if strings.Contains(src, "json.NewEncoder(os.Stdout)") {
+	if strings.Contains(body, "json.NewEncoder(os.Stdout)") {
 		t.Fatalf("handleExport must NOT hardcode os.Stdout for JSON (defect B regression)")
 	}
+}
+
+// goFunctionBody returns the body of one top-level function in a Go
+// source file.
+//
+// It finds the function's opening brace and matches braces to find the
+// end, so the assertion is made against the function and not against
+// the file around it.
+func goFunctionBody(t *testing.T, source, name string) string {
+	t.Helper()
+	start := strings.Index(source, "func "+name+"(")
+	if start < 0 {
+		t.Fatalf("the source has no function %s", name)
+	}
+	open := strings.Index(source[start:], "{")
+	if open < 0 {
+		t.Fatalf("the function %s has no body", name)
+	}
+	depth := 0
+	for i := start + open; i < len(source); i++ {
+		switch source[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return source[start+open : i+1]
+			}
+		}
+	}
+	t.Fatalf("the function %s has no closing brace", name)
+	return ""
 }
 
 // TestExportOutputFile_StatusGoesToStderr pins defect B: success

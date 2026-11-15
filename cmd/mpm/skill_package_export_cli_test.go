@@ -55,6 +55,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1028,5 +1029,120 @@ func TestP7_CLIExportWithAnOutputPathWritesNothingToStdout(t *testing.T) {
 	}
 	if doc.Archives.Count == 0 {
 		t.Errorf("the export file carries no archive")
+	}
+}
+
+// TestP7_CLITheDocumentKeepsTheModeTheExportHasAlwaysWritten pins the
+// document's mode.
+//
+// The export document is a shareable artefact: it is the file an
+// operator hands to a colleague. Its mode is `0644`, as the export has
+// always written it, and the mode is set EXPLICITLY — the atomic write
+// stages the document through a temporary file, which is `0600`, so a
+// silent `rename` would change the published file's mode without
+// saying so.
+//
+// The ARCHIVES stay private: they are the packages' contents.
+func TestP7_CLITheDocumentKeepsTheModeTheExportHasAlwaysWritten(t *testing.T) {
+	p7CLIImportPackage(t, "cli-mode")
+
+	outPath := filepath.Join(t.TempDir(), "export.json")
+	if rc := handleExport([]string{"export", "--format", "json", "--collection", "skills", "--output", outPath}); rc != 0 {
+		t.Fatalf("handleExport returned %d", rc)
+	}
+
+	info, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatalf("stat the document: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("the export document's mode is %o, want 644", got)
+	}
+}
+
+// TestP7_CLITheOmissionsAreSortedGlobally pins that the omissions are
+// reported in ONE order.
+//
+// They arrive from two sources — the export's scope and the exporter's
+// own failures — and each is sorted on its own. Without a global sort
+// the two lists interleave differently depending on which source an
+// omission came from, so the same set of omissions would be reported
+// differently on different runs.
+func TestP7_CLITheOmissionsAreSortedGlobally(t *testing.T) {
+	dm := getDBConcrete()
+	if dm == nil {
+		t.Skip("DB unavailable")
+	}
+	firstID, _ := p7CLIImportPackage(t, "cli-sorted-broken-a")
+	secondID, _ := p7CLIImportPackage(t, "cli-sorted-broken-b")
+
+	// The restore runs BEFORE the shred: the shred removes the file
+	// row the restore reads. (Deferred functions run last-in-first-out,
+	// so the shred is registered LAST.)
+	for _, id := range []string{firstID, secondID} {
+		defer p7CLIShredPackage(t, dm, id)
+		defer p7CLIRestoreBlob(t, dm, id, "references/a.md")
+	}
+	for _, id := range []string{firstID, secondID} {
+		if _, err := dm.SQLDB().Exec(`UPDATE skill_package_blobs SET content = ? WHERE sha256 = (
+			SELECT f.sha256 FROM skill_package_files f
+			WHERE f.skill_id = ? AND f.path = 'references/a.md')`,
+			[]byte("# tampered\n"), id); err != nil {
+			t.Fatalf("corrupt the blob: %v", err)
+		}
+	}
+
+	outPath := filepath.Join(t.TempDir(), "export.json")
+	if rc := handleExport([]string{"export", "--format", "json", "--collection", "skills", "--output", outPath}); rc != 0 {
+		t.Fatalf("handleExport returned %d", rc)
+	}
+	doc := p7CLIReadDoc(t, outPath)
+
+	var ids []string
+	for _, o := range doc.Packages.Packages {
+		ids = append(ids, o.SkillID)
+	}
+	if len(ids) < 2 {
+		t.Fatalf("the export named %d omission(s); the fixture breaks two packages", len(ids))
+	}
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	for i := range ids {
+		if ids[i] != sorted[i] {
+			t.Fatalf("the omissions are not sorted: %v", ids)
+		}
+	}
+}
+
+// TestP7_CLIAFailureAfterTheDirectoryIsPublishedSaysSo pins the honest
+// reporting of a PARTIAL publication.
+//
+// The publication is two renames. Once the directory's rename has
+// happened, the directory is on disk holding a complete set of
+// archives — with no document beside it. An error that said only "the
+// export failed" would leave the operator with a directory they did
+// not know was there, and the next export would refuse to run into it.
+//
+// The failure itself is hard to produce deterministically (it needs the
+// second rename to fail), so the MESSAGE is pinned directly: it names
+// the published directory and says how to recover.
+func TestP7_CLIAFailureAfterTheDirectoryIsPublishedSaysSo(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "export.json.packages")
+	err := publishedDirectoryError(errors.New("the rename failed"), directory, "publish the export document")
+	if err == nil {
+		t.Fatalf("the helper returned no error")
+	}
+	message := err.Error()
+	if !strings.Contains(message, directory) {
+		t.Errorf("the error does not name the published directory:\n%s", message)
+	}
+	if !strings.Contains(message, "was published") {
+		t.Errorf("the error does not say the directory was published:\n%s", message)
+	}
+	if !strings.Contains(message, "Remove it and run the export again") {
+		t.Errorf("the error does not say how to recover:\n%s", message)
+	}
+	if !strings.Contains(message, "the rename failed") {
+		t.Errorf("the error does not carry the underlying cause:\n%s", message)
 	}
 }

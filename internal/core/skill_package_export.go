@@ -545,18 +545,33 @@ func packageExportOmissionDetail(err error) string {
 // valid package for the P5 importer, which is what makes an ordinary
 // skill movable by the same transport a package uses.
 //
+// **A PACKAGED skill is REFUSED.** The skill's row holds the
+// *projection* of its package — the original plus, for a package that
+// declares no version, one inserted `version:` line — and the
+// package's other files (references, scripts, assets) live in their own
+// rows and blobs. A one-file archive built from the row would therefore
+// carry the projection rather than the original bytes, and would omit
+// every other file: the package would come back a DIFFERENT package, or
+// no package at all. That is the silent loss §6.3 exists to prevent, so
+// the exporter refuses instead. A caller that wants a package exports
+// the PACKAGE (`ExportSkillPackage`), which carries the original bytes
+// and every file.
+//
 // **What the transport adapts, stated plainly.** The archive carries the
-// skill's ORIGINAL document — the bytes the skill's row holds. The
-// importer, on the way back in, derives a projection from it: a document
-// that declares a version projects to itself, so the round trip is
-// byte-exact; a document that declares NO version is given the
-// effective version `1.0.0-unversioned` and the projection carries one
-// inserted `version:` line. That insertion is the IMPORTER's rule
-// (§5.2), not a rewrite by the exporter — the exporter never changes
-// the document, and it never writes to the database.
+// skill's ORIGINAL document — the bytes the skill's row holds, which
+// for an ordinary skill ARE the original document. The importer, on the
+// way back in, derives a projection from it: a document that declares a
+// version projects to itself, so the round trip is byte-exact.
+//
+// A document that declares **no** version is **refused by the
+// exporter**: the package format requires a version in the frontmatter
+// (§5.2), and the importer's own frontmatter rule refuses such a
+// document. The exporter refuses it for the same reason, so the
+// refusal happens on this side of the transport rather than after it.
 //
 // The exporter writes nothing. It reads the skill's row, checks that
-// the document parses as a skill, and serialises it.
+// the skill is not a package, checks that the document parses as a
+// skill, and serialises it.
 func (dm *DatabaseManager) ExportSkillDocument(ctx context.Context, skillID string) (*PackageExportArchive, error) {
 	if strings.TrimSpace(skillID) == "" {
 		return nil, packageReadErrorf(PackageReadReasonSelectorInvalid, "",
@@ -585,6 +600,25 @@ func (dm *DatabaseManager) ExportSkillDocument(ctx context.Context, skillID stri
 		if deletedAt.Valid {
 			return packageReadErrorf(PackageReadReasonPackageNotFound, "",
 				"the skill %s has been shredded", skillID)
+		}
+
+		// A PACKAGED skill is refused, and the refusal names the way
+		// out. A one-file archive built from the row would carry the
+		// projection and omit every other file, so the package would
+		// not survive the round trip.
+		var packaged int
+		err = tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM skill_packages WHERE skill_id = ?`, skillID).Scan(&packaged)
+		if err != nil {
+			return packageReadErrorWrap(PackageReadReasonDatabaseFailure, "", err,
+				"read the package row of %s", skillID)
+		}
+		if packaged > 0 {
+			return packageReadErrorf(PackageReadReasonSelectorInvalid, "",
+				"the skill %s is a PACKAGE, not an ordinary skill: its row holds the "+
+					"projection and its other files live in their own rows, so a "+
+					"one-file archive would drop them. Export the package instead",
+				skillID)
 		}
 
 		frontmatter, _, parseErr := ParseSkillFrontmatter(content.String)

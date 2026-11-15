@@ -88,6 +88,32 @@ func p7Import(t *testing.T, dm *DatabaseManager, name, version string, files map
 	return p7ImportOpts(t, dm, PackageImportOptions{}, name, version, files)
 }
 
+// p7TreeOrdered writes a package tree, creating the files in the given
+// ORDER.
+//
+// `p7Tree` iterates a Go map, so the order the files are created in is
+// randomised — which is fine for a test about CONTENT and wrong for a
+// test about ORDER. A test that says "the source arrived in this
+// order" has to mean it, so this helper takes the order explicitly.
+func p7TreeOrdered(t *testing.T, files map[string][]byte, order []string) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, rel := range order {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", full, err)
+		}
+		content, ok := files[rel]
+		if !ok {
+			t.Fatalf("the order names %q, which the fixture does not hold", rel)
+		}
+		if err := os.WriteFile(full, content, 0o600); err != nil {
+			t.Fatalf("write %s: %v", full, err)
+		}
+	}
+	return root
+}
+
 // p7ImportOpts is p7Import with operator options.
 func p7ImportOpts(t *testing.T, dm *DatabaseManager, opts PackageImportOptions, name, version string, files map[string][]byte) *PackageImportResult {
 	t.Helper()
@@ -97,6 +123,28 @@ func p7ImportOpts(t *testing.T, dm *DatabaseManager, opts PackageImportOptions, 
 	}
 	tree["SKILL.md"] = []byte(p7SkillDoc(name, version, "the original entrypoint body\n"))
 	opts.Path = p7Tree(t, tree)
+	result, err := dm.ImportSkillPackageFromDir(opts)
+	if err != nil {
+		t.Fatalf("import the package: %v", err)
+	}
+	return result
+}
+
+// p7ImportOrdered is p7ImportOpts with the SOURCE files created in a
+// named order.
+//
+// The entrypoint is created FIRST, so the two trees differ only in the
+// order of the supporting files — which is the difference the test is
+// about.
+func p7ImportOrdered(t *testing.T, dm *DatabaseManager, opts PackageImportOptions, name, version string, files map[string][]byte, order []string) *PackageImportResult {
+	t.Helper()
+	tree := map[string][]byte{}
+	for k, v := range files {
+		tree[k] = v
+	}
+	tree["SKILL.md"] = []byte(p7SkillDoc(name, version, "the original entrypoint body\n"))
+	full := append([]string{"SKILL.md"}, order...)
+	opts.Path = p7TreeOrdered(t, tree, full)
 	result, err := dm.ImportSkillPackageFromDir(opts)
 	if err != nil {
 		t.Fatalf("import the package: %v", err)
@@ -436,20 +484,22 @@ func TestP7ExportCarriesEveryKindOfFile(t *testing.T) {
 // Two packages with the same content, imported from directories whose
 // files were created in different orders, are the same package — so
 // they must export to the same bytes.
+//
+// The order is CONTROLLED, not merely requested: the fixture writes
+// the files in the order the test names, because a fixture that
+// iterated a Go map would create them in a random order and the test
+// would pass for the wrong reason.
 func TestP7ExportOfPackagesBuiltFromDifferentlyOrderedSourcesProducesTheSameBytes(t *testing.T) {
+	files := map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+		"scripts/run.sh":          []byte("#!/bin/sh\necho hello\n"),
+		"assets/logo.png":         {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a},
+	}
 	build := func(t *testing.T, order []string) *PackageExportArchive {
 		t.Helper()
 		dm := p7DM(t)
-		files := map[string][]byte{
-			"references/templates.md": []byte("the reference body\n"),
-			"scripts/run.sh":          []byte("#!/bin/sh\necho hello\n"),
-			"assets/logo.png":         {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a},
-		}
-		ordered := map[string][]byte{}
-		for _, name := range order {
-			ordered[name] = files[name]
-		}
-		imported := p7ImportOpts(t, dm, PackageImportOptions{AllowBinary: true}, "ordered", "1.0.0", ordered)
+		imported := p7ImportOrdered(t, dm, PackageImportOptions{AllowBinary: true},
+			"ordered", "1.0.0", files, order)
 		return p7Export(t, dm, imported.SkillID)
 	}
 
@@ -713,6 +763,20 @@ func TestP7ExportPinsTheArchiveShape(t *testing.T) {
 // package would pass on BOTH Go releases — and would not have caught
 // the toolchain dependence that the STORE decision avoids. A constant
 // catches both.
+//
+// WHAT THIS PIN DOES NOT PROMISE. Go's `archive/zip` writer does not
+// promise byte stability: "the exact bytes written to w are not
+// covered by the Go 1 compatibility promise. Callers, including tests,
+// should not depend on the exact written bytes." Go 1.27.3 already
+// changed the writer (the Zip64 threshold semantics and the EOCD64
+// emission rule), so the class of change is live.
+//
+// So this constant is a GUARD, not a promise. If a future Go release
+// changes the writer, this test fails - and that failure is the
+// intended behaviour: the archive's bytes changed, so every digest an
+// operator has recorded for an archive is now wrong, and that is worth
+// a loud failure rather than a silent drift. The archive's identity is
+// the operator's guarantee; it is not the Go release's.
 func TestP7ExportArchiveBytesAreIdenticalAcrossGoReleases(t *testing.T) {
 	dm := p7DM(t)
 	imported := p7Import(t, dm, "pinned", "1.0.0", map[string][]byte{
@@ -934,4 +998,125 @@ func p7WriteArchiveEntries(t *testing.T, wrapper string, files map[string][]byte
 		t.Fatalf("close the archive file: %v", err)
 	}
 	return path
+}
+
+// ─── The legacy single-document skill ──────────────────────────────────────
+
+// TestP7ExportDocumentRefusesAPackagedSkill pins the refusal.
+//
+// The skill's row holds the PROJECTION of its package, and the
+// package's other files live in their own rows and blobs. A one-file
+// archive built from the row would therefore carry the projection
+// rather than the original bytes, and would omit every other file —
+// so the package would come back a DIFFERENT package, or no package at
+// all. That is the silent loss §6.3 exists to prevent, so the exporter
+// refuses instead.
+func TestP7ExportDocumentRefusesAPackagedSkill(t *testing.T) {
+	dm := p7DM(t)
+	imported := p7Import(t, dm, "packaged", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	_, err := dm.ExportSkillDocument(context.Background(), imported.SkillID)
+	if err == nil {
+		t.Fatalf("the one-file export accepted a PACKAGED skill")
+	}
+	if !strings.Contains(err.Error(), "PACKAGE") {
+		t.Errorf("the refusal does not say the skill is a package: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Export the package instead") {
+		t.Errorf("the refusal does not say the way out: %v", err)
+	}
+}
+
+// TestP7ExportDocumentProducesAnArchiveTheImporterAccepts pins that the
+// one-file archive is a valid package for the P5 importer.
+//
+// The check is against the substrate's OWN reader
+// (`ImportSkillPackageFromArchive`), not against a second
+// interpretation of `archive/zip`.
+func TestP7ExportDocumentProducesAnArchiveTheImporterAccepts(t *testing.T) {
+	dm := p7DM(t)
+
+	document := p7SkillDoc("legacy", "2.1.0", "the legacy body\n")
+	skillID, err := dm.SaveSkill("legacy", "2.1.0", document, "test", false)
+	if err != nil {
+		t.Fatalf("save the skill: %v", err)
+	}
+
+	archive, err := dm.ExportSkillDocument(context.Background(), skillID)
+	if err != nil {
+		t.Fatalf("export the document: %v", err)
+	}
+
+	// The archive carries ONE entry: the skill's own document.
+	names := p7ArchiveEntries(t, archive.Content)
+	if len(names) != 1 || names[0] != "SKILL.md" {
+		t.Fatalf("the one-file archive carries %v, want exactly [SKILL.md]", names)
+	}
+
+	// And the importer accepts it.
+	target := p7DM(t)
+	result, err := target.ImportSkillPackageFromArchive(PackageImportOptions{
+		Path: p7WriteArchive(t, archive),
+	})
+	if err != nil {
+		t.Fatalf("the one-file archive is NOT accepted by the importer: %v", err)
+	}
+	// The skill's SEMANTICS survive: the same name and the same
+	// version. The document declared a version, so the projection is
+	// byte-identical to the original and the round trip is exact.
+	if result.Name != "legacy" {
+		t.Errorf("the re-imported skill is named %q, want legacy", result.Name)
+	}
+	if result.Version != "2.1.0" {
+		t.Errorf("the re-imported skill is at version %q, want 2.1.0", result.Version)
+	}
+}
+
+// TestP7TheSubstrateHoldsNoVersionlessSkill pins WHY the one-file
+// export never has to invent a version.
+//
+// The package format requires a version in the frontmatter (§5.2), and
+// the substrate enforces that at the door: a skill whose document
+// declares no version is REFUSED when it is saved. So every skill in
+// the store declares a version, the one-file archive always carries
+// one, and the transport adaptation never has to insert a line.
+//
+// The claim this replaces said the exporter gave a versionless
+// document the effective version `1.0.0-unversioned`. That is the
+// IMPORTER's rule for a PACKAGE (the importer inserts the line into
+// the projection it stores) — and it cannot happen here: the substrate
+// holds no versionless skill to export.
+func TestP7TheSubstrateHoldsNoVersionlessSkill(t *testing.T) {
+	dm := p7DM(t)
+
+	document := "---\nname: versionless\ndescription: a test skill\n" +
+		"when_to_use: when a test needs this exact skill\n---\nthe body\n"
+	_, err := dm.SaveSkill("versionless", "1.0.0", document, "test", false)
+	if err == nil {
+		t.Fatalf("the substrate stored a skill whose document declares no version")
+	}
+	if !strings.Contains(err.Error(), "version") {
+		t.Errorf("the refusal does not name the version: %v", err)
+	}
+}
+
+// TestP7ExportDocumentWritesNothing pins that the one-file export
+// changes nothing in the substrate.
+func TestP7ExportDocumentWritesNothing(t *testing.T) {
+	dm := p7DM(t)
+	document := p7SkillDoc("legacy-quiet", "1.0.0", "the legacy body\n")
+	skillID, err := dm.SaveSkill("legacy-quiet", "1.0.0", document, "test", false)
+	if err != nil {
+		t.Fatalf("save the skill: %v", err)
+	}
+	before := p6Census(t, dm)
+	if _, err := dm.ExportSkillDocument(context.Background(), skillID); err != nil {
+		t.Fatalf("export the document: %v", err)
+	}
+	after := p6Census(t, dm)
+	if before != after {
+		t.Errorf("the one-file export changed the substrate: before %s, after %s", before, after)
+	}
 }
