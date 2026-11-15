@@ -24,9 +24,10 @@ The isolation is LAYERED, and this file pins every layer:
 
   1. PERMISSION — every tool the REGISTRY publishes is denied by name,
      so a new tool cannot be added without a matching deny rule.
-  2. PERMISSION — the MPM BINARIES are refused at the command
-     position, so the command line cannot reach the substrate the tool
-     surface closed.
+  2. PERMISSION — the MPM BINARIES are refused wherever they are
+     NAMED — at the command position, as their own word, as the last
+     segment of a path, and inside a quote — so the command line
+     cannot reach the substrate the tool surface closed.
   3. PERMISSION — a live MPM workspace cannot be opened with the read
      tool, and the reviewer's own state changes are closed.
   4. ENVIRONMENT — a disposable sandbox (HOME, TMPDIR, MPM_WORKSPACE)
@@ -72,6 +73,7 @@ the rest by the shell rules that close the `mpm` binaries.
 from __future__ import annotations
 
 import importlib.util
+import re
 import re
 import unittest
 from pathlib import Path
@@ -170,12 +172,21 @@ def _permission_rules() -> list[dict[str, str]]:
     frontmatter = text[4:end]
 
     # The value is unescaped the way the host's YAML reader unescapes
-    # it: a double-quoted scalar's `\"` is a literal quote and its
-    # `\\` is a literal backslash. Without that, a rule whose literal
-    # contains a quote would be compared with the escape still on it,
-    # and the comparison would fail for the wrong reason.
+    # it: a double-quoted scalar's `\"` is a literal quote, its `\\`
+    # is a literal backslash and its `\t` is a literal TAB. Without
+    # that, a rule whose literal contains a quote or a tab would be
+    # compared with the escape still on it, and the comparison would
+    # fail for the wrong reason.
+    #
+    # The `\t` escape is MEASURED, not assumed: the host's reader
+    # expands it, and a command whose text carries a literal tab is
+    # refused by the tab rules -- which is why those rules exist.
     def unescape(value: str) -> str:
-        return value.replace('\\"', '"').replace("\\\\", "\\")
+        return (
+            value.replace('\\"', '"')
+            .replace("\\\\", "\\")
+            .replace("\\t", "\t")
+        )
 
     rules: list[dict[str, str]] = []
     current: dict[str, str] = {}
@@ -201,6 +212,20 @@ def _denied_actions() -> set[str]:
         for rule in _permission_rules()
         if rule.get("effect") == "deny"
     }
+
+
+def _shell_rules():
+    """Every shell rule, as (resource, effect) pairs, in file order.
+
+    The LAST matching rule wins, exactly as the host's `findLast` does,
+    so the ORDER matters and is preserved here.
+    """
+    rules = []
+    for rule in _permission_rules():
+        if rule.get("action") != "shell":
+            continue
+        rules.append((rule.get("resource", ""), rule.get("effect", "allow")))
+    return rules
 
 
 def _shell_denials() -> set[str]:
@@ -231,6 +256,128 @@ def _load_installer():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# ── A model of the host's shell matcher ─────────────────────────────────
+#
+# The guard above checks that certain RULE STRINGS are present.  That
+# cannot tell a rule that WORKS from a rule that is merely spelled the
+# right way: the `*/mpm ?*` form was present, the guard was green, and
+# `go run ./cmd/mpm` matched no rule at all and RAN the binary.
+#
+# So the guard also models the host's matcher and asserts the VERDICT
+# for a corpus whose outcomes are all MEASURED.  The model is
+# transcribed from the host binary (opencode v2.3.0):
+#
+#   function U2(e, r) {
+#     let a = e.replaceAll("\\", "/"),
+#         s = r.replaceAll("\\", "/")
+#           .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+#           .replace(/\*/g, ".*")
+#           .replace(/\?/g, ".");
+#     if (s.endsWith(" .*")) s = s.slice(0, -3) + "( .*)?";
+#     return new RegExp("^" + s + "$", "s").test(a);
+#   }
+#
+# and the last matching rule wins.  The command text is split into
+# simple commands; a `cd` segment's text is not matched; `$( ... )`
+# substitutions are descended into.
+#
+# The model is a MODEL.  Every outcome in the corpus below was measured
+# against the installed definition before it was written here, and a
+# host that changes its matcher would need this model revisited.
+_MATCHER_ESCAPE = re.compile(r"[.+^${}()|[\]\\]")
+
+
+def _matcher_u2(value: str, pattern: str) -> bool:
+    """Does the value match the pattern, the way the host does it?"""
+    text = value.replace("\\", "/")
+    expanded = pattern.replace("\\", "/")
+    expanded = _MATCHER_ESCAPE.sub(r"\\\g<0>", expanded)
+    expanded = expanded.replace("*", ".*").replace("?", ".")
+    if expanded.endswith(" .*"):
+        expanded = expanded[:-3] + "( .*)?"
+    try:
+        return re.match("^" + expanded + "$", text, re.DOTALL) is not None
+    except re.error:
+        return False
+
+
+def _matcher_segments(command: str):
+    """Split a command into the simple commands the host matches."""
+    segments, current, depth, quote = [], [], 0, None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        pair = command[index : index + 2]
+        if depth == 0 and pair in ("&&", "||"):
+            segments.append("".join(current))
+            current = []
+            index += 2
+            continue
+        if depth == 0 and char in ";|":
+            segments.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    segments.append("".join(current))
+    return segments
+
+
+def _matcher_substitutions(segment: str):
+    """The text inside each $( ... ) substitution."""
+    index = 0
+    while True:
+        index = segment.find("$(", index)
+        if index < 0:
+            return
+        depth, end = 0, index + 1
+        while end < len(segment):
+            if segment[end] == "(":
+                depth += 1
+            elif segment[end] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            end += 1
+        yield segment[index + 2 : end]
+        index = end + 1
+
+
+def _matcher_denies(command: str, rules) -> bool:
+    """Would the host deny this command, given these (resource, effect)?"""
+    for segment in _matcher_segments(command):
+        candidates = [segment]
+        candidates.extend(_matcher_substitutions(segment))
+        for candidate in candidates:
+            words = candidate.strip().split()
+            if words and words[0] == "cd":
+                # The host does not match a `cd` segment's text.
+                continue
+            effect = None
+            for resource, rule_effect in rules:
+                if _matcher_u2(candidate, resource):
+                    effect = rule_effect
+            if effect == "deny":
+                return True
+    return False
 
 
 class ReviewerIsolationTest(unittest.TestCase):
@@ -315,19 +462,18 @@ class ReviewerIsolationTest(unittest.TestCase):
         """The SUFFIX form must not come back.
 
         A rule of the form `*mpm *` matches any command text whose
-        last token ends in the name, so it refuses `ls /path/to/mpm`
-        - the operator's own checkout, read-only, for no reason a
-        review cares about.
+        last token ends in the name, so it refuses `grep -rn mpm .`
+        - a search, not an invocation, and one a review needs.
 
         The word shape is therefore space-anchored (`* mpm *`), and
-        the path shape requires MORE text after the name
-        (`*/mpm ?*`), so a path that merely ENDS in the name is not
-        swallowed. This test fails if the suffix form returns.
+        the path shape is end-anchored (`*/mpm *`), so a name that
+        merely appears inside a word is not swallowed. This test
+        fails if the suffix form returns.
 
-        The path shape's own cost - `git -C /path/to/mpm log` is
-        refused - is measured and stated in the SPEC and in the
-        definition's own prose. It is the price of closing the write
-        route, and it is paid deliberately.
+        The path shape's own cost - `ls /path/to/mpm` and `ls
+        cmd/mpm` are refused - is measured and stated in the SPEC
+        and in the definition's own prose. It is the price of
+        closing the write route, and it is paid deliberately.
         """
         denials = _shell_denials()
         binaries = _mpm_binaries()
@@ -337,11 +483,100 @@ class ReviewerIsolationTest(unittest.TestCase):
                     pattern,
                     denials,
                     f"the shell rule {pattern!r} refuses every command whose "
-                    f"text ends in the {binary} name - including a path that "
-                    f"merely ENDS in it, such as the operator's own checkout. "
-                    f"Use the space-anchored form '* {binary} *' and the "
-                    f"path form '*/{binary} ?*' instead",
+                    f"text ends in the {binary} name - including a search "
+                    f"for it, such as `grep -rn {binary} .`. Use the "
+                    f"space-anchored form '* {binary} *' and the path form "
+                    f"'*/{binary} *' instead",
                 )
+
+    def test_the_rule_set_denies_what_it_claims_to_deny(self) -> None:
+        """The rule set must DENY the commands it claims to deny.
+
+        The other assertions in this file check that certain RULE
+        STRINGS are present.  That cannot tell a rule that works from
+        a rule that is merely spelled the right way: the `*/mpm ?*`
+        form was present, every assertion here was green, and
+        `go run ./cmd/mpm` matched no rule at all and RAN the binary.
+
+        So this test MODELS the host's matcher and asserts the
+        VERDICT, for a corpus whose every outcome was measured against
+        the installed definition before it was written here.
+
+        A command the definition claims to close must be denied; a
+        command the definition states is OPEN must stay open.  Both
+        directions matter: the second is what keeps the residual list
+        honest, because a residual that the rules have since closed is
+        a claim that has gone stale.
+        """
+        rules = _shell_rules()
+        binaries = _mpm_binaries()
+        self.assertGreater(
+            len(binaries), 0, "the Makefile names no MPM binary; the check is vacuous"
+        )
+
+        must_deny = [
+            # the command position
+            "mpm --version",
+            "mpm-mcp --version",
+            "mpm-lint --version",
+            "mpm-critic --version",
+            "mpm-scheduler --version",
+            "mpm-telemetry --version",
+            "mpm-update --version",
+            # the name as its own word, behind an ordinary prefix
+            "env mpm --version",
+            "sh -c 'mpm --version'",
+            "xargs mpm --version",
+            "echo mpm",
+            "echo $(echo mpm)",
+            # the name inside a quote
+            '"mpm" --version',
+            "'mpm' --version",
+            # the name as the last segment of a path, with and without
+            # more of the command, with and without a trailing slash
+            "go run ./cmd/mpm --version",
+            "go run ./cmd/mpm",
+            "go run ./cmd/mpm/",
+            "go build -o /tmp/x ./cmd/mpm",
+            "/opt/mpm/bin/mpm --version",
+            # the name delimited by a TAB, which the shell splits on
+            "mpm\t--version",
+            "env mpm\t--version",
+            "echo\tmpm",
+            # the write route
+            'mpm remember "probe"',
+            'go run ./cmd/mpm remember "probe"',
+        ]
+        for command in must_deny:
+            self.assertTrue(
+                _matcher_denies(command, rules),
+                f"the rule set does NOT deny {command!r}; the name reaches the "
+                f"binary through a spelling the rules do not cover",
+            )
+
+        must_allow = [
+            # a search for the name, unquoted, is not an invocation
+            "grep -rn mpm_memory .",
+            'echo "the mpm_memory tool"',
+            "echo the_mpm_memory_tool",
+            # a file INSIDE a directory named after the binary
+            "cat cmd/mpm/main.go",
+            "ls /opt/checkout/mpm/docs",
+            # the routes the residual list names, which stay OPEN
+            "echo $(echo mp)m",
+            "M=mpm; $M --version",
+            "cd cmd/mpm && go run . --version",
+            # a command that mentions nothing at all
+            "echo probe-alive",
+            "true",
+        ]
+        for command in must_allow:
+            self.assertFalse(
+                _matcher_denies(command, rules),
+                f"the rule set denies {command!r}, which the definition states "
+                f"is allowed; a residual that has been closed is a claim that "
+                f"has gone stale",
+            )
 
     def test_the_definition_does_not_claim_the_capability_loader_is_closed(self) -> None:
         """The definition must not claim a closure it does not have.
@@ -426,15 +661,21 @@ class ReviewerIsolationTest(unittest.TestCase):
         substrate's live database. So every binary is also refused
         WHEREVER ITS NAME APPEARS, and the name is caught in the forms
         a shell command can put it in: as its own word, followed by a
-        closing parenthesis, as a path segment, and inside a quote.
+        closing parenthesis, as the last segment of a path, and inside
+        a quote.
 
-        The first two are per binary; the third is shared, because
-        every binary's name starts with `mpm`.
+        The first two are per binary; the quoted pair is shared,
+        because every binary's name starts with `mpm`.
 
-        There is a FOURTH shape, and it is the one that closes the
-        write route: the name as a PATH SEGMENT, followed by more of
-        the command (`*/mpm ?*`). `go run ./cmd/mpm remember "..."`
-        does not put the name at the command position, and it is the
+        The PATH shapes are the ones that close the write route, and
+        their form is not obvious. The host expands `*` BEFORE `?`, so
+        a rule of the form `*/mpm ?*` compiles to a pattern that needs
+        a space AND one more character after the name - and MEASURED,
+        `go run ./cmd/mpm` and `go run ./cmd/mpm/`, with nothing after
+        the name, matched no rule at all and RAN the binary. The rule
+        that closes them is the END-ANCHORED `*/mpm *`, with
+        `*/mpm/` for the trailing-slash spelling. `go run ./cmd/mpm
+        remember "..."` and `go build -o /tmp/x ./cmd/mpm` are the
         same live-substrate write the prefix bypass was.
 
         The SPACE BEFORE the name in the word shape is load-bearing. A
@@ -442,9 +683,10 @@ class ReviewerIsolationTest(unittest.TestCase):
         segment is the name, so it refuses `ls /path/to/mpm` - the
         operator's own checkout, read-only, for no reason a review
         cares about. Requiring a space before the name drops that
-        denial; the path-segment shape closes the route that matters
-        instead, and it costs `git -C /path/to/mpm log`, which is
-        measured and stated rather than assumed.
+        denial from the WORD shape; the PATH shapes close the route
+        that matters instead, and they cost `ls /path/to/mpm` and
+        `ls cmd/mpm`, which is measured and stated rather than
+        assumed.
         """
         denials = _shell_denials()
         binaries = _mpm_binaries()
@@ -457,17 +699,18 @@ class ReviewerIsolationTest(unittest.TestCase):
                     f"substitution would carry the reviewer past the "
                     f"command-position rules and into the {binary} binary",
                 )
-            # The PATH-SEGMENT shape: `go run ./cmd/mpm remember ...`
-            # names the binary as a path segment, not at the command
-            # position, and it is the write route.
-            path_pattern = f"*/{binary} ?*"
-            self.assertIn(
-                path_pattern,
-                denials,
-                f"the shell rule {path_pattern!r} is missing; `go run "
-                f"./cmd/{binary} remember ...` names the binary as a path "
-                f"segment rather than at the command position, and would "
-                f"reach the substrate",
+            # The PATH shapes. The end-anchored form is what closes
+            # `go run ./cmd/mpm` - the spelling with NOTHING after the
+            # name, which the old `*/mpm ?*` form did not match, and
+            # which was MEASURED to run the binary.
+            for path_pattern in (f"*/{binary} *", f"*/{binary}/"):
+                self.assertIn(
+                    path_pattern,
+                    denials,
+                    f"the shell rule {path_pattern!r} is missing; `go run "
+                    f"./cmd/{binary}` names the binary as the last segment "
+                    f"of a path rather than at the command position, and "
+                    f"would reach the substrate",
             )
         for pattern in ('*"mpm*', "*'mpm*"):
             self.assertIn(

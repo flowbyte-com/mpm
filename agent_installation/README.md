@@ -184,20 +184,12 @@ The definition is **layered**, and each layer says what it closes:
   see it;
 - **denies the MPM binaries wherever they are NAMED** — `mpm`,
   `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`,
-  `mpm-update`, `mpm-lint`, and their installed paths — in **four shapes**:
+  `mpm-update`, `mpm-lint`, and their installed paths — in **six shapes**:
   at the command position; as its own **word** (`env mpm …`, `xargs mpm …`,
-  `$(echo mpm)`); as a **path segment** followed by more of the command
-  (`go run ./cmd/mpm …`); and inside a **quote** (`"mpm" …`, `sh -c 'mpm …'`).
-  The installers (`install.sh`, `uninstall.sh`, `make install`/
-  `uninstall`/`deploy`) and the service-control commands are denied as
-  well, so the command line cannot reach the substrate either;
-  `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`,
-  `mpm-update`, `mpm-lint`, and their installed paths — and not only at
-  the command position: a name standing as its own **word** is caught,
-  so a prefix (`env mpm …`), a substitution (`$(echo mpm)`) or a quote
-  (`"mpm" …`) does not carry a reviewer past it. The name rules are
-  **space-anchored**, so a path that merely ends in the name
-  (`ls /path/to/mpm`) is not refused.
+  `$(echo mpm)`); separated from its neighbours by a **tab**
+  (`mpm<TAB>--version`); as the **last segment of a path** (`go run ./cmd/mpm`,
+  `go run ./cmd/mpm/`, `/home/v/.local/bin/mpm`); and inside a **quote**
+  (`"mpm" …`, `sh -c 'mpm …'`).
   The installers (`install.sh`, `uninstall.sh`, `make install`/
   `uninstall`/`deploy`) and the service-control commands are denied as
   well, so the command line cannot reach the substrate either;
@@ -234,27 +226,9 @@ intercepted** — so the write route into a runtime root is closed by a
 path substring, which also refuses a command that merely *quotes* such a
 path; the shell's matcher sees **text**, so a name **split by a
 substitution** (`$(echo mp)m`), a name held in a **variable**
-(`M=mpm; $M --version`) and a **script file** are not caught; and the
-permission layer reads the **content of a file write** too, so a
-document that merely mentions the name is refused. The first two are
-stated in the definition's own prose; the third is accepted
-deliberately, because a corrupted live database is worse than a
-findings report that cannot quote a path literally; and the fourth and
-fifth are why the **sandbox is the default**: inside it, the substrate
-resolves its workspace to a scratch directory, so a command that got
-through writes to the sandbox.
-**browser family is not governed by the permission layer** (a deny
-on the browser action, the wildcard, the per-tool names and `tool.use`
-all leave the browser tools in the reviewer's catalog and invocable);
-the **capability loader** is not gated by any permission action
-(eighteen candidate action names and the V1-style `tools:` frontmatter
-all leave it callable), so the rule was removed and the definition says
-a reviewer must not load one; the shell's **redirection targets are not
-intercepted** — so the write route into a runtime root is closed by a
-path substring, which also refuses a command that merely *quotes* such a
-path; the shell's matcher sees **text**, so a name **split by a
-substitution** (`$(echo mp)m`) and the host's exemption of **`cd`**
-(`cd cmd/mpm && go run . --version`) are not caught; and the
+(`M=mpm; $M --version`), a **script file**, and the host's refusal to
+match a **`cd`** segment's text (`cd cmd/mpm && go run . --version`)
+are not caught; and the
 permission layer reads the **content of a file write** too, so a
 document that merely mentions the name is refused. The first two are
 stated in the definition's own prose; the third is accepted
@@ -266,25 +240,19 @@ through writes to the sandbox.
 
 **The false-denial cost, measured and published.** A fixed sample of
 **sixteen** ordinary commands was run under the installed definition; the
-sample and every outcome are published in `docs/SPEC.md` §6.12, so a
-reader can re-run it rather than believe it. **Five** of the sixteen were
+sample and every outcome are published in `docs/SPEC.md` §6.4, so a
+reader can re-run it rather than believe it. **Six** of the sixteen were
 refused. **Two** are correct refusals — the bare name as a word
-(`echo mpm`, `echo mpm --version`). **Three** are false denials:
-`git -C <path>` and `make -C <path>` (the price of the path-segment
-shape, which is what closes `go run ./cmd/mpm remember "..."`; the
-spelling that works is `cd <path> && git log --oneline -1`), and the
-**quoted** form `grep -rn "mpm_memory" .` (the quoted shape is this
-definition's own rule, and it is load-bearing — with it removed, the
-quoted invocations RAN the binary; the workaround is to write the
+(`echo mpm`, `echo mpm --version`). **Four** are false denials:
+`ls <path ending in the name>`, `git -C <path>` and `make -C <path>`
+(the price of the path shape, which is what closes `go run ./cmd/mpm`
+and `go build -o /tmp/x ./cmd/mpm`; the spellings that work are a
+subdirectory and the `cd` form, `cd <path> && git log --oneline -1`),
+and the **quoted** form `grep -rn "mpm_memory" .` (the quoted shape is
+this definition's own rule, and it is load-bearing — with it removed,
+the quoted invocations RAN the binary; the workaround is to write the
 pattern unquoted). **No command that mentions nothing at all was
 refused.**
-ordinary commands was run under the installed definition. **Three**
-were refused: the bare name as a word (`echo mpm`, `echo mpm
---version` — correct refusals, not false denials) and **one** false
-denial, `grep -rn "mpm_memory" .`, which the host's own
-quoted-segment rule refuses while the unquoted `grep -rn mpm_memory .`
-is allowed. An earlier rule set refused **six** of the same sixteen;
-the space anchoring removed the three path denials.
 
 The deny list is **machine-checked against the registry**:
 `internal/core/tools/registry_list.go` is the authoritative list of every

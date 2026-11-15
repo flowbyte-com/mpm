@@ -302,25 +302,17 @@ install, and the guard test fails when it has drifted.
 The isolation is **layered**. The definition denies the MPM tools by name;
 denies the MPM **binaries** wherever they are **named** (`mpm`,
 `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`, `mpm-update`,
-`mpm-lint`, and their installed paths) in **four shapes** — at the command
-position, as its own **word** (`env mpm …`), as a **path segment**
-(`go run ./cmd/mpm …`) and inside a **quote** (`"mpm" …`, `sh -c 'mpm …'`);
+`mpm-lint`, and their installed paths) in **six shapes** — at the command
+position, as its own **word** (`env mpm …`), separated from its
+neighbours by a **tab** (`mpm<TAB>--version`), as the **last segment of
+a path** (`go run ./cmd/mpm`, `go run ./cmd/mpm/`,
+`/home/v/.local/bin/mpm`) and inside a **quote** (`"mpm" …`,
+`sh -c 'mpm …'`);
 denies the installers and the service-control commands; denies the `read`
 tool a live MPM workspace and closes its `external_directory` boundary;
 denies `edit`, `subagent`, `question` and Code Mode (`execute`); and
 requires findings to be recorded in a **filesystem scratchpad**, not in the
 substrate.
-denies the MPM **binaries** wherever they are **named** (`mpm`,
-`mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`, `mpm-update`,
-`mpm-lint`, and their installed paths) — not only at the command position,
-so a prefix (`env mpm …`), a substitution (`$(echo mpm)`) or a quote
-(`"mpm" …`) does not carry a reviewer past it. The name rules are
-**space-anchored**, so a path that merely ends in the name
-(`ls /path/to/mpm`) is not refused; denies the installers and
-the service-control commands; denies the `read` tool a live MPM workspace
-and closes its `external_directory` boundary; denies `edit`, `subagent`,
-`question` and Code Mode (`execute`); and requires findings to be
-recorded in a **filesystem scratchpad**, not in the substrate.
 
 **What it does not close.** The shell runs with the host user's authority
 and a permission rule is a pattern match on a command string, so the layer
@@ -340,29 +332,19 @@ one; the shell's **redirection targets are not intercepted**, so the write
 route into a runtime root is closed by a path substring that also refuses
 a command merely *quoting* such a path; the shell's matcher sees
 **text**, so a name **split by a substitution** (`$(echo mp)m`), a name
-held in a **variable** (`M=mpm; $M --version`) and a **script file** are
-not caught; and the permission layer reads the **content of a file write**,
-so a document that merely mentions the name is refused.
+held in a **variable** (`M=mpm; $M --version`), a **script file**, and the
+host's refusal to match a **`cd`** segment's text (`cd cmd/mpm && go run .
+--version`) are not caught; and the permission layer reads the **content of
+a file write**, so a document that merely mentions the name is refused.
 
 **The false-denial cost, measured and published.** A fixed sample of
 **sixteen** ordinary commands was run under the installed definition; the
-sample and every outcome are published in `docs/SPEC.md` §6.12. **Five**
+sample and every outcome are published in `docs/SPEC.md` §6.4. **Six**
 of the sixteen were refused — two of them correct refusals of the bare
-name as a word, and three false denials (`git -C <path>`, `make -C
-<path>`, and the quoted `grep -rn "mpm_memory" .`). **No command that
-mentions nothing at all was refused.**
-**browser family is not governed by the permission layer** (every browser
-tool stays in the reviewer's catalog and invocable); the **capability
-loader** is not gated by any permission action (eighteen candidate action
-names and the V1-style `tools:` frontmatter all leave it callable), so
-the rule was removed and the definition says a reviewer must not load
-one; the shell's **redirection targets are not intercepted**, so the write
-route into a runtime root is closed by a path substring that also refuses
-a command merely *quoting* such a path; the shell's matcher sees
-**text**, so a name **split by a substitution** (`$(echo mp)m`) and the
-host's exemption of **`cd`** are not caught; and the permission layer
-reads the **content of a file write**, so a document that merely
-mentions the name is refused.
+name as a word, and four false denials (`ls <path ending in the name>`,
+`git -C <path>`, `make -C <path>`, and the quoted
+`grep -rn "mpm_memory" .`). **No command that mentions nothing at all
+was refused.**
 
 The deny list is **machine-checked against the registry** —
 `internal/core/tools/registry_list.go` is the authoritative list of every

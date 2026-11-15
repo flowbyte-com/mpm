@@ -303,33 +303,53 @@ permissions:
   # The shell's matcher is a TEXT matcher, so a rule's literal has to
   # appear in the command text. What matters is WHERE it appears.
   #
-  # The binaries are closed in FOUR shapes, each measured as refused:
+  # The binaries are closed in FIVE shapes, each measured as refused:
   #
   #   1. the name at the COMMAND POSITION — `mpm ...` (the rules
   #      above);
   #   2. the name as its own WORD — `env mpm ...`, `xargs mpm ...`,
   #      `grep -rn mpm .`, the bare `mpm` at the end of a command,
   #      and `$(echo mpm)` — the rule is `* mpm *`, so a SPACE
-  #      precedes the name;
-  #   3. the name as a PATH SEGMENT followed by more of the command
-  #      — `go run ./cmd/mpm remember "..."`, which is the write
-  #      route this whole mechanism exists to close — the rule is
-  #      `*/mpm ?*`, so there has to be MORE after the name;
-  #   4. the name inside a QUOTE — `"mpm" --version`,
+  #      precedes the name. The shell splits on a TAB as well as a
+  #      space, so the TAB-delimited spellings are closed by their
+  #      own rules: `*mpm\t*` (a tab AFTER the name) and `*\tmpm*`
+  #      (a tab BEFORE it, shared by every binary);
+  #   3. the name as the LAST SEGMENT OF A PATH — `go run ./cmd/mpm`,
+  #      `go run ./cmd/mpm remember "..."`, `go build -o /tmp/x
+  #      ./cmd/mpm`, `/home/v/.local/bin/mpm` — the rule is
+  #      `*/mpm *`;
+  #   4. the name as the last segment of a path with a TRAILING SLASH
+  #      — `go run ./cmd/mpm/` — the rule is `*/mpm/`;
+  #   5. the name inside a QUOTE — `"mpm" --version`,
   #      `'mpm' --version` and `sh -c 'mpm --version'` — the rules
   #      are `*"mpm*` and `*'mpm*`.
   #
-  # The SPACE before the name in shape 2 is deliberate, and shape 3
-  # exists because of the alternative. A rule of the form `*mpm *`
-  # catches a PATH whose last segment is the name, so it refuses
-  # `ls /path/to/mpm` — the operator's own checkout, read-only, for
-  # no reason a review cares about. Requiring a space before the
-  # name drops that denial, and shape 3 then closes the route that
-  # matters instead: `go run ./cmd/mpm remember "..."` is refused,
-  # and so is `git -C /path/to/mpm log` — the cost of shape 3, and
-  # the reason it is measured and stated rather than assumed.
+  # Shape 3 is the one that closes the WRITE route, and its earlier
+  # form was WRONG. The rule used to be `*/mpm ?*`, which was
+  # MEASURED to be the wrong shape: the host expands `*` before `?`,
+  # so that pattern compiles to a regex that needs a space AND one
+  # more character after the name — and `go run ./cmd/mpm` and
+  # `go run ./cmd/mpm/`, with nothing after the name, matched no rule
+  # at all. Both RAN the binary. The end-anchored form `*/mpm *`
+  # closes them, and so does `go build -o /tmp/x ./cmd/mpm`, which
+  # produces a runnable binary under a name that no rule can see.
   #
-  # Shape 4 is load-bearing, and the measurement is unambiguous:
+  # Shapes 3 and 4 cost two READ denials, and they are paid
+  # deliberately: `ls /path/to/mpm` and `ls cmd/mpm` are refused,
+  # because a path whose LAST segment is the binary's name is the
+  # shape the write route takes. The trade is the one this definition
+  # makes everywhere: a read a reviewer cannot run is a nuisance, and
+  # a write into the operator's live database is a disaster. A
+  # SUBDIRECTORY of either is still allowed (`ls /path/to/mpm/docs`,
+  # `cat cmd/mpm/main.go`), and so is the `cd` spelling
+  # (`cd /path/to/mpm && git log`).
+  #
+  # The TAB rules are load-bearing too, and they were MEASURED: with
+  # them removed, `mpm<TAB>--version`, `env mpm<TAB>--version` and
+  # `echo<TAB>mpm` all RAN the binary. The host's YAML reader expands
+  # the `\t` escape into a real tab, which is what the rules carry.
+  #
+  # Shape 5 is load-bearing, and the measurement is unambiguous:
   # with these two rules REMOVED, `"mpm" --version`,
   # `'mpm' --version`, `sh -c 'mpm --version'` and
   # `bash -c "mpm --version"` all RAN the binary. So the quoted
@@ -339,11 +359,11 @@ permissions:
   # of them starts with `mpm`.
   #
   # The cost that REMAINS is the quoted form: `grep -rn
-  # "mpm_memory" .` is refused — by shape 4, which is THIS
+  # "mpm_memory" .` is refused — by shape 5, which is THIS
   # definition's rule, not the host's — while the unquoted
   # `grep -rn mpm_memory .` is allowed. Quoting is the natural way
   # to write a search, so a reviewer that meets the refusal should
-  # retry unquoted. The alternative — dropping shape 4 — was
+  # retry unquoted. The alternative — dropping shape 5 — was
   # measured, and it lets the binary run.
   #
   # The list is machine-checked against the Makefile's own binary
@@ -392,25 +412,70 @@ permissions:
     resource: "* mpm-lint)*"
     effect: deny
   - action: shell
-    resource: "*/mpm ?*"
+    resource: "*mpm\t*"
     effect: deny
   - action: shell
-    resource: "*/mpm-mcp ?*"
+    resource: "*mpm-mcp\t*"
     effect: deny
   - action: shell
-    resource: "*/mpm-scheduler ?*"
+    resource: "*mpm-scheduler\t*"
     effect: deny
   - action: shell
-    resource: "*/mpm-critic ?*"
+    resource: "*mpm-critic\t*"
     effect: deny
   - action: shell
-    resource: "*/mpm-telemetry ?*"
+    resource: "*mpm-telemetry\t*"
     effect: deny
   - action: shell
-    resource: "*/mpm-update ?*"
+    resource: "*mpm-update\t*"
     effect: deny
   - action: shell
-    resource: "*/mpm-lint ?*"
+    resource: "*mpm-lint\t*"
+    effect: deny
+  - action: shell
+    resource: "*\tmpm*"
+    effect: deny
+  - action: shell
+    resource: "*/mpm *"
+    effect: deny
+  - action: shell
+    resource: "*/mpm/"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-mcp *"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-mcp/"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-scheduler *"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-scheduler/"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-critic *"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-critic/"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-telemetry *"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-telemetry/"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-update *"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-update/"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-lint *"
+    effect: deny
+  - action: shell
+    resource: "*/mpm-lint/"
     effect: deny
   - action: shell
     resource: "*\"mpm*"
@@ -604,10 +669,11 @@ tool list, or refused when you attempt them:
 - The MPM binaries are refused wherever they are NAMED: the CLI, the
   MCP bridge, the scheduler, the critic, the telemetry sidecar, the
   updater and the linter. The name is caught as its own WORD (`env
-  mpm ...`, `$(echo mpm)`), as a PATH SEGMENT (`go run ./cmd/mpm
-  ...`), and inside a QUOTE (`"mpm" ...`, `sh -c 'mpm ...'`), so no
-  spelling carries you past it. So is `install.sh`, `uninstall.sh`,
-  the make install target, and the service-control commands.
+  mpm ...`, `$(echo mpm)`), separated by a TAB (`mpm<TAB>--version`),
+  as the LAST SEGMENT OF A PATH (`go run ./cmd/mpm`, `go run
+  ./cmd/mpm/`, `/home/v/.local/bin/mpm`), and inside a QUOTE (`"mpm"
+  ...`, `sh -c 'mpm ...'`). So is `install.sh`, `uninstall.sh`, the
+  make install target, and the service-control commands.
 - `grep` and `glob` are NOT path-restricted by the permission layer -
   their resources are the pattern and the glob, not a path. Point them
   at the working tree you were given, and at nothing else.
@@ -636,12 +702,17 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   command that merely QUOTES such a path after a ">" is refused too.
   That cost is accepted deliberately: a stray file in a runtime root
   is a nuisance, and a corrupted live database is a disaster.
-- The shell's matcher sees TEXT, and three routes are NOT caught. A
+- The shell's matcher sees TEXT, and four routes are NOT caught. A
   name SPLIT by a substitution is not the name: `$(echo mp)m`
   assembles it and runs the binary. A name in a VARIABLE is not the
-  name either: `M=mpm; $M --version` runs the binary. And a SCRIPT
-  FILE runs whatever it says: `bash script.sh` never names the
-  binary at all. (The path form IS caught: `go run ./cmd/mpm ...` is
+  name either: `M=mpm; $M --version` runs the binary. A SCRIPT FILE
+  runs whatever it says: `bash script.sh` never names the binary at
+  all. And the host does not match a `cd` segment's TEXT, so the
+  name can be parked in a directory argument and the binary run
+  without it: `cd cmd/mpm && go run . --version` reaches the binary,
+  and `cd cmd/mpm && go build -o /tmp/x .` builds it under a name no
+  rule can see. (The path forms ARE caught: `go run ./cmd/mpm`,
+  `go run ./cmd/mpm/` and `go run ./cmd/mpm remember "..."` are all
   refused.) If a command of yours is refused for any of these
   reasons, assemble the text at runtime instead of writing it
   literally — and remember that the SANDBOX below is what makes such
