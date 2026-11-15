@@ -47,8 +47,8 @@ CRITIC_BINARY := mpm-critic
 TELEMETRY_BINARY := mpm-telemetry
 UPDATE_BINARY := mpm-update
 # The linter is run with `go run ./cmd/mpm-lint`, so it is not installed
-# as a binary — but it IS an MPM binary a reviewer can run, and it opens
-# the substrate's workspace. The reviewer's isolation covers it.
+# as a binary — but it IS an MPM binary a reviewer can run, and it reads
+# the repository's own source. The reviewer's isolation covers it.
 LINT_BINARY := mpm-lint
 # Developer build output. RELATIVE on purpose: it must follow the checkout
 # into whatever worktree or scratch clone is being built, so two checkouts

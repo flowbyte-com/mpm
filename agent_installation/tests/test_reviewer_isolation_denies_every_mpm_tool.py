@@ -45,8 +45,13 @@ WHAT THIS PINS
   2. The deny list has no STALE entries: a rule for a tool that no
      longer exists is dead weight that hides a real gap.
   3. The reviewer cannot EDIT - a reviewer that could change what it
-     reviews is not a reviewer - and cannot spawn an agent, load a
-     capability, ask the operator a question, or reach Code Mode.
+     reviews is not a reviewer - and cannot spawn an agent, ask the
+     operator a question, or reach Code Mode. The capability LOADER
+     is deliberately NOT in this list: the host does not gate the
+     `skill` tool by any permission action, so a rule for it would
+     claim a closure that does not exist. The definition says so in
+     its own prose instead, and this file's own claims are checked
+     against that.
   4. The reviewer cannot reach the substrate from the COMMAND LINE
      either, and cannot read a live MPM workspace with the read tool.
   5. The comparison is not vacuous: the registry must parse into a
@@ -306,6 +311,31 @@ class ReviewerIsolationTest(unittest.TestCase):
         """A reviewer must not launch a further agent without the isolation."""
         self.assertIn("subagent", _denied_actions())
 
+    def test_no_rule_refuses_a_path_that_ends_in_the_binary_name(self) -> None:
+        """The name rules must not swallow a PATH.
+
+        A rule of the form `*mpm *` matches any command text whose
+        last token ends in the name, so it refuses `ls /path/to/mpm`
+        and `git -C /path/to/mpm log` - the operator's own checkout,
+        read-only, for no reason a review cares about.
+
+        The rules that close the prefix bypass therefore require a
+        SPACE BEFORE the name, so the name has to stand as its own
+        word. This test fails if a rule of the suffix form comes back.
+        """
+        denials = _shell_denials()
+        binaries = _mpm_binaries()
+        for binary in binaries:
+            for pattern in (f"*{binary} *", f"*{binary})*"):
+                self.assertNotIn(
+                    pattern,
+                    denials,
+                    f"the shell rule {pattern!r} refuses every command whose "
+                    f"text ends in the {binary} name - including a path that "
+                    f"merely ENDS in it, such as the operator's own checkout. "
+                    f"Use the space-anchored form '* {binary} *' instead",
+                )
+
     def test_the_definition_does_not_claim_the_capability_loader_is_closed(self) -> None:
         """The definition must not claim a closure it does not have.
 
@@ -393,11 +423,18 @@ class ReviewerIsolationTest(unittest.TestCase):
 
         The first two are per binary; the third is shared, because
         every binary's name starts with `mpm`.
+
+        The SPACE BEFORE the name is load-bearing. A rule of the form
+        `*mpm *` also matches a PATH whose last segment is the name,
+        so it refuses `ls /path/to/checkout/mpm` - the operator's
+        own checkout, read-only, for no reason a review cares about.
+        Requiring a space before the name keeps the closure and drops
+        the false denial: the name is then a WORD, and a path is not.
         """
         denials = _shell_denials()
         binaries = _mpm_binaries()
         for binary in binaries:
-            for pattern in (f"*{binary} *", f"*{binary})*"):
+            for pattern in (f"* {binary} *", f"* {binary})*"):
                 self.assertIn(
                     pattern,
                     denials,

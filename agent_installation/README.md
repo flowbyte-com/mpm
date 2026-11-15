@@ -185,8 +185,11 @@ The definition is **layered**, and each layer says what it closes:
 - **denies the MPM binaries wherever they are NAMED** — `mpm`,
   `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`,
   `mpm-update`, `mpm-lint`, and their installed paths — and not only at
-  the command position: a name preceded by a prefix (`env mpm …`), by a
-  substitution (`$(echo mpm)`) or by a quote (`"mpm" …`) is caught too.
+  the command position: a name standing as its own **word** is caught,
+  so a prefix (`env mpm …`), a substitution (`$(echo mpm)`) or a quote
+  (`"mpm" …`) does not carry a reviewer past it. The name rules are
+  **space-anchored**, so a path that merely ends in the name
+  (`ls /path/to/mpm`) is not refused.
   The installers (`install.sh`, `uninstall.sh`, `make install`/
   `uninstall`/`deploy`) and the service-control commands are denied as
   well, so the command line cannot reach the substrate either;
@@ -211,7 +214,7 @@ depend on the pattern being complete: inside it, `HOME`, `TMPDIR` and
 `MPM_WORKSPACE` point at scratch directories, so a route the rules do
 not name still cannot write into the operator's runtime root.
 
-Four residuals were **measured**, by probing the installed definition: the
+Five residuals were **measured**, by probing the installed definition: the
 **browser family is not governed by the permission layer** (a deny
 on the browser action, the wildcard, the per-tool names and `tool.use`
 all leave the browser tools in the reviewer's catalog and invocable);
@@ -221,14 +224,26 @@ all leave it callable), so the rule was removed and the definition says
 a reviewer must not load one; the shell's **redirection targets are not
 intercepted** — so the write route into a runtime root is closed by a
 path substring, which also refuses a command that merely *quotes* such a
-path; and the shell's matcher sees **text**, so a binary name
-**assembled at runtime** (`$(echo mpm)`, a script file, a name split
-across an expression) is not caught. The first two are stated in the
-definition's own prose; the third is accepted deliberately, because a
-corrupted live database is worse than a findings report that cannot
-quote a path literally; and the fourth is why the **sandbox is the
-default**: inside it, the substrate resolves its workspace to a scratch
-directory, so a command that got through writes to the sandbox.
+path; the shell's matcher sees **text**, so a name **split by a
+substitution** (`$(echo mp)m`) and the host's exemption of **`cd`**
+(`cd cmd/mpm && go run . --version`) are not caught; and the
+permission layer reads the **content of a file write** too, so a
+document that merely mentions the name is refused. The first two are
+stated in the definition's own prose; the third is accepted
+deliberately, because a corrupted live database is worse than a
+findings report that cannot quote a path literally; and the fourth and
+fifth are why the **sandbox is the default**: inside it, the substrate
+resolves its workspace to a scratch directory, so a command that got
+through writes to the sandbox.
+
+**The false-denial cost, measured.** A fixed sample of **sixteen**
+ordinary commands was run under the installed definition. **Three**
+were refused: the bare name as a word (`echo mpm`, `echo mpm
+--version` — correct refusals, not false denials) and **one** false
+denial, `grep -rn "mpm_memory" .`, which the host's own
+quoted-segment rule refuses while the unquoted `grep -rn mpm_memory .`
+is allowed. An earlier rule set refused **six** of the same sixteen;
+the space anchoring removed the three path denials.
 
 The deny list is **machine-checked against the registry**:
 `internal/core/tools/registry_list.go` is the authoritative list of every

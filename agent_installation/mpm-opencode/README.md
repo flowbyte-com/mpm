@@ -304,7 +304,9 @@ denies the MPM **binaries** wherever they are **named** (`mpm`,
 `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`, `mpm-update`,
 `mpm-lint`, and their installed paths) — not only at the command position,
 so a prefix (`env mpm …`), a substitution (`$(echo mpm)`) or a quote
-(`"mpm" …`) does not carry a reviewer past it; denies the installers and
+(`"mpm" …`) does not carry a reviewer past it. The name rules are
+**space-anchored**, so a path that merely ends in the name
+(`ls /path/to/mpm`) is not refused; denies the installers and
 the service-control commands; denies the `read` tool a live MPM workspace
 and closes its `external_directory` boundary; denies `edit`, `subagent`,
 `question` and Code Mode (`execute`); and requires findings to be
@@ -318,7 +320,7 @@ depend on the pattern being complete: it points `HOME`, `TMPDIR` and
 `MPM_WORKSPACE` at scratch directories, so a route the rules do not name
 still cannot write into the operator's runtime root.
 
-Four residuals were **measured**, by probing the installed definition: the
+Five residuals were **measured**, by probing the installed definition: the
 **browser family is not governed by the permission layer** (every browser
 tool stays in the reviewer's catalog and invocable); the **capability
 loader** is not gated by any permission action (eighteen candidate action
@@ -326,8 +328,11 @@ names and the V1-style `tools:` frontmatter all leave it callable), so
 the rule was removed and the definition says a reviewer must not load
 one; the shell's **redirection targets are not intercepted**, so the write
 route into a runtime root is closed by a path substring that also refuses
-a command merely *quoting* such a path; and the shell's matcher sees
-**text**, so a binary name **assembled at runtime** is not caught.
+a command merely *quoting* such a path; the shell's matcher sees
+**text**, so a name **split by a substitution** (`$(echo mp)m`) and the
+host's exemption of **`cd`** are not caught; and the permission layer
+reads the **content of a file write**, so a document that merely
+mentions the name is refused.
 
 The deny list is **machine-checked against the registry** —
 `internal/core/tools/registry_list.go` is the authoritative list of every
