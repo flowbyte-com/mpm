@@ -685,6 +685,109 @@ func TestP6ReadFileRefusesACorruptedBlob(t *testing.T) {
 	}
 }
 
+// TestP6ReadFileRefusesARowTheManifestDoesNotConfirm pins that the read
+// path reconciles the file row against the manifest, exactly as `files`
+// does.
+//
+// The blob is content-addressed, so re-hashing it proves only that the
+// bytes are the ones the ROW names. If a row is repointed at another
+// blob — with its size repointed too, so the row and the blob agree with
+// EACH OTHER — the bytes would be served, self-consistently, while the
+// manifest says something else. The listing refuses such a package; the
+// read must refuse it too.
+func TestP6ReadFileRefusesARowTheManifestDoesNotConfirm(t *testing.T) {
+	dm := p3DM(t)
+	result := p6ImportPackage(t, dm, "repointed", "1.0.0", map[string][]byte{
+		"SKILL.md":          []byte("# the skill\n\nthe entrypoint\n"),
+		"references/one.md": []byte("the first reference\n"),
+	})
+	sel := p6Selector(result.SkillID)
+
+	// The read works before the repointing.
+	if _, err := dm.PackageReadFile(context.Background(), sel, "references/one.md", PackageReadBounds{}); err != nil {
+		t.Fatalf("the read before the repointing: %v", err)
+	}
+
+	// The other file's blob: the row is repointed at it, and at its
+	// size, so the row and the blob agree with each other and only the
+	// manifest disagrees.
+	var otherSHA string
+	var otherSize int64
+	if err := dm.db.QueryRow(`
+		SELECT f.sha256, b.size_bytes
+		FROM skill_package_files f
+		JOIN skill_package_blobs b ON b.sha256 = f.sha256
+		WHERE f.skill_id = ? AND f.path = ?
+	`, result.SkillID, "SKILL.md").Scan(&otherSHA, &otherSize); err != nil {
+		t.Fatalf("read the other blob: %v", err)
+	}
+	if _, err := dm.db.Exec(`
+		UPDATE skill_package_files SET sha256 = ?, size_bytes = ?
+		WHERE skill_id = ? AND path = ?
+	`, otherSHA, otherSize, result.SkillID, "references/one.md"); err != nil {
+		t.Fatalf("repoint the file row: %v", err)
+	}
+
+	// The listing refuses the package...
+	if _, err := dm.PackageFiles(context.Background(), sel); p6ReadReason(err) != PackageReadReasonIntegrityFailure {
+		t.Errorf("the listing of a repointed package reported %q, want %q",
+			p6ReadReason(err), PackageReadReasonIntegrityFailure)
+	}
+
+	// ...and so must the read.
+	read, err := dm.PackageReadFile(context.Background(), sel, "references/one.md", PackageReadBounds{})
+	if err == nil {
+		t.Fatalf("read_file served a file the manifest does not confirm: %q", read.Content)
+	}
+	if got := p6ReadReason(err); got != PackageReadReasonIntegrityFailure {
+		t.Errorf("the repointed read reported %q, want %q", got, PackageReadReasonIntegrityFailure)
+	}
+	if read != nil {
+		t.Errorf("the refused read returned a payload: %+v", read)
+	}
+}
+
+// TestP6VerifyNamesOnlyTheChecksThatRan pins that the report names the
+// checks that RAN.
+//
+// The manifest's identity check runs only when the stored manifest
+// parses: there is nothing to compare it against otherwise. A report
+// that named a check that did not run would tell a caller it was
+// checked when it was not.
+func TestP6VerifyNamesOnlyTheChecksThatRan(t *testing.T) {
+	dm := p3DM(t)
+	result := p6ImportPackage(t, dm, "unparseable", "1.0.0", nil)
+	sel := p6Selector(result.SkillID)
+
+	if _, err := dm.db.Exec(`UPDATE skill_packages SET manifest = ? WHERE skill_id = ?`,
+		`this is not a manifest`, result.SkillID); err != nil {
+		t.Fatalf("corrupt the manifest: %v", err)
+	}
+
+	report, err := dm.PackageVerify(context.Background(), sel)
+	if err != nil {
+		t.Fatalf("PackageVerify: %v", err)
+	}
+	for _, ran := range report.Checks {
+		if ran == PackageVerifyCheckManifestIdentity {
+			t.Errorf("the report names the manifest identity check, which could not run: %v", report.Checks)
+		}
+	}
+	// The failure list is a SUBSET of the checks that ran.
+	for _, failure := range report.Failures {
+		found := false
+		for _, ran := range report.Checks {
+			if ran == failure.Check {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("the failure %q is not among the checks that ran: %v", failure.Check, report.Checks)
+		}
+	}
+}
+
 // ─── Binary content ────────────────────────────────────────────────────────
 
 // TestP6ReadFileCarriesBinaryBytesOnlyWhenRaw pins that binary content is

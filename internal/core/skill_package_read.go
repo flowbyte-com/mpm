@@ -349,7 +349,12 @@ type PackageFileContent struct {
 // caller reconstructs are the bytes that were stored.
 func (c *PackageFileContent) EncodedContent() (string, error) {
 	if c == nil {
-		return "", packageReadErrorf(PackageReadReasonDatabaseFailure, "", "there is no content")
+		// A nil receiver is a CALLER error, not a substrate failure. The
+		// reason vocabulary is closed and `database_failure` means "the
+		// substrate failed", so this error is deliberately not one of
+		// them: a caller branching on the reason must not conclude that
+		// the database is broken.
+		return "", errors.New("there is no content: the caller passed a nil content")
 	}
 	switch c.Encoding {
 	case PackageReadEncodingUTF8:
@@ -441,8 +446,11 @@ type PackageVerificationResult struct {
 	// package is NEVER reported as verified.
 	Verified bool
 
-	// Checks are the names of the checks that were run, in a stable
-	// order.
+	// Checks are the names of the checks that WERE RUN, in a stable
+	// order. A check that could not run is not named: the manifest's
+	// identity check runs only when the stored manifest parses, and
+	// there is nothing to compare it against otherwise. The failure
+	// list is therefore always a subset of this one.
 	Checks []string
 
 	// Failures are the integrity failures, in a stable order.
@@ -607,6 +615,22 @@ func (dm *DatabaseManager) PackageReadFile(ctx context.Context, sel PackageSelec
 		if row == nil {
 			return packageReadErrorf(PackageReadReasonFileNotFound, canonical,
 				"the package carries no file at that path")
+		}
+
+		// The row is reconciled against the manifest BEFORE its bytes are
+		// served. The blob is content-addressed, so re-hashing it proves
+		// only that the bytes are the ones the ROW names; the manifest is
+		// what commits the package to its file list. A row the manifest
+		// does not confirm is refused, exactly as `files` refuses the
+		// same package — the two paths must not differ.
+		index := manifestFileIndex(pkg.Manifest.Files, canonical)
+		if index < 0 {
+			return packageReadErrorf(PackageReadReasonIntegrityFailure, canonical,
+				"the package has a file at that path the manifest does not name")
+		}
+		if !packageFileMetadataEqual(pkg.Manifest.Files[index], *row) {
+			return packageReadErrorf(PackageReadReasonIntegrityFailure, canonical,
+				"the file row does not match the manifest's entry for it")
 		}
 
 		blob, err := loadPackageBlob(ctx, tx, row.SHA256)
@@ -1306,17 +1330,6 @@ func verifyPackageInTx(ctx context.Context, tx *sql.Tx, skillID string) (*Packag
 		Name:        row.Name,
 		Version:     row.Version,
 		PackageHash: row.PackageHash,
-		Checks: []string{
-			PackageVerifyCheckManifestHash,
-			PackageVerifyCheckManifestIdentity,
-			PackageVerifyCheckFileMetadata,
-			PackageVerifyCheckBlobExists,
-			PackageVerifyCheckBlobHash,
-			PackageVerifyCheckBlobSize,
-			PackageVerifyCheckEntrypoint,
-			PackageVerifyCheckProjection,
-			PackageVerifyCheckVersion,
-		},
 	}
 	fail := func(check, path, detail string) {
 		result.Failures = append(result.Failures, PackageVerificationFailure{
@@ -1507,6 +1520,34 @@ func verifyPackageInTx(ctx context.Context, tx *sql.Tx, skillID string) (*Packag
 		}
 	}
 
+	// The checks that RAN, in a stable order. The manifest's identity
+	// check runs only when the stored manifest parses: there is nothing
+	// to compare it against otherwise. It is not named when it did not
+	// run, so the failure list is always a subset of this one.
+	result.Checks = verifyChecksRun(manifest != nil)
+
 	result.Verified = len(result.Failures) == 0
 	return result, nil
+}
+
+// verifyChecksRun returns the names of the checks that ran, in a stable
+// order.
+//
+// The manifest's identity check runs ONLY when the stored manifest
+// parses: there is nothing to compare it against otherwise, so it is
+// not named when it did not run.
+func verifyChecksRun(manifestParsed bool) []string {
+	checks := []string{PackageVerifyCheckManifestHash}
+	if manifestParsed {
+		checks = append(checks, PackageVerifyCheckManifestIdentity)
+	}
+	return append(checks,
+		PackageVerifyCheckFileMetadata,
+		PackageVerifyCheckBlobExists,
+		PackageVerifyCheckBlobHash,
+		PackageVerifyCheckBlobSize,
+		PackageVerifyCheckEntrypoint,
+		PackageVerifyCheckProjection,
+		PackageVerifyCheckVersion,
+	)
 }

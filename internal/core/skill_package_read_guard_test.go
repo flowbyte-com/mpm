@@ -114,11 +114,16 @@ var p6DatabaseMethodNames = map[string]bool{
 //
 // `EXPLAIN` is in the list so that `EXPLAIN DELETE …` is classified as a
 // statement — and then refused, because it does not begin with `SELECT`.
+//
+// `GRANT` and `REVOKE` are in the list, and in NEITHER the write list:
+// SQLite implements neither, so `GRANT;` and `REVOKE;` are syntax errors.
+// A leading one is refused by the first-word rule, which is all there is
+// to refuse.
 var p6SQLKeywords = []string{
 	"SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE", "DROP", "ALTER",
 	"CREATE", "PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT",
-	"ROLLBACK", "SAVEPOINT", "RELEASE", "REASSIGN", "GRANT", "REVOKE",
-	"REINDEX", "ANALYZE", "WITH", "EXPLAIN", "END",
+	"ROLLBACK", "SAVEPOINT", "RELEASE", "REASSIGN", "REINDEX", "ANALYZE",
+	"WITH", "EXPLAIN", "END",
 }
 
 // p6SQLWriteKeywords are the keywords that make a statement a WRITE.
@@ -131,7 +136,7 @@ var p6SQLKeywords = []string{
 var p6SQLWriteKeywords = []string{
 	"INSERT", "UPDATE", "DELETE", "REPLACE", "DROP", "ALTER", "CREATE",
 	"PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT", "ROLLBACK",
-	"SAVEPOINT", "RELEASE", "REASSIGN", "GRANT", "REINDEX", "ANALYZE",
+	"SAVEPOINT", "RELEASE", "REASSIGN", "REINDEX", "ANALYZE",
 }
 
 // p6UnquoteSQL decodes a Go string literal into the SQL it carries.
@@ -822,7 +827,7 @@ type p6GuardControl struct {
 // It is pinned so that the matrix cannot quietly SHRINK: removing a
 // route without changing this number fails the test, and the failure
 // says exactly what happened.
-const p6GuardEvasionCount = 21
+const p6GuardEvasionCount = 22
 
 // p6GuardControlCount is the number of controls the matrix must have.
 //
@@ -894,8 +899,10 @@ var p6GuardEvasions = []p6GuardEvasion{
 		"\t_, _ = tx.QueryContext(ctx, \"DELETE/*x*/FROM skill_package_files\", skillID)\n"},
 	{"an EXPLAIN DELETE",
 		"\t_, _ = tx.QueryContext(ctx, \"EXPLAIN DELETE FROM skill_package_files\", skillID)\n"},
-	{"a statement whose SQL is built at runtime",
+	{"a statement whose SQL is a concatenation of literals",
 		"\t_, _ = tx.QueryContext(ctx, \"SELECT path FROM skill_package_files WHERE skill_id = ? \"+\"AND 1=1\", skillID)\n"},
+	{"a statement whose SQL is built at run time",
+		"\t_, _ = tx.QueryContext(ctx, fmt.Sprintf(\"SELECT %s FROM skill_package_files\", \"path\"), skillID)\n"},
 	{"a multi-statement SELECT;DELETE",
 		"\t_, _ = tx.QueryContext(ctx, \"SELECT 1; DELETE FROM skill_package_files\", skillID)\n"},
 	{"a dead SQL constant",
