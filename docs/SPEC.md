@@ -2522,9 +2522,11 @@ Because the row's `version` and `version_source` columns are `NOT NULL` (§6.8),
 
 That is pinned by an **AST walk** over the reader's own source — **both** reader files, not one — rather than by a hand-maintained list. The check is **statement-based**, not prefix-based: it scrubs the SQL's comments, string literals and quoted identifiers, and then asks what the statement **does**.
 
-- a statement must **begin** with `SELECT` — so `WITH … UPDATE` and `-- DELETE` are writes however they are dressed;
+- a statement must **begin** with `SELECT` — or with `WITH`, because a CTE is a statement too. A `WITH … UPDATE` is caught by the write-keyword rule below, so allowing `WITH` does not admit a write; and `EXPLAIN` is refused, because the reader issues plain `SELECT`s and nothing else;
 - a statement must be a **single** statement — a `;` anywhere but at the very end means another statement follows;
-- a statement must carry **no write keyword anywhere** — so `SELECT … WHERE x = 'UPDATE'` is not caught, because the string literal is scrubbed first.
+- a statement must carry **no write keyword anywhere** — so `SELECT … WHERE x = 'UPDATE'` is not caught, because the string literal is scrubbed first, and `last_update` is not mistaken for `UPDATE`, because a word is a run of letters, digits and **underscores**.
+
+A **comment is removed entire**, not replaced by a space. That matters: a comment in the middle of a keyword would otherwise *split* it, and `DE/*x*/LETE` would scrub to `DE LLETE` — two words, neither a keyword — and the statement would be misclassified as "not SQL" and skipped.
 
 The walk closes these routes, and **every one of them has been proven by injection** — each was injected into the reader, the guard was observed to fail, and the guard was observed to pass again once the injection was removed:
 
@@ -2535,18 +2537,21 @@ The walk closes these routes, and **every one of them has been proven by injecti
 | a method value passed as an **argument** | *"binds the database method ExecContext at line N"* |
 | a write smuggled through `QueryContext` | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT"* |
 | a write smuggled through `PrepareContext` | the same, at the prepare site — a prepared statement's SQL lives there |
+| a write executed through a prepared statement | *"issues a write through ExecContext at line N"* |
 | a write in a constant, **used** | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT"* |
 | a write in a constant, **unused** | *"the SQL constant X is not a single read statement: the statement begins with DELETE, not SELECT"* |
 | a write in a **concatenated** constant (`"DELETE " + "FROM …"`) | the same — the concatenation is resolved |
-| a write in a `WITH … UPDATE` constant | *"…the statement begins with WITH, not SELECT"* |
-| a write in a **comment-prefixed** constant | *"…the statement begins with DELETE, not SELECT"* — the comment is stripped, not obeyed |
+| a write in a `WITH … UPDATE` constant | *"…the statement begins with WITH, not SELECT"* — or the write-keyword rule |
+| a write in a **comment-prefixed** constant | *"…the statement begins with DELETE, not SELECT"* — the comment is removed, not obeyed |
+| a write behind a **comment-split keyword** (`DE/*x*/LETE`) | *"…the statement begins with DELETE, not SELECT"* — the comment is removed whole |
+| an `EXPLAIN DELETE` | *"…the statement begins with EXPLAIN, not SELECT"* |
 | a statement whose SQL is built at runtime | *"issues a statement whose SQL is neither a literal nor a constant at line N"* |
 | a **multi-statement** `"SELECT 1; DELETE …"` | *"…the statement carries more than one statement"* |
 | a **dead** SQL constant no statement uses | *"the SQL constant X is never used by a statement"* |
 
-A double-quoted `SELECT` is **not** a false positive — the walk decodes both literal forms, so a statement written either way is checked.
+The guard's **false positives** were checked too, and it refuses none of them: a `'UPDATE'` string literal, a `last_update` column, a `;` inside a literal, a double-quoted identifier, a `?` bind placeholder, a `UNION` subquery, a trailing semicolon, and a **read-only CTE** (`WITH x AS (SELECT 1) SELECT …`) all pass.
 
-The behaviour is pinned too — the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read.
+**The scope of the claim.** The walk covers the reader's **own two files**: every statement they issue, every statement they declare as a constant, and every database method they bind. A string literal passed to a non-database function is not inspected — it is not a statement the reader issues — and a statement issued by a helper in another file of the package is outside the walk. The behavioural pin covers the rest: the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read.
 
 #### What P6 does **not** add
 

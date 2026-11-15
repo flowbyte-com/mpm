@@ -380,10 +380,15 @@ var p6DatabaseMethodNames = map[string]bool{
 // therefore subject to the statement check. A text whose first word is
 // not one of them — "skill_package", "utf-8", "manifest_identity" — is
 // not a statement, and is left alone.
+//
+// `WITH` is in the list because a CTE is a statement: `WITH x AS (…)
+// SELECT …` is a legitimate read, and `WITH x AS (… ) UPDATE …` is a
+// write, and the write-keyword rule tells the two apart.
 var p6SQLKeywords = []string{
 	"SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE", "DROP", "ALTER",
 	"CREATE", "PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT",
 	"ROLLBACK", "REASSIGN", "GRANT", "REINDEX", "ANALYZE", "WITH",
+	"EXPLAIN",
 }
 
 // p6SQLWriteKeywords are the keywords that make a statement a WRITE.
@@ -445,25 +450,40 @@ func p6ConstStringValue(expr ast.Expr) (string, bool) {
 // structure: comments, string literals and quoted identifiers.
 //
 // What is left is the statement's CODE — the words that decide what it
-// does. A comment is stripped, not obeyed: `-- DELETE FROM x` scrubs to
-// "DELETE FROM x", so the statement behind the comment is still seen.
+// does.
+//
+// A comment is removed ENTIRELY, not replaced by a space. That matters:
+// a comment in the middle of a keyword would otherwise SPLIT it, and
+// `DE/*x*/LETE` would scrub to `DE LLETE` — two words, neither of them
+// a keyword — and the statement would be misclassified as "not SQL" and
+// skipped. Removing the comment whole leaves `DELETE`, which is what
+// the text means.
+//
+// A line comment takes its terminating newline with it, for the same
+// reason: `DE--x\nLETE` must become `DELETE`, not `DE LLETE`.
 func p6ScrubSQL(sql string) string {
 	var b strings.Builder
 	runes := []rune(sql)
 	for i := 0; i < len(runes); i++ {
 		switch {
 		case runes[i] == '-' && i+1 < len(runes) && runes[i+1] == '-':
+			// The comment runs to the end of the line, and the line
+			// break goes with it: `DE--x\nLETE` must become
+			// `DELETE`, not `DE LETE`.
+			//
+			// The index is left ON the newline, because the loop's
+			// own increment then steps past it — advancing it here
+			// as well would swallow the first character after the
+			// comment.
 			for i < len(runes) && runes[i] != '\n' {
 				i++
 			}
-			b.WriteRune('\n')
 		case runes[i] == '/' && i+1 < len(runes) && runes[i+1] == '*':
 			i += 2
 			for i+1 < len(runes) && !(runes[i] == '*' && runes[i+1] == '/') {
 				i++
 			}
 			i++
-			b.WriteRune(' ')
 		case runes[i] == '\'' || runes[i] == '"' || runes[i] == '`':
 			quote := runes[i]
 			i++
@@ -531,8 +551,11 @@ func p6IsSQLStatement(sql string) bool {
 //
 // The check is STATEMENT-based, not prefix-based, and it covers:
 //
-//   - the statement must BEGIN with SELECT — a `WITH … UPDATE` or a
-//     `-- DELETE` is a write however it is dressed;
+//   - the statement must BEGIN with `SELECT` — or with `WITH`, because a
+//     CTE is a statement too. A `WITH … UPDATE` is caught by the
+//     write-keyword rule below, so allowing `WITH` does not admit a
+//     write; and `EXPLAIN` is refused, because the reader issues plain
+//     SELECTs and nothing else;
 //   - the statement must be a SINGLE statement — a `;` anywhere but at
 //     the very end means a second statement follows;
 //   - the statement must carry NO write keyword anywhere — so a
@@ -562,7 +585,7 @@ func p6SQLStatementProblem(sql string) string {
 		// "manifest_identity".
 		return ""
 	}
-	if first != "SELECT" {
+	if first != "SELECT" && first != "WITH" {
 		return "the statement begins with " + first + ", not SELECT"
 	}
 	if strings.Contains(body, ";") {
