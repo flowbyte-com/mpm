@@ -68,6 +68,8 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.8 [Skill Package Storage (P1 — storage only)](#68-skill-package-storage-p1--storage-only)
    - 6.9 [Project-Scoped Continuity Storage (Stage 1 — storage only)](#69-project-scoped-continuity-storage-stage-1--storage-only)
    - 6.10 [Skill Package Import (P4 — directory import and the export loss marker)](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker)
+   - 6.11 [Skill Package Archive Import (P5 — the `.skill` ZIP adapter)](#611-skill-package-archive-import-p5--the-skill-zip-adapter)
+   - 6.12 [Skill Package Retrieval (P6 — the read-only retrieval and verification API)](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -279,7 +281,7 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 
 Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures can be evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
 
-**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). A package can now be imported from a directory and stored atomically; the read API, the full package export and the package CLI/MCP surfaces are still later stages, and a skill saved the ordinary way is unaffected.
+**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). A package can now be imported from a directory and stored atomically; the **internal** read API is specified in [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api), while the agent-facing read surface, the full package export and the package CLI/MCP surfaces are still later stages, and a skill saved the ordinary way is unaffected.
 
 #### Evidence
 
@@ -1889,11 +1891,11 @@ The primary key of `skill_packages` **is** the skill id: there is no second iden
 
 **No reader, writer, importer or exporter exists for these tables.** They are created empty and stay empty. There is no CLI command, no MCP action and no agent-facing surface for packages. A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
 
-> **Stage P4 has since added the writer.** This subsection describes **stage P1**, which is storage only. The **directory importer** — the first functional multi-file import — and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The import is **internal**: no CLI command, no MCP action and no agent-facing import surface exists for it either, and the read API, the full package export and the package CLI/MCP surfaces are still later stages.
+> **Stage P4 has since added the writer.** This subsection describes **stage P1**, which is storage only. The **directory importer** — the first functional multi-file import — and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The import is **internal**: no CLI command, no MCP action and no agent-facing import surface exists for it either, and the agent-facing read surface, the full package export and the package CLI/MCP surfaces are still later stages.
 
 The later stages — canonicalisation, the importer, the read API, the export writer, the CLI and MCP surfaces — are described in §10 of the design document and are **not** part of this change. Several operator decisions in that design (the accepted archive layouts, the binary-asset default, cross-workspace sharing) are **open**, and this stage does not decide any of them.
 
-**One of them is no longer open.** The prune exemption's *form* was decided after P1: the operator approved the **blanket** exclusion of `collection = 'skills'` from the age-based `PruneOlderThan` (operator decision **O17**), and P3 implemented it. The age-based prune therefore no longer removes ordinary skills exactly as it did before — it no longer removes **any** skill. The compatibility impact and the reasoning are in [Skills (Procedural Memory)](#skills-procedural-memory); the implementation is `SkillsExclusionClause` in `internal/core/skill_db.go`. P3 also added the package-immutability guard on the legacy write path and the transaction-aware skill writer the importer will use. The importer, the read API, the export writer and the package CLI/MCP surfaces are still later stages.
+**One of them is no longer open.** The prune exemption's *form* was decided after P1: the operator approved the **blanket** exclusion of `collection = 'skills'` from the age-based `PruneOlderThan` (operator decision **O17**), and P3 implemented it. The age-based prune therefore no longer removes ordinary skills exactly as it did before — it no longer removes **any** skill. The compatibility impact and the reasoning are in [Skills (Procedural Memory)](#skills-procedural-memory); the implementation is `SkillsExclusionClause` in `internal/core/skill_db.go`. P3 also added the package-immutability guard on the legacy write path and the transaction-aware skill writer the importer will use. The importer has since landed (P4 and P5), and the **internal** read API with it (P6 — [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api)); the export writer and the package CLI/MCP surfaces are still later stages.
 
 #### The tables are local-only
 
@@ -2339,6 +2341,287 @@ This is the one place where the implementation is **narrower** than the design's
 **No second package database.** The storage is the one specified in §6.8, and the archive path writes to it through the same transaction as the directory path.
 
 **No change to P4's rules.** Every protection the directory path applies — the confinement and the identity chain, the scanner preflight, the limits, the secret and poison scans, the binary and executable rules, the version derivation, the idempotence and version-conflict rules, the transactional projection and provenance, the blob dedup and the post-commit verification — is applied to an archive import **unchanged**. The archive path adds a way to **obtain** the bytes; it does not add a way to **decide** whether they may be stored.
+
+---
+
+### 6.12 Skill Package Retrieval (P6 — the read-only retrieval and verification API)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** is specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The **archive importer** is specified in [§6.11](#611-skill-package-archive-import-p5--the-skill-zip-adapter). **Stage P6** adds the **reader** — the read-only retrieval and integrity-verification API over the packages those two stages stored.
+
+The format, the retrieval contract and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5.4, §5.5, §8.1–§8.7, §10, §13. **This section describes stage P6.**
+
+#### What P6 adds
+
+Three **internal**, read-only operations, plus one accessor that the existing skill `read` action uses to attach the package provenance:
+
+| operation | what it returns |
+|---|---|
+| `DatabaseManager.PackageFiles` | the package's file **metadata** — never content (§8.5 `files`) |
+| `DatabaseManager.PackageReadFile` | **one** file's original bytes, optionally bounded (§8.5 `read_file`, §8.6) |
+| `DatabaseManager.PackageVerify` | the package's **integrity report** (§8.5 `verify`) |
+| `DatabaseManager.SkillPackageProvenance` | the §8.2.1 provenance object, or nothing at all for an ordinary skill |
+
+They are **internal**, exactly as P4's and P5's importers are: there is no CLI command, no MCP action and no agent-facing import or export surface. The agent-facing read surface lands in **P8**.
+
+#### The reader is a reader, not a writer
+
+The reader **never** creates, repairs, reimports, rescans or replaces anything. It never materialises a package on the filesystem, it never executes a stored script, and it never treats retrieved content as instructions — the bytes are **data**, whatever they say.
+
+It is also deliberately **separate** from the import and archive paths: the importer owns the bytes, the reader only reads the rows the importer wrote. Every rule the reader needs is **reused**, not duplicated: the identity rules are P1's `SkillIDForNameAndVersion`, the path validation is P2's `CanonicalPackagePath`, the manifest hashing is P2's `VerifyPackageHash`, the role and content-type classes are P2's, and the manifest and file types are P2's own.
+
+#### Every read re-hashes what it returns
+
+The stored SHA-256 is **not** taken on trust. The reader re-hashes the blob on the way out, so a blob row whose content was mutated in place is **refused** with `content_hash_mismatch` rather than returned (§8.6, T34). The same code covers a size disagreement, because a size that does not describe the bytes is the same defect seen from another side.
+
+There is exactly one exception, and it is a deliberate one: `SkillPackageProvenance` reports the **recorded** hashes and leaves the re-hashing to `verify`. The `read` action must stay a cheap retrieval, and `verify` is the operation that *proves* the package.
+
+**The re-hash proves the bytes are the ones the ROW names; the manifest is what commits the package to its file list.** A blob is content-addressed, so re-hashing it proves nothing about the *file list*: a row repointed at another blob — with its size repointed too, so the row and the blob agree with each other — would otherwise be served, self-consistently, while the manifest says something else. So the row is reconciled against the manifest **before** the bytes are served, and refuses with `integrity_failure` when the two disagree.
+
+**The two paths cannot differ, because there is one load path and one comparison.** Both `files` and `read_file` load the package through `loadPackageContext`, and both apply the **same** reconciliation — the listing's own `reconcilePackageFiles`, over the **whole** file set, not over the one path being asked for.
+
+`loadPackageContext` refuses a stored manifest that `PackageManifest.Validate()` would refuse, and the rules it decides are the manifest module's **own**: the format; the name and the version (valid semver); the version provenance (the override record — its effective version is the version, its reason is a known one, it is valid semver — and the declared version); the well-formedness of `entrypoint_sha256` and of `projection_sha256`; the entrypoint (canonical, and carried by exactly one file); and, for every file, the canonical path (and no path twice), the SHA-256's well-formedness, the non-negative size, the non-empty content type and the role — plus the entrypoint file's role and its hash against `entrypoint_sha256`. They are all decided by the **same primitive the importer used** to accept the manifest in the first place. The importer validates every manifest before it writes one, so a stored manifest that fails validation can only have come from a tampered store.
+
+**The reconciliation covers the whole file set, and that is deliberate.** A row deleted from a package the manifest still describes is **corruption**, and corruption is never reported as a missing file: the read of the deleted path would otherwise answer `file_not_found`, and the read of a healthy sibling would answer with bytes from a package the listing refuses. So the read reconciles the file set **first**, and only then looks for the path it was asked for. A path the package simply does not carry is still a **`file_not_found`** — the two are never confused.
+
+So the guarantee is stated exactly: **a package the listing refuses is a package the read refuses.** `verify` is the one operation that does not refuse — it **reports** the damage under its own check names, because the caller asked whether the package is sound rather than for its contents.
+
+#### The listing is metadata, and it is deterministic
+
+`PackageFiles` returns each file's canonical path, SHA-256, size, content type, role, executable flag and **actual** scan status — the statuses the import recorded, which scanners really ran — plus the package hash and the file count. The files are returned in **canonical-path order**, every time, because the query orders them and the order is part of the contract.
+
+It contains **no content**: the listing exists so a caller can decide what to ask for, and a listing that inlined the bytes would defeat the progressive retrieval the design is built on.
+
+#### One consistent snapshot per read
+
+Every read takes its metadata and its bytes from **one** read snapshot, so a package row and the blob it references can never come from two different database states. The snapshot is a **deferred, read-only** transaction: it takes a shared lock on its first read, holds it for the read and releases it at the end. It never takes a write lock.
+
+A one-file request loads the package's file **rows** and **one** blob — never the package's content. The rows are metadata, and the manifest they are compared with is parsed in full on every read anyway; the **bytes** are still loaded one file at a time, which is what §8.7's "bytes loaded" column counts.
+
+The **provenance accessor** is the one exception, and it needs none: its read is a **single statement**, and a single statement sees one consistent snapshot on its own. That keeps the `read` action's hot path free of a connection checkout and a `BEGIN`/`ROLLBACK`.
+
+#### The bounded read (§8.6, exactly)
+
+The three parameters use three **different** units and are never converted into one another: `offset` and `limit` count **lines**, `max_bytes` counts **bytes**.
+
+| rule | behaviour |
+|---|---|
+| the default byte cap | **64 KiB** (`max_bytes: 0` means the default) |
+| the hard byte cap | **1 MiB** — a request above it is **refused** with `invalid_bounds`, never clamped |
+| the line unit | a line **keeps its terminator**; `""` has zero lines, `"a\nb"` has the lines `"a\n"` and `"b"`, `"\n"` has the single line `"\n"` |
+| the byte cap | applied **at a line boundary** — a line cut in half by the cap is **not** returned |
+| `next_offset` | the index of the **first line that was not returned** — a **line** index, never a byte offset |
+| `next_offset` when complete | **null** |
+| the progress guarantee | every **non-terminal** truncated response satisfies `next_offset > offset` |
+
+`limit: 0` means "no line-count bound", consistently with `max_bytes: 0` meaning "the default".
+
+**The terminal case** (§8.6, T49): a file whose first line alone exceeds the cap returns **zero** lines, `truncated: true`, `next_offset == offset` and the reason code **`line_too_large`**. It is marked `terminal`, and it is the **only** response that may carry an unchanged `next_offset` — so a caller never has to infer that it must stop rather than resume. Raising `max_bytes`, up to the 1 MiB hard cap, is the only way forward.
+
+**The continuation** (§8.6, T47): because a line keeps its terminator and the cap truncates at a line boundary, the concatenation of every successive window reproduces the requested file **byte for byte** — no gap, no repeated line, no altered byte.
+
+#### Binary content is never carried through a text field by accident
+
+The internal API always returns the **exact bytes**. The `raw` parameter decides how they are carried:
+
+| `raw` | content | transport encoding |
+|---|---|---|
+| `false` (default) | the content must be **text-safe** — a binary asset, or bytes that are not valid UTF-8, is refused with `binary_requires_raw` | `utf-8` |
+| `true` | the bytes themselves | `base64` |
+
+So `raw` is meaningful for text as well as binary: it says "give me the bytes, do not interpret them", and the response's `Encoding` field names the lossless form. A future JSON layer **must** use the encoding the response names.
+
+#### The integrity report (§8.5 `verify`)
+
+`verify` is read-only and it **repairs nothing**: no row is rewritten, no blob is re-imported, no scanner is re-run, nothing is replaced. A corrupt package is **reported** as corrupt — never as verified.
+
+The checks, each with a stable name:
+
+| check | what it proves |
+|---|---|
+| `manifest_package_hash` | the canonical manifest matches the recorded package hash |
+| `manifest_valid` | the stored manifest satisfies the manifest module's own rules — its format, its version provenance, its canonical paths, its roles, its hashes and its entrypoint |
+| `manifest_identity` | the manifest and the package row describe the same name, effective version, declared version, format, entrypoint, entrypoint hash, and version source |
+| `file_metadata_matches_manifest` | the file rows match the manifest |
+| `blob_exists` | every referenced blob exists |
+| `blob_content_hash` | every stored blob's content matches its recorded SHA-256 |
+| `blob_size` | every stored size matches the actual byte length |
+| `entrypoint_hash` | the entrypoint hash matches the **original** `SKILL.md` bytes |
+| `projection_hash` | the skill projection matches the manifest's `projection_sha256` |
+| `version_identity` | the package and the projection identify the expected skill version |
+
+**The report names the checks that RAN.** `manifest_valid` and `manifest_identity` run only when the stored manifest parses — there is nothing to compare it against otherwise — so when it does not, the report names **eight** checks rather than ten, and the failure list is always a **subset** of the list the report names. A caller that wants to know whether a check ran reads `Checks`; a caller that wants to know whether the package is sound reads `Verified`.
+
+Damage is a **result**, not an error: the caller asked whether the package is sound, and the answer is a structured list of what is not. Only "there is no such package", an unusable selector and a substrate failure are errors.
+
+#### The provenance on `read` (R6 / T40)
+
+The existing `mpm_skills` `read` action gains **one** object for a **packaged** skill, and **nothing** changes for an ordinary one:
+
+```json
+{
+  "success": true,
+  "id": "skill:system-prompt-writer-v1.0.0-unversioned",
+  "body": "…",
+  "is_global": false,
+  "package": {
+    "entrypoint": "SKILL.md",
+    "entrypoint_sha256": "783ece4b…",
+    "file_count": 3,
+    "package_hash": "…",
+    "scanned": true,
+    "scan_status": {"secret": true, "poison": true},
+    "version_override": {"declared": null, "effective": "1.0.0-unversioned",
+                         "reason": "package_declares_no_version"}
+  }
+}
+```
+
+The object is **mandatory** for a packaged skill. The `read` action inlines the entrypoint's projection body straight into the agent's context, so the one piece of package content most likely to carry an injection would otherwise come back with nothing the caller could check.
+
+`entrypoint_sha256` is the hash of the **original** file bytes, as supplied — **not** the hash of the derived projection. (The two coincide for a package that declares a version, because §8.2 makes such a projection byte-identical to the original; they differ for a versionless package, and the distinction is pinned by a test.) `scanned` is `true` only when every scanner that applies to the entrypoint actually ran and passed — it is **not** a constant, and it is reported from the entrypoint file row's own status.
+
+For a skill that is **not** a package the object is **absent** — not present and empty — so a caller of today's API sees today's response byte for byte.
+
+The `read` action still returns the entrypoint **projection's** body only. No supporting file is ever inlined beside it: the agent must ask for a specific file.
+
+**The provenance read is ONE statement.** It joins the package row with the file count and the entrypoint's scan status in a single `SELECT`, and a single statement sees one consistent snapshot — so the provenance needs no transaction, and the `read` action's hot path pays for neither a connection checkout nor a `BEGIN`/`ROLLBACK`. The version override is read from the package row's own version provenance (`declared_version`, `version`, `version_source`), which is the same record the manifest's `version_override` carries, because the importer writes both from the same plan.
+
+**What the accessor does NOT check, and where it is checked.** The accessor's entrypoint hash is the **package row's** `entrypoint_sha256`, and the accessor does **not** parse the manifest, so it does not apply the comparison `loadPackageContext` applies — the one that refuses when the manifest and the row disagree about the entrypoint's hash. The two paths therefore differ **deliberately, and not silently**: the accessor is a hot-path retrieval that reports the recorded provenance, while the read paths and `verify` are where a disagreement is judged (`verify`'s `entrypoint_hash` and `manifest_identity` checks both report it). A caller that needs the package *proved* calls `verify`; a caller that needs the *recorded* provenance calls `read`. The row-wins decision of record applies to the version provenance; it is **not** a claim that the row is right about the entrypoint's hash.
+
+**`file_count` is the number of file ROWS the store holds.** The accessor counts `skill_package_files`, because counting the manifest's files would mean parsing the manifest — the one thing the accessor deliberately does not do. So on a package whose rows do not match its manifest, `file_count` is the store's count and the manifest's is different: a deleted row lowers it **silently**, with no failure and no disagreement. The accessor's tolerance list is therefore **namely**: the recorded **entrypoint path**, the recorded **entrypoint hash**, the recorded **package hash**, the recorded **file count**, the recorded **version provenance**, and the entrypoint file row's **scan status** — none of them checked against the manifest. The scan status is the one worth naming, because it is the field R6 exists for: `files` and `read_file` **refuse** a package whose row and manifest disagree about a file's scan status, while `read` reports the row's status unchecked. That is not an escalation — a row flipped to "scanned" cannot grant more trust than the manifest's own entry already implies, and the conservative direction is reported faithfully. `files` and `read_file` refuse such a package and `verify` reports it; `read` reports what is stored.
+
+**What the `read` response's hash covers — three things, not one.** The `package` object carries `entrypoint_sha256`: the **recorded** hash of the **original entrypoint document**, frontmatter included. It is the hash the store carries, **not** one this reader re-hashes — the accessor is a retrieval, and `verify` is the operation that re-hashes and proves. The **projection** is that whole document, and it differs from the original by exactly one inserted frontmatter line, and only when the package declares no version (§5.2). So for a package that **declares** a version, `entrypoint_sha256` covers the **projection** exactly; for a **versionless** package it does not, and the projection's own hash (`projection_sha256`) lives inside the **manifest**, which the accessor deliberately does not parse.
+
+**The body is a third thing, and no hash in the response covers it.** The `read` action returns the body — the part **after** the frontmatter (§8.2) — while `entrypoint_sha256` covers the whole document. A caller that hashes the returned `body` and compares it with `entrypoint_sha256` mismatches for **every** package, versioned or not, and the frontmatter is not in the response, so the caller cannot reconstruct the document the hash covers. §8.2.1's framing is therefore the right one: the hash lets the caller check that the body **derives from** the recorded file — not that it equals it.
+
+**What the design owner would have to decide.** There are **two** gaps, not one: a `projection_sha256` field would cover the projection of a **versionless** package, and a hash of the **body** would cover the part the caller actually receives. Neither field exists in the design's `package` object (§8.2.1), and both are changes to the design of record — so they belong to **#222's owner**, not to this stage. They are stated here rather than glossed.
+
+**The `read` action's body and its provenance come from two reads.** The body is read from `memories` and the provenance from `skill_packages`, in two separate snapshots — the accessor is one statement by design, so it takes no lock of its own. A package row removed between the two would let a body come back with no `package` object, which is the one shape that would break R6. Every deletion path in the substrate removes the skill row and the package row together (the foreign key cascades), so the shape is a **race rather than a reachable path** — but it is invisible to any single-snapshot reader, and it is disclosed here rather than glossed.
+
+**The failure envelope is wider than it was, deliberately.** A substrate failure while determining whether the skill is a package now fails the `read`. That is the fail-closed direction: the reader cannot know whether the skill is a package, so it cannot know whether the provenance is mandatory, and returning a body without it would break R6. An ordinary skill is unaffected in the normal case — its lookup is one indexed `SELECT` that returns no rows.
+
+#### The reason vocabulary
+
+The reader has its own **closed** vocabulary, mirroring the importer's. It is shared by two kinds of outcome, and the distinction matters: a **refusal** is an error, and the one **response classification** is not.
+
+**The refusals** — an error, with a stable reason:
+
+| reason | meaning |
+|---|---|
+| `package_not_found` | no package is published for the skill (including a skill that owns none) |
+| `file_not_found` | the package carries no file at that canonical path |
+| `invalid_path` | the requested path is not a canonical package path |
+| `content_hash_mismatch` | the stored bytes are not the bytes that were recorded |
+| `integrity_failure` | the stored package is not internally consistent |
+| `invalid_bounds` | the read's bounds are not admissible |
+| `database_failure` | the substrate failed |
+| `binary_requires_raw` | the content cannot be carried as text without loss |
+| `selector_invalid` | the package was named in a way that does not identify one package |
+
+**The one response classification** — not an error:
+
+| reason | meaning |
+|---|---|
+| `line_too_large` | the first requested line alone exceeds the byte cap. The response is **terminal**, not a failure: it carries zero lines, `truncated: true` and an unchanged `next_offset` (§8.6, T49) |
+
+Corruption is **never** reported as a missing file, and there is no fallback to the unverified projection or to unverified blob bytes. The reader fails closed.
+
+#### The deviations
+
+**The selector requires a version.** A package is named by its canonical skill id, **or** by a name **and** a version. A name alone does not identify one package, and the reader never picks a version silently — the design's parameter table says `name` + `version` as well. P8's CLI (`mpm skill files <name|id> [--version V]`) may resolve a latest version itself, above this API.
+
+**`truncated` means "the file was not fully returned".** When `limit` — rather than the byte cap — ends the read, the response is still `truncated: true` and still carries `next_offset`, because unread lines remain. A response is `truncated: false` only when the reader reached the end of the file.
+
+**`verify` checks more than the design guarantees, and says so.** The design requires that a corrupt package is never reported as verified. The reader adds the checks that make that claim **demonstrable** — the per-blob content hash, the per-blob size, the manifest-to-rows reconciliation and the projection hash — and each is reported under its own stable name, so a caller can tell **which** guarantee failed rather than only that something did.
+
+**The read path refuses a manifest the importer would not have written, and that is the decision of record.** `PackageManifest.Validate()` is the manifest module's rule set: the format, the version provenance, the canonical paths, the roles, the content types, the hashes and the entrypoint. The importer calls it on every manifest **before** it writes one, so a stored manifest that fails it can only have come from a tampered store. The reader therefore calls the **same primitive** on the manifest it reads, and refuses with `integrity_failure` — rather than carrying a second, partial rule set of its own. The alternative was to validate a subset and to publish the subset; the subset was the source of the asymmetry an independent review found (a manifest naming one path twice was refused by the listing and served by the read), so the full rule set is used instead. `verify` reports the same damage under the `manifest_valid` check rather than refusing, because a report is what that caller asked for.
+
+**`Validate()` is now load-bearing for every read, and that has a consequence for the format.** The reader treats it as the arbiter of what a stored manifest may be, so a change to its rules that would refuse a manifest **already accepted** under `mpm-skill-package/1` would refuse packages that are already published. The decision of record: **such a change requires a format bump** — a new `mpm-skill-package/N` — or an explicit migration of the stored manifests, because the stored manifest is hashed (`package_hash`) and the reader compares the two. A rule that only refuses manifests the importer never wrote needs no bump: such a manifest was never valid. This change makes no such change — `Validate()` is P2's, unchanged, and P6 only **calls** it.
+
+**The provenance's `version_override` comes from the PACKAGE ROW, and it is always present.** The row's `declared_version`, `version` and `version_source` are the same record the manifest's `version_override` carries — the importer writes both from the same plan — so the accessor reads the row and does not parse the manifest. For an importer-written package the two are identical.
+
+**That is the decision of record for the disagreement case: the ROW wins.** If a row and its manifest ever disagree about the version provenance, the provenance reports the **row's** values and `verify` reports the disagreement as a `manifest_identity` failure. The row is what the package IS, in the store the reader reads; the manifest is what the package CLAIMS about itself. A reader that silently preferred the claim would be reporting the manifest's story rather than the package's state.
+
+Because the row's `version` and `version_source` columns are `NOT NULL` (§6.8), the version provenance **always exists** for a packaged skill, and the accessor therefore always emits the object — including when the stored manifest does not parse. The accessor does not test the values for emptiness: a packaged skill with no version provenance would be a row that contradicts its own schema, and `verify` — not the provenance — is where such a contradiction is judged. That is a change from the first commit, where the override was recovered from the manifest and was therefore absent when the manifest was unreadable; it is disclosed here because it changes the `read` response's shape for a damaged package.
+
+**The provenance accessor is tolerant where the rest of the reader is strict.** `read` must keep returning the entrypoint's projection even when the package's manifest is broken — that is what `verify` is for. What the accessor never does is claim a scan that was not recorded: a missing entrypoint file row reports **no** scan.
+
+**The wire shape is P8's.** The internal response types carry no JSON tags, deliberately. The design pins the `files` and `read_file` wire shapes (§8.5), but it also requires that a binary payload's JSON encoding be **explicit and lossless** — and `encoding/json`'s default handling of a `[]byte` is base64, which would silently decide that question for every file, text ones included. The reader therefore stays transport-agnostic and names the encoding explicitly in its `Encoding` field; P8 writes the mapper against §8.5 and honours that field. The one exception is the file record itself, which is P2's `PackageManifestFile` — already carrying §5.5's own tags, so P8's mapper for it is empty.
+
+**`max_bytes` bounds CONTENT bytes, not wire bytes.** A response carried as base64 is about four thirds of the cap in size, because the cap applies to the bytes the reader returned, not to their encoding. A caller that budgets the wire size must budget accordingly; the cap is a bound on the file content, which is what §8.6 specifies.
+
+**`scanned` is a summary; `scan_status` is the detail.** `scanned` is true only when every scanner that applies to the entrypoint ran and passed. For an entrypoint the two always apply — `SKILL.md` is text, and a binary asset's disclosed poison skip can therefore never arise for it — so `scanned` is `scan_status.secret && scan_status.poison` and the two agree. The disclosed-skip case is visible in the `files` listing, where the per-scanner status is reported for every file.
+
+**The read operations are not on the `CoreDB` interface.** Only the provenance accessor is, because the MCP `read` action needs it and the tool layer holds a `CoreDB`. `PackageFiles`, `PackageReadFile` and `PackageVerify` are methods on the concrete `*DatabaseManager`, which is where P8 will reach them — with the interface widening as part of P8's surface, not P6's.
+
+**The read snapshot's read-only nature rests on discipline, and the discipline is pinned.** The transaction is opened with `sql.TxOptions{ReadOnly: true}`, but the SQLite driver ignores that option and issues a plain (deferred) `BEGIN`. The snapshot therefore takes a shared lock and no write lock, and it is read-only because the reader issues no write.
+
+That is pinned by an **AST walk** over the reader's own source — **both** reader files, not one — rather than by a hand-maintained list. The check is **statement-based**, and it is anchored on **SQLite's own grammar**, not on a keyword list.
+
+- the **spaced** reading is SQLite's tokenization: SQLite treats a comment as **whitespace**, so `DELETE/*x*/FROM t` is two tokens — `DELETE` and `FROM` — and every **executable** write is visible in it;
+- a statement must be a **single** statement — a `;` anywhere but at the very end means another statement follows, and a `;` inside a comment or a string literal is not a separator;
+- a statement that begins with `SELECT` is a read, **full stop**: SQLite allows no DML in a subquery (`SELECT * FROM (DELETE …)` is a syntax error), none in a CTE body, and no `SELECT … INTO`;
+- a statement that begins with `WITH` is read only if it carries **no write keyword at the top level**. SQLite's only legal main statements after a CTE list are `SELECT`, `INSERT`, `UPDATE`, `DELETE` and `REPLACE`, and the last four are write keywords; the main statement sits at the top level, so the top-level words carry it;
+- anything else — `DELETE`, `INSERT`, `PRAGMA`, `EXPLAIN`, `END`, `VACUUM`, `REVOKE` — is refused, because the reader issues plain `SELECT`s and nothing else.
+
+**The side effects a `SELECT` cannot have.** SQLite allows no DML in a subquery, none in a CTE body and no `SELECT … INTO`, so a `SELECT` cannot write **the database**. The two process-level side effects it could otherwise have are closed as well: the substrate registers **no user-defined function** (`RegisterFunc` appears only in comments explaining why it is avoided), and this build's SQLite is compiled with `SQLITE_OMIT_LOAD_EXTENSION`, so `SELECT load_extension(…)` is refused at run time. `TestP6TheGuardRefusesARouteSQLiteReallyExecutes` **pins** that, so a change to the build shows up in the test suite rather than in a security review.
+
+The **removed** reading rejoins a keyword that a comment split, which SQLite does not do. It contributes exactly **one** rule: if its first word is a **write** keyword, the text is refused. That catches `DE/*x*/LETE` — which SQLite rejects as a syntax error, so refusing it costs nothing — **without** manufacturing a keyword out of two unrelated tokens, which is what would make `SELECT up/*x*/date` a false positive. A word immediately followed by `(` names a **function**, and a function call is never a statement keyword: `SELECT replace(x,'a','b')` is a read.
+
+The walk closes these routes, and **every one of them is pinned in the repository**: the evasion matrix in `TestP6TheReadOnlyGuardCatchesEveryEvasion` splices each of them into a **copy** of the reader and requires the guard to report it, and `TestP6TheReadOnlyGuardRefusesNoLegitimateRead` splices the controls into a copy and requires the guard to stay silent. The matrix's **size** and its **historically-important routes** are pinned as well — the count is a constant, and the routes that have caught a real defect are pinned by name **and by the SHA-256 of their snippet** — so the matrix can be neither quietly shrunk nor quietly substituted: a name pin alone stops a deletion, and only the digest stops a swap. **The digest pin is a review aid, not an enforcement mechanism**: the pin lives in the same file as the snippet it pins, so a simultaneous edit of both is possible — and what it guarantees is that such an edit shows **two** changed lines in one hunk instead of one.
+
+The table below gives the guard's message for each route, **up to the SQL it quotes**.
+
+| evasion | what the guard says |
+|---|---|
+| a write through `ExecContext` | *"issues a write through ExecContext at line N: the reader must never write"* |
+| a write through `Exec` | *"issues a write through Exec at line N: the reader must never write"* |
+| a **method value** — `exec := db.ExecContext` | *"binds the database method ExecContext at line N: the reader must never bind a database method"* |
+| a method value passed as an **argument** | *"binds the database method ExecContext at line N: the reader must never bind a database method"* |
+| a write smuggled through `QueryContext` | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT: \"…\""* |
+| a write smuggled through `PrepareContext` | the same, at the prepare site — a prepared statement's SQL lives there |
+| a write executed through a prepared statement | *"issues a write through ExecContext at line N: the reader must never write"* |
+| a write in a constant, **used** | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT: \"…\""* |
+| a write in a constant, **unused** | *"the SQL constant X is not a single read statement: the statement begins with DELETE, not SELECT: \"…\""* |
+| a write in a **concatenated** constant (`"DELETE " + "FROM …"`) | the same — the concatenation is resolved |
+| a write in a `WITH … UPDATE` constant | *"…the statement carries the write keyword UPDATE: \"…\""* |
+| a write in a **comment-prefixed** constant | *"…the statement begins with DELETE, not SELECT: \"…\""* — the comment is removed, not obeyed |
+| a write behind a **comment-split keyword** (`DE/*x*/LETE`) | *"…the statement begins with DELETE, not SELECT: \"…\""* — the comment is removed whole |
+| a write behind a **comment-split keyword**, line comment (`DE--x⏎LETE`) | the same |
+| a write with a comment **between** its keywords (`DELETE/*x*/FROM t`) | *"…the statement begins with DELETE, not SELECT: \"…\""* — the comment is spaced, and the tokens stay separate |
+| an `EXPLAIN DELETE` | *"…the statement begins with EXPLAIN, not SELECT"* |
+| an `END` — a transaction control | *"…the statement begins with END, not SELECT"* |
+| a `REVOKE` | *"…the statement begins with REVOKE, not SELECT"* |
+| a statement whose SQL is a concatenation of literals | *"issues a statement whose SQL is neither a literal nor a constant at line N"* |
+| a statement whose SQL is built at run time (`fmt.Sprintf`) | the same — the argument is neither a literal nor a constant |
+| a **multi-statement** `"SELECT 1; DELETE …"` | *"…the statement carries more than one statement: \"…\""* |
+| a **dead** SQL constant no statement uses | *"the SQL constant X is never used by a statement: \"…\""* |
+
+That is **twenty-two routes**. The **seventeen controls** — the legitimate reads the guard must not refuse — are pinned beside them: a plain `SELECT` written as a raw backtick literal, the same written as a double-quoted literal, a trailing semicolon, a `UNION` subquery, a read-only CTE, a `'UPDATE'` string literal, a `last_update` column, a `;` inside a literal, a doubled quote inside a literal, a `--` inside a literal, a bracket identifier containing a `;`, a bracket identifier containing a write keyword, a `?` bind placeholder, a **function** whose name is a statement keyword (`replace(x,'a','b')`), a **column** named after a statement keyword, an identifier split by a comment, and a CTE whose body is a read.
+
+**The matrix is not merely about the guard's classifier.** A statement SQLite rejects as a syntax error proves nothing, so one route is checked **against SQLite itself**: `TestP6TheGuardRefusesARouteSQLiteReallyExecutes` runs `DELETE/*x*/FROM skill_package_files` against a real in-memory database and asserts that the row it would have removed is **gone** — and that the guard refuses the same text. The live database is never opened.
+
+**The scope of the claim.** The walk covers the reader's **own two files**: every statement they issue, every statement they declare as a constant, and every database method they bind. A string literal passed to a non-database function is not inspected — it is not a statement the reader issues — and a statement issued by a helper in another file of the package is outside the walk. The behavioural pin covers the rest: the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read. The guard is a source-level regression pin, **not** a security boundary: it audits the reader's own SQL text, not what a user-defined function, an extension, or a future hand-written `db.Exec` in another file of the package would do.
+
+**The residual over-strictness, stated as a rule.** A `WITH` statement is refused if **any top-level word is a write keyword** — except a word that names a **function**, which is never a statement keyword — even when SQLite would accept it. The identifier that trips it may be the CTE's own name (`WITH replace AS (SELECT 1) SELECT * FROM replace`), a column reference in the main statement (`… ORDER BY release`), or anything else at the top level; the same word inside the **column list** (`WITH x (release) AS …`) is not affected, because it sits inside parentheses. The guard cannot tell a write keyword in the main statement from one used as an identifier without SQLite's parser. **The reader's own statements contain no `WITH`**, so nothing it owns is affected, and the refusal fails **closed**.
+
+#### What P6 does **not** add
+
+**No P7 export writer.** The `.skill` archive is the transport; the writer that produces one is P7.
+
+**No P8 CLI or MCP surface.** The reader is internal. No `mpm skill files`, `read-file` or `verify` command and no new MCP action registration lands here.
+
+**No agent-facing import.**
+
+**No P9 promotion, garbage collection or lifecycle mutation.**
+
+**No automatic execution.** A stored script is stored and flagged, never run.
+
+**No HAL integration.**
+
+**No change to the shared model-configuration project.**
+
+**No new table and no schema change.** The reader reads the three package tables §6.8 specifies — `skill_packages`, `skill_package_files` and `skill_package_blobs` — plus `memories`, which `verify` reads to check the projection's hash and its version. It touches nothing else.
 
 ---
 

@@ -3812,7 +3812,7 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	}
 	// Observability Layer: skill reads are retrievals.
 	_ = dm.RecordRetrieval(skill.ID, "skill")
-	return map[string]interface{}{
+	response := map[string]interface{}{
 		"success":     true,
 		"id":          skill.ID,
 		"name":        skill.Name,
@@ -3823,7 +3823,39 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 		"steps":       skill.Steps,
 		"body":        skill.Body,
 		"is_global":   skill.IsGlobal,
-	}, nil
+	}
+
+	// R6 / T40 (PR #222 §8.2.1): a PACKAGED skill's read response gains
+	// one object — the package provenance — and an ordinary skill's
+	// response is unchanged.
+	//
+	// The object is MANDATORY for a packaged skill: the `read` action
+	// inlines the entrypoint's projection body straight into the caller's
+	// context, so the one piece of package content most likely to carry an
+	// injection would otherwise come back with nothing the caller could
+	// check. It carries the ORIGINAL entrypoint's hash — not the
+	// projection's — and the entrypoint's ACTUAL scan status.
+	//
+	// Nothing else about the response changes: the body is still the
+	// entrypoint projection's body and no supporting file is ever inlined.
+	//
+	// A FAILURE HERE FAILS THE READ, and that is deliberate: the reader
+	// cannot know whether the skill is a package, so it cannot know
+	// whether the provenance is mandatory — and returning a body without it
+	// would break R6. The lookup is one indexed SELECT, so an ordinary
+	// skill's read is unaffected in the normal case.
+	//
+	// The context is `context.Background()` because the tool surface's
+	// handler signature carries no context at all; the lookup is a single
+	// statement with no timeout, so there is no unbounded work to cancel.
+	provenance, err := dm.SkillPackageProvenance(context.Background(), skill.ID)
+	if err != nil {
+		return nil, err
+	}
+	if provenance != nil {
+		response["package"] = provenance
+	}
+	return response, nil
 }
 
 // resolveSkillID resolves a skill identifier from the params map.
