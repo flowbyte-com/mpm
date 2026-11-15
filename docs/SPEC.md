@@ -1273,14 +1273,23 @@ For a step-by-step recipe for connecting OpenCode — including the plugin regis
 
 A **review** subagent runs in a child session with the parent's tool surface. On 2026-11-15 a review subagent wrote a memory into the operator's **live** MPM database through the `mpm_memory` tool, against an explicit instruction not to touch it. A written instruction was not enough, and could not have been: the tool was still **registered** for the reviewer, so "do not call it" was the only thing standing between a review note and a write into the operator's substrate.
 
-The fix is the **permission layer**, and it is per-agent, so normal MPM operation is untouched. The canonical definition is [`agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md`](../agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md), installed by `agent_installation/mpm-opencode/scripts/install_reviewer_agent.py` into `~/.config/opencode/agents/mpm-reviewer.md`. It:
+The fix is the **permission layer**, and it is per-agent, so normal MPM operation is untouched. The canonical definition is [`agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md`](../agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md), installed by `agent_installation/mpm-opencode/scripts/install_reviewer_agent.py` into `~/.config/opencode/agents/mpm-reviewer.md`. The install is part of the **canonical install flow** (`agent_installation/mpm-opencode/install.sh` and `make install`), because a definition that lives only in the repository is not an isolation — a fresh install would have no reviewer definition at all.
 
-- **denies every MPM tool by name**, so a denied tool is removed from the reviewer's tool list entirely — the reviewer cannot call it and cannot see it;
-- **denies `edit`**, so a reviewer cannot change what it reviews, and **denies `subagent`**, so it cannot launch an agent that lacks the isolation;
-- **denies the shell routes into the same substrate** (`mpm call`, `mpm-memory`) and the ways a shell writes into a live MPM workspace, so the command line is closed too;
-- requires findings to be recorded in a **filesystem scratchpad**, not in the substrate.
+The isolation is **layered**, and each layer says exactly what it closes:
 
-The deny list is **machine-checked against the registry** — `internal/core/tools/registry_list.go` is the authoritative list of every MPM tool, and `agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py` fails if a tool is added to the registry without a matching deny rule. The isolation therefore cannot quietly erode as the tool surface grows. The guard is proven non-vacuous: removing one deny rule fails the test with the name of the uncovered tool.
+| layer | mechanism | what it closes |
+|---|---|---|
+| **tool surface** | every MPM tool is denied **by name**, so a denied tool is removed from the reviewer's tool list entirely — the reviewer cannot call it and cannot see it | the MCP route into the substrate |
+| **command line** | every MPM binary is refused **at the command position** (`mpm`, `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`, `mpm-update`, and their installed paths), and so are the installers (`install.sh`, `uninstall.sh`, `make install`/`uninstall`/`deploy`) and the service-control commands | the CLI route into the substrate |
+| **reads** | the `read` tool cannot open a file inside a live MPM workspace, and the `external_directory` boundary of a runtime root is closed | the reviewer's access to the operator's private substrate |
+| **state changes** | `edit`, `subagent`, `skill`, `question` and Code Mode (`execute`) are denied | the reviewer's ability to change what it reviews, or to reach the tools by another route |
+| **environment** | a disposable sandbox (`agent_installation/mpm-opencode/scripts/reviewer_sandbox.py`) points `HOME`, `TMPDIR` and `MPM_WORKSPACE` at scratch directories, so a route the rules do not name still cannot write into the operator's runtime root | the residue a pattern match cannot close |
+
+**What the permission layer does NOT close, stated rather than glossed.** The shell runs with the host user's filesystem, process and network authority, and a permission rule is a pattern match on a command string. The `grep` and `glob` actions are **not** path-restricted — their resources are the pattern and the glob, not a path — so the reviewer's own scope (the working tree it was given) is what keeps them off a runtime root. The permission layer is a **barrier, not a jail**; the sandbox is the layer that does not depend on the pattern being complete.
+
+The deny list is **machine-checked against the registry** — `internal/core/tools/registry_list.go` is the authoritative list of every MPM tool, and `agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py` fails if a tool is added to the registry without a matching deny rule. The registry parse itself is checked, so a name the parse cannot capture **fails the test** rather than passing it: a dropped name would need no deny rule, and the tool would stay reachable. The binary deny list is checked against the **Makefile's own** binary variables, so a new MPM binary cannot be built without the list being extended. The guard is proven non-vacuous: removing one deny rule fails the test with the name of the uncovered tool.
+
+**The installed copy may not drift.** The definition is MPM-owned state under `~/.config/opencode/agents/`, refreshed by the canonical install, and the guard test **fails when the installed copy differs from the template**: a weaker definition in force is exactly the hazard this exists to close.
 
 #### MCP tool surface
 
@@ -2520,7 +2529,7 @@ The `read` action still returns the entrypoint **projection's** body only. No su
 
 **What the accessor does NOT check, and where it is checked.** The accessor's entrypoint hash is the **package row's** `entrypoint_sha256`, and the accessor does **not** apply the comparison `loadPackageContext` applies — the one that refuses when the manifest and the row disagree about the entrypoint's hash. The two paths therefore differ **deliberately, and not silently**: the accessor is a hot-path retrieval that reports the recorded provenance, while the read paths and `verify` are where a disagreement is judged (`verify`'s `entrypoint_hash` and `manifest_identity` checks both report it). A caller that needs the package *proved* calls `verify`; a caller that needs the *recorded* provenance calls `read`. The row-wins decision of record applies to the version provenance; it is **not** a claim that the row is right about the entrypoint's hash.
 
-**`file_count` is the number of file ROWS the store holds.** The accessor counts `skill_package_files`, because counting the manifest's files would mean parsing the manifest — the one thing the accessor deliberately does not do. So on a package whose rows do not match its manifest, `file_count` is the store's count and the manifest's is different: a deleted row lowers it **silently**, with no failure and no disagreement. The accessor's tolerance list is therefore **namely**: the recorded **entrypoint path**, the recorded **entrypoint hash**, the recorded **package hash**, the recorded **file count**, the recorded **version provenance**, and the entrypoint file row's **scan status** — none of them checked against the manifest. The scan status is the one worth naming, because it is the field R6 exists for: `files` and `read_file` **refuse** a package whose row and manifest disagree about a file's scan status, while `read` reports the row's status unchecked. That is not an escalation — a row flipped to "scanned" cannot grant more trust than the manifest's own entry already implies, and the conservative direction is reported faithfully. `files` and `read_file` refuse such a package and `verify` reports it; `read` reports what is stored.
+**`file_count` is the number of file ROWS the store holds.** The accessor counts `skill_package_files`, because the count is of the store's **rows**, not of the manifest's file list. So on a package whose rows do not match its manifest, `file_count` is the store's count and the manifest's is different: a deleted row lowers it **silently**, with no failure and no disagreement. The accessor's tolerance list is therefore **namely**: the recorded **entrypoint path**, the recorded **entrypoint hash**, the recorded **package hash**, the recorded **file count**, the recorded **version provenance**, and the entrypoint file row's **scan status** — none of them checked against the manifest. The scan status is the one worth naming, because it is the field R6 exists for: `files` and `read_file` **refuse** a package whose row and manifest disagree about a file's scan status, while `read` reports the row's status unchecked. That is not an escalation — a row flipped to "scanned" cannot grant more trust than the manifest's own entry already implies, and the conservative direction is reported faithfully. `files` and `read_file` refuse such a package and `verify` reports it; `read` reports what is stored.
 
 **The one hash the accessor DOES check against the manifest is the projection's** — because it now reports it, and a recorded value that does not describe the bytes beside it would be a false claim. The asymmetry is deliberate and is stated rather than glossed: the accessor reports the **projection** hash it has validated, and reports the **entrypoint** hash the row claims.
 
@@ -2536,15 +2545,30 @@ P6 disclosed that the `read` action's body and its provenance came from **two** 
 
 The snapshot is **not** a full-package integrity scan. No blob is read and no package byte is hashed: the read loads the skill's projection and the package's metadata, and hashes only the **one** projection document the response is about.
 
-**What it cost, measured.** The P6 hot path was a skill read plus **one** statement. The combined read is a transaction plus three statements and a manifest parse:
+**What it cost, measured.** The P6 hot path was a skill read plus **one** statement. The combined read is a transaction plus three statements and a manifest parse. Every number below is produced by a benchmark in `internal/core/skill_package_provenance_followup_test.go`, so it can be re-measured rather than believed:
 
-| shape | ns/op |
-|---|---|
-| P6 hot path (skill read + one statement) | 83,851 |
-| **combined read (one snapshot)** | **107,465** |
-| two independent calls (the current accessor) | 178,163 |
+| shape | benchmark | ns/op (median of 5, 5,000 iterations) |
+|---|---|---|
+| P6 hot path (skill read + one statement) | `BenchmarkP6FollowupReadSkillOldShape` | 82,659 |
+| **combined read (one snapshot)** | `BenchmarkP6FollowupReadSkillWithProvenance` | **113,551** |
+| the accessor called separately (each call opens its own snapshot) | `BenchmarkP6FollowupReadSkillTwoStatements` | 169,294 |
 
-The overhead is **+23.6 µs (+28%)** over the P6 hot path, and **−70.7 µs (−40%)** against calling the accessor separately. Its components, measured: the transaction itself is **3.3 µs**; the manifest `SELECT` is about **8 µs**; the manifest parse is **6.8 µs**; the manifest **validation** is **0.4 µs** — so the validation is free, and the cost is the manifest round-trip the recorded projection hash requires. The read is **not** an unconditional integrity scan.
+The overhead is **+30.9 µs (+37%)** over the P6 hot path, and **−55.7 µs (−33%)** against calling the accessor separately.
+
+**The third row is labelled for what it measures.** It is *not* "two independent reads": the accessor opens its **own** snapshot now — it has to, because it reads the manifest — so the shape it measures is a skill read on the pool plus an accessor call that takes a transaction of its own. That is the cost of the pre-follow-up arrangement *as it stands today*, not a hypothetical one.
+
+The components, each measured by its own benchmark on the same host:
+
+| component | benchmark | ns/op (median) |
+|---|---|---|
+| the read snapshot itself (BEGIN, ROLLBACK, connection checkout) | `BenchmarkP6FollowupComponentTransaction` | 3,280 |
+| the manifest `SELECT` | `BenchmarkP6FollowupComponentManifestSelect` | 6,502 |
+| the manifest parse | `BenchmarkP6FollowupComponentManifestParse` | 6,133 |
+| the manifest **validation** | `BenchmarkP6FollowupComponentManifestValidate` | 378 |
+
+So the validation is **free** (0.4 µs against a 113.6 µs read), and the measured components account for about **16 µs** of the 31 µs overhead; the remainder is the extra statement issued **inside** the snapshot rather than on the pool, and the per-statement cost a transaction adds. The read is **not** an unconditional integrity scan: no blob is read and no package byte is hashed.
+
+**Measurement host.** The figures above were measured on the development host (Linux x86-64, 12 CPUs, Go 1.27.3, SQLite in WAL mode, the package's own disposable workspace) with `go test -bench 'BenchmarkP6Followup' -benchtime=5000x -count=5`. Absolute numbers are host-specific; the **ratios** are the claim, and the benchmarks are in the repository so a reader can re-measure them on their own host.
 
 **The skill-document loader was extracted so the guard covers it.** The combined read needs the skill-loading logic to run inside a caller's transaction, so it moved from `skill_db.go` into `skill_document.go`, written against the smallest read surface that both `*sql.DB` and `*sql.Tx` satisfy. That file is now part of the reader's **guarded set**: the write-guard walks it, so a write could not hide in the skill loader and go unseen. The loader is **one** implementation — `ReadSkill` and the combined read share it, so they cannot drift.
 

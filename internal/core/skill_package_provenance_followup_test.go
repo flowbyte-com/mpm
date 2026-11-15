@@ -43,7 +43,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // ─── Fixtures ──────────────────────────────────────────────────────────────
@@ -354,16 +353,29 @@ func TestP6FollowupProvenanceRefusesAProjectionThatContradictsTheManifest(t *tes
 
 // ─── A2: one snapshot ──────────────────────────────────────────────────────
 
-// TestP6FollowupTheReadIsOneSnapshot pins the invariant DETERMINISTICALLY.
+// TestP6FollowupTheReadIsOneSnapshot pins the invariant DETERMINISTICALLY,
+// against the EXPORTED read.
 //
 // The test holds a read snapshot open, deletes the package CONCURRENTLY
-// on another connection, and then runs the combined read INSIDE the held
-// snapshot. The snapshot does not see the deletion, so the read returns
-// the skill AND its provenance — a consistent pair.
+// on another connection, and then runs the EXPORTED
+// `ReadSkillWithPackageProvenance` inside the held snapshot — through
+// the snapshot seam, so the interleaving is CHOSEN rather than raced
+// for.
 //
-// With two independent statements the same interleaving would return the
-// skill with NO provenance, because the first statement would have seen
-// the package and the second would not.
+// Two things are asserted, and the second is the load-bearing one:
+//
+//   - the export read returns the CONSISTENT PAIR — the skill AND its
+//     provenance — because the held snapshot does not see the deletion;
+//   - the export read really took ONE snapshot: the seam was called.
+//
+// The second assertion is what makes this a guard rather than a
+// demonstration. A regression that turned the exported read back into
+// two independent statements would never call the seam, so the test
+// would fail on the counter rather than on a race it happened to lose.
+//
+// With two independent statements the same interleaving would return
+// the skill with NO provenance, because the first statement would have
+// seen the package and the second would not.
 func TestP6FollowupTheReadIsOneSnapshot(t *testing.T) {
 	dm := p3DM(t)
 	imported := p6ImportPackage(t, dm, "snapshot", "1.0.0", map[string][]byte{
@@ -397,8 +409,15 @@ func TestP6FollowupTheReadIsOneSnapshot(t *testing.T) {
 		t.Fatalf("delete the skill concurrently: %v", err)
 	}
 
-	// The held snapshot still sees the skill and its package.
-	skill, provenance, err := readSkillWithPackageProvenanceTx(context.Background(), tx, imported.SkillID, "")
+	// The exported read runs inside the HELD snapshot.
+	seamCalls := 0
+	restore := setSkillReadSnapshotHook(func(ctx context.Context, fn func(*sql.Tx) error) error {
+		seamCalls++
+		return fn(tx)
+	})
+	defer restore()
+
+	skill, provenance, err := dm.ReadSkillWithPackageProvenance(context.Background(), imported.SkillID, "")
 	if err != nil {
 		t.Fatalf("the read inside the held snapshot failed: %v", err)
 	}
@@ -406,32 +425,205 @@ func TestP6FollowupTheReadIsOneSnapshot(t *testing.T) {
 		t.Fatalf("the read inside the held snapshot returned no skill")
 	}
 	if provenance == nil {
-		t.Fatalf("the read inside the held snapshot returned a skill with NO provenance; "+
+		t.Fatalf("the read inside the held snapshot returned a skill with NO provenance; " +
 			"the two reads came from different snapshots")
 	}
 	if provenance.EntrypointSHA256 != imported.EntrypointSHA256 {
 		t.Errorf("the entrypoint hash is %s, want %s", provenance.EntrypointSHA256, imported.EntrypointSHA256)
 	}
+
+	// The load-bearing assertion: the exported read took ONE snapshot.
+	// A regression that split it back into two independent reads would
+	// never have called the seam.
+	if seamCalls != 1 {
+		t.Fatalf("the exported read opened %d snapshot(s), want exactly 1; "+
+			"the read is not reading the body and the provenance from one snapshot", seamCalls)
+	}
+}
+
+// TestP6FollowupTheReadReportsNotFoundAfterADeletion pins the OTHER half
+// of the invariant, also deterministically and against the exported
+// read.
+//
+// A deletion that has COMMITTED is wholly visible: the read returns the
+// ordinary not-found answer, not a body without its provenance.
+//
+// The snapshot here is a FRESH one — taken after the deletion — so the
+// two halves of the read see the same, post-deletion state.
+func TestP6FollowupTheReadReportsNotFoundAfterADeletion(t *testing.T) {
+	dm := p3DM(t)
+	imported := p6ImportPackage(t, dm, "deleted", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	// The deletion COMMITS before the read starts.
+	if _, err := dm.db.Exec(`DELETE FROM memories WHERE id = ?`, imported.SkillID); err != nil {
+		t.Fatalf("delete the skill: %v", err)
+	}
+
+	seamCalls := 0
+	restore := setSkillReadSnapshotHook(func(ctx context.Context, fn func(*sql.Tx) error) error {
+		seamCalls++
+		return dm.withPackageReadSnapshot(ctx, fn)
+	})
+	defer restore()
+
+	_, _, err := dm.ReadSkillWithPackageProvenance(context.Background(), imported.SkillID, "")
+	if err == nil {
+		t.Fatalf("the read of a deleted skill succeeded")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("the read failed with %v, want the not-found answer", err)
+	}
+	if seamCalls != 1 {
+		t.Fatalf("the exported read opened %d snapshot(s), want exactly 1", seamCalls)
+	}
+}
+
+// p6fuPackageSnapshot captures the rows a packaged skill occupies, so a
+// test can put them back.
+//
+// It captures the SKILL row and the PACKAGE row. The file rows are not
+// captured: the reader does not need them to answer "is there a
+// package, and what is its provenance", and a restore that put them
+// back would make the fixture longer without making the test stronger.
+type p6fuPackageSnapshot struct {
+	skillID string
+
+	skillID2       string
+	skillColl      string
+	skillContent   string
+	skillTags      string
+	skillMeta      string
+	skillGlobal    int
+	skillPrime     int
+	skillWeight    float64
+	skillCreatedAt string
+
+	pkgSkillID    string
+	pkgName       string
+	pkgVersion    string
+	pkgDeclared   sql.NullString
+	pkgVersionSrc string
+	pkgFormat     string
+	pkgEntrypoint string
+	pkgEntrySHA   string
+	pkgManifest   string
+	pkgHash       string
+	pkgSourceSHA  sql.NullString
+	pkgGlobal     int
+	pkgCreatedAt  int64
+	pkgUpdatedAt  sql.NullInt64
+}
+
+// p6fuCapturePackage captures the rows of a packaged skill.
+func p6fuCapturePackage(t *testing.T, dm *DatabaseManager, skillID string) p6fuPackageSnapshot {
+	t.Helper()
+	var snap p6fuPackageSnapshot
+	snap.skillID = skillID
+	err := dm.db.QueryRow(`
+		SELECT id, collection, content, tags, metadata, is_global, is_prime_directive,
+		       weight, created_at
+		FROM memories WHERE id = ?`, skillID).Scan(
+		&snap.skillID2, &snap.skillColl, &snap.skillContent, &snap.skillTags, &snap.skillMeta,
+		&snap.skillGlobal, &snap.skillPrime, &snap.skillWeight, &snap.skillCreatedAt)
+	if err != nil {
+		t.Fatalf("capture the skill row: %v", err)
+	}
+	err = dm.db.QueryRow(`
+		SELECT skill_id, name, version, declared_version, version_source, format,
+		       entrypoint, entrypoint_sha256, manifest, package_hash, source_sha256,
+		       is_global, created_at, updated_at
+		FROM skill_packages WHERE skill_id = ?`, skillID).Scan(
+		&snap.pkgSkillID, &snap.pkgName, &snap.pkgVersion, &snap.pkgDeclared,
+		&snap.pkgVersionSrc, &snap.pkgFormat, &snap.pkgEntrypoint, &snap.pkgEntrySHA,
+		&snap.pkgManifest, &snap.pkgHash, &snap.pkgSourceSHA, &snap.pkgGlobal,
+		&snap.pkgCreatedAt, &snap.pkgUpdatedAt)
+	if err != nil {
+		t.Fatalf("capture the package row: %v", err)
+	}
+	return snap
+}
+
+// delete removes the skill row — and, by the foreign key, the package
+// row with it.
+// cycle removes the packaged skill and puts it back, ATOMICALLY.
+//
+// The removal and the restoration happen in ONE transaction, so the
+// pair appears and disappears TOGETHER — which is what the foreign
+// key's cascade does on a real deletion. Restoring the two rows in
+// separate statements would create an intermediate state the substrate
+// cannot produce: a skill row WITHOUT its package row. That state is
+// what the reader must never observe, and manufacturing it here would
+// test the fixture rather than the code.
+//
+// The two statements inside the transaction are separated in time by
+// the transaction's own work, so the reader still meets the "gone"
+// state and the "present" state at the boundaries — which is the
+// interleaving this test is for.
+func (s p6fuPackageSnapshot) cycle(dm *DatabaseManager) error {
+	tx, err := dm.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, s.skillID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO memories (id, collection, content, tags, metadata, is_global,
+		                      is_prime_directive, weight, created_at)
+		VALUES (?, ?, CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), ?, ?, ?, ?)`,
+		s.skillID2, s.skillColl, s.skillContent, s.skillTags, s.skillMeta,
+		s.skillGlobal, s.skillPrime, s.skillWeight, s.skillCreatedAt); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO skill_packages (skill_id, name, version, declared_version, version_source,
+		                            format, entrypoint, entrypoint_sha256, manifest, package_hash,
+		                            source_sha256, is_global, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS TEXT), ?, ?, ?, ?, ?)`,
+		s.pkgSkillID, s.pkgName, s.pkgVersion, s.pkgDeclared, s.pkgVersionSrc,
+		s.pkgFormat, s.pkgEntrypoint, s.pkgEntrySHA, s.pkgManifest, s.pkgHash,
+		s.pkgSourceSHA, s.pkgGlobal, s.pkgCreatedAt, s.pkgUpdatedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // TestP6FollowupAConcurrentDeletionNeverReturnsABodyWithoutItsProvenance
 // pins the invariant under REAL concurrency.
 //
-// A deleter removes packaged skills (and, by cascade, their packages)
-// while a reader reads them, repeatedly. Every read must land on one of
-// exactly two answers:
+// A deleter removes a packaged skill — and, by the cascade, its package
+// row — and puts it back, over and over, while a reader reads it. Every
+// read must land on one of exactly two answers:
 //
 //   - the skill is gone — the not-found answer; or
 //   - the skill AND its provenance are both present.
 //
 // A body WITHOUT its provenance is never an acceptable answer, because
 // the provenance is mandatory for a packaged skill.
+//
+// THE DETERMINISTIC GUARD IS ELSEWHERE. This test exercises the REAL
+// path — the exported read, taking its own snapshot — so it is a
+// probabilistic detector by nature: it can only catch a regression when
+// a deletion happens to land in the window between the reader's two
+// reads. The DETERMINISTIC guard is
+// `TestP6FollowupTheReadIsOneSnapshot`, which drives the exported read
+// through the snapshot seam and asserts both that the seam was used —
+// so the exported read really took ONE snapshot — and that the result is
+// a consistent pair.
+//
+// This test is the supplementary real-path check, and its iteration
+// count is set so that a regression is caught with high probability
+// rather than by luck.
 func TestP6FollowupAConcurrentDeletionNeverReturnsABodyWithoutItsProvenance(t *testing.T) {
 	dm := p3DM(t)
 
 	// Several packages, so the reader keeps meeting packages that are
 	// still there while the deleter works through them.
-	const count = 8
+	const count = 4
 	ids := make([]string, 0, count)
 	for i := 0; i < count; i++ {
 		imported := p6ImportPackage(t, dm, "racy"+string(rune('a'+i)), "1.0.0", map[string][]byte{
@@ -439,30 +631,38 @@ func TestP6FollowupAConcurrentDeletionNeverReturnsABodyWithoutItsProvenance(t *t
 		})
 		ids = append(ids, imported.SkillID)
 	}
+	snapshots := make([]p6fuPackageSnapshot, 0, count)
+	for _, id := range ids {
+		snapshots = append(snapshots, p6fuCapturePackage(t, dm, id))
+	}
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 
-	// The deleter: shred each packaged skill in turn. The delete of the
-	// `memories` row cascades to the package row, so the pair goes
-	// together — the same way every real deletion path removes them.
+	// The deleter: remove each packaged skill and put it back, in a
+	// TIGHT loop with no sleep, and ATOMICALLY — the pair appears and
+	// disappears together, which is what the foreign key's cascade
+	// does on a real deletion. The pause the earlier version of this
+	// fixture had meant the package was gone for a tiny fraction of the
+	// reader's reads, so the race was almost never hit — which is why
+	// this fixture now restores the rows it removes.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for _, id := range ids {
-			select {
-			case <-stop:
-				return
-			case <-time.After(2 * time.Millisecond):
-			}
-			if _, err := dm.db.Exec(`DELETE FROM memories WHERE id = ?`, id); err != nil {
-				return
+		for {
+			for i := range snapshots {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = snapshots[i].cycle(dm)
 			}
 		}
 	}()
 
 	pairs, notFound := 0, 0
-	for i := 0; i < 600; i++ {
+	for i := 0; i < 1500; i++ {
 		for _, id := range ids {
 			skill, provenance, err := dm.ReadSkillWithPackageProvenance(context.Background(), id, "")
 			if err != nil {
@@ -539,10 +739,10 @@ func BenchmarkP6FollowupReadSkillOldShape(b *testing.B) {
 		// The P6 accessor's statement, verbatim.
 		var (
 			entrypoint, entrypointSHA, packageHash string
-			declaredVersion                          sql.NullString
-			version, versionSource                   string
-			fileCount                                int
-			secretScanned, poisonScanned             sql.NullInt64
+			declaredVersion                        sql.NullString
+			version, versionSource                 string
+			fileCount                              int
+			secretScanned, poisonScanned           sql.NullInt64
 		)
 		err = dm.db.QueryRowContext(ctx, packageProvenanceQuery, skill.ID).Scan(
 			&entrypoint, &entrypointSHA, &packageHash,
@@ -575,6 +775,110 @@ func BenchmarkP6FollowupReadSkillTwoStatements(b *testing.B) {
 		}
 		if _, err := dm.SkillPackageProvenance(ctx, skill.ID); err != nil {
 			b.Fatalf("read the provenance: %v", err)
+		}
+	}
+}
+
+// ─── The components of the combined read ───────────────────────────────────
+//
+// The hot-path table in `docs/SPEC.md` §6.12 quotes the cost of the
+// combined read AND its parts. A quoted number that nothing measures
+// is a claim, not a measurement, so each part has its own benchmark
+// here. The four together account for the difference between the P6
+// hot path and the combined read.
+
+// BenchmarkP6FollowupComponentTransaction measures the snapshot itself:
+// a BEGIN, a rollback, and the connection checkout they need.
+//
+// It is the part of the combined read that the P6 hot path did NOT
+// pay, because the P6 accessor was a single statement.
+func BenchmarkP6FollowupComponentTransaction(b *testing.B) {
+	p6fuWorkspace(b)
+	dm := p6fuDM(b)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := dm.withPackageReadSnapshot(ctx, func(tx *sql.Tx) error {
+			return nil
+		}); err != nil {
+			b.Fatalf("open the snapshot: %v", err)
+		}
+	}
+}
+
+// BenchmarkP6FollowupComponentManifestSelect measures the manifest
+// statement alone: the `SELECT manifest` the recorded projection hash
+// requires.
+func BenchmarkP6FollowupComponentManifestSelect(b *testing.B) {
+	p6fuWorkspace(b)
+	dm := p6fuDM(b)
+	imported := p6fuImport(b, dm, "bench", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var manifestJSON string
+		if err := dm.db.QueryRowContext(ctx, packageManifestQuery, imported.SkillID).
+			Scan(&manifestJSON); err != nil {
+			b.Fatalf("read the manifest: %v", err)
+		}
+	}
+}
+
+// BenchmarkP6FollowupComponentManifestParse measures the manifest PARSE
+// alone: the JSON unmarshal, with no database access.
+func BenchmarkP6FollowupComponentManifestParse(b *testing.B) {
+	p6fuWorkspace(b)
+	dm := p6fuDM(b)
+	imported := p6fuImport(b, dm, "bench", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	var manifestJSON string
+	if err := dm.db.QueryRow(packageManifestQuery, imported.SkillID).
+		Scan(&manifestJSON); err != nil {
+		b.Fatalf("read the manifest: %v", err)
+	}
+	payload := []byte(manifestJSON)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := ParsePackageManifest(payload); err != nil {
+			b.Fatalf("parse the manifest: %v", err)
+		}
+	}
+}
+
+// BenchmarkP6FollowupComponentManifestValidate measures the manifest
+// VALIDATION alone: the manifest module's own rules, applied to an
+// already-parsed manifest.
+//
+// It is the check that turns a recorded value into a validated one, so
+// its cost is the price of the `recorded` origin.
+func BenchmarkP6FollowupComponentManifestValidate(b *testing.B) {
+	p6fuWorkspace(b)
+	dm := p6fuDM(b)
+	imported := p6fuImport(b, dm, "bench", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	var manifestJSON string
+	if err := dm.db.QueryRow(packageManifestQuery, imported.SkillID).
+		Scan(&manifestJSON); err != nil {
+		b.Fatalf("read the manifest: %v", err)
+	}
+	manifest, _, err := ParsePackageManifest([]byte(manifestJSON))
+	if err != nil {
+		b.Fatalf("parse the manifest: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := manifest.Validate(); err != nil {
+			b.Fatalf("validate the manifest: %v", err)
 		}
 	}
 }

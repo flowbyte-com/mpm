@@ -171,26 +171,54 @@ watches its configuration directory and reloads agents after a save, so
 the definition is live without a restart; `/reload` forces it if the host
 has not noticed yet.
 
-The definition:
+**The canonical install does this for you.** `mpm-opencode/install.sh`
+and `make install` both install the definition, so a fresh installation
+never leaves a review subagent with the parent's tool surface. The
+installed copy is MPM-owned state: it is refreshed from the template on
+every install, and the guard test below fails when it has drifted.
+
+The definition is **layered**, and each layer says what it closes:
 
 - **denies every MPM tool by name**, so a denied tool is removed from the
   reviewer's tool list entirely — the reviewer cannot call it and cannot
   see it;
-- **denies `edit`** (a reviewer cannot change what it reviews) and
+- **denies the MPM binaries at the command position** — `mpm`,
+  `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`,
+  `mpm-update`, and their installed paths — and denies the installers
+  (`install.sh`, `uninstall.sh`, `make install`/`uninstall`/`deploy`)
+  and the service-control commands, so the command line cannot reach the
+  substrate either;
+- **denies the `read` tool** a live MPM workspace, and closes the
+  `external_directory` boundary of a runtime root;
+- **denies `edit`** (a reviewer cannot change what it reviews),
   **`subagent`** (a reviewer cannot launch an agent that lacks the
-  isolation);
-- **denies the shell routes into the same substrate** (`mpm call`,
-  `mpm-memory`) and the redirections that would write into a live MPM
-  workspace, so the command line is closed too;
+  isolation), **`skill`**, **`question`** and Code Mode
+  (**`execute`**, the bridge to every tool the host publishes);
 - requires findings to be recorded in a **filesystem scratchpad**, not in
-  the substrate.
+  the substrate, and points at the **disposable sandbox**
+  (`mpm-opencode/scripts/reviewer_sandbox.py`) for anything that would
+  otherwise need the substrate at all.
+
+**What this does not close.** The shell runs with the host user's
+authority, and a permission rule is a pattern match on a command string:
+the layer is a **barrier, not a jail**. `grep` and `glob` are not
+path-restricted (their resources are the pattern and the glob), so the
+reviewer's own scope — the working tree it was given — is what keeps
+them off a runtime root. The **sandbox** is the layer that does not
+depend on the pattern being complete: inside it, `HOME`, `TMPDIR` and
+`MPM_WORKSPACE` point at scratch directories, so a route the rules do
+not name still cannot write into the operator's runtime root.
 
 The deny list is **machine-checked against the registry**:
 `internal/core/tools/registry_list.go` is the authoritative list of every
 MPM tool, and
 [`tests/test_reviewer_isolation_denies_every_mpm_tool.py`](./tests/test_reviewer_isolation_denies_every_mpm_tool.py)
 fails if a tool is added to the registry without a matching deny rule.
-The isolation therefore cannot quietly erode as the tool surface grows.
+The registry parse is itself checked, so a name the parse cannot
+capture fails the test rather than passing it. The binary deny list is
+checked against the **Makefile's own** binary variables, so a new MPM
+binary cannot be built without the list being extended. The isolation
+therefore cannot quietly erode as the tool surface grows.
 
 ## Installation
 

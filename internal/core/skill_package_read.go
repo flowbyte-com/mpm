@@ -47,6 +47,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -968,7 +969,7 @@ func (dm *DatabaseManager) ReadSkillWithPackageProvenance(ctx context.Context, n
 		skill      *Skill
 		provenance *SkillPackageProvenance
 	)
-	err := dm.withPackageReadSnapshot(ctx, func(tx *sql.Tx) error {
+	err := withSkillReadSnapshot(ctx, dm, func(tx *sql.Tx) error {
 		s, p, err := readSkillWithPackageProvenanceTx(ctx, tx, nameOrID, version)
 		if err != nil {
 			return err
@@ -980,6 +981,79 @@ func (dm *DatabaseManager) ReadSkillWithPackageProvenance(ctx context.Context, n
 		return nil, nil, err
 	}
 	return skill, provenance, nil
+}
+
+// withSkillReadSnapshot runs fn inside the snapshot the combined read
+// uses.
+//
+// It exists as a NAMED SEAM rather than an inline call to
+// `dm.withPackageReadSnapshot` for one reason: the concurrency
+// invariant has to be testable DETERMINISTICALLY against the EXPORTED
+// `ReadSkillWithPackageProvenance`, not only against an internal
+// helper.
+//
+// A test that drives the internal helper proves the helper takes one
+// snapshot. It does NOT prove the exported function does — and an
+// exported function that had been rewritten as two independent reads
+// would pass such a test every time. This seam lets a test supply the
+// snapshot the exported function runs inside, so the interleaving is
+// chosen rather than raced for, and so the test can prove the exported
+// function really took ONE snapshot (the seam is not called at all if
+// it does not).
+//
+// The seam is a package-level variable, so it is guarded by a mutex
+// and it is only ever set by a test. Production always takes the
+// default path.
+var skillReadSnapshotHook struct {
+	mu   sync.Mutex
+	hook func(ctx context.Context, fn func(*sql.Tx) error) error
+}
+
+// setSkillReadSnapshotHook installs a snapshot provider for the
+// combined read, and returns a function that restores the previous one.
+//
+// It exists for ONE reason: the concurrency invariant has to be
+// testable DETERMINISTICALLY against the EXPORTED
+// `ReadSkillWithPackageProvenance`, not only against an internal
+// helper.
+//
+// A test that drives the internal helper proves the helper takes one
+// snapshot. It does NOT prove the exported function does — and an
+// exported function that had been rewritten as two independent reads
+// would pass such a test every time. This seam lets a test supply the
+// snapshot the exported function runs inside, so the interleaving is
+// CHOSEN rather than raced for — and so the test can prove the
+// exported function really took ONE snapshot, because the seam is not
+// called at all if it does not.
+//
+// It lives here rather than in a test file so that the production
+// function and the test seam cannot drift apart: the production
+// function calls the seam, and the test drives the seam.
+func setSkillReadSnapshotHook(hook func(ctx context.Context, fn func(*sql.Tx) error) error) (restore func()) {
+	skillReadSnapshotHook.mu.Lock()
+	previous := skillReadSnapshotHook.hook
+	skillReadSnapshotHook.hook = hook
+	skillReadSnapshotHook.mu.Unlock()
+	return func() {
+		skillReadSnapshotHook.mu.Lock()
+		skillReadSnapshotHook.hook = previous
+		skillReadSnapshotHook.mu.Unlock()
+	}
+}
+
+// withSkillReadSnapshot runs fn inside one read snapshot.
+//
+// The default path is `dm.withPackageReadSnapshot`. When a test has
+// installed a seam, the seam provides the snapshot instead — which is
+// how the concurrent deletion is made deterministic.
+func withSkillReadSnapshot(ctx context.Context, dm *DatabaseManager, fn func(*sql.Tx) error) error {
+	skillReadSnapshotHook.mu.Lock()
+	hook := skillReadSnapshotHook.hook
+	skillReadSnapshotHook.mu.Unlock()
+	if hook == nil {
+		return dm.withPackageReadSnapshot(ctx, fn)
+	}
+	return hook(ctx, fn)
 }
 
 // readSkillWithPackageProvenanceTx is the snapshot-scoped form of the
@@ -1085,10 +1159,14 @@ func skillPackageProvenanceInTx(ctx context.Context, tx *sql.Tx, skillID, projec
 	// This is the one hash the caller can check on its own: it hashes
 	// the exact `body` field this response carries. The recorded hashes
 	// cover the projection, which the response does not carry.
-	if body != "" {
-		provenance.BodySHA256 = sha256Hex([]byte(body))
-		provenance.HashOrigins.BodySHA256 = PackageHashOriginRecomputed
-	}
+	//
+	// It is computed UNCONDITIONALLY. The hash of an empty body is
+	// well defined — it is the hash of the empty byte string — so an
+	// empty body is a body with a hash, not a body without one.
+	// `unavailable` is reserved for the case where no body exists at
+	// all, which cannot happen for a readable skill.
+	provenance.BodySHA256 = sha256Hex([]byte(body))
+	provenance.HashOrigins.BodySHA256 = PackageHashOriginRecomputed
 
 	// ── The projection's hash: RECORDED in the stored manifest. ──────
 	//
@@ -1186,11 +1264,20 @@ func loadSkillProjection(ctx context.Context, tx *sql.Tx, skillID string) (strin
 // behaviour: after every read operation, the whole substrate is
 // unchanged.
 //
-// The ONE reader that does not use this helper is
-// `SkillPackageProvenance`: its read is a SINGLE statement, and a single
-// statement sees ONE consistent snapshot on its own — so it needs no
-// transaction, and the `read` action's hot path pays for neither a
-// connection checkout nor a BEGIN/ROLLBACK.
+// EVERY reader uses this helper now.
+//
+// `SkillPackageProvenance` was the ONE exception in P6: its read was a
+// SINGLE statement, and a single statement sees ONE consistent snapshot
+// on its own — so it needed no transaction, and the `read` action's hot
+// path paid for neither a connection checkout nor a BEGIN/ROLLBACK.
+//
+// The follow-up changed that. The accessor now reads the MANIFEST for
+// the recorded projection hash, so it needs the snapshot: the manifest
+// and the package row have to come from the same database state, or the
+// accessor could report a recorded hash that describes a different
+// package. The `read` action's hot path therefore pays for a
+// connection checkout and a BEGIN/ROLLBACK now, and the cost is
+// measured and stated in `docs/SPEC.md` §6.12.
 func (dm *DatabaseManager) withPackageReadSnapshot(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if dm.db == nil {
 		return packageReadErrorf(PackageReadReasonDatabaseFailure, "",

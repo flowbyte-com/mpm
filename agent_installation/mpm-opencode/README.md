@@ -293,16 +293,38 @@ configuration directory and reloads agents after a save, so the definition
 is live without a restart; `/reload` forces it if the host has not noticed
 yet. Launch it with `subagent(agent="mpm-reviewer", …)`.
 
-The definition denies the MPM tools, `edit` and `subagent`, and closes the
-shell routes into the same substrate (`mpm call`, `mpm-memory`) and the
-redirections that would write into a live MPM workspace. It requires
-findings to be recorded in a **filesystem scratchpad**, not in the substrate.
+**The canonical install does this for you** — `./install.sh` and
+`make install` both install the definition, so a fresh installation never
+leaves a review subagent with the parent's tool surface. The installed
+copy is MPM-owned state: it is refreshed from the template on every
+install, and the guard test fails when it has drifted.
+
+The isolation is **layered**. The definition denies the MPM tools by name;
+denies the MPM **binaries** at the command position (`mpm`, `mpm-mcp`,
+`mpm-scheduler`, `mpm-critic`, `mpm-telemetry`, `mpm-update`, and their
+installed paths); denies the installers and the service-control commands;
+denies the `read` tool a live MPM workspace and closes its
+`external_directory` boundary; denies `edit`, `subagent`, `skill`,
+`question` and Code Mode (`execute`); and requires findings to be recorded
+in a **filesystem scratchpad**, not in the substrate.
+
+**What it does not close.** The shell runs with the host user's authority
+and a permission rule is a pattern match on a command string, so the layer
+is a **barrier, not a jail**; `grep` and `glob` are not path-restricted.
+The **sandbox** (`scripts/reviewer_sandbox.py`) is the layer that does not
+depend on the pattern being complete: it points `HOME`, `TMPDIR` and
+`MPM_WORKSPACE` at scratch directories, so a route the rules do not name
+still cannot write into the operator's runtime root.
 
 The deny list is **machine-checked against the registry** —
 `internal/core/tools/registry_list.go` is the authoritative list of every
 MPM tool, and `agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py`
 fails if a tool is added to the registry without a matching deny rule, so
-the isolation cannot quietly erode as the tool surface grows.
+the isolation cannot quietly erode as the tool surface grows. The registry
+parse is itself checked (a name it cannot capture fails the test rather
+than passing it), the binary deny list is checked against the Makefile's
+own binary variables, and the **installed copy** is checked against the
+template.
 
 ## Verification
 
