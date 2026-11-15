@@ -773,17 +773,22 @@ func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID s
 	// one was arrived at. The importer writes it and the manifest's
 	// `version_override` from the same plan, so the row carries the same
 	// record — and reading it here costs no manifest parse.
-	if version != "" || versionSource != "" {
-		override := PackageVersionOverride{
-			Effective: version,
-			Reason:    versionSource,
-		}
-		if declaredVersion.Valid {
-			declared := declaredVersion.String
-			override.Declared = &declared
-		}
-		provenance.VersionOverride = &override
+	//
+	// It is ALWAYS present for a packaged skill. The row's `version` and
+	// `version_source` columns are NOT NULL (§6.8), so the record always
+	// exists; the accessor does not test for emptiness, because a
+	// packaged skill with no version provenance would be a row that
+	// contradicts its own schema, and `verify` — not the provenance —
+	// is where such a contradiction is judged.
+	override := PackageVersionOverride{
+		Effective: version,
+		Reason:    versionSource,
 	}
+	if declaredVersion.Valid {
+		declared := declaredVersion.String
+		override.Declared = &declared
+	}
+	provenance.VersionOverride = &override
 	return provenance, nil
 }
 

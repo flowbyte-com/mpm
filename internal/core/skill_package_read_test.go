@@ -358,6 +358,11 @@ func TestP6VerifyReportsACorruptedManifestIdentity(t *testing.T) {
 //
 // A call to one of them is a statement; a bare REFERENCE to one of them
 // is a method value, which the call walk cannot see.
+//
+// `Prepare` and `PrepareContext` are in the set because a prepared
+// statement's SQL lives at the PREPARE site: the `*sql.Stmt` it returns
+// carries the SQL forward, so a write prepared there would be executed by
+// a later `stmt.Query…` call that carries no SQL of its own.
 var p6DatabaseMethodNames = map[string]bool{
 	"Exec":            true,
 	"ExecContext":     true,
@@ -365,13 +370,26 @@ var p6DatabaseMethodNames = map[string]bool{
 	"QueryRow":        true,
 	"QueryContext":    true,
 	"QueryRowContext": true,
+	"Prepare":         true,
+	"PrepareContext":  true,
 }
 
-// p6SQLWriteKeywords are the statement keywords that begin a WRITE.
+// p6SQLKeywords are the keywords a SQL statement can begin with.
 //
-// A string constant that begins with one of them is a write statement the
-// reader owns, even if no call site issues it yet — and even if it is
-// declared inside a function rather than at the top level.
+// A text whose first word is one of them is a STATEMENT, and it is
+// therefore subject to the statement check. A text whose first word is
+// not one of them — "skill_package", "utf-8", "manifest_identity" — is
+// not a statement, and is left alone.
+var p6SQLKeywords = []string{
+	"SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE", "DROP", "ALTER",
+	"CREATE", "PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT",
+	"ROLLBACK", "REASSIGN", "GRANT", "REINDEX", "ANALYZE", "WITH",
+}
+
+// p6SQLWriteKeywords are the keywords that make a statement a WRITE.
+//
+// A statement that carries one of them anywhere — not merely at its
+// start — is a write, and the reader issues none.
 var p6SQLWriteKeywords = []string{
 	"INSERT", "UPDATE", "DELETE", "REPLACE", "DROP", "ALTER", "CREATE",
 	"PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT", "ROLLBACK",
@@ -392,26 +410,205 @@ func p6UnquoteSQL(literal string) (string, bool) {
 	return unquoted, true
 }
 
+// p6ConstStringValue returns the string a constant expression carries.
+//
+// It handles a plain literal and a CONCATENATION of literals, because
+// `"DELETE " + "FROM …"` is a constant too — and a write written that
+// way must not slip past the constant check.
+func p6ConstStringValue(expr ast.Expr) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if e.Kind != token.STRING {
+			return "", false
+		}
+		return p6UnquoteSQL(e.Value)
+	case *ast.BinaryExpr:
+		if e.Op != token.ADD {
+			return "", false
+		}
+		left, ok := p6ConstStringValue(e.X)
+		if !ok {
+			return "", false
+		}
+		right, ok := p6ConstStringValue(e.Y)
+		if !ok {
+			return "", false
+		}
+		return left + right, true
+	case *ast.ParenExpr:
+		return p6ConstStringValue(e.X)
+	}
+	return "", false
+}
+
+// p6ScrubSQL strips the parts of a SQL text that are not statement
+// structure: comments, string literals and quoted identifiers.
+//
+// What is left is the statement's CODE — the words that decide what it
+// does. A comment is stripped, not obeyed: `-- DELETE FROM x` scrubs to
+// "DELETE FROM x", so the statement behind the comment is still seen.
+func p6ScrubSQL(sql string) string {
+	var b strings.Builder
+	runes := []rune(sql)
+	for i := 0; i < len(runes); i++ {
+		switch {
+		case runes[i] == '-' && i+1 < len(runes) && runes[i+1] == '-':
+			for i < len(runes) && runes[i] != '\n' {
+				i++
+			}
+			b.WriteRune('\n')
+		case runes[i] == '/' && i+1 < len(runes) && runes[i+1] == '*':
+			i += 2
+			for i+1 < len(runes) && !(runes[i] == '*' && runes[i+1] == '/') {
+				i++
+			}
+			i++
+			b.WriteRune(' ')
+		case runes[i] == '\'' || runes[i] == '"' || runes[i] == '`':
+			quote := runes[i]
+			i++
+			for i < len(runes) && runes[i] != quote {
+				if runes[i] == quote && i+1 < len(runes) && runes[i+1] == quote {
+					i++
+				}
+				i++
+			}
+			b.WriteRune(' ')
+		default:
+			b.WriteRune(runes[i])
+		}
+	}
+	return b.String()
+}
+
+// p6SQLWords splits a SQL text into its keywords and identifiers.
+//
+// A word is a run of letters, digits and UNDERSCORES, so an identifier
+// like `last_update` is ONE word and is never mistaken for the keyword
+// `UPDATE`.
+func p6SQLWords(sql string) []string {
+	var words []string
+	var current strings.Builder
+	for _, r := range sql {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			current.WriteRune(r)
+		default:
+			if current.Len() > 0 {
+				words = append(words, current.String())
+				current.Reset()
+			}
+		}
+	}
+	if current.Len() > 0 {
+		words = append(words, current.String())
+	}
+	return words
+}
+
+// p6IsSQLStatement reports whether a SQL text is a STATEMENT at all.
+//
+// A text whose first word is a SQL keyword is one; a text whose first
+// word is not — "skill_package", "utf-8", "manifest_identity" — is a
+// constant that happens to hold a string, and is left alone.
+func p6IsSQLStatement(sql string) bool {
+	trimmed := strings.TrimSpace(sql)
+	if trimmed == "" {
+		return false
+	}
+	body := strings.TrimRight(strings.ToUpper(p6ScrubSQL(trimmed)), " \t\r\n")
+	body = strings.TrimSuffix(body, ";")
+	body = strings.TrimRight(body, " \t\r\n")
+	words := p6SQLWords(body)
+	if len(words) == 0 {
+		return false
+	}
+	return p6WordIn(strings.ToUpper(words[0]), p6SQLKeywords)
+}
+
+// p6SQLStatementProblem describes why a SQL text is not a single read
+// statement, or returns the empty string when it is one.
+//
+// The check is STATEMENT-based, not prefix-based, and it covers:
+//
+//   - the statement must BEGIN with SELECT — a `WITH … UPDATE` or a
+//     `-- DELETE` is a write however it is dressed;
+//   - the statement must be a SINGLE statement — a `;` anywhere but at
+//     the very end means a second statement follows;
+//   - the statement must carry NO write keyword anywhere — so a
+//     `SELECT 1; DELETE …` is caught by the second rule and a
+//     `SELECT … WHERE x = 'UPDATE'` is not, because the string literal
+//     is scrubbed first.
+//
+// It returns the empty string for a text that is not a statement at all
+// (see p6IsSQLStatement), which is how a non-SQL constant is left alone.
+func p6SQLStatementProblem(sql string) string {
+	trimmed := strings.TrimSpace(sql)
+	if trimmed == "" {
+		return ""
+	}
+	code := p6ScrubSQL(trimmed)
+	body := strings.TrimRight(strings.ToUpper(code), " \t\r\n")
+	body = strings.TrimSuffix(body, ";")
+	body = strings.TrimRight(body, " \t\r\n")
+
+	words := p6SQLWords(body)
+	if len(words) == 0 {
+		return ""
+	}
+	first := strings.ToUpper(words[0])
+	if !p6WordIn(first, p6SQLKeywords) {
+		// Not a statement: a constant like "skill_package" or
+		// "manifest_identity".
+		return ""
+	}
+	if first != "SELECT" {
+		return "the statement begins with " + first + ", not SELECT"
+	}
+	if strings.Contains(body, ";") {
+		return "the statement carries more than one statement"
+	}
+	for _, word := range words[1:] {
+		upper := strings.ToUpper(word)
+		if p6WordIn(upper, p6SQLWriteKeywords) {
+			return "the statement carries the write keyword " + upper
+		}
+	}
+	return ""
+}
+
+// p6WordIn reports whether a word is in a keyword list.
+func p6WordIn(word string, list []string) bool {
+	for _, candidate := range list {
+		if word == candidate {
+			return true
+		}
+	}
+	return false
+}
+
 // p6AssertReaderIssuesNoWrite walks ONE reader source file and asserts
-// that it issues no write and that every statement it issues is a
-// SELECT. It returns the number of statements it found.
+// that it issues no write and that every statement it owns is a single
+// read statement. It returns the number of statements it found.
 //
 // The walk has several halves, and each closes an evasion route:
 //
 //   - a CALL to a database method is inspected, and the SQL it carries is
-//     checked — so a write smuggled through `QueryContext` is caught;
+//     checked — so a write smuggled through `QueryContext` is caught,
+//     and so is one prepared through `PrepareContext`;
 //   - a bare REFERENCE to a database method — a method value — is
 //     refused, so `exec := db.ExecContext; exec(ctx, "UPDATE …")`
 //     cannot slip past the call walk;
-//   - a SQL constant that begins with a WRITE keyword is refused, so a
-//     write cannot hide in a constant — used or not;
+//   - every string constant the file declares is checked: one that is a
+//     STATEMENT must be a single read statement, so a write cannot hide
+//     in a constant — used or not, concatenated or not;
 //   - a statement whose SQL is neither a literal nor one of the reader's
 //     own constants is refused, so a statement built at runtime cannot
 //     slip past either;
-//   - every SQL constant the file declares is checked for being a
-//     SELECT, so a statement that no call site uses yet is still a
-//     statement the reader owns.
-//
+//   - every SQL constant the file declares must be USED by a statement,
+//     so a statement no call site issues is still a statement the reader
+//     owns — and so a file cannot declare SQL it never runs.
+
 // Both literal forms are decoded, so a statement written as a raw
 // backtick string and one written as a double-quoted string are checked
 // alike — and a double-quoted SELECT is not a false positive.
@@ -426,7 +623,8 @@ func p6AssertReaderIssuesNoWrite(t *testing.T, sourceFile string) int {
 
 	// The SQL the reader's own constants declare — at the top level AND
 	// inside a function, because a function-local constant is just as
-	// much a statement the reader owns.
+	// much a statement the reader owns. A constant may be a plain
+	// literal or a CONCATENATION of literals, and both are resolved.
 	consts := map[string]string{}
 	ast.Inspect(parsed, func(n ast.Node) bool {
 		gen, ok := n.(*ast.GenDecl)
@@ -442,15 +640,11 @@ func p6AssertReaderIssuesNoWrite(t *testing.T, sourceFile string) int {
 				if i >= len(vs.Values) {
 					continue
 				}
-				lit, ok := vs.Values[i].(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					continue
-				}
-				sql, ok := p6UnquoteSQL(lit.Value)
+				value, ok := p6ConstStringValue(vs.Values[i])
 				if !ok {
 					continue
 				}
-				consts[name.Name] = sql
+				consts[name.Name] = value
 			}
 		}
 		return true
@@ -460,6 +654,10 @@ func p6AssertReaderIssuesNoWrite(t *testing.T, sourceFile string) int {
 	// selector that is not in this set is a bare reference — a method
 	// value — and the reader must not bind one.
 	calledSelectors := map[token.Pos]bool{}
+
+	// The constants a statement actually used. A SQL constant no
+	// statement uses is dead SQL the reader still owns.
+	usedConstants := map[string]bool{}
 
 	queries := 0
 	ast.Inspect(parsed, func(n ast.Node) bool {
@@ -488,11 +686,11 @@ func p6AssertReaderIssuesNoWrite(t *testing.T, sourceFile string) int {
 		// not. The SQL is the first argument after the context.
 		sqlArg := 0
 		switch sel.Sel.Name {
-		case "QueryContext", "QueryRowContext":
+		case "QueryContext", "QueryRowContext", "PrepareContext":
 			sqlArg = 1
 		}
 		if len(call.Args) <= sqlArg {
-			t.Errorf("%s issues a query with no SQL at line %d", sourceFile, fset.Position(call.Pos()).Line)
+			t.Errorf("%s issues a statement with no SQL at line %d", sourceFile, fset.Position(call.Pos()).Line)
 			return true
 		}
 		// The SQL is either a literal or one of the reader's own
@@ -502,13 +700,13 @@ func p6AssertReaderIssuesNoWrite(t *testing.T, sourceFile string) int {
 		switch arg := call.Args[sqlArg].(type) {
 		case *ast.BasicLit:
 			if arg.Kind != token.STRING {
-				t.Errorf("%s issues a query whose SQL is not a string at line %d",
+				t.Errorf("%s issues a statement whose SQL is not a string at line %d",
 					sourceFile, fset.Position(call.Pos()).Line)
 				return true
 			}
 			resolved, ok := p6UnquoteSQL(arg.Value)
 			if !ok {
-				t.Errorf("%s issues a query whose SQL literal does not decode at line %d",
+				t.Errorf("%s issues a statement whose SQL literal does not decode at line %d",
 					sourceFile, fset.Position(call.Pos()).Line)
 				return true
 			}
@@ -516,19 +714,20 @@ func p6AssertReaderIssuesNoWrite(t *testing.T, sourceFile string) int {
 		case *ast.Ident:
 			resolved, ok := consts[arg.Name]
 			if !ok {
-				t.Errorf("%s issues a query whose SQL is %s, which is not one of its own constants at line %d",
+				t.Errorf("%s issues a statement whose SQL is %s, which is not one of its own constants at line %d",
 					sourceFile, arg.Name, fset.Position(call.Pos()).Line)
 				return true
 			}
+			usedConstants[arg.Name] = true
 			sql = resolved
 		default:
-			t.Errorf("%s issues a query whose SQL is neither a literal nor a constant at line %d",
+			t.Errorf("%s issues a statement whose SQL is neither a literal nor a constant at line %d",
 				sourceFile, fset.Position(call.Pos()).Line)
 			return true
 		}
-		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sql)), "SELECT") {
-			t.Errorf("%s issues a non-SELECT statement at line %d: %q",
-				sourceFile, fset.Position(call.Pos()).Line, sql)
+		if problem := p6SQLStatementProblem(sql); problem != "" {
+			t.Errorf("%s issues a statement that is not a single read statement at line %d: %s: %q",
+				sourceFile, fset.Position(call.Pos()).Line, problem, sql)
 		}
 		return true
 	})
@@ -555,18 +754,32 @@ func p6AssertReaderIssuesNoWrite(t *testing.T, sourceFile string) int {
 		return true
 	})
 
-	// Every SQL constant the reader declares is a SELECT too — a constant
-	// that no call site uses yet is still a statement the reader owns.
+	// ── The constant route. ───────────────────────────────────────────
+	//
+	// Every string constant the file declares is checked: one that is a
+	// STATEMENT must be a single read statement. A write can therefore
+	// hide in a constant — used or not, at the top level or inside a
+	// function, written as a literal or as a concatenation.
 	for name, sql := range consts {
-		trimmed := strings.ToUpper(strings.TrimSpace(sql))
-		if strings.HasPrefix(trimmed, "SELECT") {
+		if !p6IsSQLStatement(sql) {
 			continue
 		}
-		for _, keyword := range p6SQLWriteKeywords {
-			if strings.HasPrefix(trimmed, keyword) {
-				t.Errorf("the SQL constant %s is a write statement (%s): %q", name, keyword, sql)
-				break
-			}
+		if problem := p6SQLStatementProblem(sql); problem != "" {
+			t.Errorf("the SQL constant %s is not a single read statement: %s: %q", name, problem, sql)
+		}
+	}
+
+	// ── The dead-SQL route. ───────────────────────────────────────────
+	//
+	// A SQL constant no statement uses is still a statement the reader
+	// owns, and a file that declares SQL it never runs is a file whose
+	// guard has nothing to check. Both are refused.
+	for name, sql := range consts {
+		if !p6IsSQLStatement(sql) {
+			continue
+		}
+		if !usedConstants[name] {
+			t.Errorf("the SQL constant %s is never used by a statement: %q", name, sql)
 		}
 	}
 	return queries
@@ -578,16 +791,17 @@ func p6AssertReaderIssuesNoWrite(t *testing.T, sourceFile string) int {
 // `sql.TxOptions{ReadOnly}` and issues a plain `BEGIN`, so the snapshot's
 // read-only nature rests on DISCIPLINE. This test makes the discipline
 // structural: the reader's source contains no `Exec` call at all, it
-// binds no database method, and EVERY statement it issues is a `SELECT`.
+// binds no database method, and EVERY statement it owns — issued or
+// merely declared — is a single read statement.
 //
 // It is a STATIC check on purpose. A dynamic one could only prove that
 // the paths a test happens to exercise did not write; a source check
 // proves that there is no statement they could have written.
 //
 // The check is an AST walk, not a hand-maintained list: it finds EVERY
-// call that issues a query and checks the SQL that call carries. A list
-// would go stale the moment a statement were added, and a write smuggled
-// through `QueryContext` would evade it.
+// call that issues a statement and checks the SQL that call carries. A
+// list would go stale the moment a statement were added, and a write
+// smuggled through `QueryContext` would evade it.
 //
 // BOTH reader files are walked, not one: the reader is the two files
 // together, and a guard that covered only one of them would have left

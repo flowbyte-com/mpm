@@ -2506,7 +2506,7 @@ Corruption is **never** reported as a missing file, and there is no fallback to 
 
 **That is the decision of record for the disagreement case: the ROW wins.** If a row and its manifest ever disagree about the version provenance, the provenance reports the **row's** values and `verify` reports the disagreement as a `manifest_identity` failure. The row is what the package IS, in the store the reader reads; the manifest is what the package CLAIMS about itself. A reader that silently preferred the claim would be reporting the manifest's story rather than the package's state.
 
-Because the row's `version` and `version_source` columns are `NOT NULL` (§6.8), the object is **always** present for a packaged skill — including when the stored manifest does not parse. The accessor nevertheless tests the values for emptiness rather than relying on the constraint, so a row that somehow violates it still yields a well-formed object. That is a change from the first commit, where the override was recovered from the manifest and was therefore absent when the manifest was unreadable; it is disclosed here because it changes the `read` response's shape for a damaged package.
+Because the row's `version` and `version_source` columns are `NOT NULL` (§6.8), the version provenance **always exists** for a packaged skill, and the accessor therefore always emits the object — including when the stored manifest does not parse. The accessor does not test the values for emptiness: a packaged skill with no version provenance would be a row that contradicts its own schema, and `verify` — not the provenance — is where such a contradiction is judged. That is a change from the first commit, where the override was recovered from the manifest and was therefore absent when the manifest was unreadable; it is disclosed here because it changes the `read` response's shape for a damaged package.
 
 **The provenance accessor is tolerant where the rest of the reader is strict.** `read` must keep returning the entrypoint's projection even when the package's manifest is broken — that is what `verify` is for. What the accessor never does is claim a scan that was not recorded: a missing entrypoint file row reports **no** scan.
 
@@ -2520,17 +2520,31 @@ Because the row's `version` and `version_source` columns are `NOT NULL` (§6.8),
 
 **The read snapshot's read-only nature rests on discipline, and the discipline is pinned.** The transaction is opened with `sql.TxOptions{ReadOnly: true}`, but the SQLite driver ignores that option and issues a plain (deferred) `BEGIN`. The snapshot therefore takes a shared lock and no write lock, and it is read-only because the reader issues no write.
 
-That is pinned by an **AST walk** over the reader's own source — **both** reader files, not one — rather than by a hand-maintained list. The walk closes five evasion routes:
+That is pinned by an **AST walk** over the reader's own source — **both** reader files, not one — rather than by a hand-maintained list. The check is **statement-based**, not prefix-based: it scrubs the SQL's comments, string literals and quoted identifiers, and then asks what the statement **does**.
+
+- a statement must **begin** with `SELECT` — so `WITH … UPDATE` and `-- DELETE` are writes however they are dressed;
+- a statement must be a **single** statement — a `;` anywhere but at the very end means another statement follows;
+- a statement must carry **no write keyword anywhere** — so `SELECT … WHERE x = 'UPDATE'` is not caught, because the string literal is scrubbed first.
+
+The walk closes these routes, and **every one of them has been proven by injection** — each was injected into the reader, the guard was observed to fail, and the guard was observed to pass again once the injection was removed:
 
 | evasion | what the guard says |
 |---|---|
 | a write through `Exec` / `ExecContext` | *"issues a write through ExecContext at line N: the reader must never write"* |
-| a write smuggled through `QueryContext` | *"issues a non-SELECT statement at line N: \"DELETE FROM …\""* |
 | a **method value** — `exec := db.ExecContext` | *"binds the database method ExecContext at line N: the reader must never bind a database method"* |
-| a write hidden in a constant | *"the SQL constant X is a write statement (DELETE): …"* |
-| a statement whose SQL is built at runtime | *"issues a query whose SQL is neither a literal nor a constant at line N"* |
+| a method value passed as an **argument** | *"binds the database method ExecContext at line N"* |
+| a write smuggled through `QueryContext` | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT"* |
+| a write smuggled through `PrepareContext` | the same, at the prepare site — a prepared statement's SQL lives there |
+| a write in a constant, **used** | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT"* |
+| a write in a constant, **unused** | *"the SQL constant X is not a single read statement: the statement begins with DELETE, not SELECT"* |
+| a write in a **concatenated** constant (`"DELETE " + "FROM …"`) | the same — the concatenation is resolved |
+| a write in a `WITH … UPDATE` constant | *"…the statement begins with WITH, not SELECT"* |
+| a write in a **comment-prefixed** constant | *"…the statement begins with DELETE, not SELECT"* — the comment is stripped, not obeyed |
+| a statement whose SQL is built at runtime | *"issues a statement whose SQL is neither a literal nor a constant at line N"* |
+| a **multi-statement** `"SELECT 1; DELETE …"` | *"…the statement carries more than one statement"* |
+| a **dead** SQL constant no statement uses | *"the SQL constant X is never used by a statement"* |
 
-Every route has been **proven by injection**: each was injected into the reader, the guard was observed to fail, and the guard was observed to pass again once the injection was removed. A double-quoted SQL literal is **not** a false positive — the walk decodes both literal forms, so a statement written either way is checked.
+A double-quoted `SELECT` is **not** a false positive — the walk decodes both literal forms, so a statement written either way is checked.
 
 The behaviour is pinned too — the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read.
 
