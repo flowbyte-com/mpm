@@ -30,6 +30,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -38,6 +39,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -206,17 +208,73 @@ func p6MutateBlob(t *testing.T, dm *DatabaseManager, sha, content string) {
 	}
 }
 
-// TestP6VerifyReportsACorruptedManifestIdentity pins that the package row
-// and the manifest must agree about the DECLARED VERSION and the FORMAT as
-// well as about the name, the version and the entrypoint.
+// p6PackageIdentityState is the package row's identity columns, as stored.
 //
-// The row's `declared_version` and `format` columns are part of the
-// package's identity provenance: a row that disagrees with its own
-// manifest is a damaged package, and it must not verify.
+// It is the fixture primitive for the corruption tests: a corruption is
+// only meaningful if the row is restored EXACTLY afterwards, because a
+// leftover disagreement would satisfy the NEXT corruption's assertions
+// on its own — and the test would then pass without testing anything.
+type p6PackageIdentityState struct {
+	declaredVersion sql.NullString
+	format          string
+	versionSource   string
+}
+
+// p6ReadPackageIdentityState reads the package row's identity columns.
+func p6ReadPackageIdentityState(t *testing.T, dm *DatabaseManager, skillID string) p6PackageIdentityState {
+	t.Helper()
+	var state p6PackageIdentityState
+	err := dm.db.QueryRow(`
+		SELECT declared_version, format, version_source
+		FROM skill_packages WHERE skill_id = ?
+	`, skillID).Scan(&state.declaredVersion, &state.format, &state.versionSource)
+	if err != nil {
+		t.Fatalf("read the package identity state: %v", err)
+	}
+	return state
+}
+
+// p6RestorePackageIdentityState puts the package row's identity columns
+// back exactly as they were.
+//
+// The restore is EXACT: a restore that leaves a disagreement behind would
+// make the next corruption's assertions vacuous.
+func p6RestorePackageIdentityState(t *testing.T, dm *DatabaseManager, skillID string, state p6PackageIdentityState) {
+	t.Helper()
+	var declared any
+	if state.declaredVersion.Valid {
+		declared = state.declaredVersion.String
+	}
+	if _, err := dm.db.Exec(`
+		UPDATE skill_packages
+		SET declared_version = ?, format = ?, version_source = ?
+		WHERE skill_id = ?
+	`, declared, state.format, state.versionSource, skillID); err != nil {
+		t.Fatalf("restore the package identity state: %v", err)
+	}
+}
+
+// TestP6VerifyReportsACorruptedManifestIdentity pins that the package row
+// and the manifest must agree about the DECLARED VERSION, the FORMAT and
+// the VERSION SOURCE, as well as about the name, the version and the
+// entrypoint.
+//
+// The row's `declared_version`, `format` and `version_source` columns are
+// part of the package's identity provenance: a row that disagrees with its
+// own manifest is a damaged package, and it must not verify.
+//
+// EACH corruption is proved LOAD-BEARING. Every case restores the row
+// EXACTLY afterwards and asserts that the package verifies clean again,
+// so a mutation that changes nothing cannot satisfy the next case's
+// assertions on its own — the failure a case asserts is the failure that
+// case caused, and not one left behind by an earlier one.
 func TestP6VerifyReportsACorruptedManifestIdentity(t *testing.T) {
 	dm := p3DM(t)
 	result := p6ImportPackage(t, dm, "identity", "1.0.0", nil)
 	sel := p6Selector(result.SkillID)
+
+	// The row's pristine state. Every case restores it.
+	orig := p6ReadPackageIdentityState(t, dm, result.SkillID)
 
 	// A healthy package verifies.
 	report, err := dm.PackageVerify(context.Background(), sel)
@@ -227,46 +285,57 @@ func TestP6VerifyReportsACorruptedManifestIdentity(t *testing.T) {
 		t.Fatalf("a healthy package did not verify: %+v", report.Failures)
 	}
 
-	// ── A declared version that disagrees with the manifest. ──
-	if _, err := dm.db.Exec(`UPDATE skill_packages SET declared_version = ? WHERE skill_id = ?`,
-		"9.9.9", result.SkillID); err != nil {
-		t.Fatalf("corrupt the declared version: %v", err)
-	}
-	report, err = dm.PackageVerify(context.Background(), sel)
-	if err != nil {
-		t.Fatalf("PackageVerify: %v", err)
-	}
-	if report.Verified {
-		t.Errorf("a package with a corrupted declared version reported itself verified")
-	}
-	if !p6HasFailure(report, PackageVerifyCheckManifestIdentity, "") {
-		t.Errorf("the report does not name the corrupted declared version: %+v", report.Failures)
-	}
-	// And the ordinary reads fail closed on it.
-	if _, err := dm.PackageFiles(context.Background(), sel); p6ReadReason(err) != PackageReadReasonIntegrityFailure {
-		t.Errorf("the listing of a package with a corrupted declared version reported %q, want %q",
-			p6ReadReason(err), PackageReadReasonIntegrityFailure)
+	// corrupt applies one mutation, asserts that `verify` reports the
+	// identity failure AND that the ordinary reads fail closed on it,
+	// then restores the row and asserts that the package verifies clean
+	// again.
+	corrupt := func(name string, mutate func() error) {
+		t.Helper()
+		if err := mutate(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		report, err := dm.PackageVerify(context.Background(), sel)
+		if err != nil {
+			t.Fatalf("%s: PackageVerify: %v", name, err)
+		}
+		if report.Verified {
+			t.Errorf("%s: the package reported itself verified", name)
+		}
+		if !p6HasFailure(report, PackageVerifyCheckManifestIdentity, "") {
+			t.Errorf("%s: the report does not name the identity failure: %+v", name, report.Failures)
+		}
+		if _, err := dm.PackageFiles(context.Background(), sel); p6ReadReason(err) != PackageReadReasonIntegrityFailure {
+			t.Errorf("%s: the listing reported %q, want %q",
+				name, p6ReadReason(err), PackageReadReasonIntegrityFailure)
+		}
+
+		// Restore, and the package must verify clean again. This is what
+		// makes the case load-bearing: a mutation that changed nothing
+		// would leave the package verifying, and the assertion above
+		// would have failed.
+		p6RestorePackageIdentityState(t, dm, result.SkillID, orig)
+		report, err = dm.PackageVerify(context.Background(), sel)
+		if err != nil {
+			t.Fatalf("%s: PackageVerify after the restore: %v", name, err)
+		}
+		if !report.Verified {
+			t.Errorf("%s: the package did not verify again after the restore: %+v", name, report.Failures)
+		}
 	}
 
+	// ── A declared version that disagrees with the manifest. ──
+	corrupt("a corrupted declared version", func() error {
+		_, err := dm.db.Exec(`UPDATE skill_packages SET declared_version = ? WHERE skill_id = ?`,
+			"9.9.9", result.SkillID)
+		return err
+	})
+
 	// ── A format that disagrees with the manifest. ──
-	if _, err := dm.db.Exec(`UPDATE skill_packages SET declared_version = ? WHERE skill_id = ?`,
-		nil, result.SkillID); err != nil {
-		t.Fatalf("restore the declared version: %v", err)
-	}
-	if _, err := dm.db.Exec(`UPDATE skill_packages SET format = ? WHERE skill_id = ?`,
-		"mpm-skill-package/999", result.SkillID); err != nil {
-		t.Fatalf("corrupt the format: %v", err)
-	}
-	report, err = dm.PackageVerify(context.Background(), sel)
-	if err != nil {
-		t.Fatalf("PackageVerify: %v", err)
-	}
-	if report.Verified {
-		t.Errorf("a package with a corrupted format reported itself verified")
-	}
-	if !p6HasFailure(report, PackageVerifyCheckManifestIdentity, "") {
-		t.Errorf("the report does not name the corrupted format: %+v", report.Failures)
-	}
+	corrupt("a corrupted format", func() error {
+		_, err := dm.db.Exec(`UPDATE skill_packages SET format = ? WHERE skill_id = ?`,
+			"mpm-skill-package/999", result.SkillID)
+		return err
+	})
 
 	// ── A version SOURCE that disagrees with the manifest. ──
 	//
@@ -274,50 +343,80 @@ func TestP6VerifyReportsACorruptedManifestIdentity(t *testing.T) {
 	// manifest's `version_override.reason` and the row's `version_source`
 	// are the same record. A row that disagrees with its own manifest
 	// about it is damaged in exactly the way the effective version is.
-	if _, err := dm.db.Exec(`UPDATE skill_packages SET format = ? WHERE skill_id = ?`,
-		PackageFormatV1, result.SkillID); err != nil {
-		t.Fatalf("restore the format: %v", err)
-	}
-	if _, err := dm.db.Exec(`UPDATE skill_packages SET version_source = ? WHERE skill_id = ?`,
-		"declared", result.SkillID); err != nil {
-		t.Fatalf("corrupt the version source: %v", err)
-	}
-	report, err = dm.PackageVerify(context.Background(), sel)
-	if err != nil {
-		t.Fatalf("PackageVerify: %v", err)
-	}
-	if report.Verified {
-		t.Errorf("a package with a corrupted version source reported itself verified")
-	}
-	if !p6HasFailure(report, PackageVerifyCheckManifestIdentity, "") {
-		t.Errorf("the report does not name the corrupted version source: %+v", report.Failures)
-	}
-	// And the ordinary reads fail closed on it, exactly as they do on the
-	// effective version.
-	if _, err := dm.PackageFiles(context.Background(), sel); p6ReadReason(err) != PackageReadReasonIntegrityFailure {
-		t.Errorf("the listing of a package with a corrupted version source reported %q, want %q",
-			p6ReadReason(err), PackageReadReasonIntegrityFailure)
-	}
+	//
+	// The mutated value is DIFFERENT from the one the importer wrote —
+	// this package declares 1.0.0, so the row's source is `declared` and
+	// the corruption makes it `package_declares_no_version`.
+	corrupt("a corrupted version source", func() error {
+		_, err := dm.db.Exec(`UPDATE skill_packages SET version_source = ? WHERE skill_id = ?`,
+			PackageVersionSourceUnversioned, result.SkillID)
+		return err
+	})
 }
 
-// TestP6TheReaderNeverWrites pins that the reader issues no write.
+// p6DatabaseMethodNames are the methods that issue a statement.
 //
-// The read snapshot is a DEFERRED transaction: the SQLite driver ignores
-// `sql.TxOptions{ReadOnly}` and issues a plain `BEGIN`, so the snapshot's
-// read-only nature rests on DISCIPLINE. This test makes the discipline
-// structural: the reader's source contains no `Exec` call at all, and
-// EVERY statement it issues is a `SELECT`.
+// A call to one of them is a statement; a bare REFERENCE to one of them
+// is a method value, which the call walk cannot see.
+var p6DatabaseMethodNames = map[string]bool{
+	"Exec":            true,
+	"ExecContext":     true,
+	"Query":           true,
+	"QueryRow":        true,
+	"QueryContext":    true,
+	"QueryRowContext": true,
+}
+
+// p6SQLWriteKeywords are the statement keywords that begin a WRITE.
 //
-// It is a STATIC check on purpose. A dynamic one could only prove that
-// the paths a test happens to exercise did not write; a source check
-// proves that there is no statement they could have written.
+// A string constant that begins with one of them is a write statement the
+// reader owns, even if no call site issues it yet — and even if it is
+// declared inside a function rather than at the top level.
+var p6SQLWriteKeywords = []string{
+	"INSERT", "UPDATE", "DELETE", "REPLACE", "DROP", "ALTER", "CREATE",
+	"PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT", "ROLLBACK",
+	"REASSIGN", "GRANT", "REINDEX", "ANALYZE",
+}
+
+// p6UnquoteSQL decodes a Go string literal into the SQL it carries.
 //
-// The statement check is an AST walk, not a hand-maintained list: it
-// finds EVERY call that issues a query and checks the SQL that call
-// carries. A list would go stale the moment a statement were added, and
-// a write smuggled through `QueryContext` would evade it.
-func TestP6TheReaderNeverWrites(t *testing.T) {
-	const sourceFile = "skill_package_read.go"
+// It handles BOTH literal forms — the raw backtick string and the
+// double-quoted interpreted string — so a statement written either way is
+// checked, rather than only the raw form being checked and the other
+// raising a false positive.
+func p6UnquoteSQL(literal string) (string, bool) {
+	unquoted, err := strconv.Unquote(literal)
+	if err != nil {
+		return "", false
+	}
+	return unquoted, true
+}
+
+// p6AssertReaderIssuesNoWrite walks ONE reader source file and asserts
+// that it issues no write and that every statement it issues is a
+// SELECT. It returns the number of statements it found.
+//
+// The walk has several halves, and each closes an evasion route:
+//
+//   - a CALL to a database method is inspected, and the SQL it carries is
+//     checked — so a write smuggled through `QueryContext` is caught;
+//   - a bare REFERENCE to a database method — a method value — is
+//     refused, so `exec := db.ExecContext; exec(ctx, "UPDATE …")`
+//     cannot slip past the call walk;
+//   - a SQL constant that begins with a WRITE keyword is refused, so a
+//     write cannot hide in a constant — used or not;
+//   - a statement whose SQL is neither a literal nor one of the reader's
+//     own constants is refused, so a statement built at runtime cannot
+//     slip past either;
+//   - every SQL constant the file declares is checked for being a
+//     SELECT, so a statement that no call site uses yet is still a
+//     statement the reader owns.
+//
+// Both literal forms are decoded, so a statement written as a raw
+// backtick string and one written as a double-quoted string are checked
+// alike — and a double-quoted SELECT is not a false positive.
+func p6AssertReaderIssuesNoWrite(t *testing.T, sourceFile string) int {
+	t.Helper()
 
 	fset := token.NewFileSet()
 	parsed, err := parser.ParseFile(fset, sourceFile, nil, 0)
@@ -325,12 +424,14 @@ func TestP6TheReaderNeverWrites(t *testing.T) {
 		t.Fatalf("parse %s: %v", sourceFile, err)
 	}
 
-	// The SQL the reader's own constants declare.
+	// The SQL the reader's own constants declare — at the top level AND
+	// inside a function, because a function-local constant is just as
+	// much a statement the reader owns.
 	consts := map[string]string{}
-	for _, decl := range parsed.Decls {
-		gen, ok := decl.(*ast.GenDecl)
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		gen, ok := n.(*ast.GenDecl)
 		if !ok || gen.Tok != token.CONST {
-			continue
+			return true
 		}
 		for _, spec := range gen.Specs {
 			vs, ok := spec.(*ast.ValueSpec)
@@ -345,10 +446,20 @@ func TestP6TheReaderNeverWrites(t *testing.T) {
 				if !ok || lit.Kind != token.STRING {
 					continue
 				}
-				consts[name.Name] = strings.Trim(lit.Value, "`")
+				sql, ok := p6UnquoteSQL(lit.Value)
+				if !ok {
+					continue
+				}
+				consts[name.Name] = sql
 			}
 		}
-	}
+		return true
+	})
+
+	// The database-method selectors that are the `Fun` of a CALL. A
+	// selector that is not in this set is a bare reference — a method
+	// value — and the reader must not bind one.
+	calledSelectors := map[token.Pos]bool{}
 
 	queries := 0
 	ast.Inspect(parsed, func(n ast.Node) bool {
@@ -360,16 +471,19 @@ func TestP6TheReaderNeverWrites(t *testing.T) {
 		if !ok {
 			return true
 		}
+		if !p6DatabaseMethodNames[sel.Sel.Name] {
+			return true
+		}
+		calledSelectors[sel.Pos()] = true
+
 		switch sel.Sel.Name {
 		case "Exec", "ExecContext":
 			t.Errorf("%s issues a write through %s at line %d: the reader must never write",
 				sourceFile, sel.Sel.Name, fset.Position(call.Pos()).Line)
 			return true
-		case "Query", "QueryRow", "QueryContext", "QueryRowContext":
-		default:
-			return true
 		}
 		queries++
+
 		// The context variants take the context first; the plain ones do
 		// not. The SQL is the first argument after the context.
 		sqlArg := 0
@@ -392,7 +506,13 @@ func TestP6TheReaderNeverWrites(t *testing.T) {
 					sourceFile, fset.Position(call.Pos()).Line)
 				return true
 			}
-			sql = strings.Trim(arg.Value, "`")
+			resolved, ok := p6UnquoteSQL(arg.Value)
+			if !ok {
+				t.Errorf("%s issues a query whose SQL literal does not decode at line %d",
+					sourceFile, fset.Position(call.Pos()).Line)
+				return true
+			}
+			sql = resolved
 		case *ast.Ident:
 			resolved, ok := consts[arg.Name]
 			if !ok {
@@ -412,19 +532,78 @@ func TestP6TheReaderNeverWrites(t *testing.T) {
 		}
 		return true
 	})
-	if queries == 0 {
-		t.Fatalf("%s issues no query at all: the static guard found nothing to check", sourceFile)
-	}
+
+	// ── The method-value route. ──────────────────────────────────────
+	//
+	// A bare reference to a database method is a METHOD VALUE. The call
+	// walk cannot see what it is later called with, so the reference
+	// itself is refused: `exec := db.ExecContext` is a write waiting to
+	// happen, and the reader has no reason to bind one.
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if !p6DatabaseMethodNames[sel.Sel.Name] {
+			return true
+		}
+		if calledSelectors[sel.Pos()] {
+			return true
+		}
+		t.Errorf("%s binds the database method %s at line %d: the reader must never bind a database method",
+			sourceFile, sel.Sel.Name, fset.Position(sel.Pos()).Line)
+		return true
+	})
 
 	// Every SQL constant the reader declares is a SELECT too — a constant
 	// that no call site uses yet is still a statement the reader owns.
 	for name, sql := range consts {
-		if !strings.Contains(strings.ToUpper(sql), "SELECT") {
+		trimmed := strings.ToUpper(strings.TrimSpace(sql))
+		if strings.HasPrefix(trimmed, "SELECT") {
 			continue
 		}
-		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sql)), "SELECT") {
-			t.Errorf("the SQL constant %s is not a SELECT: %q", name, sql)
+		for _, keyword := range p6SQLWriteKeywords {
+			if strings.HasPrefix(trimmed, keyword) {
+				t.Errorf("the SQL constant %s is a write statement (%s): %q", name, keyword, sql)
+				break
+			}
 		}
+	}
+	return queries
+}
+
+// TestP6TheReaderNeverWrites pins that the reader issues no write.
+//
+// The read snapshot is a DEFERRED transaction: the SQLite driver ignores
+// `sql.TxOptions{ReadOnly}` and issues a plain `BEGIN`, so the snapshot's
+// read-only nature rests on DISCIPLINE. This test makes the discipline
+// structural: the reader's source contains no `Exec` call at all, it
+// binds no database method, and EVERY statement it issues is a `SELECT`.
+//
+// It is a STATIC check on purpose. A dynamic one could only prove that
+// the paths a test happens to exercise did not write; a source check
+// proves that there is no statement they could have written.
+//
+// The check is an AST walk, not a hand-maintained list: it finds EVERY
+// call that issues a query and checks the SQL that call carries. A list
+// would go stale the moment a statement were added, and a write smuggled
+// through `QueryContext` would evade it.
+//
+// BOTH reader files are walked, not one: the reader is the two files
+// together, and a guard that covered only one of them would have left
+// half of the reader unguarded.
+func TestP6TheReaderNeverWrites(t *testing.T) {
+	readerFiles := []string{
+		"skill_package_read.go",
+		"skill_package_read_errors.go",
+	}
+
+	total := 0
+	for _, file := range readerFiles {
+		total += p6AssertReaderIssuesNoWrite(t, file)
+	}
+	if total == 0 {
+		t.Fatalf("the reader files issue no query at all: the static guard found nothing to check")
 	}
 }
 

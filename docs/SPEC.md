@@ -2506,7 +2506,7 @@ Corruption is **never** reported as a missing file, and there is no fallback to 
 
 **That is the decision of record for the disagreement case: the ROW wins.** If a row and its manifest ever disagree about the version provenance, the provenance reports the **row's** values and `verify` reports the disagreement as a `manifest_identity` failure. The row is what the package IS, in the store the reader reads; the manifest is what the package CLAIMS about itself. A reader that silently preferred the claim would be reporting the manifest's story rather than the package's state.
 
-Because the row's `version` is `NOT NULL`, the object is **always** present for a packaged skill — including when the stored manifest does not parse. That is a change from the first commit, where the override was recovered from the manifest and was therefore absent when the manifest was unreadable; it is disclosed here because it changes the `read` response's shape for a damaged package.
+Because the row's `version` and `version_source` columns are `NOT NULL` (§6.8), the object is **always** present for a packaged skill — including when the stored manifest does not parse. The accessor nevertheless tests the values for emptiness rather than relying on the constraint, so a row that somehow violates it still yields a well-formed object. That is a change from the first commit, where the override was recovered from the manifest and was therefore absent when the manifest was unreadable; it is disclosed here because it changes the `read` response's shape for a damaged package.
 
 **The provenance accessor is tolerant where the rest of the reader is strict.** `read` must keep returning the entrypoint's projection even when the package's manifest is broken — that is what `verify` is for. What the accessor never does is claim a scan that was not recorded: a missing entrypoint file row reports **no** scan.
 
@@ -2520,7 +2520,17 @@ Because the row's `version` is `NOT NULL`, the object is **always** present for 
 
 **The read snapshot's read-only nature rests on discipline, and the discipline is pinned.** The transaction is opened with `sql.TxOptions{ReadOnly: true}`, but the SQLite driver ignores that option and issues a plain (deferred) `BEGIN`. The snapshot therefore takes a shared lock and no write lock, and it is read-only because the reader issues no write.
 
-That is pinned by an **AST walk** over the reader's own source, not by a hand-maintained list: the walk finds **every** call that issues a query and checks the SQL that call carries — whether the call is `Exec`, `ExecContext`, `Query`, `QueryRow`, `QueryContext` or `QueryRowContext`, and whether the SQL is a literal or one of the reader's own constants. Both evasion routes are closed: a write through `Exec` is refused by name, and a write smuggled through `QueryContext` is refused because its SQL is not a `SELECT`. (Both routes have been proven by injection: each makes the guard fail, and the guard passes again once the injection is removed.)
+That is pinned by an **AST walk** over the reader's own source — **both** reader files, not one — rather than by a hand-maintained list. The walk closes five evasion routes:
+
+| evasion | what the guard says |
+|---|---|
+| a write through `Exec` / `ExecContext` | *"issues a write through ExecContext at line N: the reader must never write"* |
+| a write smuggled through `QueryContext` | *"issues a non-SELECT statement at line N: \"DELETE FROM …\""* |
+| a **method value** — `exec := db.ExecContext` | *"binds the database method ExecContext at line N: the reader must never bind a database method"* |
+| a write hidden in a constant | *"the SQL constant X is a write statement (DELETE): …"* |
+| a statement whose SQL is built at runtime | *"issues a query whose SQL is neither a literal nor a constant at line N"* |
+
+Every route has been **proven by injection**: each was injected into the reader, the guard was observed to fail, and the guard was observed to pass again once the injection was removed. A double-quoted SQL literal is **not** a false positive — the walk decodes both literal forms, so a statement written either way is checked.
 
 The behaviour is pinned too — the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read.
 
@@ -2540,7 +2550,7 @@ The behaviour is pinned too — the census in `TestP6ReadsChangeNothing` shows t
 
 **No change to the shared model-configuration project.**
 
-**No new table and no schema change.** The reader reads the three tables §6.8 specifies, and nothing else.
+**No new table and no schema change.** The reader reads the three package tables §6.8 specifies — `skill_packages`, `skill_package_files` and `skill_package_blobs` — plus `memories`, which `verify` reads to check the projection's hash and its version. It touches nothing else.
 
 ---
 

@@ -479,8 +479,14 @@ type SkillPackageProvenance struct {
 	// ScanStatus names WHICH scanners ran on the entrypoint.
 	ScanStatus PackageScanStatus `json:"scan_status"`
 
-	// VersionOverride records how the effective version was arrived at.
-	// It is omitted when the package records no override at all.
+	// VersionOverride records how the effective version was arrived at:
+	// the declared version, the effective version and the reason.
+	//
+	// It is ALWAYS present for a packaged skill: the package row's
+	// `version` and `version_source` columns are NOT NULL (§6.8), so the
+	// record always exists — including when the stored manifest cannot
+	// be parsed, which is the case the earlier, manifest-derived version
+	// of this object got wrong.
 	VersionOverride *PackageVersionOverride `json:"version_override,omitempty"`
 }
 
