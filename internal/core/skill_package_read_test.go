@@ -990,6 +990,114 @@ func TestP6VerifyReportsAManifestThatIsNotValid(t *testing.T) {
 	}
 }
 
+// TestP6ReadFileRefusesAPackageWhoseFileSetIsDamaged pins that the read
+// path and the listing agree about a DAMAGED FILE SET.
+//
+// The reconciliation is over the whole file set, not over the one path
+// being asked for. A row deleted from a package the manifest still
+// describes is CORRUPTION — and corruption is never reported
+// as a missing file:
+//
+//   - the listing refuses the package;
+//   - the read of the DELETED path refuses with `integrity_failure`,
+//     not `file_not_found`;
+//   - the read of a HEALTHY SIBLING refuses too, because a package the
+//     listing refuses is a package the read refuses.
+func TestP6ReadFileRefusesAPackageWhoseFileSetIsDamaged(t *testing.T) {
+	dm := p3DM(t)
+	result := p6ImportPackage(t, dm, "damagedset", "1.0.0", map[string][]byte{
+		"SKILL.md":          []byte("# the skill\n\nthe entrypoint\n"),
+		"references/one.md": []byte("the first reference\n"),
+		"references/two.md": []byte("the second reference\n"),
+	})
+	sel := p6Selector(result.SkillID)
+
+	// Every read works before the damage.
+	for _, path := range []string{"SKILL.md", "references/one.md", "references/two.md"} {
+		if _, err := dm.PackageReadFile(context.Background(), sel, path, PackageReadBounds{}); err != nil {
+			t.Fatalf("the read of %s before the damage: %v", path, err)
+		}
+	}
+
+	// A row is deleted. The manifest still describes it.
+	if _, err := dm.db.Exec(
+		`DELETE FROM skill_package_files WHERE skill_id = ? AND path = ?`,
+		result.SkillID, "references/two.md"); err != nil {
+		t.Fatalf("delete the file row: %v", err)
+	}
+
+	// The listing refuses the package.
+	if _, err := dm.PackageFiles(context.Background(), sel); p6ReadReason(err) != PackageReadReasonIntegrityFailure {
+		t.Errorf("the listing reported %q, want %q",
+			p6ReadReason(err), PackageReadReasonIntegrityFailure)
+	}
+
+	// The read of the DELETED path refuses — and says the
+	// package is inconsistent, not that the file is missing.
+	read, err := dm.PackageReadFile(context.Background(), sel, "references/two.md", PackageReadBounds{})
+	if err == nil {
+		t.Fatalf("the read served a file whose row was deleted: %q", read.Content)
+	}
+	if got := p6ReadReason(err); got != PackageReadReasonIntegrityFailure {
+		t.Errorf("the read of the deleted path reported %q, want %q",
+			got, PackageReadReasonIntegrityFailure)
+	}
+	if read != nil {
+		t.Errorf("the refused read returned a payload: %+v", read)
+	}
+
+	// And the read of a HEALTHY SIBLING refuses too.
+	read, err = dm.PackageReadFile(context.Background(), sel, "references/one.md", PackageReadBounds{})
+	if err == nil {
+		t.Fatalf("the read served a healthy sibling of a damaged package: %q", read.Content)
+	}
+	if got := p6ReadReason(err); got != PackageReadReasonIntegrityFailure {
+		t.Errorf("the read of the healthy sibling reported %q, want %q",
+			got, PackageReadReasonIntegrityFailure)
+	}
+
+	// The report says the package is not verified.
+	report, err := dm.PackageVerify(context.Background(), sel)
+	if err != nil {
+		t.Fatalf("PackageVerify: %v", err)
+	}
+	if report.Verified {
+		t.Errorf("a package with a deleted file row reported itself verified")
+	}
+	if !p6HasFailure(report, PackageVerifyCheckFileMetadata, "references/two.md") {
+		t.Errorf("the report does not name the missing file row: %+v", report.Failures)
+	}
+}
+
+// TestP6ReadFileReportsAGenuinelyAbsentFileAsFileNotFound pins that a
+// file the package never carried is a MISSING FILE, and not corruption.
+//
+// The two are never confused: a damaged file set is `integrity_failure`,
+// and a path the package simply does not carry is `file_not_found`.
+func TestP6ReadFileReportsAGenuinelyAbsentFileAsFileNotFound(t *testing.T) {
+	dm := p3DM(t)
+	result := p6ImportPackage(t, dm, "absent", "1.0.0", map[string][]byte{
+		"SKILL.md": []byte("# the skill\n\nthe entrypoint\n"),
+	})
+	sel := p6Selector(result.SkillID)
+
+	read, err := dm.PackageReadFile(context.Background(), sel, "references/never-there.md", PackageReadBounds{})
+	if err == nil {
+		t.Fatalf("the read served a file the package does not carry: %q", read.Content)
+	}
+	if got := p6ReadReason(err); got != PackageReadReasonFileNotFound {
+		t.Errorf("the read reported %q, want %q", got, PackageReadReasonFileNotFound)
+	}
+	if read != nil {
+		t.Errorf("the refused read returned a payload: %+v", read)
+	}
+
+	// The listing is unaffected — the package is sound.
+	if _, err := dm.PackageFiles(context.Background(), sel); err != nil {
+		t.Errorf("the listing of a sound package failed: %v", err)
+	}
+}
+
 // ─── Binary content ────────────────────────────────────────────────────────
 
 // TestP6ReadFileCarriesBinaryBytesOnlyWhenRaw pins that binary content is

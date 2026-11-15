@@ -105,13 +105,6 @@ const (
 		ORDER BY path
 	`
 
-	packageFileQuery = `
-		SELECT path, sha256, size_bytes, content_type, role, executable,
-		       secret_scanned, poison_scanned
-		FROM skill_package_files
-		WHERE skill_id = ? AND path = ?
-	`
-
 	packageBlobQuery = `
 		SELECT sha256, size_bytes, content
 		FROM skill_package_blobs
@@ -619,37 +612,51 @@ func (dm *DatabaseManager) PackageReadFile(ctx context.Context, sel PackageSelec
 		if err != nil {
 			return err
 		}
-		row, err := loadPackageFileRow(ctx, tx, skillID, canonical)
+		// The package's file set is reconciled against the manifest BEFORE any
+		// file is served, with the SAME comparison `files` uses.
+		//
+		// The blob is content-addressed, so re-hashing it proves only
+		// that the bytes are the ones a ROW names; the manifest is what
+		// commits the package to its file list. A file set the manifest
+		// does not confirm is refused — exactly as `files`
+		// refuses the same package, and with the same reason. The two
+		// paths must not differ: a package the listing refuses is a
+		// package the read refuses.
+		//
+		// The comparison is over the WHOLE file set, not over the one
+		// path being asked for. A row deleted from a package that the
+		// manifest still describes is CORRUPTION, and corruption is
+		// never reported as a missing file: the read of the deleted
+		// path would otherwise answer `file_not_found`, and the read of
+		// a healthy sibling would answer with bytes from a package the
+		// listing refuses.
+		//
+		// The rows are metadata — the manifest they are
+		// compared with is parsed in full anyway — so this costs one
+		// query of small rows, not the package's content. The
+		// bytes are still loaded one file at a time.
+		rows, err := loadPackageFileRows(ctx, tx, skillID)
 		if err != nil {
 			return err
 		}
-		if row == nil {
-			return packageReadErrorf(PackageReadReasonFileNotFound, canonical,
-				"the package carries no file at that path")
+		if failures := reconcilePackageFiles(pkg, rows); len(failures) > 0 {
+			return packageReadErrorf(PackageReadReasonIntegrityFailure, failures[0].Path,
+				"the file rows do not match the manifest: %s", failures[0].Detail)
 		}
 
-		// The row is reconciled against the manifest BEFORE its bytes are
-		// served. The blob is content-addressed, so re-hashing it proves
-		// only that the bytes are the ones the ROW names; the manifest is
-		// what commits the package to its file list. A row the manifest
-		// does not confirm is refused, exactly as `files` refuses the
-		// same package — the two paths must not differ.
-		//
-		// The comparison is over EVERY manifest entry for the path, not
-		// over the first one, because the listing's comparison is over
-		// every one. A manifest that names the same path twice would
-		// otherwise satisfy the read on its first entry while failing
-		// the listing on its second.
-		entries := manifestFilesForPath(pkg.Manifest.Files, canonical)
-		if len(entries) == 0 {
-			return packageReadErrorf(PackageReadReasonIntegrityFailure, canonical,
-				"the package has a file at that path the manifest does not name")
-		}
-		for _, entry := range entries {
-			if !packageFileMetadataEqual(entry, *row) {
-				return packageReadErrorf(PackageReadReasonIntegrityFailure, canonical,
-					"the file row does not match the manifest's entry for it")
+		var row *PackageManifestFile
+		for i := range rows {
+			if rows[i].Path == canonical {
+				row = &rows[i]
+				break
 			}
+		}
+		if row == nil {
+			// The file set is consistent and the package simply does
+			// not carry this path. That is a MISSING FILE, not
+			// corruption, and the two are never confused.
+			return packageReadErrorf(PackageReadReasonFileNotFound, canonical,
+				"the package carries no file at that path")
 		}
 
 		blob, err := loadPackageBlob(ctx, tx, row.SHA256)
@@ -1024,21 +1031,6 @@ func loadPackageFileRows(ctx context.Context, tx *sql.Tx, skillID string) ([]Pac
 	return out, nil
 }
 
-// loadPackageFileRow reads ONE file row, or nil when the package carries
-// no file at that path.
-func loadPackageFileRow(ctx context.Context, tx *sql.Tx, skillID, canonicalPath string) (*PackageManifestFile, error) {
-	row := tx.QueryRowContext(ctx, packageFileQuery, skillID, canonicalPath)
-	f, err := scanPackageFileRow(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, packageReadErrorWrap(PackageReadReasonDatabaseFailure, "", err,
-			"read the file row %s of %s", canonicalPath, skillID)
-	}
-	return &f, nil
-}
-
 // scanPackageFileRow reads one file row's columns.
 //
 // The scan statuses are the ACTUAL statuses the import recorded — which
@@ -1311,21 +1303,6 @@ func reconcilePackageFiles(pkg *packageContext, rows []PackageManifestFile) []Pa
 	}
 
 	return failures
-}
-
-// manifestFilesForPath returns EVERY manifest entry that names a path.
-//
-// The listing's comparison is over every entry for a path, so the read's
-// must be too: a manifest that names the same path twice is compared
-// against the row once per entry.
-func manifestFilesForPath(files []PackageManifestFile, path string) []PackageManifestFile {
-	var out []PackageManifestFile
-	for i := range files {
-		if files[i].Path == path {
-			out = append(out, files[i])
-		}
-	}
-	return out
 }
 
 // manifestFileIndex returns the index of the manifest entry for a path, or
