@@ -280,8 +280,10 @@ def _load_installer():
 #   }
 #
 # and the last matching rule wins.  The command text is split into
-# simple commands; a `cd` segment's text is not matched; `$( ... )`
-# substitutions are descended into.
+# simple commands on `&&`, `||`, `;`, `|`, a single `&` and a
+# NEWLINE, and each segment is TRIMMED before it is matched; a `cd`
+# segment's text is not matched; `$( ... )` substitutions are
+# descended into.
 #
 # The model is a MODEL.  Every outcome in the corpus below was measured
 # against the installed definition before it was written here, and a
@@ -304,7 +306,17 @@ def _matcher_u2(value: str, pattern: str) -> bool:
 
 
 def _matcher_segments(command: str):
-    """Split a command into the simple commands the host matches."""
+    """Split a command into the simple commands the host matches.
+
+    The host splits on `&&`, `||`, `;`, `|`, a single `&` and a
+    NEWLINE.  The separator set was MEASURED against the installed
+    definition, not guessed: `true<NL>systemctl` and
+    `true&systemctl` are refused, while `true systemctl` — the same
+    words with whitespace between them and no separator — is allowed.
+
+    The `&&` and `||` pairs are consumed as pairs, so a single `&`
+    never splits one of them in half.
+    """
     segments, current, depth, quote = [], [], 0, None
     index = 0
     while index < len(command):
@@ -330,7 +342,12 @@ def _matcher_segments(command: str):
             current = []
             index += 2
             continue
-        if depth == 0 and char in ";|":
+        if depth == 0 and char in ";|\n":
+            segments.append("".join(current))
+            current = []
+            index += 1
+            continue
+        if depth == 0 and char == "&":
             segments.append("".join(current))
             current = []
             index += 1
@@ -367,7 +384,11 @@ def _matcher_denies(command: str, rules) -> bool:
         candidates = [segment]
         candidates.extend(_matcher_substitutions(segment))
         for candidate in candidates:
-            words = candidate.strip().split()
+            # The host TRIMS each segment before matching it.  This
+            # was MEASURED: `echo hi & systemctl` is refused, and the
+            # only reason is that the trimmed segment is `systemctl`.
+            candidate = candidate.strip()
+            words = candidate.split()
             if words and words[0] == "cd":
                 # The host does not match a `cd` segment's text.
                 continue
@@ -488,6 +509,23 @@ class ReviewerIsolationTest(unittest.TestCase):
                     f"space-anchored form '* {binary} *' and the path form "
                     f"'*/{binary} *' instead",
                 )
+            # The `?` form must not be PRESENT at all - not merely
+            # absent as a replacement.  It is the wrong SHAPE, and the
+            # host expands `*` before `?`, so it does not close the
+            # bare path: `go run ./cmd/{binary}` matched no rule and ran
+            # the binary.  ADDING it alongside the right form would
+            # leave the guard green while the definition carried a
+            # rule that means the opposite of what it appears to mean.
+            self.assertNotIn(
+                f"*/{binary} ?*",
+                denials,
+                f"the shell rule '*/{binary} ?*' is present; it is the wrong "
+                f"SHAPE - the host expands `*` before `?`, so it compiles to "
+                f"a pattern that needs a space AND one more character "
+                f"after the name, and `go run ./cmd/{binary}` with nothing "
+                f"after the name matched no rule at all and RAN the binary. "
+                f"Remove it; the end-anchored '*/{binary} *' closes the route",
+            )
 
     def test_the_rule_set_denies_what_it_claims_to_deny(self) -> None:
         """The rule set must DENY the commands it claims to deny.
@@ -539,6 +577,15 @@ class ReviewerIsolationTest(unittest.TestCase):
             "go run ./cmd/mpm/",
             "go build -o /tmp/x ./cmd/mpm",
             "/opt/mpm/bin/mpm --version",
+            # the name inside a GO PACKAGE PATTERN, which puts
+            # something after the name and so escaped the
+            # last-segment shapes
+            "go run ./cmd/mpm/...",
+            "go run ./cmd/mpm/... --version",
+            'go run ./cmd/mpm/... remember "probe"',
+            "go list ./cmd/mpm/...",
+            "go run ./cmd/mpm-mcp/...",
+            "go run ./cmd/mpm-lint/...", 
             # the name delimited by a TAB, which the shell splits on
             "mpm\t--version",
             "env mpm\t--version",
@@ -566,6 +613,10 @@ class ReviewerIsolationTest(unittest.TestCase):
             "echo $(echo mp)m",
             "M=mpm; $M --version",
             "cd cmd/mpm && go run . --version",
+            # a SHELL GLOB expands to the name before the matcher
+            # sees it, so the text is not the name
+            "go run ./cmd/mp?",
+            "go build -o /tmp/x ./cmd/mp?",
             # a command that mentions nothing at all
             "echo probe-alive",
             "true",
@@ -703,7 +754,11 @@ class ReviewerIsolationTest(unittest.TestCase):
             # `go run ./cmd/mpm` - the spelling with NOTHING after the
             # name, which the old `*/mpm ?*` form did not match, and
             # which was MEASURED to run the binary.
-            for path_pattern in (f"*/{binary} *", f"*/{binary}/"):
+            for path_pattern in (
+                f"*/{binary} *",
+                f"*/{binary}/",
+                f"*/{binary}/...*",
+            ):
                 self.assertIn(
                     path_pattern,
                     denials,

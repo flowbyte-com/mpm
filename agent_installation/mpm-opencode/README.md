@@ -302,11 +302,12 @@ install, and the guard test fails when it has drifted.
 The isolation is **layered**. The definition denies the MPM tools by name;
 denies the MPM **binaries** wherever they are **named** (`mpm`,
 `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`, `mpm-update`,
-`mpm-lint`, and their installed paths) in **six shapes** — at the command
+`mpm-lint`, and their installed paths) in **seven shapes** — at the command
 position, as its own **word** (`env mpm …`), separated from its
 neighbours by a **tab** (`mpm<TAB>--version`), as the **last segment of
 a path** (`go run ./cmd/mpm`, `go run ./cmd/mpm/`,
-`/home/v/.local/bin/mpm`) and inside a **quote** (`"mpm" …`,
+`/home/v/.local/bin/mpm`), inside a **Go package pattern**
+(`go run ./cmd/mpm/...`) and inside a **quote** (`"mpm" …`,
 `sh -c 'mpm …'`);
 denies the installers and the service-control commands; denies the `read`
 tool a live MPM workspace and closes its `external_directory` boundary;
@@ -332,9 +333,10 @@ one; the shell's **redirection targets are not intercepted**, so the write
 route into a runtime root is closed by a path substring that also refuses
 a command merely *quoting* such a path; the shell's matcher sees
 **text**, so a name **split by a substitution** (`$(echo mp)m`), a name
-held in a **variable** (`M=mpm; $M --version`), a **script file**, and the
-host's refusal to match a **`cd`** segment's text (`cd cmd/mpm && go run .
---version`) are not caught; and the permission layer reads the **content of
+held in a **variable** (`M=mpm; $M --version`), a **script file**, a name
+**expanded by a shell glob** (`go run ./cmd/mp?`), and the host's refusal
+to match a **`cd`** segment's text (`cd cmd/mpm && go run . --version`)
+are not caught; and the permission layer reads the **content of
 a file write**, so a document that merely mentions the name is refused.
 
 **The false-denial cost, measured and published.** A fixed sample of
