@@ -209,6 +209,17 @@ depend on the pattern being complete: inside it, `HOME`, `TMPDIR` and
 `MPM_WORKSPACE` point at scratch directories, so a route the rules do
 not name still cannot write into the operator's runtime root.
 
+Two residuals were **measured**, by probing the installed definition:
+the **browser family is not governed by the permission layer** (a deny
+on the browser action, the wildcard, the per-tool names and `tool.use`
+all leave the browser tools in the reviewer's catalog and invocable),
+and the shell's **redirection targets are not intercepted** — so the
+write route into a runtime root is closed by a path substring, which
+also refuses a command that merely *quotes* such a path. The first is
+stated in the definition's own prose; the second is accepted
+deliberately, because a corrupted live database is worse than a
+findings report that cannot quote a path literally.
+
 The deny list is **machine-checked against the registry**:
 `internal/core/tools/registry_list.go` is the authoritative list of every
 MPM tool, and

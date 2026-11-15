@@ -316,6 +316,13 @@ depend on the pattern being complete: it points `HOME`, `TMPDIR` and
 `MPM_WORKSPACE` at scratch directories, so a route the rules do not name
 still cannot write into the operator's runtime root.
 
+Two residuals were **measured**, by probing the installed definition: the
+**browser family is not governed by the permission layer** (every browser
+tool stays in the reviewer's catalog and invocable), and the shell's
+**redirection targets are not intercepted**, so the write route into a
+runtime root is closed by a path substring that also refuses a command
+merely *quoting* such a path.
+
 The deny list is **machine-checked against the registry** —
 `internal/core/tools/registry_list.go` is the authoritative list of every
 MPM tool, and `agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py`

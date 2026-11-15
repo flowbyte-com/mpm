@@ -103,6 +103,19 @@ permissions:
     resource: "*"
     effect: deny
 
+  # ── The MCP RESOURCE surface is closed. ────────────────────────────
+  #
+  # The MCP TOOLS are denied by name above. The resource surface is a
+  # different door into the same server, so it is closed as well: a
+  # resource can carry the substrate's bytes just as a tool can.
+  #
+  # The session and worktree MUTATIONS go with it: a reviewer reports
+  # findings; it does not move the session it is running in, rename it,
+  # or create a worktree of its own.
+  - action: "opencode_*"
+    resource: "*"
+    effect: deny
+
   # ── Code Mode is closed too. ───────────────────────────────────────
   #
   # `execute` reaches every tool the host publishes, including the ones
@@ -340,8 +353,22 @@ permissions:
 
   # ── Nothing may be written into a live MPM workspace. ──────────────
   #
-  # The redirection patterns cover the ways a shell writes a file
-  # without an editor.
+  # The WRITE routes are the shell's own verbs: a copy, a move and a
+  # removal, each with the workspace path in the command.
+  #
+  # A REDIRECTION is listed too, and it is the one rule here with a
+  # known cost. The permission layer's shell resource is the raw
+  # command text, and the host does NOT intercept a redirection's
+  # target: a command that writes into a runtime root is executed
+  # unless a rule says otherwise. So the rule is a path substring, and
+  # a path substring matches TEXT as well as a path — a heredoc that
+  # merely QUOTES a runtime path after a ">" is refused too.
+  #
+  # That cost is accepted deliberately: the alternative is a reviewer
+  # that can overwrite the operator's live database, and a stray file
+  # in a runtime root is a nuisance while a corrupted database is a
+  # disaster. The workaround is to assemble such a path at runtime
+  # rather than writing it literally.
   - action: shell
     resource: "*>*/.mpm/*"
     effect: deny
@@ -382,6 +409,9 @@ tool list, or refused when you attempt them:
   one.
 - Code Mode is closed, so the nested bridge to those tools is closed
   too.
+- The MCP resource surface and the session and worktree management
+  tools are closed: a resource can carry the substrate's bytes just as
+  a tool can, and a reviewer does not move its own session.
 - You cannot EDIT anything, you cannot launch another agent, you cannot
   load a capability and you cannot ask the operator a question.
 - You cannot open a file inside a live MPM workspace with the read
@@ -400,6 +430,19 @@ The shell runs with the host user's filesystem, process and network
 authority. The permission rules above close the KNOWN routes to the
 production substrate; they are a barrier, not a jail, and a determined
 command can still find a way the rules do not name.
+
+Two things are NOT closed, and you must not rely on them being closed:
+
+- The BROWSER is still available to you. Its tools are not governed by
+  the permission rules, so a `file://` URL could open a file on this
+  machine. The browser is inert unless a desktop browser is connected
+  to this session, but if one IS connected, do not use it. A code
+  review does not need a browser.
+- The shell's redirection targets are not intercepted either. The rules
+  above close the write routes into a runtime root by matching the
+  path, so a command that merely QUOTES such a path after a ">" is
+  refused as well. If a command of yours is refused for that reason,
+  assemble the path at runtime instead of writing it literally.
 
 So:
 
