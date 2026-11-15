@@ -959,18 +959,24 @@ func (d packageArchiveDirectory) centralDirectoryHeaderParses(r io.ReaderAt, siz
 		return false
 	}
 
-	compressedSize := binary.LittleEndian.Uint32(header[20:])
-	uncompressedSize := binary.LittleEndian.Uint32(header[24:])
+	compressedSaturated := binary.LittleEndian.Uint32(header[20:]) == 0xffffffff
+	uncompressedSaturated := binary.LittleEndian.Uint32(header[24:]) == 0xffffffff
 	nameLen := int64(binary.LittleEndian.Uint16(header[28:]))
 	extraLen := int64(binary.LittleEndian.Uint16(header[30:]))
 	commentLen := int64(binary.LittleEndian.Uint16(header[32:]))
-	localHeaderOffset := binary.LittleEndian.Uint32(header[42:])
+	localHeaderOffset := int64(binary.LittleEndian.Uint32(header[42:]))
+	headerOffsetSaturated := localHeaderOffset == int64(0xffffffff)
 
 	if d.offset+headerLen+nameLen+extraLen+commentLen > size {
 		return false
 	}
 
 	// The extra fields, walked exactly as `archive/zip` walks them.
+	//
+	// The ZIP64 handling has one subtlety worth stating: resolving a
+	// saturated local-header offset CLEARS its saturation, so a second
+	// ZIP64 field is judged against the resolved value. The two size
+	// saturations are never cleared.
 	if extraLen > 0 {
 		extra := make([]byte, extraLen)
 		if _, err := r.ReadAt(extra, d.offset+headerLen+nameLen); err != nil {
@@ -983,11 +989,21 @@ func (d packageArchiveDirectory) centralDirectoryHeaderParses(r io.ReaderAt, siz
 				break
 			}
 			if tag == archiveZip64ExtraID {
-				saturated := compressedSize == 0xffffffff ||
-					uncompressedSize == 0xffffffff ||
-					localHeaderOffset == 0xffffffff
-				if saturated && fieldSize < 8 {
+				fieldBuf := extra[4 : 4+fieldSize]
+				if uncompressedSaturated && len(fieldBuf) < 8 {
 					return false
+				}
+				if compressedSaturated && len(fieldBuf) < 8 {
+					return false
+				}
+				if headerOffsetSaturated {
+					if len(fieldBuf) < 8 {
+						return false
+					}
+					// The offset is resolved from the field, which
+					// clears its saturation for the fields that follow.
+					localHeaderOffset = int64(binary.LittleEndian.Uint64(fieldBuf[:8]))
+					headerOffsetSaturated = localHeaderOffset == int64(0xffffffff)
 				}
 			}
 			extra = extra[4+fieldSize:]

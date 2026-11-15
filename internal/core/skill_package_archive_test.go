@@ -1731,6 +1731,147 @@ func p5WriteCraftedZip64HeaderArchive(t *testing.T, path string, records int, de
 	}
 }
 
+// p5WriteValidHeaderArchive writes an archive whose declared offset
+// points at a VALID central-directory record spliced into the
+// local-header region.
+//
+// The spliced record PARSES, so `archive/zip` takes its inconsistent-
+// offsets fallback and parses from there — reading ONE record, because
+// the bytes after it are the local-header region and are not records.
+//
+// The NORMAL start, by contrast, reaches the real central directory and
+// counts every record in it. So the two candidate starts DISAGREE, and
+// the importer's count must be the LARGER of them.
+//
+// This is the shape that proves the count is taken over both starts
+// rather than over the mirror's own choice: without the maximum, the
+// count would be ONE — lower than the real central directory's, and
+// lower than the bound needs.
+func p5WriteValidHeaderArchive(t *testing.T, path string, records int) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for i := 0; i < records; i++ {
+		w, err := zw.Create("references/f" + p5Itoa(i) + ".md")
+		if err != nil {
+			t.Fatalf("create the archive entry: %v", err)
+		}
+		if _, err := w.Write([]byte("# F\n")); err != nil {
+			t.Fatalf("write the archive entry: %v", err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close the archive: %v", err)
+	}
+	data := buf.Bytes()
+
+	eocd := bytes.LastIndex(data, []byte{0x50, 0x4b, 0x05, 0x06})
+	cdOffset := int(binary.LittleEndian.Uint32(data[eocd+16:]))
+
+	// A VALID central-directory record: the right signature, and a
+	// name that is present, so it parses.
+	name := []byte("references/spliced.md")
+	crafted := make([]byte, archiveCentralDirectoryRecordMinBytes)
+	binary.LittleEndian.PutUint32(crafted[0:], archiveCentralDirectorySignature)
+	binary.LittleEndian.PutUint16(crafted[28:], uint16(len(name)))
+	crafted = append(crafted, name...)
+
+	// Splice it into the local-header region.
+	const insertAt = 500
+	out := make([]byte, 0, len(data)+len(crafted))
+	out = append(out, data[:insertAt]...)
+	out = append(out, crafted...)
+	out = append(out, data[insertAt:]...)
+
+	newEOCD := eocd + len(crafted)
+	// The declared offset points at the spliced record, and the
+	// declared size makes `endOffset - size` the REAL central
+	// directory's start.
+	binary.LittleEndian.PutUint32(out[newEOCD+16:], uint32(insertAt))
+	binary.LittleEndian.PutUint32(out[newEOCD+12:], uint32(newEOCD-(cdOffset+len(crafted))))
+
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write the archive: %v", err)
+	}
+}
+
+// TestP5_TheCountIsTakenOverBothOfTheReadersStarts asserts the
+// backstop's construction directly.
+//
+// The bound's soundness rests on the count being no lower than the
+// number of records `archive/zip` will parse. That is guaranteed by
+// taking the count over BOTH of the reader's candidate parse starts and
+// keeping the LARGER — so the property does not depend on the mirror
+// being right.
+//
+// The fixture is the shape where the two disagree: the declared offset
+// points at a VALID record spliced into the local-header region, so the
+// reader takes its fallback and parses ONE record, while the normal
+// start reaches the real central directory and counts them all.
+//
+// Without the maximum, the importer's count would be ONE.
+func TestP5_TheCountIsTakenOverBothOfTheReadersStarts(t *testing.T) {
+	const records = 100
+
+	archive := filepath.Join(t.TempDir(), "both-starts.skill")
+	p5WriteValidHeaderArchive(t, archive, records)
+
+	f, err := os.Open(archive)
+	if err != nil {
+		t.Fatalf("open the archive: %v", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("stat the archive: %v", err)
+	}
+
+	dir, err := readPackageArchiveDirectory(f, info.Size())
+	if err != nil {
+		t.Fatalf("read the central directory: %v", err)
+	}
+
+	// The counts over each candidate start.
+	var largest int64
+	for _, start := range dir.candidateParseStarts(info.Size()) {
+		n, err := countPackageArchiveRecords(f, start, info.Size(), 1<<20)
+		if err != nil {
+			t.Fatalf("count the records from %d: %v", start, err)
+		}
+		if n > largest {
+			largest = n
+		}
+	}
+	if largest != records {
+		t.Fatalf("the largest candidate count is %d, want %d — the fixture is not the shape it claims",
+			largest, records)
+	}
+
+	// The importer's count is the LARGER of them.
+	got, err := dir.parseRecordCount(f, info.Size(), 1<<20)
+	if err != nil {
+		t.Fatalf("count the records: %v", err)
+	}
+	if got != largest {
+		t.Errorf("the importer counted %d records, want the larger candidate's %d — "+
+			"the count must be taken over BOTH of the reader's starts", got, largest)
+	}
+
+	// And it is never lower than the reader's own count — whenever the
+	// reader accepts the archive at all. (This shape makes the reader
+	// refuse it: it parses one record and then finds that the declared
+	// count does not match.)
+	if reader, err := zip.OpenReader(archive); err == nil {
+		readerCount := int64(len(reader.File))
+		reader.Close()
+		if got < readerCount {
+			t.Errorf("the importer counted %d records, the reader parsed %d — the count must never be lower",
+				got, readerCount)
+		}
+	}
+}
+
 // TestP5_TheCentralDirectoryCountMatchesTheReader pins the count to
 // the reader's OWN count.
 //
