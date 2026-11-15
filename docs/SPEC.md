@@ -2525,44 +2525,48 @@ That is pinned by an **AST walk** over the reader's own source — **both** read
 - the **spaced** reading is SQLite's tokenization: SQLite treats a comment as **whitespace**, so `DELETE/*x*/FROM t` is two tokens — `DELETE` and `FROM` — and every **executable** write is visible in it;
 - a statement must be a **single** statement — a `;` anywhere but at the very end means another statement follows, and a `;` inside a comment or a string literal is not a separator;
 - a statement that begins with `SELECT` is a read, **full stop**: SQLite allows no DML in a subquery (`SELECT * FROM (DELETE …)` is a syntax error), none in a CTE body, and no `SELECT … INTO`;
-- a statement that begins with `WITH` is a read only if its **main** statement — the one after the CTE list — is a `SELECT`, and the main statement sits at the **top level**, so the top-level words carry it;
+- a statement that begins with `WITH` is read only if it carries **no write keyword at the top level**. SQLite's only legal main statements after a CTE list are `SELECT`, `INSERT`, `UPDATE`, `DELETE` and `REPLACE`, and the last four are write keywords; the main statement sits at the top level, so the top-level words carry it;
 - anything else — `DELETE`, `INSERT`, `PRAGMA`, `EXPLAIN`, `END`, `VACUUM`, `REVOKE` — is refused, because the reader issues plain `SELECT`s and nothing else.
+
+**The side effects a `SELECT` cannot have.** SQLite allows no DML in a subquery, none in a CTE body and no `SELECT … INTO`, so a `SELECT` cannot write **the database**. The two process-level side effects it could otherwise have are closed as well: the substrate registers **no user-defined function** (`RegisterFunc` appears only in comments explaining why it is avoided), and this build's SQLite is compiled with `SQLITE_OMIT_LOAD_EXTENSION`, so `SELECT load_extension(…)` is refused at run time. `TestP6TheGuardRefusesARouteSQLiteReallyExecutes` **pins** that, so a change to the build shows up in the test suite rather than in a security review.
 
 The **removed** reading rejoins a keyword that a comment split, which SQLite does not do. It contributes exactly **one** rule: if its first word is a **write** keyword, the text is refused. That catches `DE/*x*/LETE` — which SQLite rejects as a syntax error, so refusing it costs nothing — **without** manufacturing a keyword out of two unrelated tokens, which is what would make `SELECT up/*x*/date` a false positive. A word immediately followed by `(` names a **function**, and a function call is never a statement keyword: `SELECT replace(x,'a','b')` is a read.
 
-The walk closes these routes, and **every one of them is pinned in the repository**: the evasion matrix in `TestP6TheReadOnlyGuardCatchesEveryEvasion` splices each of them into a **copy** of the reader and requires the guard to report it, and `TestP6TheReadOnlyGuardRefusesNoLegitimateRead` splices the controls into a copy and requires the guard to stay silent. The matrix's **size** and its **historically-important routes** are pinned as well — the count is a constant, and the routes that have caught a real defect are pinned by name — so the matrix cannot quietly shrink or be swapped.
+The walk closes these routes, and **every one of them is pinned in the repository**: the evasion matrix in `TestP6TheReadOnlyGuardCatchesEveryEvasion` splices each of them into a **copy** of the reader and requires the guard to report it, and `TestP6TheReadOnlyGuardRefusesNoLegitimateRead` splices the controls into a copy and requires the guard to stay silent. The matrix's **size** and its **historically-important routes** are pinned as well — the count is a constant, and the routes that have caught a real defect are pinned by name **and by the SHA-256 of their snippet** — so the matrix can be neither quietly shrunk nor quietly substituted: a name pin alone stops a deletion, and only the digest stops a swap.
+
+The table below gives the guard's message for each route, **up to the SQL it quotes**.
 
 | evasion | what the guard says |
 |---|---|
 | a write through `ExecContext` | *"issues a write through ExecContext at line N: the reader must never write"* |
 | a write through `Exec` | *"issues a write through Exec at line N: the reader must never write"* |
 | a **method value** — `exec := db.ExecContext` | *"binds the database method ExecContext at line N: the reader must never bind a database method"* |
-| a method value passed as an **argument** | *"binds the database method ExecContext at line N"* |
-| a write smuggled through `QueryContext` | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT"* |
+| a method value passed as an **argument** | *"binds the database method ExecContext at line N: the reader must never bind a database method"* |
+| a write smuggled through `QueryContext` | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT: \"…\""* |
 | a write smuggled through `PrepareContext` | the same, at the prepare site — a prepared statement's SQL lives there |
-| a write executed through a prepared statement | *"issues a write through ExecContext at line N"* |
-| a write in a constant, **used** | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT"* |
-| a write in a constant, **unused** | *"the SQL constant X is not a single read statement: the statement begins with DELETE, not SELECT"* |
+| a write executed through a prepared statement | *"issues a write through ExecContext at line N: the reader must never write"* |
+| a write in a constant, **used** | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT: \"…\""* |
+| a write in a constant, **unused** | *"the SQL constant X is not a single read statement: the statement begins with DELETE, not SELECT: \"…\""* |
 | a write in a **concatenated** constant (`"DELETE " + "FROM …"`) | the same — the concatenation is resolved |
-| a write in a `WITH … UPDATE` constant | *"…the statement carries the write keyword UPDATE"* |
-| a write in a **comment-prefixed** constant | *"…the statement begins with DELETE, not SELECT"* — the comment is removed, not obeyed |
-| a write behind a **comment-split keyword** (`DE/*x*/LETE`) | *"…the statement begins with DELETE, not SELECT"* — the comment is removed whole |
+| a write in a `WITH … UPDATE` constant | *"…the statement carries the write keyword UPDATE: \"…\""* |
+| a write in a **comment-prefixed** constant | *"…the statement begins with DELETE, not SELECT: \"…\""* — the comment is removed, not obeyed |
+| a write behind a **comment-split keyword** (`DE/*x*/LETE`) | *"…the statement begins with DELETE, not SELECT: \"…\""* — the comment is removed whole |
 | a write behind a **comment-split keyword**, line comment (`DE--x⏎LETE`) | the same |
-| a write with a comment **between** its keywords (`DELETE/*x*/FROM t`) | *"…the statement begins with DELETE, not SELECT"* — the comment is spaced, and the tokens stay separate |
+| a write with a comment **between** its keywords (`DELETE/*x*/FROM t`) | *"…the statement begins with DELETE, not SELECT: \"…\""* — the comment is spaced, and the tokens stay separate |
 | an `EXPLAIN DELETE` | *"…the statement begins with EXPLAIN, not SELECT"* |
 | an `END` — a transaction control | *"…the statement begins with END, not SELECT"* |
 | a `REVOKE` | *"…the statement begins with REVOKE, not SELECT"* |
 | a statement whose SQL is built at runtime | *"issues a statement whose SQL is neither a literal nor a constant at line N"* |
-| a **multi-statement** `"SELECT 1; DELETE …"` | *"…the statement carries more than one statement"* |
-| a **dead** SQL constant no statement uses | *"the SQL constant X is never used by a statement"* |
+| a **multi-statement** `"SELECT 1; DELETE …"` | *"…the statement carries more than one statement: \"…\""* |
+| a **dead** SQL constant no statement uses | *"the SQL constant X is never used by a statement: \"…\""* |
 
 That is **twenty-one routes**. The **seventeen controls** — the legitimate reads the guard must not refuse — are pinned beside them: a plain `SELECT` written as a raw backtick literal, the same written as a double-quoted literal, a trailing semicolon, a `UNION` subquery, a read-only CTE, a `'UPDATE'` string literal, a `last_update` column, a `;` inside a literal, a doubled quote inside a literal, a `--` inside a literal, a bracket identifier containing a `;`, a bracket identifier containing a write keyword, a `?` bind placeholder, a **function** whose name is a statement keyword (`replace(x,'a','b')`), a **column** named after a statement keyword, an identifier split by a comment, and a CTE whose body is a read.
 
 **The matrix is not merely about the guard's classifier.** A statement SQLite rejects as a syntax error proves nothing, so one route is checked **against SQLite itself**: `TestP6TheGuardRefusesARouteSQLiteReallyExecutes` runs `DELETE/*x*/FROM skill_package_files` against a real in-memory database and asserts that the row it would have removed is **gone** — and that the guard refuses the same text. The live database is never opened.
 
-**The scope of the claim.** The walk covers the reader's **own two files**: every statement they issue, every statement they declare as a constant, and every database method they bind. A string literal passed to a non-database function is not inspected — it is not a statement the reader issues — and a statement issued by a helper in another file of the package is outside the walk. The behavioural pin covers the rest: the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read.
+**The scope of the claim.** The walk covers the reader's **own two files**: every statement they issue, every statement they declare as a constant, and every database method they bind. A string literal passed to a non-database function is not inspected — it is not a statement the reader issues — and a statement issued by a helper in another file of the package is outside the walk. The behavioural pin covers the rest: the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read. The guard is a source-level regression pin, **not** a security boundary: it audits the reader's own SQL text, not what a user-defined function, an extension, or a future hand-written `db.Exec` in another file of the package would do.
 
-**The residual over-strictness.** One shape is still refused that SQLite would accept: a `WITH` statement whose **top level** carries a statement keyword used as an identifier — `WITH x AS (SELECT 1) SELECT replace FROM t`. The top-level scan is what catches `WITH … DELETE`, and it cannot tell a write keyword in the main statement from one used as a column name without SQLite's parser. The reader's own statements contain no `WITH`, so nothing it owns is affected, and the refusal fails **closed**.
+**The residual over-strictness, stated as a rule.** A `WITH` statement is refused if **any top-level word is a write keyword**, even when SQLite would accept it. The identifier that trips it may be the CTE's own name (`WITH replace AS (SELECT 1) SELECT * FROM replace`), a column reference in the main statement (`… ORDER BY release`), or anything else at the top level; the same word inside the **column list** (`WITH x (release) AS …`) is not affected, because it sits inside parentheses. The guard cannot tell a write keyword in the main statement from one used as an identifier without SQLite's parser. **The reader's own statements contain no `WITH`**, so nothing it owns is affected, and the refusal fails **closed**.
 
 #### What P6 does **not** add
 
