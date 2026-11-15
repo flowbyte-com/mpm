@@ -544,6 +544,18 @@ type CoreDB interface {
 	// PermanentlyShredSkill is the destructive complement of ShredSkill:
 	// hard DELETE plus cascade cleanup. Not recoverable. Idempotent.
 	PermanentlyShredSkill(skillID string) error
+	// SkillPackageProvenance returns the package provenance object for a
+	// skill (PR #222 §8.2.1, R6/T40).
+	//
+	// It returns (nil, nil) for a skill that owns NO package: the object
+	// is absent for an ordinary single-document skill, and its absence is
+	// not an error. For a packaged skill the object is MANDATORY — the
+	// caller must not be able to receive package content without the
+	// entrypoint's hash and scan status beside it.
+	//
+	// The entrypoint hash it carries is the hash of the ORIGINAL
+	// entrypoint bytes, not of the derived projection.
+	SkillPackageProvenance(ctx context.Context, skillID string) (*SkillPackageProvenance, error)
 
 	// ─── Retrieval metadata (Observability Layer, 2026-07-26) ─────
 	// Fire-and-forget telemetry for adaptive retrieval. Called from

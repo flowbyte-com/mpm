@@ -68,6 +68,8 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.8 [Skill Package Storage (P1 — storage only)](#68-skill-package-storage-p1--storage-only)
    - 6.9 [Project-Scoped Continuity Storage (Stage 1 — storage only)](#69-project-scoped-continuity-storage-stage-1--storage-only)
    - 6.10 [Skill Package Import (P4 — directory import and the export loss marker)](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker)
+   - 6.11 [Skill Package Archive Import (P5 — the `.skill` ZIP adapter)](#611-skill-package-archive-import-p5--the-skill-zip-adapter)
+   - 6.12 [Skill Package Retrieval (P6 — the read-only retrieval and verification API)](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -279,7 +281,7 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 
 Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures can be evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
 
-**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). A package can now be imported from a directory and stored atomically; the read API, the full package export and the package CLI/MCP surfaces are still later stages, and a skill saved the ordinary way is unaffected.
+**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). A package can now be imported from a directory and stored atomically; the **internal** read API is specified in [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api), while the agent-facing read surface, the full package export and the package CLI/MCP surfaces are still later stages, and a skill saved the ordinary way is unaffected.
 
 #### Evidence
 
@@ -1889,11 +1891,11 @@ The primary key of `skill_packages` **is** the skill id: there is no second iden
 
 **No reader, writer, importer or exporter exists for these tables.** They are created empty and stay empty. There is no CLI command, no MCP action and no agent-facing surface for packages. A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
 
-> **Stage P4 has since added the writer.** This subsection describes **stage P1**, which is storage only. The **directory importer** — the first functional multi-file import — and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The import is **internal**: no CLI command, no MCP action and no agent-facing import surface exists for it either, and the read API, the full package export and the package CLI/MCP surfaces are still later stages.
+> **Stage P4 has since added the writer.** This subsection describes **stage P1**, which is storage only. The **directory importer** — the first functional multi-file import — and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The import is **internal**: no CLI command, no MCP action and no agent-facing import surface exists for it either, and the agent-facing read surface, the full package export and the package CLI/MCP surfaces are still later stages.
 
 The later stages — canonicalisation, the importer, the read API, the export writer, the CLI and MCP surfaces — are described in §10 of the design document and are **not** part of this change. Several operator decisions in that design (the accepted archive layouts, the binary-asset default, cross-workspace sharing) are **open**, and this stage does not decide any of them.
 
-**One of them is no longer open.** The prune exemption's *form* was decided after P1: the operator approved the **blanket** exclusion of `collection = 'skills'` from the age-based `PruneOlderThan` (operator decision **O17**), and P3 implemented it. The age-based prune therefore no longer removes ordinary skills exactly as it did before — it no longer removes **any** skill. The compatibility impact and the reasoning are in [Skills (Procedural Memory)](#skills-procedural-memory); the implementation is `SkillsExclusionClause` in `internal/core/skill_db.go`. P3 also added the package-immutability guard on the legacy write path and the transaction-aware skill writer the importer will use. The importer, the read API, the export writer and the package CLI/MCP surfaces are still later stages.
+**One of them is no longer open.** The prune exemption's *form* was decided after P1: the operator approved the **blanket** exclusion of `collection = 'skills'` from the age-based `PruneOlderThan` (operator decision **O17**), and P3 implemented it. The age-based prune therefore no longer removes ordinary skills exactly as it did before — it no longer removes **any** skill. The compatibility impact and the reasoning are in [Skills (Procedural Memory)](#skills-procedural-memory); the implementation is `SkillsExclusionClause` in `internal/core/skill_db.go`. P3 also added the package-immutability guard on the legacy write path and the transaction-aware skill writer the importer will use. The importer has since landed (P4 and P5), and the **internal** read API with it (P6 — [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api)); the export writer and the package CLI/MCP surfaces are still later stages.
 
 #### The tables are local-only
 
@@ -2339,6 +2341,180 @@ This is the one place where the implementation is **narrower** than the design's
 **No second package database.** The storage is the one specified in §6.8, and the archive path writes to it through the same transaction as the directory path.
 
 **No change to P4's rules.** Every protection the directory path applies — the confinement and the identity chain, the scanner preflight, the limits, the secret and poison scans, the binary and executable rules, the version derivation, the idempotence and version-conflict rules, the transactional projection and provenance, the blob dedup and the post-commit verification — is applied to an archive import **unchanged**. The archive path adds a way to **obtain** the bytes; it does not add a way to **decide** whether they may be stored.
+
+---
+
+### 6.12 Skill Package Retrieval (P6 — the read-only retrieval and verification API)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** is specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The **archive importer** is specified in [§6.11](#611-skill-package-archive-import-p5--the-skill-zip-adapter). **Stage P6** adds the **reader** — the read-only retrieval and integrity-verification API over the packages those two stages stored.
+
+The format, the retrieval contract and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5.4, §5.5, §8.1–§8.7, §10, §13. **This section describes stage P6.**
+
+#### What P6 adds
+
+Three **internal**, read-only operations, plus one accessor that the existing skill `read` action uses to attach the package provenance:
+
+| operation | what it returns |
+|---|---|
+| `DatabaseManager.PackageFiles` | the package's file **metadata** — never content (§8.5 `files`) |
+| `DatabaseManager.PackageReadFile` | **one** file's original bytes, optionally bounded (§8.5 `read_file`, §8.6) |
+| `DatabaseManager.PackageVerify` | the package's **integrity report** (§8.5 `verify`) |
+| `DatabaseManager.SkillPackageProvenance` | the §8.2.1 provenance object, or nothing at all for an ordinary skill |
+
+They are **internal**, exactly as P4's and P5's importers are: there is no CLI command, no MCP action and no agent-facing import or export surface. The agent-facing read surface lands in **P8**.
+
+#### The reader is a reader, not a writer
+
+The reader **never** creates, repairs, reimports, rescans or replaces anything. It never materialises a package on the filesystem, it never executes a stored script, and it never treats retrieved content as instructions — the bytes are **data**, whatever they say.
+
+It is also deliberately **separate** from the import and archive paths: the importer owns the bytes, the reader only reads the rows the importer wrote. Every rule the reader needs is **reused**, not duplicated: the identity rules are P1's `SkillIDForNameAndVersion`, the path validation is P2's `CanonicalPackagePath`, the manifest hashing is P2's `VerifyPackageHash`, the role and content-type classes are P2's, and the manifest and file types are P2's own.
+
+#### Every read re-hashes what it returns
+
+The stored SHA-256 is **not** taken on trust. The reader re-hashes the blob on the way out, so a blob row whose content was mutated in place is **refused** with `content_hash_mismatch` rather than returned (§8.6, T34). The same code covers a size disagreement, because a size that does not describe the bytes is the same defect seen from another side.
+
+There is exactly one exception, and it is a deliberate one: `SkillPackageProvenance` reports the **recorded** hashes and leaves the re-hashing to `verify`. The `read` action must stay a cheap retrieval, and `verify` is the operation that *proves* the package.
+
+#### The listing is metadata, and it is deterministic
+
+`PackageFiles` returns each file's canonical path, SHA-256, size, content type, role, executable flag and **actual** scan status — the statuses the import recorded, which scanners really ran — plus the package hash and the file count. The files are returned in **canonical-path order**, every time, because the query orders them and the order is part of the contract.
+
+It contains **no content**: the listing exists so a caller can decide what to ask for, and a listing that inlined the bytes would defeat the progressive retrieval the design is built on.
+
+#### One consistent snapshot per read
+
+Every read takes its metadata and its bytes from **one** read snapshot, so a package row and the blob it references can never come from two different database states. The snapshot is a **deferred, read-only** transaction: it takes a shared lock on its first read, holds it for the read and releases it at the end. It never takes a write lock.
+
+A one-file request loads **one** file row and **one** blob — never the whole package.
+
+#### The bounded read (§8.6, exactly)
+
+The three parameters use three **different** units and are never converted into one another: `offset` and `limit` count **lines**, `max_bytes` counts **bytes**.
+
+| rule | behaviour |
+|---|---|
+| the default byte cap | **64 KiB** (`max_bytes: 0` means the default) |
+| the hard byte cap | **1 MiB** — a request above it is **refused** with `invalid_bounds`, never clamped |
+| the line unit | a line **keeps its terminator**; `""` has zero lines, `"a\nb"` has the lines `"a\n"` and `"b"`, `"\n"` has the single line `"\n"` |
+| the byte cap | applied **at a line boundary** — a line cut in half by the cap is **not** returned |
+| `next_offset` | the index of the **first line that was not returned** — a **line** index, never a byte offset |
+| `next_offset` when complete | **null** |
+| the progress guarantee | every **non-terminal** truncated response satisfies `next_offset > offset` |
+
+`limit: 0` means "no line-count bound", consistently with `max_bytes: 0` meaning "the default".
+
+**The terminal case** (§8.6, T49): a file whose first line alone exceeds the cap returns **zero** lines, `truncated: true`, `next_offset == offset` and the reason code **`line_too_large`**. It is marked `terminal`, and it is the **only** response that may carry an unchanged `next_offset` — so a caller never has to infer that it must stop rather than resume. Raising `max_bytes`, up to the 1 MiB hard cap, is the only way forward.
+
+**The continuation** (§8.6, T47): because a line keeps its terminator and the cap truncates at a line boundary, the concatenation of every successive window reproduces the requested file **byte for byte** — no gap, no repeated line, no altered byte.
+
+#### Binary content is never carried through a text field by accident
+
+The internal API always returns the **exact bytes**. The `raw` parameter decides how they are carried:
+
+| `raw` | content | transport encoding |
+|---|---|---|
+| `false` (default) | the content must be **text-safe** — a binary asset, or bytes that are not valid UTF-8, is refused with `binary_requires_raw` | `utf-8` |
+| `true` | the bytes themselves | `base64` |
+
+So `raw` is meaningful for text as well as binary: it says "give me the bytes, do not interpret them", and the response's `Encoding` field names the lossless form. A future JSON layer **must** use the encoding the response names.
+
+#### The integrity report (§8.5 `verify`)
+
+`verify` is read-only and it **repairs nothing**: no row is rewritten, no blob is re-imported, no scanner is re-run, nothing is replaced. A corrupt package is **reported** as corrupt — never as verified.
+
+The checks, each with a stable name:
+
+| check | what it proves |
+|---|---|
+| `manifest_package_hash` | the canonical manifest matches the recorded package hash |
+| `manifest_identity` | the manifest and the package row describe the same skill, version and entrypoint |
+| `file_metadata_matches_manifest` | the file rows match the manifest |
+| `blob_exists` | every referenced blob exists |
+| `blob_content_hash` | every stored blob's content matches its recorded SHA-256 |
+| `blob_size` | every stored size matches the actual byte length |
+| `entrypoint_hash` | the entrypoint hash matches the **original** `SKILL.md` bytes |
+| `projection_hash` | the skill projection matches the manifest's `projection_sha256` |
+| `version_identity` | the package and the projection identify the expected skill version |
+
+Damage is a **result**, not an error: the caller asked whether the package is sound, and the answer is a structured list of what is not. Only "there is no such package", an unusable selector and a substrate failure are errors.
+
+#### The provenance on `read` (R6 / T40)
+
+The existing `mpm_skills` `read` action gains **one** object for a **packaged** skill, and **nothing** changes for an ordinary one:
+
+```json
+{
+  "success": true,
+  "id": "skill:system-prompt-writer-v1.0.0-unversioned",
+  "body": "…",
+  "is_global": false,
+  "package": {
+    "entrypoint": "SKILL.md",
+    "entrypoint_sha256": "783ece4b…",
+    "file_count": 3,
+    "package_hash": "…",
+    "scanned": true,
+    "scan_status": {"secret": true, "poison": true},
+    "version_override": {"declared": null, "effective": "1.0.0-unversioned",
+                         "reason": "package_declares_no_version"}
+  }
+}
+```
+
+The object is **mandatory** for a packaged skill. The `read` action inlines the entrypoint's projection body straight into the agent's context, so the one piece of package content most likely to carry an injection would otherwise come back with nothing the caller could check.
+
+`entrypoint_sha256` is the hash of the **original** file bytes, as supplied — **not** the hash of the derived projection. (The two coincide for a package that declares a version, because §8.2 makes such a projection byte-identical to the original; they differ for a versionless package, and the distinction is pinned by a test.) `scanned` is `true` only when every scanner that applies to the entrypoint actually ran and passed — it is **not** a constant, and it is reported from the entrypoint file row's own status.
+
+For a skill that is **not** a package the object is **absent** — not present and empty — so a caller of today's API sees today's response byte for byte.
+
+The `read` action still returns the entrypoint **projection's** body only. No supporting file is ever inlined beside it: the agent must ask for a specific file.
+
+#### The refusal vocabulary
+
+The reader has its own **closed** vocabulary, mirroring the importer's:
+
+| reason | meaning |
+|---|---|
+| `package_not_found` | no package is published for the skill (including a skill that owns none) |
+| `file_not_found` | the package carries no file at that canonical path |
+| `invalid_path` | the requested path is not a canonical package path |
+| `content_hash_mismatch` | the stored bytes are not the bytes that were recorded |
+| `integrity_failure` | the stored package is not internally consistent |
+| `invalid_bounds` | the read's bounds are not admissible |
+| `line_too_large` | the first requested line alone exceeds the byte cap (**terminal**, not a failure) |
+| `database_failure` | the substrate failed |
+| `binary_requires_raw` | the content cannot be carried as text without loss |
+| `selector_invalid` | the package was named in a way that does not identify one package |
+
+Corruption is **never** reported as a missing file, and there is no fallback to the unverified projection or to unverified blob bytes. The reader fails closed.
+
+#### The deviations
+
+**The selector requires a version.** A package is named by its canonical skill id, **or** by a name **and** a version. A name alone does not identify one package, and the reader never picks a version silently — the design's parameter table says `name` + `version` as well. P8's CLI (`mpm skill files <name|id> [--version V]`) may resolve a latest version itself, above this API.
+
+**`truncated` means "the file was not fully returned".** When `limit` — rather than the byte cap — ends the read, the response is still `truncated: true` and still carries `next_offset`, because unread lines remain. A response is `truncated: false` only when the reader reached the end of the file.
+
+**`verify` checks more than the design guarantees, and says so.** The design requires that a corrupt package is never reported as verified. The reader adds the checks that make that claim **demonstrable** — the per-blob content hash, the per-blob size, the manifest-to-rows reconciliation and the projection hash — and each is reported under its own stable name, so a caller can tell **which** guarantee failed rather than only that something did.
+
+**The provenance accessor is tolerant where the rest of the reader is strict.** `read` must keep returning the entrypoint's projection even when the package's manifest is broken — that is what `verify` is for. What the accessor never does is claim a scan that was not recorded: a missing entrypoint file row reports **no** scan.
+
+#### What P6 does **not** add
+
+**No P7 export writer.** The `.skill` archive is the transport; the writer that produces one is P7.
+
+**No P8 CLI or MCP surface.** The reader is internal. No `mpm skill files`, `read-file` or `verify` command and no new MCP action registration lands here.
+
+**No agent-facing import.**
+
+**No P9 promotion, garbage collection or lifecycle mutation.**
+
+**No automatic execution.** A stored script is stored and flagged, never run.
+
+**No HAL integration.**
+
+**No change to the shared model-configuration project.**
+
+**No new table and no schema change.** The reader reads the three tables §6.8 specifies, and nothing else.
 
 ---
 
