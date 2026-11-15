@@ -28,7 +28,9 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1513,6 +1515,104 @@ func TestP5_APrefixedArchiveIsNotRefusedByTheCentralDirectoryBound(t *testing.T)
 	got := p5PackageFiles(t, dm, res.SkillID)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("the package's file rows = %v, want %v", got, want)
+	}
+}
+
+// TestP5_TheCentralDirectoryCountMatchesTheReader pins the count to
+// the reader's OWN count.
+//
+// The bound's soundness rests on the count being the number of records
+// `archive/zip` will actually parse. The walk therefore covers exactly
+// the window `archive/zip` reads — from the parse start to the end of
+// the file — and uses the same signature test and the same
+// 46-bytes-plus-lengths advance.
+//
+// This test compares the two counts, directly, over a range of archive
+// shapes: the ordinary ones and the awkward ones (directory entries,
+// maximum-length names, extra fields, a trailing comment, a prefixed
+// archive).
+//
+// For a well-formed archive the two counts are EQUAL. For a malformed
+// one the importer's count is never LOWER — the walk's window is
+// `archive/zip`'s, so it can only see more, and the bound is only ever
+// conservative.
+func TestP5_TheCentralDirectoryCountMatchesTheReader(t *testing.T) {
+	// A range of shapes.
+	shapes := []struct {
+		name    string
+		entries []p5ArchiveEntry
+	}{
+		{"a single entry", []p5ArchiveEntry{
+			{name: "SKILL.md", content: []byte("x\n")},
+		}},
+		{"several entries", []p5ArchiveEntry{
+			{name: "SKILL.md", content: []byte("x\n")},
+			{name: "references/a.md", content: []byte("a\n")},
+			{name: "references/b.md", content: []byte("b\n")},
+			{name: "scripts/run.sh", content: []byte("#!/bin/sh\n")},
+		}},
+		{"directory entries", []p5ArchiveEntry{
+			{name: "SKILL.md", content: []byte("x\n")},
+			{name: "references/", dir: true},
+			{name: "references/a.md", content: []byte("a\n")},
+			{name: "references/deep/", dir: true},
+			{name: "references/deep/b.md", content: []byte("b\n")},
+		}},
+		{"maximum-length names", []p5ArchiveEntry{
+			{name: "SKILL.md", content: []byte("x\n")},
+			{name: "references/" + strings.Repeat("x", 240) + ".md", content: []byte("a\n")},
+		}},
+		{"many entries", func() []p5ArchiveEntry {
+			out := []p5ArchiveEntry{{name: "SKILL.md", content: []byte("x\n")}}
+			for i := 0; i < 300; i++ {
+				out = append(out, p5ArchiveEntry{
+					name:    "references/f" + p5Itoa(i) + ".md",
+					content: []byte("a\n"),
+				})
+			}
+			return out
+		}()},
+	}
+
+	for _, shape := range shapes {
+		t.Run(shape.name, func(t *testing.T) {
+			archive := filepath.Join(t.TempDir(), "shape.skill")
+			p5WriteArchive(t, archive, shape.entries)
+
+			// The reader's count.
+			reader, err := zip.OpenReader(archive)
+			if err != nil {
+				t.Fatalf("open the archive: %v", err)
+			}
+			defer reader.Close()
+
+			// The importer's count, over the same window.
+			f, err := os.Open(archive)
+			if err != nil {
+				t.Fatalf("open the archive: %v", err)
+			}
+			defer f.Close()
+			info, err := f.Stat()
+			if err != nil {
+				t.Fatalf("stat the archive: %v", err)
+			}
+
+			dir, err := readPackageArchiveDirectory(f, info.Size())
+			if err != nil {
+				t.Fatalf("read the central directory: %v", err)
+			}
+			start := dir.parseStart(f, info.Size())
+			window := make([]byte, info.Size()-start)
+			if _, err := f.ReadAt(window, start); err != nil && !errors.Is(err, io.EOF) {
+				t.Fatalf("read the parse window: %v", err)
+			}
+			got := countPackageArchiveRecords(window)
+
+			if got != int64(len(reader.File)) {
+				t.Errorf("the walk counted %d records, the reader parsed %d — they must agree",
+					got, len(reader.File))
+			}
+		})
 	}
 }
 

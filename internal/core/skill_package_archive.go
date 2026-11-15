@@ -123,30 +123,34 @@ type packageArchiveLimits struct {
 	// about 1 023 entries. 4096 leaves four times that headroom.
 	MaxArchiveEntries int
 
-	// MaxCentralDirectoryBytes is the maximum size of the archive's
-	// central directory, in bytes.
+	// MaxParseWindowBytes is the maximum number of bytes `archive/zip`
+	// may read as central-directory records.
 	//
-	// JUSTIFICATION. The allocation `archive/zip` makes on the central
-	// directory is proportional to its byte size — measured at 4.8×
-	// the bytes, for the per-record header and its index — so this cap
-	// IS the allocation bound, stated in the unit the allocation is
-	// actually made in.
+	// JUSTIFICATION. `archive/zip` reads directory records from the
+	// parse start to the end of the file, stopping at the first byte
+	// that is not a record, and it builds one `zip.File` per record —
+	// 168 bytes each, plus an index. The allocation is proportional to
+	// the window's size — measured at between 4.8× and 5.7× — so this
+	// cap IS the allocation bound, stated in the unit the allocation
+	// is actually made in.
 	//
 	// It also bounds the walk that counts the records, which reads the
-	// directory into one buffer.
+	// window into one buffer.
 	//
-	// The legitimate worst case — 512 files and 511 directories, every
+	// For a well-formed archive the window is the central directory
+	// plus the End-of-Central-Directory record and its comment. The
+	// legitimate worst case — 512 files and 511 directories, every
 	// name at the 511-byte archive-path maximum — has a 569 811-byte
-	// central directory. 4 MiB leaves seven times that headroom.
-	MaxCentralDirectoryBytes int64
+	// central directory; 4 MiB leaves seven times that headroom.
+	MaxParseWindowBytes int64
 }
 
 // defaultPackageArchiveLimits returns the archive limits.
 func defaultPackageArchiveLimits() packageArchiveLimits {
 	return packageArchiveLimits{
-		MaxArchiveBytes:          64 << 20, // 64 MiB
-		MaxArchiveEntries:        4096,
-		MaxCentralDirectoryBytes: 4 << 20, // 4 MiB
+		MaxArchiveBytes:     64 << 20, // 64 MiB
+		MaxArchiveEntries:   4096,
+		MaxParseWindowBytes: 4 << 20, // 4 MiB
 	}
 }
 
@@ -310,22 +314,30 @@ func readPackageArchive(archivePath string, limits PackageImportLimits, archiveL
 			dir.count, archiveLimits.MaxArchiveEntries)
 	}
 
-	// The central directory's byte extent. The allocation `archive/zip`
-	// goes on to make is proportional to it — measured at 4.8× — so
-	// this cap IS the allocation bound.
+	// The parse window. `archive/zip` reads central-directory records
+	// from the parse start to the END OF THE FILE, stopping at the
+	// first byte that is not a record. The window is therefore exactly
+	// the bytes the walk below must cover, and it is also the unit the
+	// allocation is made in: the allocation `archive/zip` goes on to
+	// make is proportional to the window's size — measured at between
+	// 4.8× and 5.7× — so this cap IS the allocation bound.
 	start := dir.parseStart(file, info.Size())
-	span := dir.endOffset - start
+	span := info.Size() - start
 	if span < 0 {
 		span = 0
 	}
-	if span > archiveLimits.MaxCentralDirectoryBytes {
+	if span > archiveLimits.MaxParseWindowBytes {
 		return source, packageImportErrorf(PackageImportReasonFileCountLimit, "",
-			"the archive's central directory is %d bytes, over the %d-byte cap",
-			span, archiveLimits.MaxCentralDirectoryBytes)
+			"the archive's central directory spans %d bytes, over the %d-byte cap",
+			span, archiveLimits.MaxParseWindowBytes)
 	}
 
-	// The EXACT record count. The span is already bounded above, so
+	// The EXACT record count. The window is already bounded above, so
 	// this buffer is bounded too.
+	//
+	// The window is `archive/zip`'s own, to the end of the file, so
+	// the walk sees exactly the bytes it will see and the count it
+	// produces is exactly the count `archive/zip` will produce.
 	spanBytes := make([]byte, span)
 	if _, err := file.ReadAt(spanBytes, start); err != nil && !errors.Is(err, io.EOF) {
 		return source, packageImportErrorWrap(PackageImportReasonArchiveInvalid, "", err,
