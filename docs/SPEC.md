@@ -70,6 +70,7 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.10 [Skill Package Import (P4 — directory import and the export loss marker)](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker)
    - 6.11 [Skill Package Archive Import (P5 — the `.skill` ZIP adapter)](#611-skill-package-archive-import-p5--the-skill-zip-adapter)
    - 6.12 [Skill Package Retrieval (P6 — the read-only retrieval and verification API)](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api)
+   - 6.13 [Skill Package Export (P7 — the deterministic `.skill` writer and the complete skills export)](#613-skill-package-export-p7--the-deterministic-skill-writer-and-the-complete-skills-export)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -281,7 +282,7 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 
 Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures can be evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
 
-**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). A package can now be imported from a directory and stored atomically; the **internal** read API is specified in [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api), while the agent-facing read surface, the full package export and the package CLI/MCP surfaces are still later stages, and a skill saved the ordinary way is unaffected.
+**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The **archive importer** is specified in [§6.11](#611-skill-package-archive-import-p5--the-skill-zip-adapter). A package can now be imported from a directory and stored atomically; the **internal** read API is specified in [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api); the **deterministic `.skill` export** and the **complete skills export** are specified in [§6.13](#613-skill-package-export-p7--the-deterministic-skill-writer-and-the-complete-skills-export), so a package's bytes can now leave the substrate as a deterministic archive and re-enter as the same package. The **agent-facing read surface** and the **package CLI/MCP surfaces** are still later stages, and a skill saved the ordinary way is unaffected.
 
 #### Evidence
 
@@ -2622,6 +2623,131 @@ That is **twenty-two routes**. The **seventeen controls** — the legitimate rea
 **No change to the shared model-configuration project.**
 
 **No new table and no schema change.** The reader reads the three package tables §6.8 specifies — `skill_packages`, `skill_package_files` and `skill_package_blobs` — plus `memories`, which `verify` reads to check the projection's hash and its version. It touches nothing else.
+
+### 6.13 Skill Package Export (P7 — the deterministic `.skill` writer and the complete skills export)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The **archive importer** is specified in [§6.11](#611-skill-package-archive-import-p5--the-skill-zip-adapter). The **reader** is specified in [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api). **Stage P7** adds the **writer**: the deterministic `.skill` export, and the complete skills export that carries every package it selects.
+
+The format, the export contract and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5.4, §5.5, §5.6, §6.3, §10 and §13. **This section describes stage P7.**
+
+#### What P7 changes
+
+Before P7 the skills export carried the **projected skill row only**, and the loss marker named every package whose content had been dropped. P7 makes the export **complete**: the packages' bytes are exported, and the marker names only what could **not** be carried.
+
+That is a change in the marker's **meaning**, so the marker is stated again here:
+
+| field | meaning in P7 |
+|---|---|
+| `packages_omitted.count` | the number of packages that were **selected and not carried** — zero when the export carried every one of them |
+| `packages_omitted.packages[]` | each omitted package, **with its reason** (`integrity_failure`, `package_not_found`, `file_name_collision`, `skill_row_not_exported`, `database_failure`, `export_failed`) and a human-readable detail |
+| `packages_omitted.scope.total` | the number of packages in the store, whatever the export's filters selected |
+| `packages_omitted.scope.selected` | the number of packages the export's filters chose — the denominator the omission count is measured against |
+| `packages_omitted.scope.carried` | the number of `.skill` archives the export actually produced |
+
+**A zero omission count is a positive statement only in the light of the scope.** Zero omitted out of twelve selected packages is a *complete* export; zero omitted out of zero selected packages says nothing about the packages that were never selected. That is why the scope is part of the marker.
+
+#### The deterministic writer
+
+A `.skill` archive is the **transport** for a package: the bytes a package is moved in. Two exports of the same package must therefore produce the **same bytes**, or the transport has no identity of its own and an operator cannot tell a faithful copy from a tampered one.
+
+Everything that could vary between two exports is pinned:
+
+| field | value |
+|---|---|
+| **layout** | **flat** — every canonical path sits at the archive's top level, so `SKILL.md` is at the archive's top level and §5.3.1's rule 4 makes the archive root the package root |
+| **entry order** | `SKILL.md` first, then the other canonical paths **sorted** |
+| **timestamp** | every entry carries **1980-01-01 00:00:00 UTC** — the ZIP epoch, and the earliest instant a DOS timestamp can express |
+| **permissions** | `0644`; `0755` for a file the manifest marks executable |
+| **compression** | **`Store`** — no compression at all |
+| **header fields** | no extra field of the writer's own, no comment, no archive comment |
+| **content** | the **original** package bytes, never the derived projection |
+
+**The compression choice is load-bearing, and it is measured rather than assumed.** Go's DEFLATE output is **not stable across Go releases**: the same bytes compressed by Go **1.26.6** and by Go **1.27.3** produce archives of **395** and **396** bytes, with **different digests** (`f3187b20…` and `a1f5b1ab…`). A deflate archive's identity would therefore depend on the **toolchain** that produced it, which defeats the purpose of a deterministic transport. `Store` makes the archive's bytes a function of the package's bytes and the pinned header fields alone, so the same package exports to the same bytes on **every** Go release. The cost is size: an archive is the sum of its files rather than a compressed fraction of it.
+
+That claim is **pinned as a constant**, not as a comparison: `TestP7ExportArchiveBytesAreIdenticalAcrossGoReleases` asserts the archive's SHA-256 against a literal. A test that compared two exports of the same package would pass on **both** Go releases — and would not have caught the toolchain dependence the `Store` decision avoids. A constant catches both, because the constant is measured on one toolchain and CI runs the other.
+
+#### Verify before export, in one snapshot
+
+The exporter **verifies** a package before it serialises it, reusing **P6's own verification** (`verifyPackageInTx`) and the **P1/P2 manifest primitives**. A missing blob, a corrupted hash, a mismatched file size, an invalid manifest, or a projection that contradicts the manifest **refuses the export**. There is no "export what is there" mode: an archive is a claim that these are the package's bytes, and a damaged package cannot make that claim.
+
+The verification and the serialisation read the **same snapshot**. A verify-then-export sequence across two snapshots would permit the content to change between the verification and the serialisation — which is exactly the window the verification exists to close.
+
+The exporter never **repairs**, never **mutates** and never **rescans**. It reads the rows the importer wrote and serialises them.
+
+#### The round trip
+
+`stored package → deterministic .skill → P5 import → identical package_hash and file hashes`
+
+The property holds because the manifest's per-file fields — path, sha256, size, content type, role, executable and the scan statuses — are all **re-derived identically** by the importer from the same bytes. The `executable` flag comes from the file's **extension** (the import's own allow-list), not from the archive's mode bits, so the mode bits are documentation rather than identity.
+
+The round trip is pinned across: a version-declaring package; a **versionless** package (whose effective version is `1.0.0-unversioned`); the **original** `SKILL.md` versus the derived projection; markdown references; scripts; binary assets; **shared content-addressed blobs**; empty supporting files; and packages built from **differently ordered** sources — which must export to the same bytes.
+
+#### The legacy single-document skill
+
+An ordinary skill — one with no package — exports as a **one-file** `.skill` archive: a single `SKILL.md` entry holding the skill's own bytes. The archive is a valid package for the P5 importer, which is what makes an ordinary skill movable by the same transport a package uses.
+
+**The transport adaptation is named, not glossed.** The archive carries the skill's **original** document. On the way back in, the importer derives a projection from it: a document that declares a version projects to itself, so the round trip is byte-exact; a document that declares **no** version is given the effective version `1.0.0-unversioned` and the projection carries one inserted `version:` line. That insertion is the **importer's** rule (§5.2), not a rewrite by the exporter. The exporter changes no document and writes nothing to the database.
+
+#### The complete skills export
+
+The operator accepted the design's **sibling-directory** approach. A batch skills export writes:
+
+- the **export document** — the same JSON document the export has always written, with the `memories` array, the `packages_omitted` marker and the new `package_archives` index;
+- a **sibling directory** named for that export — `<output-path>.packages` — holding one `<name>-<version>.skill` archive per packaged skill.
+
+The `package_archives` index is **machine-readable**: it names the directory, and for each archive its file name, the skill id, the package hash, the archive's own SHA-256 and its size. An operator can therefore check every archive without re-deriving what it should contain.
+
+**The file name is derived from the package's canonical identity, and the derivation is checked as a FILE NAME.** A skill name is an **identifier**, and an identifier may contain a path separator — `a/b` is a legal skill name, and `a/b-1.0.0.skill` is a path, not a file name. So the derived name is refused when it is not a single safe path component: no path separator, not `.` or `..`, no leading dot, no control character.
+
+**The derivation is not injective, so a collision is possible.** The skill `a` at version `1.0.0-b-2.0.0` and the skill `a-1.0.0-b` at version `2.0.0` both derive `a-1.0.0-b-2.0.0.skill`. Two archives with one name cannot both be published — the second would overwrite the first — so the **first** archive in the canonical skill-id order keeps the name, and every other one is **named as an omission** with the reason `file_name_collision`. An export never silently overwrites an archive.
+
+#### The destination policy
+
+A package-bearing export needs a destination that can carry the archives **and** the index that names them.
+
+| destination | package-bearing export | package-free export |
+|---|---|---|
+| `--output <path>` | the document and the sibling directory | the document alone |
+| **standard output** | **refused** — before anything is emitted | unchanged |
+| **`--format csv`** | **refused** | unchanged |
+| **`--format json-array`** (deprecated) | **refused** | unchanged |
+
+The refusals happen **before anything is written**, so a refused export has written nothing at all — not a truncated document, not a half-published directory. Standard output cannot carry the archives; neither can CSV or the deprecated bare array, and an export that dropped the archives silently would be the exact loss R11 exists to prevent.
+
+**The deprecated `json-array` policy is preserved, not widened.** The bare array is still available for every export that has nothing to lose, and it is refused for the one that does. The compatibility shim is safe in the same shape it had before P7: a consumer that cannot yet read the structured object keeps working for every complete export, and is given a clear error — not silent data loss — for the one that is not.
+
+#### The migration consumer fails closed
+
+`mpm migrate --from` reads the document's **`memories` array** — the projected rows — and nothing else. Importing a package-bearing document would therefore write the projected rows and **silently drop** every package's reference files, scripts and assets. Those bytes exist nowhere else.
+
+So the consumer **refuses**, with a diagnostic that says what is missing and where it is. The complete import path — the document's archives imported as packages — belongs with the package import surface (**P8**), not with the memory migration, so it is **deferred deliberately** rather than half-built. A document that carries the `package_archives` key with a **count of zero** is a complete export of a workspace with no packages, and it is imported normally.
+
+#### The filesystem safety
+
+Archives and export metadata are written through **private staging paths**:
+
+- The staging directory is created with a **random** name **beside** the output, so the publication is a same-filesystem rename and a predictable name cannot be pre-created as a symlink. It is removed on every failure path.
+- Nothing is published until every archive has been written **and** its digest re-read from the staged file and checked.
+- The document is written to a temporary name and **renamed** over the output, so the output is never truncated before its content is known to be complete.
+- A **symlink** is never followed: the output path and the sibling directory are inspected **without** following links, and a symlink in either place is refused.
+- An existing sibling directory that holds files is **refused**. An export never silently overwrites an archive.
+- Every **published** archive's digest is verified by reading it **back** from the published location.
+
+**The publication is NOT one atomic operation, and the design does not pretend otherwise.** The directory is published by a rename and the document by a second rename. The **order** makes the intermediate state harmless: the **directory is published first** and the **document second**, so a document is never published pointing at archives that are not there — a lie the consumer could not detect. The reverse — a directory with no document — points at nothing, and the recovery is to remove the directory and run the export again.
+
+**The recovery path is tested, not assumed.** An interruption between the two renames leaves a directory of archives and no document. The test asserts that the archives the interruption left behind are **intact and importable** — the interruption damaged nothing — that the next export **refuses** to run into that directory and says how to recover, and that removing the directory and running the export again succeeds.
+
+#### What P7 does **not** add
+
+**No `mpm skill export` command and no new `mpm_skills` MCP actions.** Those belong to **P8**. P7 extends the existing `mpm export` command, because complete skills export is explicitly part of the P7 contract, and it exposes an **internal export interface** — `ExportSkillPackage` and `ExportSkillPackages` — that P8's CLI and MCP surfaces call directly.
+
+**No new multi-package ZIP format.** One archive carries one package. The batch export's archives are separate files beside the document, named by the document's index.
+
+**No P9 lifecycle management, no agent-executable package content and no HAL integration.** A stored script is stored and flagged, never run.
+
+**No change to the database schema, and no write to the database at all.** The exporter reads the three package tables §6.8 specifies, plus `memories`. It writes nothing.
+
+**No change to the importer.** The `.skill` archive the writer produces is accepted by the existing P5 importer **by construction** — the flat layout is what §5.3.1's root rule expects — and no importer change was needed to make it so.
 
 ---
 

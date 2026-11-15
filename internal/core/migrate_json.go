@@ -235,6 +235,31 @@ func (dm *DatabaseManager) IngestFromJsonFile(sourcePath, importBatch string, dr
 		return nil, fmt.Errorf("read %s: %w", sourcePath, err)
 	}
 
+	// ── A document that carries PACKAGE ARCHIVES is refused. ──────────
+	//
+	// P7's skills export writes one `.skill` archive per packaged
+	// skill, beside the document, and names them in the document's
+	// `package_archives` index. This importer reads the document's
+	// `memories` array — the PROJECTED skill rows — and nothing else.
+	//
+	// So importing such a document would write the projected rows and
+	// SILENTLY DROP every package's reference files, scripts and
+	// assets. Those bytes exist nowhere else, which is exactly the loss
+	// R11 exists to make loud.
+	//
+	// The refusal is the fail-closed choice, and it is deferred
+	// deliberately: a COMPLETE import path — the document's archives
+	// imported as packages — belongs with the package import surface,
+	// not with the memory migration. Until it exists, the consumer says
+	// so instead of quietly losing the packages.
+	if count, directory, ok := jsonPackageArchiveIndex([]byte(content)); ok && count > 0 {
+		return nil, fmt.Errorf(
+			"%s carries %d skill package archive(s) in %q; this importer reads only the document's projected rows, "+
+				"so importing it would silently drop every package's reference files, scripts and assets. "+
+				"Import the .skill archives themselves, or export a document that carries no package",
+			sourcePath, count, directory)
+	}
+
 	facts, perEntryErrors, err := ParseJsonFactsWithReport(content, sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", sourcePath, err)

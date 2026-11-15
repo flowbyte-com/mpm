@@ -42,24 +42,29 @@ func p4ExportPackage(t *testing.T, dm *DatabaseManager, name string) string {
 
 // TestP4_T44_TheExportNamesEveryPackageItDidNotCarry pins T44.
 //
-// The loss marker carries the COUNT and the IDENTITY of every package
-// the export did not carry.
+// The export's SCOPE carries the COUNT and the IDENTITY of every package
+// the export is about.
+//
+// P7 changed what this method reports. Before P7 the export carried no
+// package content at all, so the scope and the omissions were the same
+// list. P7 makes the export COMPLETE: the scope is what the export is
+// ABOUT, and the omissions are what it could not carry — a difference
+// the export reports through the marker it now builds from its own
+// omissions. The scope is what the marker is measured against, so it is
+// what this test pins.
 func TestP4_T44_TheExportNamesEveryPackageItDidNotCarry(t *testing.T) {
 	dm := p3DM(t)
 
 	skillID := p4ExportPackage(t, dm, "lossy-package")
 
-	loss, err := dm.GetSkillPackageExportLoss("skills", "", "")
+	scope, err := dm.SkillPackageExportScope("skills", "", "")
 	if err != nil {
-		t.Fatalf("the loss marker: %v", err)
+		t.Fatalf("the export scope: %v", err)
 	}
-	if loss.Count != 1 {
-		t.Fatalf("the loss marker reports %d omitted packages, want 1", loss.Count)
+	if len(scope.Packages) != 1 {
+		t.Fatalf("the export scope names %d packages, want 1", len(scope.Packages))
 	}
-	if len(loss.Packages) != 1 {
-		t.Fatalf("the loss marker names %d packages, want 1", len(loss.Packages))
-	}
-	omitted := loss.Packages[0]
+	omitted := scope.Packages[0]
 	if omitted.SkillID != skillID {
 		t.Errorf("the omitted package is %q, want %q", omitted.SkillID, skillID)
 	}
@@ -78,6 +83,7 @@ func TestP4_T44_TheExportNamesEveryPackageItDidNotCarry(t *testing.T) {
 
 	// The notice NAMES the affected package. The marker is not a warning
 	// that can be missed.
+	loss := &SkillPackageExportLoss{Count: len(scope.Packages), Packages: scope.Packages}
 	notice := loss.Notice()
 	if !strings.Contains(notice, skillID) {
 		t.Errorf("the notice does not name the omitted package:\n%s", notice)
@@ -98,13 +104,14 @@ func TestP4_T44_AnExportOfOrdinarySkillsCarriesNoLoss(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	loss, err := dm.GetSkillPackageExportLoss("skills", "", "")
+	scope, err := dm.SkillPackageExportScope("skills", "", "")
 	if err != nil {
-		t.Fatalf("the loss marker: %v", err)
+		t.Fatalf("the export scope: %v", err)
 	}
-	if loss.Count != 0 {
-		t.Errorf("the loss marker reports %d omitted packages, want 0", loss.Count)
+	if len(scope.Packages) != 0 {
+		t.Errorf("the export scope names %d packages, want 0", len(scope.Packages))
 	}
+	loss := &SkillPackageExportLoss{Count: 0, Packages: scope.Packages}
 	if loss.Notice() != "" {
 		t.Errorf("the notice is not empty for an export that lost nothing:\n%s", loss.Notice())
 	}
@@ -117,12 +124,12 @@ func TestP4_T44_AnExportOfAnotherCollectionCarriesNoLoss(t *testing.T) {
 
 	p4ExportPackage(t, dm, "lossy-but-not-exported")
 
-	loss, err := dm.GetSkillPackageExportLoss("memories", "", "")
+	scope, err := dm.SkillPackageExportScope("memories", "", "")
 	if err != nil {
-		t.Fatalf("the loss marker: %v", err)
+		t.Fatalf("the export scope: %v", err)
 	}
-	if loss.Count != 0 {
-		t.Errorf("a memories export reports %d omitted packages, want 0", loss.Count)
+	if len(scope.Packages) != 0 {
+		t.Errorf("a memories export names %d packages, want 0", len(scope.Packages))
 	}
 }
 
@@ -132,15 +139,15 @@ func TestP4_T44_AnExportOfAnotherCollectionCarriesNoLoss(t *testing.T) {
 func TestP4_T44_TheMarkerIsAlwaysPresent(t *testing.T) {
 	dm := p3DM(t)
 
-	loss, err := dm.GetSkillPackageExportLoss("", "", "")
+	scope, err := dm.SkillPackageExportScope("", "", "")
 	if err != nil {
-		t.Fatalf("the loss marker: %v", err)
+		t.Fatalf("the export scope: %v", err)
 	}
-	if loss == nil {
-		t.Fatal("the loss marker is nil; it must always be present")
+	if scope == nil {
+		t.Fatal("the export scope is nil; it must always be present")
 	}
-	if loss.Packages == nil {
-		t.Errorf("the marker carries a nil package list; it must be an empty list")
+	if scope.Packages == nil {
+		t.Errorf("the scope carries a nil package list; it must be an empty list")
 	}
 }
 
@@ -153,13 +160,14 @@ func TestP4_T44_EveryPackageIsNamed(t *testing.T) {
 	second := p4ExportPackage(t, dm, "lossy-two")
 	third := p4ExportPackage(t, dm, "lossy-three")
 
-	loss, err := dm.GetSkillPackageExportLoss("skills", "", "")
+	scope, err := dm.SkillPackageExportScope("skills", "", "")
 	if err != nil {
-		t.Fatalf("the loss marker: %v", err)
+		t.Fatalf("the export scope: %v", err)
 	}
-	if loss.Count != 3 {
-		t.Fatalf("the loss marker reports %d omitted packages, want 3", loss.Count)
+	if len(scope.Packages) != 3 {
+		t.Fatalf("the export scope names %d packages, want 3", len(scope.Packages))
 	}
+	loss := &SkillPackageExportLoss{Count: len(scope.Packages), Packages: scope.Packages}
 	notice := loss.Notice()
 	for _, id := range []string{first, second, third} {
 		if !strings.Contains(notice, id) {

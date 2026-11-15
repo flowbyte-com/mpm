@@ -69,15 +69,32 @@ func TestMemoryWriter_InterfaceHasFindPromotionByLineage(t *testing.T) {
 	}
 }
 
-// TestExportOutputFile_RoutesToFileNotStdout pins defect B: the JSON
-// encoder must point at outputTarget (the file when --output is set)
-// not os.Stdout. The pre-fix code had json.NewEncoder(os.Stdout) hard
-// at the JSON branch, which is the exact bug.
+// TestExportOutputFile_RoutesToFileNotStdout pins defect B: the export
+// document must go to the file when --output is set, and never to
+// standard output.
+//
+// The pre-fix code had json.NewEncoder(os.Stdout) hard at the JSON
+// branch, which is the exact bug: the output file was created and
+// truncated but nothing was ever written to it — a 0-byte file with the
+// stdout JSON next to it.
+//
+// P7 rewrote the export's output path: the document is now rendered in
+// full, in memory, and written through an ATOMIC writer (a temporary
+// name and a rename), so the output is never truncated before its
+// content is known to be complete. The defect's intent is unchanged, so
+// the pin is restated against the new shape — and the behavioural
+// companion (an export with --output writes NOTHING to standard output)
+// lives in skill_package_export_cli_test.go.
 func TestExportOutputFile_RoutesToFileNotStdout(t *testing.T) {
 	src := readServiceSource(t, "maint_cmds.go")
-	// After patch: encoder uses outputTarget.
-	if !strings.Contains(src, "json.NewEncoder(outputTarget)") {
-		t.Fatalf("handleExport must use outputTarget for the JSON encoder (defect B)")
+	// The document reaches the --output path through the atomic
+	// writer.
+	if !strings.Contains(src, "writeFileAtomically(o.output, document)") {
+		t.Fatalf("handleExport must route the document to --output through writeFileAtomically (defect B)")
+	}
+	// Standard output is written only when there is no output path.
+	if !strings.Contains(src, "os.Stdout.Write(document)") {
+		t.Fatalf("handleExport must write the document to standard output when no --output is given")
 	}
 	// Before patch: encoder hardcoded os.Stdout. The patch removes
 	// that line.
