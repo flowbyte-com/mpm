@@ -2135,6 +2135,211 @@ The content-type allow-list is **explicit and closed**: `.md .txt .json .yaml .y
 
 **No change to ordinary skills.** A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
 
+### 6.11 Skill Package Archive Import (P5 — the `.skill` ZIP adapter)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** is specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). **Stage P5** adds the **archive importer** — the `.skill` ZIP adapter — and it is the second half of the same pipeline.
+
+The format and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5.3, §5.3.1, §5.4, §4.4 Rule 2, §7, §7.1, §10, §12.2 and §13. **This section describes stage P5.**
+
+#### What P5 adds
+
+An **internal** importer — `DatabaseManager.ImportSkillPackageFromArchive` — that takes an operator-selected `.skill` ZIP archive and stores the whole package **atomically**, through the **same** plan, the **same** transaction and the **same** post-commit verification the directory path uses.
+
+It is **internal**, exactly as the P4 importer is: there is no CLI command, no MCP action and no agent-facing import surface. The operator-facing command lands in a later stage (P8).
+
+The P5 property that everything else serves is **equivalence**: the same logical package produces the **same** canonical identity, the **same** file rows, the **same** per-file hashes, the **same** `package_hash` and the **same** stored content, whether it arrived as a directory or as a ZIP. The two layouts of the archive — flat and wrapped — produce **byte-identical** packages except for the display-only `raw_path`.
+
+#### The ingestion architecture — one boundary, not two importers
+
+P5 is an **adapter**, not a second importer. The pipeline is:
+
+```
+ZIP archive
+    ↓  readPackageArchive          ← the ADAPTER: this is all P5 adds
+       · open + identity check
+       · EOCD pre-scan (entry count)
+       · per-entry: type / encryption / count / path / size
+       · read the bytes (bounded)
+    ↓  packageImportSource          ← the SHARED validated representation
+    ↓  planPackageImportFiles       ← P4's planner, unchanged
+       · entrypoint cap · version derivation · semver · name
+       · secret + poison scans · binary/executable rules
+       · manifest · per-file hashes · package hash · identity
+    ↓  commitPackageImport          ← P4's transaction, unchanged
+    ↓  verifyPackageImport          ← P4's post-commit verification, unchanged
+```
+
+The boundary is drawn **after** the bytes are in memory, because that is where the two paths genuinely converge: once the bytes exist, the rules that decide whether a package may be stored are the **same** rules, and they are the rules the directory path has always applied. Every rule the mission lists as "reuse P4" — the frontmatter contract, the canonical path validation, the secret and poison scans, the binary and executable handling, the hashing and the manifest, the identity and semver, the idempotence and version-conflict rules, the transactional projection and provenance, the blob dedup and the post-commit verification — is applied **once**, in one place.
+
+P4's planner was **split** to make that boundary explicit and testable. `planPackageImport` (the directory path) resolves the root, runs the scanner preflight, walks the tree and selects the entrypoint; it then hands a `packageImportSource` to `planPackageImportFiles`, which is the **whole** of the remaining logic. No rule was duplicated, and no protection was weakened.
+
+**No package byte ever reaches the filesystem.** The archive is read **directly into the shared representation**; there is no temporary extraction tree, so there is nothing to clean up and no window in which an extracted file exists outside the database. This is **Rule 2** (§4.4) honoured literally, and it is what makes the next section's asymmetry safe.
+
+#### The accepted layouts (O9) and the root derivation
+
+**Exactly two** archive layouts are accepted, per the operator's decision **O9**:
+
+| layout | shape | the package root |
+|---|---|---|
+| **flat** | `SKILL.md` at the archive's top level | the archive root |
+| **wrapped** | one enclosing directory holding the whole package | that directory |
+
+The root is derived from the **entrypoint's parent directory** (§5.3.1) — never from a count of directories. The derivation is **order-independent** and **hash-neutral**: a flat archive and a wrapped archive carrying the same package produce the **same** `package_hash`, and only the display-only `raw_path` differs.
+
+The derivation is **not** a directory count, and that is load-bearing: a flat package may carry `references/`, `scripts/`, `assets/` and any number of other directories beside its entrypoint — those are **content directories of that package**, not competing roots. What is refused is a genuinely **competing package root**: more than one `SKILL.md` (`ambiguous_package_root`).
+
+The rules are applied in the design's order:
+
+1. **directory entries are skipped** — an entry whose name ends in `/` or whose attributes carry the MS-DOS directory bit is not a file, is not stored and does not participate in the derivation;
+2. **the remaining entries are canonicalised** — and a duplicate, a unicode collision or a case collision is refused here, **before** the entrypoint's uniqueness is considered;
+3. **the entrypoint is the file entry whose base name is exactly `SKILL.md`** — more than one is `ambiguous_package_root`; none is `entrypoint_not_found`;
+4. **the package root is the entrypoint's parent directory**;
+5. **every file entry must lie under the root** (`path_outside_root`) — otherwise an entry beside the wrapper belongs to a different tree, and nothing is dropped silently;
+6. **the root segment is stripped by whole segment**, and the root itself is never stored — so `pkg-extra/x.md` is *outside* a root of `pkg`, not a sibling of `pkg`;
+7. **the derivation is order-independent** — it uses the complete entry set, and the files are sorted by canonical path, so two archives carrying the same entries in a different order produce identical rows, manifests and hashes.
+
+#### The security model — Rule 2 is the boundary, not the entry-type check
+
+An archive entry's **type** is determined by an attacker-chosen header byte — the central directory's creator byte — so the type check is available only for a Unix-attribute archive:
+
+| creator byte | a symlink / FIFO / device entry |
+|---|---|
+| **Unix** (3), **macOS** (19) | **refused** (`unsupported_entry_type`) |
+| **FAT** (0), **NTFS** (11), **VFAT** (14) | **degrades to a regular file**, and the import **succeeds** |
+
+That asymmetry is deliberate and safe **because of Rule 2** (§4.4): an import writes the bytes into a database column and never materialises them as a file. There is no filesystem object for a symlink to escape into, and no code path connects package content to execution. The entry-type check is **defence in depth**; Rule 2 is the boundary.
+
+The **directory** entry is the exception, and it is detected under **both** creator bytes: a name ending in `/` identifies it on its own, and the MS-DOS directory attribute is a second, independent signal.
+
+The rest of the hostile-archive handling:
+
+| threat | refusal |
+|---|---|
+| a `..` segment (ZIP-slip) | `path_traversal` |
+| a leading `/` | `absolute_path` |
+| a drive-letter prefix (`C:`) | `drive_letter_prefix` |
+| a UNC prefix | `unc_path` |
+| a backslash separator | `backslash_separator` |
+| a NUL byte or a control character | `nul_byte` / `control_character` |
+| a `.` segment, an empty segment, a trailing slash | `dot_segment` / `empty_path_segment` / `trailing_slash` |
+| two entries with the same canonical path | `duplicate_path` |
+| two paths differing only by ASCII case | `path_case_collision` |
+| two paths differing only by Unicode normalisation form | `path_unicode_collision` |
+| an encrypted entry | `archive_encrypted` |
+| a malformed structure, a truncated entry, a CRC failure | `archive_invalid` / `checksum_mismatch` |
+
+The **path** codes are the canonical-path rules' **own** strings — the P2 path reasons, carried verbatim — so a caller branches on one vocabulary rather than on a second encoding of the same rule.
+
+**The limits are enforced while reading**, never after a complete listing is collected. The **declared** size is checked against the per-file cap **before** the entry is decompressed, so a decompression bomb is refused without ever being materialised, and the cap is **also** enforced while the bytes are read, because a header can lie. The total-byte cap is checked as the bytes are read.
+
+The **central directory is bounded before it is parsed.** `archive/zip` builds one header per central-directory record when the reader is created, and it validates the **declared** count only *afterwards*, so the declared count alone does not bound that allocation: an archive that declares two entries and carries 20 000 real records has all 20 000 parsed — and a header allocated for each — before the mismatch is noticed.
+
+Three bounds are applied, and together they hold:
+
+1. the **declared** count — the cheap check, which refuses an archive that plainly declares too many entries;
+2. the **parse window's** byte extent — the bytes `archive/zip` may read as central-directory records, which bounds both the count walk below and the allocation that follows it (the allocation is proportional to the window's size — measured at between **4.8×** and **5.7×** — so this cap *is* the allocation bound);
+3. the **record count**, obtained by walking the directory's records **before** the reader is built — an upper bound on the reader's count, and equal to it for every archive whose declared offsets are consistent.
+
+The count must be the **real** record count, and that is a substantive point rather than a detail. A byte-derived *estimate* of it is far too pessimistic to refuse on: a record is at least 46 bytes, but its **name** is not, so the estimate counts a legitimate package's long paths as extra records. Measured, the legitimate worst case — 512 files and 511 directories, every name at the 511-byte archive-path maximum — has **1 023** real records but a byte-derived estimate of **12 387**, and an estimate-based cap that clears the real count would refuse the estimate. (The regression test uses a flatter fixture of the same shape — 246-byte directory paths and 251-byte file paths — whose real count is also 1 023 and whose estimate is 6 555; both exceed the 4 096 cap.) So the records are **counted**, not estimated, before the reader is built: the refusal then costs nothing, a lying header cannot defeat it, and no legitimate package is refused.
+
+**The invariant the bound rests on is this: the count is never lower than the number of records `archive/zip` will parse, and it is equal to it for every well-formed archive** — every ordinary archive, and every self-extracting one. Two things together give it.
+
+**First, the walk never under-counts.** It uses the same signature test and the same 46-bytes-plus-lengths advance as the reader, and it counts every record whose signature is right. `archive/zip` counts a *subset* of those, on **every** Go version: it additionally refuses a record whose name, extra field or comment runs past the end of the file, and — depending on the version — one whose ZIP64 extra field is malformed or whose size is saturated. So the walk stops no earlier than the reader does and counts no fewer records. The walk reads only what it needs — one 46-byte header at a time — so a start offset that is not a central directory costs 46 bytes and not the whole window.
+
+**The walk is version-independent too**, and deliberately so: it applies the *structural* rule and nothing more, so it is a superset of every Go version's records rather than a copy of any one of them.
+
+**Second, the count is taken over BOTH of the reader's candidate parse starts, and the larger is kept.** The reader's start is one of two: the **normal** start (the central directory's first byte) or the **fallback** start (the declared offset, which the reader uses only for an archive whose declared offsets are inconsistent). Taking the maximum over both makes the count an upper bound on the reader's own, whatever the fallback decision turns out to be — the reader's start is one of the two, and the walk never under-counts from either.
+
+The price of that upper bound is that an archive whose declared offsets are **inconsistent** may be counted **higher** than the reader would count it — the reader takes the fallback and reads one record, while the normal start reaches the whole central directory. Such an archive is then **refused** with `file_count_limit`. It is a malformed archive, it fails closed, and the refusal is a clear reason rather than a silent miscount.
+
+The fallback is **decided** by the same question `archive/zip` asks: is there a central-directory header at the declared offset? The importer answers it with the **structural** rule — the 46-byte fixed header is readable, the signature is the central-directory one, and the name, extra field and comment the header declares are readable — and **nothing more**.
+
+**That is deliberate, and it is the whole point of the rule.** `archive/zip` applies further refinements on top of the structural rule, and they are **not stable across Go versions**:
+
+- **Go 1.26.6** refuses a header whose compressed size or local-header offset is **saturated** and which carries no ZIP64 extra field — `if needCSize || needHeaderOffset { return ErrFormat }`;
+- **Go 1.27.3** has no such check, but it refuses a header whose **second** ZIP64 extra field is shorter than the eight bytes it would need, because it does not clear the saturation when it resolves the first one.
+
+So the two versions differ in **both** directions, no fixed rule mirrors both, and a mirror pinned to one version's internals would make the importer's behaviour depend on the toolchain it was built with. That is not hypothetical: it is exactly what this stage's CI caught, when the mirror — written against Go 1.27.3 — disagreed with the Go 1.26.6 reader the build actually used.
+
+**What the bound needs is one direction only: the mirror must never be STRICTER than the reader.** It may be more permissive, and it is:
+
+- the mirror says "valid" and the reader says "no" — the reader keeps the normal start, the importer takes the fallback, and the importer's window is therefore **larger** than the reader's. That is the safe direction.
+- the mirror says "invalid" and the reader says "valid" — the reader takes the fallback, the importer keeps the normal start, and the importer's window would be **smaller** than the reader's. That is the unsafe direction, and the structural rule cannot produce it: every Go version refuses a header that is not structurally valid.
+
+So the rule is version-independent by construction, and future-proof in the safe direction — a Go version that refuses more headers than this rule does only makes the importer more conservative.
+
+The price of the permissive direction is stated here, because it is real. The rule is consulted only for an archive whose declared offsets are **inconsistent** — which for a legitimate archive means a **prefixed (self-extracting)** one. Such an archive's declared offset points into its prefix, and the prefix is arbitrary bytes: the rule accepts it only if the prefix happens to carry a central-directory signature at exactly that offset, with readable lengths. When it does, the importer takes the fallback and the parse window grows to cover the prefix. The archive is then **refused** if the grown window exceeds the parse-window cap — with `file_count_limit`, so it fails closed with a clear reason. A prefix small enough to stay under the cap is not refused on this ground; it is bounded like any other archive. That is a deliberate trade: a possible false refusal of a malformed archive, in exchange for a bound that does not depend on which Go version the binary was built with.
+
+The structural rule is also what the **signature-only** test got wrong, in both directions. A **prefixed (self-extracting)** archive's declared offset points into its prefix, so a signature-only test would treat the whole prefix as parseable central directory. And a **crafted** header — the right signature, but lengths that run past the end of the file — is not a header the reader can parse, so a signature-only test would move the parse start onto it.
+
+A regression test compares the two counts **directly**, over a range of archive shapes — the ordinary ones and the awkward ones (directory entries, maximum-length names, many entries, and archives whose declared offsets are inconsistent and point at a crafted header, with and without a malformed ZIP64 extra field) — and requires them to be equal.
+
+A **differential fuzz** checks the invariant across the mutation classes that have historically diverged: the declared offset, the declared size, a crafted header with absurd lengths, a crafted header carrying a malformed ZIP64 extra field, and a lying declared count. It compares the importer's count against the reader's for every mutation the reader accepts, and requires the importer's count never to be lower. Because it measures the importer against `archive/zip` rather than against a hand-written expectation, it cannot disagree with the reader by construction.
+
+A second regression pins the **mirror's rule** itself: over 200 000 randomised headers, the mirror's verdict must equal the structural rule, computed independently in the test — the fixed header readable, the signature right, the declared lengths within the file. The test also asserts that the mirror is **more permissive** than the refinements `archive/zip` applies: it accepts a saturated compressed size, a saturated local-header offset, every value saturated, and a short ZIP64 extra field. Those are exactly the refinements that differ between Go versions, so accepting all of them is what makes the rule version-independent. A mirror pinned to one version's internals would fail this test on the other.
+
+A third regression checks the property the bound actually needs, against the **real** `archive/zip`: **the mirror never refuses a header the reader parses**. The oracle is the reader itself — the archive is built so that the reader's two possible parse starts give different results (the declared offset points at the candidate header, and the declared size makes the normal start land in the local-header region, where there is no record at all), so the reader's own count check decides whether it parsed the header. The mirror may refuse **less** than the reader; it must never refuse more.
+
+> A note on how that oracle was arrived at, because the first version of it was wrong in a way that would have hidden a defect: a **transcription** of `archive/zip`'s `readDirectoryHeader` cannot be the oracle, because a transcription can encode the same wrong model as the code it checks — and that is exactly what happened twice. The earlier transcription read the local-header offset from the **first** eight bytes of the ZIP64 field, where the reader reads it from whichever eight bytes the cursor stands on; and it modelled the ZIP64 field as consumed at fixed offsets, where the reader consumes it **sequentially**. Both times the differential test agreed with itself and with nothing else. The oracle has to be the reader.
+
+A fourth regression pins the **backstop** on its own: an archive whose declared offset points at a **valid** record spliced into the local-header region, so the reader's two candidate starts **disagree** — the reader takes the fallback and reads one record, while the normal start reaches the whole central directory. The importer's count must be the **larger** of the two.
+
+A fifth regression builds the dangerous shape end to end: an archive whose declared count **lies**, whose declared offset points at a crafted ZIP64-extra header, and which carries 20 001 real records. The reader parses all 20 001 of them; the importer must refuse it **before** the reader is built, and the test asserts the allocation that proves it.
+
+A ZIP64 locator is checked the way `archive/zip` checks it: it must name **disk zero** and a **single-disk** archive, and its offset is resolved **absolutely** — so a prefixed ZIP64 archive is refused rather than mis-parsed, the same behaviour `archive/zip` itself has, and it fails closed. An archive that declares ZIP64 fields but carries no usable locator is refused outright, before the reader is built.
+
+#### The limits and their justification
+
+The package's **content** limits are P4's, unchanged: **512 files**, **32 MiB** total, **4 MiB** per file, **256 KiB** for the entrypoint (O6). The archive path inherits them exactly, which is what makes the directory/ZIP equivalence hold.
+
+P5 adds exactly **three** archive-level limits, and each is stated with its reason:
+
+| limit | value | justification |
+|---|---|---|
+| `MaxArchiveBytes` | **64 MiB** | The on-disk size bounds the **central directory**, which `archive/zip` parses eagerly into one header per entry, and bounds the compressed payload a single entry may carry. A legitimate archive holds at most 32 MiB of content; DEFLATE never expands and STORED entries are the same size as their content, so 64 MiB — twice the content cap — accommodates every legitimate archive with room for the central directory and the local headers, while refusing an archive whose size is driven by something other than package content. |
+| `MaxArchiveEntries` | **4096** | The entry count is what bounds `archive/zip`'s per-record header allocation, so this is the **policy** bound on how many records an archive may carry. The count it is compared against is the **real** record count — the records are counted by walking the directory before the reader is built, over both of the reader's candidate starts, and the count is never lower than the reader's — so the cap compares against a real number and cannot refuse a legitimate package. A legitimate package carries at most 512 files (P4's cap) and at most one directory entry per directory it contains, so at most about **1 023** entries; 4096 leaves four times that headroom. |
+| `MaxParseWindowBytes` | **4 MiB** | The allocation `archive/zip` makes on the central directory is proportional to the **parse window**'s size — measured at between **4.8×** and **5.7×** the bytes, for the per-record header (`sizeof(zip.File)` = 168 bytes) and its index — so this cap is the **allocation** bound, stated in the unit the allocation is actually made in. For a well-formed archive the window is the central directory plus the End-of-Central-Directory record and its comment. The legitimate worst case — 512 files and 511 directories, every name at the 511-byte archive-path maximum — has a **569 811-byte** central directory; 4 MiB leaves seven times that headroom. |
+
+All three are **read before the allocation they bound** — the file size before the archive is opened for parsing, and the parse window's byte extent and the record count before the central directory is parsed.
+
+**The archive's *content* limits are P4's, inherited exactly**: 512 files, 32 MiB total, 4 MiB per file and 256 KiB for the entrypoint. The three limits above are **additional** archive-level limits, and they bound the *archive*, not the package's content — a package's own content is bounded by P4's limits, unchanged.
+
+#### The reason codes P5 adds
+
+The refusal vocabulary is **closed**. P5's additions are **additive** — every code the directory path already had keeps its meaning:
+
+| code | meaning |
+|---|---|
+| `archive_invalid` | the archive's structure is unusable: not a ZIP, a truncated or malformed central directory, an entry whose declared size does not match its payload, or an entry cut short mid-stream |
+| `checksum_mismatch` | an entry's bytes did not match the CRC-32 the archive declares |
+| `path_outside_root` | a file entry does not lie under the derived package root (§5.3.1 rule 5) |
+| `unsupported_archive_layout` | the package root is neither the archive root nor a **single** enclosing directory |
+| `archive_encrypted` | an entry is encrypted, so its bytes cannot be validated by the scanners that guard every stored byte |
+
+The path rules are reported with the **P2 path reasons verbatim** — `path_traversal`, `absolute_path`, `drive_letter_prefix`, `duplicate_path`, `path_case_collision`, `path_unicode_collision`, `nul_byte`, `control_character`, `backslash_separator`, `unc_path`, `dot_segment`, `empty_path_segment`, `trailing_slash`, `empty_path`, `path_too_long`, `path_too_deep` — and the mapping between the two vocabularies is **total**.
+
+Every refusal on the archive path is **fail closed** in the same sense the directory path's refusals are: validation and scanning happen **before** the transaction opens, so a rejected archive writes **nothing** — no package row, no file row, no blob row, no projection, no provenance row.
+
+#### The deviation — a nested wrapper is refused
+
+§5.3.1's derivation would accept a package root **deeper than one segment** and treat the entrypoint's whole parent path as the root. **O9 accepts exactly two shapes** — the flat layout and the single-wrapper layout — so a root two segments deep is a **third** shape, and it is **refused** (`unsupported_archive_layout`) rather than silently reinterpreted.
+
+This is the one place where the implementation is **narrower** than the design's derivation. The narrower rule is the operator's O9 instruction, and it is recorded here for the design owner's confirmation.
+
+#### What P5 does **not** add
+
+**No read APIs.** The package's read surface is P6.
+
+**No export writer.** The `.skill` archive is the *transport*; the writer that produces one is P7.
+
+**No CLI or MCP surface.** The importer is internal, exactly as P4's is. The operator-facing command is P8.
+
+**No promotion or garbage collection.** P9.
+
+**No second package database.** The storage is the one specified in §6.8, and the archive path writes to it through the same transaction as the directory path.
+
+**No change to P4's rules.** Every protection the directory path applies — the confinement and the identity chain, the scanner preflight, the limits, the secret and poison scans, the binary and executable rules, the version derivation, the idempotence and version-conflict rules, the transactional projection and provenance, the blob dedup and the post-commit verification — is applied to an archive import **unchanged**. The archive path adds a way to **obtain** the bytes; it does not add a way to **decide** whether they may be stored.
+
 ---
 
 ## 7. Core Stability

@@ -389,6 +389,33 @@ type packageImportPlan struct {
 	warnings []string
 }
 
+// packageImportSource is the VALIDATED REPRESENTATION both import paths
+// produce.
+//
+// It is the shared ingestion boundary: the directory walk and the ZIP
+// archive adapter both end with one of these, and everything after it —
+// the entrypoint cap, the version derivation, the frontmatter validation,
+// the secret and poison scans, the binary and executable rules, the
+// manifest, the hashes and the identity — happens ONCE, in
+// planPackageImportFiles.
+//
+// The boundary is deliberately drawn AFTER the bytes are in memory. The
+// two paths differ entirely in HOW the bytes are obtained and in what can
+// go wrong on the way; once the bytes are here, the rules that decide
+// whether a package may be stored are the same rules, and they are the
+// rules the directory path has always applied.
+type packageImportSource struct {
+	// files are the package's files, in canonical-path order.
+	files []packageImportFile
+
+	// entrypointIndex is the index into files of the entrypoint.
+	entrypointIndex int
+
+	// origin names the source in the operator's messages — the import
+	// root for the directory path, the archive's path for the ZIP path.
+	origin string
+}
+
 // planPackageImport performs every validation the import needs, and
 // returns the plan the transaction will execute.
 //
@@ -439,6 +466,27 @@ func (dm *DatabaseManager) planPackageImport(opts PackageImportOptions, limits P
 	// The entrypoint is `SKILL.md` at the package root (§5.3). The
 	// operator named the root, so there is no competing-root ambiguity
 	// to resolve here (§5.3.1 governs the ZIP path only).
+	entrypointIndex, err := selectDirectoryPackageEntrypoint(files, root)
+	if err != nil {
+		return nil, err
+	}
+
+	return dm.planPackageImportFiles(opts, limits, phrasesPath, packageImportSource{
+		files:           files,
+		entrypointIndex: entrypointIndex,
+		origin:          root,
+	})
+}
+
+// selectDirectoryPackageEntrypoint finds the entrypoint among the files
+// of a DIRECTORY import.
+//
+// The operator named the root, so the entrypoint is the file whose
+// canonical path is exactly `SKILL.md` at the root's top level. A
+// `SKILL.md` deeper in the tree is not the entrypoint — it is a content
+// file — and its presence is reported so the operator can see what the
+// tree carried.
+func selectDirectoryPackageEntrypoint(files []packageImportFile, root string) (int, error) {
 	entrypointIndex := -1
 	var candidates []string
 	for i := range files {
@@ -451,9 +499,43 @@ func (dm *DatabaseManager) planPackageImport(opts PackageImportOptions, limits P
 		}
 	}
 	if entrypointIndex < 0 {
-		return nil, packageImportErrorf(PackageImportReasonEntrypointNotFound, "",
+		return -1, packageImportErrorf(PackageImportReasonEntrypointNotFound, "",
 			"the package root %q has no %s at its top level%s",
 			root, packageEntrypointName, formatPackageEntrypointCandidates(candidates))
+	}
+	return entrypointIndex, nil
+}
+
+// planPackageImportFiles turns a validated source into the plan the
+// transaction will execute.
+//
+// EVERY rule that decides whether a package may be stored lives here, and
+// it lives here ONCE. The directory path and the ZIP path differ in how
+// they obtain the bytes; they do not differ in what the bytes must
+// satisfy:
+//
+//   - the entrypoint's own byte cap;
+//   - the frontmatter parse and the version derivation (§5.2);
+//   - the semantic-version and skill-name validation;
+//   - the secret scan and the poison scan, on every file (§7 threat 18);
+//   - the binary and executable rules (§7 threat 16, O3);
+//   - the manifest, the per-file hashes, the package hash and the
+//     canonical identity.
+//
+// Nothing here writes: the whole plan is computed before a transaction
+// exists, so a refusal at any point leaves the database untouched
+// (§7 threat 17).
+func (dm *DatabaseManager) planPackageImportFiles(opts PackageImportOptions, limits PackageImportLimits, phrasesPath string, src packageImportSource) (*packageImportPlan, error) {
+	files := src.files
+	entrypointIndex := src.entrypointIndex
+
+	if len(files) == 0 {
+		return nil, packageImportErrorf(PackageImportReasonEntrypointNotFound, "",
+			"the package source %q contains no files", src.origin)
+	}
+	if entrypointIndex < 0 || entrypointIndex >= len(files) {
+		return nil, packageImportErrorf(PackageImportReasonEntrypointNotFound, "",
+			"the package source %q has no %s at its package root", src.origin, packageEntrypointName)
 	}
 
 	// The entrypoint's own cap.
