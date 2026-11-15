@@ -374,6 +374,17 @@ const (
 	// recorded package hash.
 	PackageVerifyCheckManifestHash = "manifest_package_hash"
 
+	// PackageVerifyCheckManifestValid — the stored manifest satisfies the
+	// manifest module's own rules.
+	//
+	// It is a separate check from the identity one because it is a
+	// different question: the identity check asks whether the manifest
+	// and the package row describe the same package, and this one asks
+	// whether the manifest is a manifest at all. A stored manifest that
+	// names the same path twice, or carries a role the importer would
+	// never write, is not internally valid — whatever the row says.
+	PackageVerifyCheckManifestValid = "manifest_valid"
+
 	// PackageVerifyCheckManifestIdentity — the manifest and the package
 	// row describe the same skill, version and entrypoint.
 	PackageVerifyCheckManifestIdentity = "manifest_identity"
@@ -623,14 +634,22 @@ func (dm *DatabaseManager) PackageReadFile(ctx context.Context, sel PackageSelec
 		// what commits the package to its file list. A row the manifest
 		// does not confirm is refused, exactly as `files` refuses the
 		// same package — the two paths must not differ.
-		index := manifestFileIndex(pkg.Manifest.Files, canonical)
-		if index < 0 {
+		//
+		// The comparison is over EVERY manifest entry for the path, not
+		// over the first one, because the listing's comparison is over
+		// every one. A manifest that names the same path twice would
+		// otherwise satisfy the read on its first entry while failing
+		// the listing on its second.
+		entries := manifestFilesForPath(pkg.Manifest.Files, canonical)
+		if len(entries) == 0 {
 			return packageReadErrorf(PackageReadReasonIntegrityFailure, canonical,
 				"the package has a file at that path the manifest does not name")
 		}
-		if !packageFileMetadataEqual(pkg.Manifest.Files[index], *row) {
-			return packageReadErrorf(PackageReadReasonIntegrityFailure, canonical,
-				"the file row does not match the manifest's entry for it")
+		for _, entry := range entries {
+			if !packageFileMetadataEqual(entry, *row) {
+				return packageReadErrorf(PackageReadReasonIntegrityFailure, canonical,
+					"the file row does not match the manifest's entry for it")
+			}
 		}
 
 		blob, err := loadPackageBlob(ctx, tx, row.SHA256)
@@ -909,6 +928,24 @@ func loadPackageContext(ctx context.Context, tx *sql.Tx, skillID string) (*packa
 	if err != nil {
 		return nil, packageReadErrorWrap(PackageReadReasonIntegrityFailure, "", err,
 			"the stored manifest of %s could not be parsed", skillID)
+	}
+	// The manifest must be VALID, not merely parseable.
+	//
+	// The importer validates every manifest before it writes one, so a
+	// stored manifest that fails validation can only have come from a
+	// tampered store. The reader refuses it on the manifest module's own
+	// rules rather than on a second set of them — the duplicate
+	// path, the non-canonical path, the empty content type, the invalid
+	// role, the missing entrypoint and the entrypoint's hash
+	// disagreement are all decided by the SAME primitive the importer
+	// used.
+	//
+	// Refusing here, rather than on each read path, is what makes the
+	// listing and the read agree: both load the package through this
+	// function, so a package one refuses is a package the other refuses.
+	if err := manifest.Validate(); err != nil {
+		return nil, packageReadErrorWrap(PackageReadReasonIntegrityFailure, "", err,
+			"the stored manifest of %s is not a valid manifest", skillID)
 	}
 	// The package-hash rule is the manifest module's, not this file's:
 	// VerifyPackageHash re-derives the canonical hash and compares it
@@ -1276,6 +1313,21 @@ func reconcilePackageFiles(pkg *packageContext, rows []PackageManifestFile) []Pa
 	return failures
 }
 
+// manifestFilesForPath returns EVERY manifest entry that names a path.
+//
+// The listing's comparison is over every entry for a path, so the read's
+// must be too: a manifest that names the same path twice is compared
+// against the row once per entry.
+func manifestFilesForPath(files []PackageManifestFile, path string) []PackageManifestFile {
+	var out []PackageManifestFile
+	for i := range files {
+		if files[i].Path == path {
+			out = append(out, files[i])
+		}
+	}
+	return out
+}
+
 // manifestFileIndex returns the index of the manifest entry for a path, or
 // -1 when the manifest does not name it.
 func manifestFileIndex(files []PackageManifestFile, path string) int {
@@ -1356,6 +1408,15 @@ func verifyPackageInTx(ctx context.Context, tx *sql.Tx, skillID string) (*Packag
 		case recomputed != row.PackageHash:
 			fail(PackageVerifyCheckManifestHash, "",
 				"the stored manifest hashes to "+recomputed+", not to the recorded "+row.PackageHash)
+		}
+		// The manifest must be VALID, not merely parseable. The
+		// importer validates every manifest before it writes one, so a
+		// stored manifest that fails validation can only have come from
+		// a tampered store — and it is reported, not
+		// accepted.
+		if verr := parsed.Validate(); verr != nil {
+			fail(PackageVerifyCheckManifestValid, "",
+				"the stored manifest is not a valid manifest: "+verr.Error())
 		}
 		if parsed.Name != row.Name || parsed.Version != row.Version {
 			fail(PackageVerifyCheckManifestIdentity, "",
@@ -1539,7 +1600,9 @@ func verifyPackageInTx(ctx context.Context, tx *sql.Tx, skillID string) (*Packag
 func verifyChecksRun(manifestParsed bool) []string {
 	checks := []string{PackageVerifyCheckManifestHash}
 	if manifestParsed {
-		checks = append(checks, PackageVerifyCheckManifestIdentity)
+		checks = append(checks,
+			PackageVerifyCheckManifestValid,
+			PackageVerifyCheckManifestIdentity)
 	}
 	return append(checks,
 		PackageVerifyCheckFileMetadata,

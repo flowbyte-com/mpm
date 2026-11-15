@@ -2375,7 +2375,11 @@ The stored SHA-256 is **not** taken on trust. The reader re-hashes the blob on t
 
 There is exactly one exception, and it is a deliberate one: `SkillPackageProvenance` reports the **recorded** hashes and leaves the re-hashing to `verify`. The `read` action must stay a cheap retrieval, and `verify` is the operation that *proves* the package.
 
-**The re-hash proves the bytes are the ones the ROW names; the manifest is what commits the package to its file list.** A blob is content-addressed, so re-hashing it proves nothing about the *file list*: a row repointed at another blob — with its size repointed too, so the row and the blob agree with each other — would otherwise be served, self-consistently, while the manifest says something else. So `read_file` reconciles the row against the manifest's entry for that path **before** it serves the bytes, with the **same** comparison `files` uses (`manifestFileIndex` and `packageFileMetadataEqual` — reused, not a new rule), and refuses with `integrity_failure` when the two disagree. The two paths must not differ: a package the listing refuses is a package the read refuses.
+**The re-hash proves the bytes are the ones the ROW names; the manifest is what commits the package to its file list.** A blob is content-addressed, so re-hashing it proves nothing about the *file list*: a row repointed at another blob — with its size repointed too, so the row and the blob agree with each other — would otherwise be served, self-consistently, while the manifest says something else. So `read_file` reconciles the row against the manifest's entry for that path **before** it serves the bytes, with the **same** comparison `files` uses (`packageFileMetadataEqual` — reused, not a new rule), and refuses with `integrity_failure` when the two disagree. The comparison is over **every** manifest entry for the path, not over the first one, because the listing's comparison is over every one: a manifest that names the same path twice would otherwise satisfy the read on its first entry while failing the listing on its second.
+
+**The two paths cannot differ, because there is one load path and one comparison.** Both `files` and `read_file` load the package through `loadPackageContext`, and both apply the same reconciliation. `loadPackageContext` refuses a stored manifest that `PackageManifest.Validate()` would refuse — the duplicate path, the non-canonical path, the empty content type, the invalid role, the missing entrypoint and the entrypoint's hash disagreement are all decided by the **manifest module's own primitive**, the one the importer used to accept the manifest in the first place. The importer validates every manifest before it writes one, so a stored manifest that fails validation can only have come from a tampered store.
+
+So the guarantee is stated exactly: **a package the listing refuses is a package the read refuses.** `verify` is the one operation that does not refuse — it **reports** the damage under its own check names, because the caller asked whether the package is sound rather than for its contents.
 
 #### The listing is metadata, and it is deterministic
 
@@ -2431,6 +2435,7 @@ The checks, each with a stable name:
 | check | what it proves |
 |---|---|
 | `manifest_package_hash` | the canonical manifest matches the recorded package hash |
+| `manifest_valid` | the stored manifest satisfies the manifest module's own rules — its format, its version provenance, its canonical paths, its roles, its hashes and its entrypoint |
 | `manifest_identity` | the manifest and the package row describe the same name, effective version, declared version, format, entrypoint, entrypoint hash, and version source |
 | `file_metadata_matches_manifest` | the file rows match the manifest |
 | `blob_exists` | every referenced blob exists |
@@ -2439,6 +2444,8 @@ The checks, each with a stable name:
 | `entrypoint_hash` | the entrypoint hash matches the **original** `SKILL.md` bytes |
 | `projection_hash` | the skill projection matches the manifest's `projection_sha256` |
 | `version_identity` | the package and the projection identify the expected skill version |
+
+**The report names the checks that RAN.** `manifest_valid` and `manifest_identity` run only when the stored manifest parses — there is nothing to compare it against otherwise — so when it does not, the report names **eight** checks rather than ten, and the failure list is always a **subset** of the list the report names. A caller that wants to know whether a check ran reads `Checks`; a caller that wants to know whether the package is sound reads `Verified`.
 
 Damage is a **result**, not an error: the caller asked whether the package is sound, and the answer is a structured list of what is not. Only "there is no such package", an unusable selector and a substrate failure are errors.
 
@@ -2479,9 +2486,11 @@ The `read` action still returns the entrypoint **projection's** body only. No su
 
 **The failure envelope is wider than it was, deliberately.** A substrate failure while determining whether the skill is a package now fails the `read`. That is the fail-closed direction: the reader cannot know whether the skill is a package, so it cannot know whether the provenance is mandatory, and returning a body without it would break R6. An ordinary skill is unaffected in the normal case — its lookup is one indexed `SELECT` that returns no rows.
 
-#### The refusal vocabulary
+#### The reason vocabulary
 
-The reader has its own **closed** vocabulary, mirroring the importer's:
+The reader has its own **closed** vocabulary, mirroring the importer's. It is shared by two kinds of outcome, and the distinction matters: a **refusal** is an error, and the one **response classification** is not.
+
+**The refusals** — an error, with a stable reason:
 
 | reason | meaning |
 |---|---|
@@ -2491,10 +2500,15 @@ The reader has its own **closed** vocabulary, mirroring the importer's:
 | `content_hash_mismatch` | the stored bytes are not the bytes that were recorded |
 | `integrity_failure` | the stored package is not internally consistent |
 | `invalid_bounds` | the read's bounds are not admissible |
-| `line_too_large` | the first requested line alone exceeds the byte cap (**terminal**, not a failure) |
 | `database_failure` | the substrate failed |
 | `binary_requires_raw` | the content cannot be carried as text without loss |
 | `selector_invalid` | the package was named in a way that does not identify one package |
+
+**The one response classification** — not an error:
+
+| reason | meaning |
+|---|---|
+| `line_too_large` | the first requested line alone exceeds the byte cap. The response is **terminal**, not a failure: it carries zero lines, `truncated: true` and an unchanged `next_offset` (§8.6, T49) |
 
 Corruption is **never** reported as a missing file, and there is no fallback to the unverified projection or to unverified blob bytes. The reader fails closed.
 
@@ -2505,6 +2519,8 @@ Corruption is **never** reported as a missing file, and there is no fallback to 
 **`truncated` means "the file was not fully returned".** When `limit` — rather than the byte cap — ends the read, the response is still `truncated: true` and still carries `next_offset`, because unread lines remain. A response is `truncated: false` only when the reader reached the end of the file.
 
 **`verify` checks more than the design guarantees, and says so.** The design requires that a corrupt package is never reported as verified. The reader adds the checks that make that claim **demonstrable** — the per-blob content hash, the per-blob size, the manifest-to-rows reconciliation and the projection hash — and each is reported under its own stable name, so a caller can tell **which** guarantee failed rather than only that something did.
+
+**The read path refuses a manifest the importer would not have written, and that is the decision of record.** `PackageManifest.Validate()` is the manifest module's rule set: the format, the version provenance, the canonical paths, the roles, the content types, the hashes and the entrypoint. The importer calls it on every manifest **before** it writes one, so a stored manifest that fails it can only have come from a tampered store. The reader therefore calls the **same primitive** on the manifest it reads, and refuses with `integrity_failure` — rather than carrying a second, partial rule set of its own. The alternative was to validate a subset and to publish the subset; the subset was the source of the asymmetry an independent review found (a manifest naming one path twice was refused by the listing and served by the read), so the full rule set is used instead. `verify` reports the same damage under the `manifest_valid` check rather than refusing, because a report is what that caller asked for.
 
 **The provenance's `version_override` comes from the PACKAGE ROW, and it is always present.** The row's `declared_version`, `version` and `version_source` are the same record the manifest's `version_override` carries — the importer writes both from the same plan — so the accessor reads the row and does not parse the manifest. For an importer-written package the two are identical.
 

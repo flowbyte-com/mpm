@@ -33,6 +33,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -201,6 +202,50 @@ func p6MutateBlob(t *testing.T, dm *DatabaseManager, sha, content string) {
 	if _, err := dm.db.Exec(`UPDATE skill_package_blobs SET content = ? WHERE sha256 = ?`,
 		[]byte(content), sha); err != nil {
 		t.Fatalf("mutate the blob: %v", err)
+	}
+}
+
+// p6RewriteManifest replaces a package's stored manifest with a mutated
+// one, and re-records the package hash so that the row and the manifest
+// agree with EACH OTHER.
+//
+// It is the tamper primitive: a manifest a legitimate import could never
+// write, because the importer validates every manifest before it stores
+// one. The package hash is recomputed from the MUTATED manifest, so the
+// row's hash describes it — which is what makes the case
+// interesting: the reader cannot detect the tampering by comparing the
+// row with the manifest, because the two were forged together.
+//
+// The bytes the reader serves are still checked against the blob they
+// name, so this primitive cannot forge CONTENT — only the manifest's
+// claim about the file list.
+func p6RewriteManifest(t *testing.T, dm *DatabaseManager, skillID string, mutate func(*PackageManifest)) {
+	t.Helper()
+
+	var stored string
+	if err := dm.db.QueryRow(`SELECT manifest FROM skill_packages WHERE skill_id = ?`, skillID).Scan(&stored); err != nil {
+		t.Fatalf("read the stored manifest: %v", err)
+	}
+	var wire packageManifestWire
+	if err := json.Unmarshal([]byte(stored), &wire); err != nil {
+		t.Fatalf("decode the stored manifest: %v", err)
+	}
+	mutate(&wire.PackageManifest)
+
+	hash, err := wire.ComputePackageHash()
+	if err != nil {
+		t.Fatalf("recompute the package hash: %v", err)
+	}
+	wire.PackageHash = hash
+
+	encoded, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("encode the mutated manifest: %v", err)
+	}
+	if _, err := dm.db.Exec(
+		`UPDATE skill_packages SET manifest = ?, package_hash = ? WHERE skill_id = ?`,
+		string(encoded), hash, skillID); err != nil {
+		t.Fatalf("store the mutated manifest: %v", err)
 	}
 }
 
@@ -772,6 +817,9 @@ func TestP6VerifyNamesOnlyTheChecksThatRan(t *testing.T) {
 		if ran == PackageVerifyCheckManifestIdentity {
 			t.Errorf("the report names the manifest identity check, which could not run: %v", report.Checks)
 		}
+		if ran == PackageVerifyCheckManifestValid {
+			t.Errorf("the report names the manifest validity check, which could not run: %v", report.Checks)
+		}
 	}
 	// The failure list is a SUBSET of the checks that ran.
 	for _, failure := range report.Failures {
@@ -785,6 +833,160 @@ func TestP6VerifyNamesOnlyTheChecksThatRan(t *testing.T) {
 		if !found {
 			t.Errorf("the failure %q is not among the checks that ran: %v", failure.Check, report.Checks)
 		}
+	}
+}
+
+// TestP6ReadFileRefusesAManifestThatNamesAPathTwice pins that the two
+// read paths agree about a manifest that names the same path twice.
+//
+// The manifest is the package's claim about its file list. A
+// manifest that names a path twice is not a manifest the importer could
+// have written — `Validate()` refuses it — so it takes a
+// tampered store to reach.
+//
+// Two shapes are checked, because they are caught by DIFFERENT
+// comparisons:
+//
+//   - the second entry disagrees with the row: the listing's own
+//     comparison catches it, and so must the read's;
+//   - the second entry is an exact copy: ONLY the manifest's own
+//     validity rule catches it, and so must the read.
+func TestP6ReadFileRefusesAManifestThatNamesAPathTwice(t *testing.T) {
+	for _, shape := range []struct {
+		name   string
+		mutate func(*PackageManifest)
+	}{
+		{
+			name: "the second entry disagrees with the row",
+			mutate: func(m *PackageManifest) {
+				duplicate := p6ManifestFileForPath(t, m, "references/one.md")
+				duplicate.SHA256 = strings.Repeat("a", 64)
+				m.Files = append(m.Files, duplicate)
+			},
+		},
+		{
+			name: "the second entry is an exact copy",
+			mutate: func(m *PackageManifest) {
+				m.Files = append(m.Files, p6ManifestFileForPath(t, m, "references/one.md"))
+			},
+		},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			dm := p3DM(t)
+			result := p6ImportPackage(t, dm, "duplicate", "1.0.0", map[string][]byte{
+				"SKILL.md":          []byte("# the skill\n\nthe entrypoint\n"),
+				"references/one.md": []byte("the first reference\n"),
+			})
+			sel := p6Selector(result.SkillID)
+
+			// The read works before the tampering.
+			if _, err := dm.PackageReadFile(context.Background(), sel,
+				"references/one.md", PackageReadBounds{}); err != nil {
+				t.Fatalf("the read before the tampering: %v", err)
+			}
+
+			p6RewriteManifest(t, dm, result.SkillID, shape.mutate)
+
+			// The listing refuses...
+			if _, err := dm.PackageFiles(context.Background(), sel); p6ReadReason(err) != PackageReadReasonIntegrityFailure {
+				t.Errorf("the listing reported %q, want %q",
+					p6ReadReason(err), PackageReadReasonIntegrityFailure)
+			}
+
+			// ...and so must the read.
+			read, err := dm.PackageReadFile(context.Background(), sel,
+				"references/one.md", PackageReadBounds{})
+			if err == nil {
+				t.Fatalf("the read served a file from a manifest that names its path twice: %q", read.Content)
+			}
+			if got := p6ReadReason(err); got != PackageReadReasonIntegrityFailure {
+				t.Errorf("the read reported %q, want %q", got, PackageReadReasonIntegrityFailure)
+			}
+			if read != nil {
+				t.Errorf("the refused read returned a payload: %+v", read)
+			}
+
+			// And the report says the package is not verified.
+			report, err := dm.PackageVerify(context.Background(), sel)
+			if err != nil {
+				t.Fatalf("PackageVerify: %v", err)
+			}
+			if report.Verified {
+				t.Errorf("a package whose manifest names a path twice reported itself verified")
+			}
+			if !p6HasFailure(report, PackageVerifyCheckManifestValid, "") {
+				t.Errorf("the report does not name the invalid manifest: %+v", report.Failures)
+			}
+		})
+	}
+}
+
+// p6ManifestFileForPath returns a manifest's entry for a path.
+func p6ManifestFileForPath(t *testing.T, m *PackageManifest, path string) PackageManifestFile {
+	t.Helper()
+	for _, file := range m.Files {
+		if file.Path == path {
+			return file
+		}
+	}
+	t.Fatalf("the manifest names no file at %s", path)
+	return PackageManifestFile{}
+}
+
+// TestP6VerifyReportsAManifestThatIsNotValid pins that a manifest the
+// importer would never write is REPORTED, and that the report names the
+// check that caught it.
+//
+// The manifest is valid JSON and hashes to its own recorded package
+// hash — so the package-hash check passes — and only the
+// manifest's own validity rule can catch it. The role here is one the four
+// roles do not include.
+func TestP6VerifyReportsAManifestThatIsNotValid(t *testing.T) {
+	dm := p3DM(t)
+	result := p6ImportPackage(t, dm, "invalidmanifest", "1.0.0", map[string][]byte{
+		"SKILL.md": []byte("# the skill\n\nthe entrypoint\n"),
+	})
+	sel := p6Selector(result.SkillID)
+
+	p6RewriteManifest(t, dm, result.SkillID, func(m *PackageManifest) {
+		for i := range m.Files {
+			if m.Files[i].Path == "SKILL.md" {
+				m.Files[i].Role = PackageRole("not-a-role")
+			}
+		}
+	})
+
+	report, err := dm.PackageVerify(context.Background(), sel)
+	if err != nil {
+		t.Fatalf("PackageVerify: %v", err)
+	}
+	if report.Verified {
+		t.Errorf("a package with an invalid manifest reported itself verified")
+	}
+	if !p6HasFailure(report, PackageVerifyCheckManifestValid, "") {
+		t.Errorf("the report does not name the invalid manifest: %+v", report.Failures)
+	}
+
+	// The check that caught it is named, because it ran.
+	found := false
+	for _, ran := range report.Checks {
+		if ran == PackageVerifyCheckManifestValid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("the report does not name the check that caught it: %v", report.Checks)
+	}
+
+	// The ordinary reads FAIL CLOSED on it.
+	if _, err := dm.PackageFiles(context.Background(), sel); p6ReadReason(err) != PackageReadReasonIntegrityFailure {
+		t.Errorf("the listing reported %q, want %q",
+			p6ReadReason(err), PackageReadReasonIntegrityFailure)
+	}
+	if _, err := dm.PackageReadFile(context.Background(), sel, "SKILL.md", PackageReadBounds{}); p6ReadReason(err) != PackageReadReasonIntegrityFailure {
+		t.Errorf("the read reported %q, want %q",
+			p6ReadReason(err), PackageReadReasonIntegrityFailure)
 	}
 }
 
@@ -1222,6 +1424,7 @@ func TestP6VerifyReportsAHealthyPackage(t *testing.T) {
 	}
 	for _, check := range []string{
 		PackageVerifyCheckManifestHash,
+		PackageVerifyCheckManifestValid,
 		PackageVerifyCheckManifestIdentity,
 		PackageVerifyCheckFileMetadata,
 		PackageVerifyCheckBlobExists,
