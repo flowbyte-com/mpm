@@ -311,17 +311,23 @@ class ReviewerIsolationTest(unittest.TestCase):
         """A reviewer must not launch a further agent without the isolation."""
         self.assertIn("subagent", _denied_actions())
 
-    def test_no_rule_refuses_a_path_that_ends_in_the_binary_name(self) -> None:
-        """The name rules must not swallow a PATH.
+    def test_no_rule_of_the_suffix_form_returns(self) -> None:
+        """The SUFFIX form must not come back.
 
         A rule of the form `*mpm *` matches any command text whose
         last token ends in the name, so it refuses `ls /path/to/mpm`
-        and `git -C /path/to/mpm log` - the operator's own checkout,
-        read-only, for no reason a review cares about.
+        - the operator's own checkout, read-only, for no reason a
+        review cares about.
 
-        The rules that close the prefix bypass therefore require a
-        SPACE BEFORE the name, so the name has to stand as its own
-        word. This test fails if a rule of the suffix form comes back.
+        The word shape is therefore space-anchored (`* mpm *`), and
+        the path shape requires MORE text after the name
+        (`*/mpm ?*`), so a path that merely ENDS in the name is not
+        swallowed. This test fails if the suffix form returns.
+
+        The path shape's own cost - `git -C /path/to/mpm log` is
+        refused - is measured and stated in the SPEC and in the
+        definition's own prose. It is the price of closing the write
+        route, and it is paid deliberately.
         """
         denials = _shell_denials()
         binaries = _mpm_binaries()
@@ -333,7 +339,8 @@ class ReviewerIsolationTest(unittest.TestCase):
                     f"the shell rule {pattern!r} refuses every command whose "
                     f"text ends in the {binary} name - including a path that "
                     f"merely ENDS in it, such as the operator's own checkout. "
-                    f"Use the space-anchored form '* {binary} *' instead",
+                    f"Use the space-anchored form '* {binary} *' and the "
+                    f"path form '*/{binary} ?*' instead",
                 )
 
     def test_the_definition_does_not_claim_the_capability_loader_is_closed(self) -> None:
@@ -417,19 +424,27 @@ class ReviewerIsolationTest(unittest.TestCase):
         force: `env mpm --version` RAN, `sh -c 'mpm --version'` RAN,
         and `env mpm remember "..."` wrote a memory into the
         substrate's live database. So every binary is also refused
-        WHEREVER ITS NAME APPEARS, and the name is caught in the three
-        forms a shell command can put it in: followed by a space,
-        followed by a closing parenthesis, and preceded by a quote.
+        WHEREVER ITS NAME APPEARS, and the name is caught in the forms
+        a shell command can put it in: as its own word, followed by a
+        closing parenthesis, as a path segment, and inside a quote.
 
         The first two are per binary; the third is shared, because
         every binary's name starts with `mpm`.
 
-        The SPACE BEFORE the name is load-bearing. A rule of the form
-        `*mpm *` also matches a PATH whose last segment is the name,
-        so it refuses `ls /path/to/checkout/mpm` - the operator's
-        own checkout, read-only, for no reason a review cares about.
-        Requiring a space before the name keeps the closure and drops
-        the false denial: the name is then a WORD, and a path is not.
+        There is a FOURTH shape, and it is the one that closes the
+        write route: the name as a PATH SEGMENT, followed by more of
+        the command (`*/mpm ?*`). `go run ./cmd/mpm remember "..."`
+        does not put the name at the command position, and it is the
+        same live-substrate write the prefix bypass was.
+
+        The SPACE BEFORE the name in the word shape is load-bearing. A
+        rule of the form `*mpm *` also matches a PATH whose last
+        segment is the name, so it refuses `ls /path/to/mpm` - the
+        operator's own checkout, read-only, for no reason a review
+        cares about. Requiring a space before the name drops that
+        denial; the path-segment shape closes the route that matters
+        instead, and it costs `git -C /path/to/mpm log`, which is
+        measured and stated rather than assumed.
         """
         denials = _shell_denials()
         binaries = _mpm_binaries()
@@ -442,6 +457,18 @@ class ReviewerIsolationTest(unittest.TestCase):
                     f"substitution would carry the reviewer past the "
                     f"command-position rules and into the {binary} binary",
                 )
+            # The PATH-SEGMENT shape: `go run ./cmd/mpm remember ...`
+            # names the binary as a path segment, not at the command
+            # position, and it is the write route.
+            path_pattern = f"*/{binary} ?*"
+            self.assertIn(
+                path_pattern,
+                denials,
+                f"the shell rule {path_pattern!r} is missing; `go run "
+                f"./cmd/{binary} remember ...` names the binary as a path "
+                f"segment rather than at the command position, and would "
+                f"reach the substrate",
+            )
         for pattern in ('*"mpm*', "*'mpm*"):
             self.assertIn(
                 pattern,
