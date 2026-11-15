@@ -382,17 +382,17 @@ func handleExport(args []string) int {
 		switch {
 		case o.output == "":
 			return usererrorf(
-				"this export carries %d skill package(s), and their .skill archives cannot be carried to standard output. "+
+				"this export is about %d skill package(s), and their .skill archives cannot be carried to standard output. "+
 					"Re-run with --output <path>: the export writes the document to that path and the archives to the sibling directory %s.",
 				len(scope.Packages), packageExportDirectorySuffix)
 		case o.format == "csv":
 			return usererrorf(
-				"the CSV format cannot carry the %d skill package archive(s) this export would produce, nor the index that names them. "+
+				"the CSV format cannot carry the .skill archives of the %d skill package(s) in scope, nor the index that names them. "+
 					"Use --format json with --output <path>. The CSV format is unchanged for an export that carries no package.",
 				len(scope.Packages))
 		case o.format == exportLegacyArrayFormat:
 			return usererrorf(
-				"the legacy %q format cannot carry the %d skill package archive(s) this export would produce, nor the index that names them. "+
+				"the legacy %q format cannot carry the .skill archives of the %d skill package(s) in scope, nor the index that names them. "+
 					"Use --format json with --output <path>.",
 				exportLegacyArrayFormat, len(scope.Packages))
 		}

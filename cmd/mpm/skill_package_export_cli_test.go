@@ -1146,3 +1146,93 @@ func TestP7_CLIAFailureAfterTheDirectoryIsPublishedSaysSo(t *testing.T) {
 		t.Errorf("the error does not carry the underlying cause:\n%s", message)
 	}
 }
+
+// TestP7_CLIThePackageFreeDocumentKeepsTheSameMode pins that the
+// export document's mode does not depend on whether the export
+// carried packages.
+//
+// The package-bearing path and the package-free path use the SAME
+// writer now, and the writer sets the mode explicitly before the
+// rename: a temporary file is 0600, because that is what a temporary
+// file is, and a rename publishes that mode. Without the explicit
+// chmod, the package-free path published a PRIVATE document — a
+// silent change an operator would only notice when a colleague could
+// not read the file.
+func TestP7_CLIThePackageFreeDocumentKeepsTheSameMode(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "export.json")
+	// The `memories` collection carries no packages, so this export
+	// takes the package-free path.
+	if rc := handleExport([]string{"export", "--format", "json", "--collection", "memories", "--output", outPath}); rc != 0 {
+		t.Fatalf("handleExport returned %d", rc)
+	}
+
+	info, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatalf("stat the document: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("the package-free export document's mode is %o, want 644", got)
+	}
+}
+
+// TestP7_CLIMigrateRefusesADocumentThatDroppedAPackage pins the second
+// number at the CLI boundary.
+//
+// The export writes `package_archives.count` — the archives it
+// PRODUCED — and `packages_omitted.count` — the packages it could NOT
+// carry. A guard that reads only the first imports a document that
+// dropped a package, and the package's content is left behind.
+func TestP7_CLIMigrateRefusesADocumentThatDroppedAPackage(t *testing.T) {
+	dm := getDBConcrete()
+	if dm == nil {
+		t.Skip("DB unavailable")
+	}
+	brokenID, _ := p7CLIImportPackage(t, "cli-dropped")
+	defer p7CLIShredPackage(t, dm, brokenID)
+	defer p7CLIRestoreBlob(t, dm, brokenID, "references/a.md")
+	if _, err := dm.SQLDB().Exec(`UPDATE skill_package_blobs SET content = ? WHERE sha256 = (
+		SELECT f.sha256 FROM skill_package_files f
+		WHERE f.skill_id = ? AND f.path = 'references/a.md')`,
+		[]byte("# tampered\n"), brokenID); err != nil {
+		t.Fatalf("corrupt the blob: %v", err)
+	}
+
+	outPath := filepath.Join(t.TempDir(), "export.json")
+	if rc := handleExport([]string{"export", "--format", "json", "--collection", "skills", "--output", outPath}); rc != 0 {
+		t.Fatalf("handleExport returned %d", rc)
+	}
+	doc := p7CLIReadDoc(t, outPath)
+
+	// The export could not carry the package, and the document SAYS
+	// so: the omission marker names it, with the reason.
+	//
+	// The count is not asserted exactly: the suite's database holds
+	// packages from other tests, and a blob is shared by every package
+	// whose file has the same content, so corrupting one can drop
+	// more than one. What matters is that THIS package is named.
+	named := false
+	for _, p := range doc.Packages.Packages {
+		if strings.HasPrefix(p.Name, "cli-dropped") {
+			named = true
+			if p.Reason == "" {
+				t.Errorf("the omitted package carries no reason: %+v", p)
+			}
+		}
+	}
+	if !named {
+		t.Fatalf("the export did not name the package it dropped; the omissions are %+v", doc.Packages.Packages)
+	}
+
+	// And the migration refuses that document.
+	source := filepath.Join(t.TempDir(), "import.json")
+	content, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read the document: %v", err)
+	}
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatalf("write the source: %v", err)
+	}
+	if rc := handleMigrate([]string{"migrate", "--from", source}); rc == 0 {
+		t.Fatalf("the migration accepted a document that DROPPED a package")
+	}
+}

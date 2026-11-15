@@ -2090,7 +2090,9 @@ The JSON document's shape is now an **object**, not a bare array:
 }
 ```
 
-`packages_omitted` is **always present**. A count of zero is a positive statement — this export carried every package it could — and it keeps the response's type stable, so a consumer never has to branch on whether the field exists. The marker's scope mirrors the export's own filters exactly, so it names precisely the packages whose skill rows **were** exported and whose content was **not**.
+`packages_omitted` is **always present**. It keeps the response's type stable, so a consumer never has to branch on whether the field exists. The marker's scope mirrors the export's own filters exactly, so it names precisely the packages whose skill rows **were** exported and whose content was **not**.
+
+**The marker's meaning changed with P7, and this section states the current one.** The count is the number of packages that were **selected and not carried** — the packages whose content this export could not carry. It is **not** the number of packages the export carried, and it is **not** the number of packages in the store. A count of zero is a positive statement only against a **known denominator**, which is why the marker carries a `scope` (`total`, `selected`, `carried`): "zero omitted out of twelve selected" is a complete export, while "zero omitted out of zero selected" says nothing about the packages that were never selected. The P7 section (§6.13) states the same rule from the export side.
 
 The CSV format is unchanged; the marker is a notice on standard error.
 
@@ -2102,7 +2104,7 @@ The shape change is a **breaking change to a CLI output contract**, so it is giv
 
 **`--format json-array` is the deprecated legacy shape** — a bare JSON array, the shape the export had before the marker existed. It is kept for **one release**, for consumers that cannot yet read the object.
 
-**The legacy shape is REFUSED whenever a package's content would be omitted.** A bare array has nowhere to put the loss marker, so emitting one while content is being dropped would drop those bytes **silently** — the exact failure R11 exists to prevent, and the legacy shape would reintroduce it for precisely the consumers that have not migrated. So the legacy format is available only when there is **nothing to lose**: an export of any collection other than `skills`, or a skills export in which no package exists. When a package would be omitted, the legacy format is refused with an error that **names the affected packages** and points at `--format json`. The deprecation is announced on standard error, so the document on standard output stays parseable.
+**The legacy shape is REFUSED whenever the export is PACKAGE-BEARING.** A bare array has nowhere to put the loss marker, so emitting one while content is being dropped would drop those bytes **silently** — the exact failure R11 exists to prevent, and the legacy shape would reintroduce it for precisely the consumers that have not migrated. So the legacy format is available only when there is **nothing to lose**: an export of any collection other than `skills`, or a skills export in which **no package is in scope**. The refusal is on the export being package-bearing, not on whether a package would actually be omitted: a package in scope is a package whose `.skill` archive and index entry the bare array cannot carry, whether or not the export managed to produce them. (This supersedes the P4-era condition, which refused only when content was actually dropped — that condition was correct when the export carried no archives at all, and is too weak now that the archives exist. §6.13 states the rule from the export side.) The deprecation is announced on standard error, so the document on standard output stays parseable.
 
 **The `memories` key's coupling with `mpm migrate --from` is pinned by a test.** `mpm migrate --from <export.json>` reads a `memories` array, so the export's top-level key name is a real coupling between the export writer and the migrate parser — it was incidental, and a regression test now feeds the document the export actually emits to the substrate's own JSON parser and asserts the rows come back. An export file therefore remains a valid input for `mpm migrate --from`.
 
@@ -2726,9 +2728,20 @@ The refusals happen **before anything is written**, so a refused export has writ
 
 `mpm migrate --from` reads the document's **`memories` array** — the projected rows — and nothing else. Importing a package-bearing document would therefore write the projected rows and **silently drop** every package's reference files, scripts and assets. Those bytes exist nowhere else.
 
-So the consumer **refuses**, with a diagnostic that says what is missing and where it is. The complete import path — the document's archives imported as packages — belongs with the package import surface (**P8**), not with the memory migration, so it is **deferred deliberately** rather than half-built. A document that carries the `package_archives` key with a **count of zero** is a complete export of a workspace with no packages, and it is imported normally.
+So the consumer **refuses**, with a diagnostic that says what is missing and where it is. The complete import path — the document's archives imported as packages — belongs with the package import surface (**P8**), not with the memory migration, so it is **deferred deliberately** rather than half-built.
 
-**A MALFORMED index is refused too.** The index's count decides whether the document carries packages, so an index whose count cannot be read leaves that number **unknown** — and an unknown number is not zero. A string count, a fractional count, a missing count, a null count, and an index that is not an object at all are all refused, with a diagnostic that says the index is malformed. The safe reading of an unreadable index is the one that refuses; treating it as "no packages" would be a fail-open in a fail-closed design.
+**TWO numbers decide the refusal, not one.** The document carries two independent statements about its packages, and the consumer reads both:
+
+| key | says |
+|---|---|
+| `package_archives.count` | the archives the export **produced** |
+| `packages_omitted.count` | the packages the export could **not** carry |
+
+Reading only the first is a **fail-open**: an export whose every package failed verification writes `package_archives.count = 0` and `packages_omitted.count = 1`, and a guard that reads the first number imports that document normally — the projected rows land and the package's content is left behind. That is the loss the refusal exists to prevent, and it is reachable from this export's own output. So a document that **dropped** anything is package-bearing, whether or not it also carries an index.
+
+**A MALFORMED shape is refused too.** A count that cannot be read, a negative count, and a count that disagrees with the list it accompanies (`package_archives.count` against `package_archives.archives`, `packages_omitted.count` against `packages_omitted.packages`) all leave the number of packages **unknown** — and an unknown number is not zero. A string count, a fractional count, a missing count, a null count, and an index that is not an object at all are all refused, with a diagnostic that says the index is malformed. The safe reading of an unreadable index is the one that refuses; treating it as "no packages" would be a fail-open in a fail-closed design.
+
+A document that carries **both** counts at zero — a complete export of a workspace with no packages — is imported normally.
 
 #### The filesystem safety
 
@@ -2740,7 +2753,7 @@ Archives and export metadata are written through **private staging paths**:
 - A **symlink** is never followed: the output path and the sibling directory are inspected **without** following links, and a symlink in either place is refused.
 - An existing sibling directory that holds files is **refused**. An export never silently overwrites an archive.
 - Every **published** archive's digest is verified by reading it **back** from the published location.
-- The **document** keeps the mode the export has always written — `0644`, as `os.Create` produced it — while the **archives** stay private (`0600`, inside a `0700` directory): the document is a shareable artefact, and the packages' contents are not.
+- The **document** keeps the mode the export has always published — `0644` — on **both** paths. The package-free path and the package-bearing path use the **same** writer, and the writer sets the mode explicitly before the rename: a temporary file is `0600`, because that is what a temporary file is, and a rename publishes that mode. The **archives** stay private (`0600`, inside a `0700` directory): the document is a shareable artefact, and the packages' contents are not.
 
 **The publication is NOT one atomic operation, and the design does not pretend otherwise.** The directory is published by a rename and the document by a second rename. The **order** makes the intermediate state harmless: the **directory is published first** and the **document second**, so a document is never published pointing at archives that are not there — a lie the consumer could not detect. The reverse — a directory with no document — points at nothing, and the recovery is to remove the directory and run the export again.
 

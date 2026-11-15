@@ -232,6 +232,13 @@ func publishPackageExport(target packageExportTarget, archives []*mpminternal.Pa
 	// It is written to a temporary name and RENAMED over the output, so
 	// the output is never truncated before its content is complete.
 	//
+	// It is the SAME writer the package-free export uses, so the
+	// document's mode is the same whichever shape the export took: 0644,
+	// the shareable artefact an operator hands to a colleague. The
+	// ARCHIVES stay private (0600, inside a 0700 directory): they are
+	// the packages' contents, and the directory is the private half of
+	// the export.
+	//
 	// EVERY failure from here on leaves the package directory
 	// PUBLISHED. The error says so, and says how to recover: the
 	// directory is a complete set of archives that simply has no
@@ -239,43 +246,10 @@ func publishPackageExport(target packageExportTarget, archives []*mpminternal.Pa
 	// until it is removed. An error that said only "the export failed"
 	// would leave the operator with a directory they did not know was
 	// there.
-	documentTemp, err := os.CreateTemp(parent, ".mpm-export-document-")
-	if err != nil {
-		return publishedDirectoryError(err, target.DirectoryPath, "stage the export document")
-	}
-	documentTempName := documentTemp.Name()
-	documentPublished := false
-	defer func() {
-		if !documentPublished {
-			os.Remove(documentTempName)
-		}
-	}()
-	if _, err := documentTemp.Write(document); err != nil {
-		documentTemp.Close()
-		return publishedDirectoryError(err, target.DirectoryPath, "write the export document")
-	}
-	if err := documentTemp.Close(); err != nil {
-		return publishedDirectoryError(err, target.DirectoryPath, "close the export document")
-	}
-	// The document's mode is the one the export has always written:
-	// 0644, as `os.Create` produced it. The temporary file is 0600
-	// because that is what a temporary file is, so the mode is set
-	// explicitly before the rename — an export document is a
-	// shareable artefact, and its mode changing silently would be a
-	// behaviour change an operator would only notice when a colleague
-	// could not read the file.
-	//
-	// The ARCHIVES stay private (0600, inside a 0700 directory): they
-	// are the packages' contents, and the directory is the private
-	// half of the export.
-	if err := os.Chmod(documentTempName, 0o644); err != nil {
-		return publishedDirectoryError(err, target.DirectoryPath, "set the export document's mode")
-	}
-	if err := os.Rename(documentTempName, target.DocumentPath); err != nil {
+	if err := writeFileAtomically(target.DocumentPath, document); err != nil {
 		return publishedDirectoryError(err, target.DirectoryPath,
 			fmt.Sprintf("publish the export document %q", target.DocumentPath))
 	}
-	documentPublished = true
 
 	// ── Verify what was published. ─────────────────────────────────────
 	//
@@ -487,6 +461,22 @@ func writeFileAtomically(path string, content []byte) error {
 	}
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("close the output file: %w", err)
+	}
+	// The document's mode is set EXPLICITLY, before the rename.
+	//
+	// A temporary file is created 0600, because that is what a
+	// temporary file is — and a rename publishes that mode, so the
+	// export document would silently become a private file. The
+	// package-bearing path already sets 0644; this path sets it too,
+	// so the export document has ONE mode whichever shape the export
+	// took, and that mode is the one the export has always published:
+	// 0644, the shareable artefact an operator hands to a colleague.
+	//
+	// The ARCHIVES stay private (0600, inside a 0700 directory): they
+	// are the packages' contents, and the directory is the private
+	// half of the export.
+	if err := os.Chmod(tempName, 0o644); err != nil {
+		return fmt.Errorf("set the output file's mode: %w", err)
 	}
 	if err := os.Rename(tempName, path); err != nil {
 		return fmt.Errorf("publish the output file %q: %w", path, err)

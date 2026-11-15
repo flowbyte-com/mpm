@@ -115,6 +115,12 @@ func TestExportOutputFile_RoutesToFileNotStdout(t *testing.T) {
 // It finds the function's opening brace and matches braces to find the
 // end, so the assertion is made against the function and not against
 // the file around it.
+//
+// The brace matching is done on the source with its STRINGS and
+// COMMENTS removed. A brace inside a string literal or a comment is not
+// a brace, and counting it would truncate the body at a place that has
+// nothing to do with the function's end — which would make the pin
+// pass or fail for the wrong reason.
 func goFunctionBody(t *testing.T, source, name string) string {
 	t.Helper()
 	start := strings.Index(source, "func "+name+"(")
@@ -125,20 +131,114 @@ func goFunctionBody(t *testing.T, source, name string) string {
 	if open < 0 {
 		t.Fatalf("the function %s has no body", name)
 	}
+	stripped := goSourceWithoutLiterals(source)
 	depth := 0
-	for i := start + open; i < len(source); i++ {
-		switch source[i] {
+	for i := start + open; i < len(stripped); i++ {
+		switch stripped[i] {
 		case '{':
 			depth++
 		case '}':
 			depth--
 			if depth == 0 {
-				return source[start+open : i+1]
+				return stripped[start+open : i+1]
 			}
 		}
 	}
 	t.Fatalf("the function %s has no closing brace", name)
 	return ""
+}
+
+// goSourceWithoutLiterals returns a Go source with its string literals
+// and comments blanked out, so that the braces inside them are not
+// counted.
+//
+// The blanks are SPACES, so every byte offset in the result is the
+// same as in the original — which matters, because the caller slices
+// the original with offsets found in the stripped copy.
+func goSourceWithoutLiterals(source string) string {
+	out := []byte(source)
+	// The state of the scanner: in code, in a line comment, in a
+	// double-quoted string, in a back-quoted string, or in a
+	// single-quoted rune.
+	const (
+		inCode = iota
+		inLineComment
+		inBlockComment
+		inString
+		inRawString
+		inRune
+	)
+	state := inCode
+	for i := 0; i < len(out); i++ {
+		c := out[i]
+		switch state {
+		case inCode:
+			switch {
+			case c == '/' && i+1 < len(out) && out[i+1] == '/':
+				state = inLineComment
+				out[i] = ' '
+				out[i+1] = ' '
+				i++
+			case c == '/' && i+1 < len(out) && out[i+1] == '*':
+				state = inBlockComment
+				out[i] = ' '
+				out[i+1] = ' '
+				i++
+			case c == '"':
+				state = inString
+				out[i] = ' '
+			case c == '`':
+				state = inRawString
+				out[i] = ' '
+			case c == '\'':
+				state = inRune
+				out[i] = ' '
+			}
+		case inLineComment:
+			if c == '\n' {
+				state = inCode
+				continue
+			}
+			out[i] = ' '
+		case inBlockComment:
+			if c == '*' && i+1 < len(out) && out[i+1] == '/' {
+				out[i] = ' '
+				out[i+1] = ' '
+				state = inCode
+				i++
+				continue
+			}
+			out[i] = ' '
+		case inString:
+			if c == '\\' && i+1 < len(out) {
+				out[i] = ' '
+				out[i+1] = ' '
+				i++
+				continue
+			}
+			if c == '"' {
+				state = inCode
+			}
+			out[i] = ' '
+		case inRawString:
+			if c == '`' {
+				state = inCode
+			}
+			out[i] = ' '
+		case inRune:
+			if c == '\\' && i+1 < len(out) {
+				out[i] = ' '
+				out[i+1] = ' '
+				i++
+				continue
+			}
+			if c == '\'' {
+				state = inCode
+			}
+			out[i] = ' '
+		}
+	}
+	return string(out)
 }
 
 // TestExportOutputFile_StatusGoesToStderr pins defect B: success

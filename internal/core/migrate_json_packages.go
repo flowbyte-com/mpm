@@ -20,77 +20,166 @@ package internal
 // alternative — implementing the complete import path — belongs with
 // the package import surface (P8), not with the memory migration.
 //
-// The check reads the `package_archives` key the export writes and its
-// count. A document that does not carry the key is not affected.
+// The check reads the TWO numbers the document carries about its
+// packages:
+//
+//   - `package_archives.count` — the archives the export PRODUCED;
+//   - `packages_omitted.count` — the packages the export could NOT
+//     carry.
+//
+// The second one is the one that matters most, and reading only the
+// first is a fail-open: a document whose every package failed
+// verification carries `package_archives.count = 0` and
+// `packages_omitted.count = 1`, and a guard that reads the first number
+// imports it normally — the projected rows land and the packages'
+// content is left behind. The document's own statement of what it
+// dropped is therefore read as well, and a document that dropped
+// anything is package-bearing.
+//
+// The check is a NUDGE on the document's shape, not a second parser: it
+// reads three keys and counts two arrays.
 
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
-// jsonPackageArchiveIndex reports the package-archive index a JSON
-// document carries.
+// jsonPackageArchiveFacts reports what a JSON export document says
+// about the skill packages it carries — and what it dropped.
 //
-// The four return values are: how many archives the document names, the
-// name of the directory that holds them, whether the document carried
-// the key at all, and whether the index could be READ.
+// The two numbers are the document's own statements, and they are read
+// independently: the archive count says what was PRODUCED, and the
+// omission count says what was DROPPED. A document is package-bearing
+// when either says there is a package in it.
 //
-// The distinction between the last two is the whole point of the
-// function, and it is the fail-closed direction:
+// A malformed shape is reported as such rather than as zero, because
+// an unknown number is not zero.
+type jsonPackageArchiveFacts struct {
+	// Archives is `package_archives.count`: the archives the document
+	// says it produced. Zero when the document carries no index.
+	Archives int
+
+	// ArchivesListed is the number of archive entries the document
+	// actually lists. A count that disagrees with the list is
+	// malformed — the document contradicts itself.
+	ArchivesListed int
+
+	// Omitted is `packages_omitted.count`: the packages the document
+	// says it could NOT carry. Zero when the document carries no
+	// marker, or when it dropped nothing.
+	Omitted int
+
+	// OmittedListed is the number of omission entries the document
+	// actually lists.
+	OmittedListed int
+
+	// Directory names the sibling directory the archives live in.
+	Directory string
+
+	// IndexPresent says the document carries a package-archive index
+	// at all. A document without one is an older document, and the
+	// omission marker alone decides it.
+	IndexPresent bool
+
+	// Malformed says the document's package facts could not be read,
+	// or contradict themselves. Reason names the problem.
+	Malformed bool
+	Reason    string
+}
+
+// jsonPackageArchiveFactsOf reads a document's package facts.
 //
-//   - the key is **absent** — the document carries no archive index, so
-//     there is nothing to drop, and the document is imported normally;
-//   - the key is **present and readable** with a count of zero — a
-//     complete export of a workspace with no packages, imported
-//     normally;
-//   - the key is **present and its count cannot be read** — the
-//     document is MALFORMED, and the consumer cannot tell how many
-//     packages it is carrying. The answer is "package-bearing", because
-//     the safe reading of an unreadable index is the one that refuses.
-//
-// The malformed case is the reason this function does not simply
-// `json.Unmarshal` into a struct and move on: an unmarshal failure
-// would leave the count at zero, the guard would not fire, and the
-// projected rows would be imported with the packages' content left
-// behind. That is a fail-open in a fail-closed design.
-func jsonPackageArchiveIndex(content []byte) (count int, directory string, present bool, readable bool) {
+// The three keys are read from the RAW document, before any typed
+// unmarshal of the whole thing: a typed unmarshal of the document
+// fails for reasons that have nothing to do with the package facts (a
+// malformed `memories` entry, say), and that failure must not be read
+// as "there are no packages here".
+func jsonPackageArchiveFactsOf(content []byte) jsonPackageArchiveFacts {
+	facts := jsonPackageArchiveFacts{}
+
 	trimmed := bytes.TrimSpace(content)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return 0, "", false, true
+		// Not a JSON object. The parser refuses it on its own terms;
+		// this helper says nothing about it.
+		return facts
 	}
-
-	// The key's presence is decided on the RAW document, before any
-	// typed unmarshal: a typed unmarshal of the whole document fails
-	// for reasons that have nothing to do with the archive index (a
-	// malformed `memories` entry, say), and that failure must not be
-	// read as "there is no index here".
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(trimmed, &raw); err != nil {
-		// The document cannot be parsed at all. The parser refuses it
-		// on its own terms; this helper says nothing about it.
-		return 0, "", false, true
-	}
-	indexJSON, ok := raw["package_archives"]
-	if !ok {
-		return 0, "", false, true
+		// The document cannot be parsed at all. Same reasoning.
+		return facts
 	}
 
-	// The key is present. Its count must now be readable, or the
-	// document is treated as package-bearing.
-	var index struct {
-		Count     *int   `json:"count"`
-		Directory string `json:"directory"`
+	// ── The archive index. ────────────────────────────────────────────
+	if indexJSON, ok := raw["package_archives"]; ok {
+		facts.IndexPresent = true
+		var index struct {
+			Count     *int              `json:"count"`
+			Directory string            `json:"directory"`
+			Archives  []json.RawMessage `json:"archives"`
+		}
+		if err := json.Unmarshal(indexJSON, &index); err != nil {
+			facts.Malformed = true
+			facts.Reason = "the package-archive index is not readable"
+			return facts
+		}
+		if index.Count == nil {
+			facts.Malformed = true
+			facts.Reason = "the package-archive index carries no count"
+			return facts
+		}
+		if *index.Count < 0 {
+			facts.Malformed = true
+			facts.Reason = fmt.Sprintf("the package-archive index counts %d archives", *index.Count)
+			return facts
+		}
+		if *index.Count != len(index.Archives) {
+			facts.Malformed = true
+			facts.Reason = fmt.Sprintf(
+				"the package-archive index counts %d archive(s) but lists %d",
+				*index.Count, len(index.Archives))
+			return facts
+		}
+		facts.Archives = *index.Count
+		facts.ArchivesListed = len(index.Archives)
+		facts.Directory = index.Directory
 	}
-	if err := json.Unmarshal(indexJSON, &index); err != nil {
-		// The index is present but malformed. The count cannot be
-		// read, so the number of packages the document carries is
-		// unknown — and an unknown number is not zero.
-		return 0, "", true, false
+
+	// ── The omission marker. ──────────────────────────────────────────
+	//
+	// This is the number that says what the export DROPPED, and a
+	// document that dropped anything is package-bearing — whether or
+	// not it also carries an index.
+	if omittedJSON, ok := raw["packages_omitted"]; ok {
+		var omitted struct {
+			Count    *int              `json:"count"`
+			Packages []json.RawMessage `json:"packages"`
+		}
+		if err := json.Unmarshal(omittedJSON, &omitted); err != nil {
+			facts.Malformed = true
+			facts.Reason = "the package-omission marker is not readable"
+			return facts
+		}
+		if omitted.Count == nil {
+			facts.Malformed = true
+			facts.Reason = "the package-omission marker carries no count"
+			return facts
+		}
+		if *omitted.Count < 0 {
+			facts.Malformed = true
+			facts.Reason = fmt.Sprintf("the package-omission marker counts %d omitted package(s)", *omitted.Count)
+			return facts
+		}
+		if *omitted.Count != len(omitted.Packages) {
+			facts.Malformed = true
+			facts.Reason = fmt.Sprintf(
+				"the package-omission marker counts %d omitted package(s) but lists %d",
+				*omitted.Count, len(omitted.Packages))
+			return facts
+		}
+		facts.Omitted = *omitted.Count
+		facts.OmittedListed = len(omitted.Packages)
 	}
-	if index.Count == nil {
-		// The index is present but carries no count. Same reasoning:
-		// the count is unknown, so the document is package-bearing.
-		return 0, index.Directory, true, false
-	}
-	return *index.Count, index.Directory, true, true
+
+	return facts
 }

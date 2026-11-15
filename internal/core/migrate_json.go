@@ -253,26 +253,46 @@ func (dm *DatabaseManager) IngestFromJsonFile(sourcePath, importBatch string, dr
 	// not with the memory migration. Until it exists, the consumer says
 	// so instead of quietly losing the packages.
 	//
-	// A MALFORMED index is refused too. The index's count decides
-	// whether the document carries packages, so an index whose count
-	// cannot be read leaves the number of packages UNKNOWN — and an
+	// TWO numbers decide it, not one.
+	//
+	// `package_archives.count` is the number of archives the export
+	// PRODUCED. `packages_omitted.count` is the number of packages it
+	// could NOT carry. Reading only the first is a fail-open: an export
+	// whose every package failed verification writes
+	// `package_archives.count = 0` and `packages_omitted.count = 1`,
+	// and a guard that reads the first number imports that document
+	// normally — the projected rows land and the packages' content is
+	// left behind. The document's own statement of what it dropped is
+	// therefore read as well, and a document that dropped anything is
+	// package-bearing.
+	//
+	// A MALFORMED shape is refused too. A count that cannot be read, a
+	// negative count, and a count that disagrees with the list it
+	// accompanies all leave the number of packages UNKNOWN — and an
 	// unknown number is not zero. Treating a malformed index as "no
 	// packages" would be a fail-open in a fail-closed design.
-	count, directory, present, readable := jsonPackageArchiveIndex([]byte(content))
+	packageFacts := jsonPackageArchiveFactsOf([]byte(content))
 	switch {
-	case present && !readable:
+	case packageFacts.Malformed:
 		return nil, fmt.Errorf(
-			"%s carries a MALFORMED package-archive index, so the number of skill packages it carries cannot be read; "+
+			"%s carries a MALFORMED package index (%s), so the number of skill packages it carries cannot be read; "+
 				"this importer reads only the document's projected rows, so importing it would risk silently dropping "+
 				"every package's reference files, scripts and assets. Import the .skill archives themselves, or export a "+
-				"document that carries a readable archive index",
-			sourcePath)
-	case present && count > 0:
+				"document that carries a readable package index",
+			sourcePath, packageFacts.Reason)
+	case packageFacts.Omitted > 0:
+		return nil, fmt.Errorf(
+			"%s DROPPED %d skill package(s): the document's own package-omission marker names them. "+
+				"This importer reads only the document's projected rows, so importing it would silently drop every "+
+				"dropped package's reference files, scripts and assets. Import the .skill archives themselves, or "+
+				"export a document that carries every package",
+			sourcePath, packageFacts.Omitted)
+	case packageFacts.Archives > 0:
 		return nil, fmt.Errorf(
 			"%s carries %d skill package archive(s) in %q; this importer reads only the document's projected rows, "+
 				"so importing it would silently drop every package's reference files, scripts and assets. "+
 				"Import the .skill archives themselves, or export a document that carries no package",
-			sourcePath, count, directory)
+			sourcePath, packageFacts.Archives, packageFacts.Directory)
 	}
 
 	facts, perEntryErrors, err := ParseJsonFactsWithReport(content, sourcePath)
