@@ -281,20 +281,25 @@ func (dm *DatabaseManager) IngestFromJsonFile(sourcePath, importBatch string, dr
 				"document that carries a readable package index",
 			sourcePath, packageFacts.Reason)
 	case packageFacts.Omitted > 0:
-		// The message says what the document DROPPED and where the
-		// archives would have been — a document that carries no
-		// archive index at all dropped every package it was about,
-		// and saying so is more useful than saying nothing.
+		// The message says what the document DROPPED, and it says
+		// where the packages' BYTES are — which is nowhere in the
+		// document. The archive index names the directory that holds
+		// the CARRIED packages' archives; the dropped packages never
+		// had one, so pointing at that directory for their bytes
+		// would be a lie. A document with no index at all dropped
+		// every package it was about.
 		where := "the document carries no package-archive index, so none of them were written beside it"
 		if packageFacts.IndexPresent {
-			where = fmt.Sprintf("the archives belong in %q", packageFacts.Directory)
+			where = fmt.Sprintf(
+				"they have no .skill archive of their own - %q holds the archives of the packages that WERE carried, and %d of them dropped package(s) have none",
+				packageFacts.Directory, packageFacts.Omitted)
 		}
 		return nil, fmt.Errorf(
-			"%s DROPPED %d skill package(s): the document's own package-omission marker names %d of them. "+
+			"%s DROPPED %d skill package(s): the document's own package-omission marker names them. "+
 				"This importer reads only the document's projected rows, so importing it would silently drop every "+
 				"dropped package's reference files, scripts and assets (%s). "+
 				"Import the .skill archives themselves, or export a document that carries every package",
-			sourcePath, packageFacts.Omitted, packageFacts.OmittedListed, where)
+			sourcePath, packageFacts.Omitted, where)
 	case packageFacts.Archives > 0:
 		return nil, fmt.Errorf(
 			"%s carries %d skill package archive(s) in %q; this importer reads only the document's projected rows, "+

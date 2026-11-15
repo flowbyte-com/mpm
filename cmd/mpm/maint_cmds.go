@@ -230,10 +230,11 @@ hash and archive digest. The archives themselves are written to a SIBLING
 DIRECTORY named for the export - "<output-path>.packages".
 
 "memories" is the same key mpm migrate --from reads, so an export file
-remains a valid input for "mpm migrate --from <file>" - but a document
-that carries package archives is REFUSED by the migration, because the
-migration reads only the projected rows and would drop the packages'
-content silently.
+that carries NO package remains a valid input for "mpm migrate --from
+<file>". A document that carries package archives is REFUSED by the
+migration, and so is a document that DROPPED a package: the migration
+reads only the projected rows, and importing either would drop the
+packages' content silently.
 
 The CSV format is unchanged. The loss marker is a notice on standard error,
 so it never corrupts the document on standard output.

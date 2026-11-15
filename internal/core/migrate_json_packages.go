@@ -236,6 +236,13 @@ func jsonPackageArchiveFactsOf(content []byte) jsonPackageArchiveFacts {
 				facts.Reason = "the package-omission marker's scope carries no selected/carried counts"
 				return facts
 			}
+			if scope.Total != nil && *scope.Total < 0 {
+				facts.Malformed = true
+				facts.Reason = fmt.Sprintf(
+					"the package-omission marker's scope counts %d package(s) in the store",
+					*scope.Total)
+				return facts
+			}
 			if *scope.Selected < 0 || *scope.Carried < 0 {
 				facts.Malformed = true
 				facts.Reason = fmt.Sprintf(

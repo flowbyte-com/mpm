@@ -790,8 +790,10 @@ func TestP7ExportArchiveBytesAreIdenticalAcrossGoReleases(t *testing.T) {
 	// on one of them.
 	//
 	// A DEFLATE archive would not survive that: Go's deflate output
-	// differs between the two releases (measured: 395 bytes and
-	// 396 bytes, and two different digests, for the same input). The
+	// differs between the two releases - the same input produces
+	// archives of different sizes and different digests under Go
+	// 1.26.6 and Go 1.27.3. (The exact sizes depend on the fixture,
+	// so none is quoted: the DIGESTS differing is the claim.) The
 	// STORE decision is what makes this constant possible.
 	const wantDigest = "61bcd485ef6dde79d442f63168652437d0ec453e00de8bb24336ae9970131afd"
 
