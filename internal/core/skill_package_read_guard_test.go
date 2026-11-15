@@ -735,12 +735,19 @@ func p6ReaderWriteProblems(sourceFile string, source []byte) ([]string, int) {
 }
 
 // p6ReaderSourceFiles are the files the reader consists of. The guard
-// walks ALL of them: the reader is the two files together, and a guard
+// walks ALL of them: the reader is the three files together, and a guard
 // that covered only one of them would leave half of the reader
 // unguarded.
+//
+// The third file is the skill-document loader. It is part of the reader
+// because the `read` action loads the skill and its package provenance
+// from ONE snapshot, and the skill's own SELECTs are therefore part of
+// the read path the guard covers. Without it, a write could hide in the
+// skill loader and the guard would never see it.
 var p6ReaderSourceFiles = []string{
 	"skill_package_read.go",
 	"skill_package_read_errors.go",
+	"skill_document.go",
 }
 
 // TestP6TheReaderNeverWrites pins that the reader issues no write.

@@ -1269,6 +1269,19 @@ Historical note: the 2026-06-23 migration replaced an earlier *per-agent* plugin
 
 For a step-by-step recipe for connecting OpenCode — including the plugin registration, the `MPM_PROVENANCE_*` environment variables, and the wake-context injection path — see [`agent_installation/mpm-opencode/README.md`](../agent_installation/mpm-opencode/README.md).
 
+#### The isolated reviewer agent
+
+A **review** subagent runs in a child session with the parent's tool surface. On 2026-11-15 a review subagent wrote a memory into the operator's **live** MPM database through the `mpm_memory` tool, against an explicit instruction not to touch it. A written instruction was not enough, and could not have been: the tool was still **registered** for the reviewer, so "do not call it" was the only thing standing between a review note and a write into the operator's substrate.
+
+The fix is the **permission layer**, and it is per-agent, so normal MPM operation is untouched. The canonical definition is [`agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md`](../agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md), installed by `agent_installation/mpm-opencode/scripts/install_reviewer_agent.py` into `~/.config/opencode/agents/mpm-reviewer.md`. It:
+
+- **denies every MPM tool by name**, so a denied tool is removed from the reviewer's tool list entirely — the reviewer cannot call it and cannot see it;
+- **denies `edit`**, so a reviewer cannot change what it reviews, and **denies `subagent`**, so it cannot launch an agent that lacks the isolation;
+- **denies the shell routes into the same substrate** (`mpm call`, `mpm-memory`) and the ways a shell writes into a live MPM workspace, so the command line is closed too;
+- requires findings to be recorded in a **filesystem scratchpad**, not in the substrate.
+
+The deny list is **machine-checked against the registry** — `internal/core/tools/registry_list.go` is the authoritative list of every MPM tool, and `agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py` fails if a tool is added to the registry without a matching deny rule. The isolation therefore cannot quietly erode as the tool surface grows. The guard is proven non-vacuous: removing one deny rule fails the test with the name of the uncovered tool.
+
 #### MCP tool surface
 
 The MCP server exposes the full MPM substrate as native function calls. Adding a new tool is a single Go function — no plugin path, no shell wrapper, no parallel documentation.
@@ -2397,7 +2410,7 @@ Every read takes its metadata and its bytes from **one** read snapshot, so a pac
 
 A one-file request loads the package's file **rows** and **one** blob — never the package's content. The rows are metadata, and the manifest they are compared with is parsed in full on every read anyway; the **bytes** are still loaded one file at a time, which is what §8.7's "bytes loaded" column counts.
 
-The **provenance accessor** is the one exception, and it needs none: its read is a **single statement**, and a single statement sees one consistent snapshot on its own. That keeps the `read` action's hot path free of a connection checkout and a `BEGIN`/`ROLLBACK`.
+The **provenance accessor** was the one exception in P6, and it needed none: its read was a **single statement**, and a single statement sees one consistent snapshot on its own. That kept the `read` action's hot path free of a connection checkout and a `BEGIN`/`ROLLBACK`. The follow-up changed that — the accessor now reads the **manifest** for the recorded projection hash, and the `read` action reads its body and its provenance from **one** snapshot, so the accessor is no longer a single statement. See [The `read` action's body and its provenance come from ONE snapshot](#the-read-actions-body-and-its-provenance-come-from-one-snapshot) for the invariant and the measured cost.
 
 #### The bounded read (§8.6, exactly)
 
@@ -2466,6 +2479,11 @@ The existing `mpm_skills` `read` action gains **one** object for a **packaged** 
   "package": {
     "entrypoint": "SKILL.md",
     "entrypoint_sha256": "783ece4b…",
+    "projection_sha256": "9a1f3c22…",
+    "body_sha256": "5d7e9014…",
+    "hash_origins": {"entrypoint_sha256": "recorded",
+                     "projection_sha256": "recorded",
+                     "body_sha256": "recomputed"},
     "file_count": 3,
     "package_hash": "…",
     "scanned": true,
@@ -2484,21 +2502,52 @@ For a skill that is **not** a package the object is **absent** — not present a
 
 The `read` action still returns the entrypoint **projection's** body only. No supporting file is ever inlined beside it: the agent must ask for a specific file.
 
-**The provenance read is ONE statement.** It joins the package row with the file count and the entrypoint's scan status in a single `SELECT`, and a single statement sees one consistent snapshot — so the provenance needs no transaction, and the `read` action's hot path pays for neither a connection checkout nor a `BEGIN`/`ROLLBACK`. The version override is read from the package row's own version provenance (`declared_version`, `version`, `version_source`), which is the same record the manifest's `version_override` carries, because the importer writes both from the same plan.
+**The three hashes, and which of them the store is claiming.** The `package` object carries **three** hashes, and they are not interchangeable. `entrypoint_sha256` and `projection_sha256` are **recorded** — they are claims the STORE makes, read out of the package's own records. `body_sha256` is **recomputed** — it is a measurement the READER takes, over the exact bytes the response carries. The `hash_origins` object says which is which, so a caller never has to guess whether it is holding a stored claim or a fresh observation.
 
-**What the accessor does NOT check, and where it is checked.** The accessor's entrypoint hash is the **package row's** `entrypoint_sha256`, and the accessor does **not** parse the manifest, so it does not apply the comparison `loadPackageContext` applies — the one that refuses when the manifest and the row disagree about the entrypoint's hash. The two paths therefore differ **deliberately, and not silently**: the accessor is a hot-path retrieval that reports the recorded provenance, while the read paths and `verify` are where a disagreement is judged (`verify`'s `entrypoint_hash` and `manifest_identity` checks both report it). A caller that needs the package *proved* calls `verify`; a caller that needs the *recorded* provenance calls `read`. The row-wins decision of record applies to the version provenance; it is **not** a claim that the row is right about the entrypoint's hash.
+| hash | covers | origin | what a caller can do with it |
+|---|---|---|---|
+| `entrypoint_sha256` | the **original** `SKILL.md`, frontmatter included | recorded | check that the body *derives from* the recorded file |
+| `projection_sha256` | the complete **derived projection** — the original plus one inserted `version:` line, and only when the package declares no version (§5.2) | recorded | check that the projection the store holds is the one the store recorded |
+| `body_sha256` | the exact UTF-8 bytes of the **`body` field this response returns** | recomputed | check the bytes it is holding, on its own |
+
+**`projection_sha256` is obtained from the manifest and validated.** It is not a hash this reader invents: the recorded value lives in the stored manifest, so the accessor reads the manifest, parses it, and applies the manifest module's **own** rules to it (`PackageManifest.Validate()` — the same primitive the importer used to accept the manifest, and the same one the reader's other paths use). It then compares the recorded value with the hash of the projection it is actually returning. A manifest that does not parse, or that does not validate, leaves no recorded value that could be validated: the read still returns the body — that is what `verify` is for — and the provenance reports the projection hash as **`unavailable`** (`hash_origins.projection_sha256 == "unavailable"`), not as an empty string that reads like a hash. A manifest that **does** validate and whose recorded projection hash **disagrees** with the projection the store holds is a positive claim of corruption, and the read **fails closed** on it with `integrity_failure`.
+
+**`body_sha256` closes the gap the P6 spec named.** P6 stated that no hash in the response covered the body: a caller that hashed the returned `body` and compared it with `entrypoint_sha256` mismatched for **every** package, and could not reconstruct the document the hash covered. `body_sha256` is the hash of exactly the bytes the caller receives, so the caller can now check the one thing it is actually holding.
+
+**The `scanned` boolean and the `scan_status` object are both kept.** `scanned` is the compatibility shape — a single boolean that says whether every scanner that applies ran and passed. `scan_status` is the **detail**: which scanner ran, per scanner (`{"secret": true, "poison": true}`). They always agree for an entrypoint, because `SKILL.md` is text and a binary asset's disclosed poison skip cannot arise for it; the disclosed-skip case is visible in the `files` listing. `scan_status` is an **additive extension** of §8.2.1's six-field object, and §8.2.1's own prose asks the object to carry *"the entrypoint's hash and its scan status"* — so it is recorded here, in the design of record, and the discrepancy with §8.5's `scanned`-as-object is reconciled by naming the two shapes: `scanned` is the **summary**, `scan_status` is the **detail**.
+
+**The version override is read from the package row's own version provenance** (`declared_version`, `version`, `version_source`), which is the same record the manifest's `version_override` carries, because the importer writes both from the same plan.
+
+**What the accessor does NOT check, and where it is checked.** The accessor's entrypoint hash is the **package row's** `entrypoint_sha256`, and the accessor does **not** apply the comparison `loadPackageContext` applies — the one that refuses when the manifest and the row disagree about the entrypoint's hash. The two paths therefore differ **deliberately, and not silently**: the accessor is a hot-path retrieval that reports the recorded provenance, while the read paths and `verify` are where a disagreement is judged (`verify`'s `entrypoint_hash` and `manifest_identity` checks both report it). A caller that needs the package *proved* calls `verify`; a caller that needs the *recorded* provenance calls `read`. The row-wins decision of record applies to the version provenance; it is **not** a claim that the row is right about the entrypoint's hash.
 
 **`file_count` is the number of file ROWS the store holds.** The accessor counts `skill_package_files`, because counting the manifest's files would mean parsing the manifest — the one thing the accessor deliberately does not do. So on a package whose rows do not match its manifest, `file_count` is the store's count and the manifest's is different: a deleted row lowers it **silently**, with no failure and no disagreement. The accessor's tolerance list is therefore **namely**: the recorded **entrypoint path**, the recorded **entrypoint hash**, the recorded **package hash**, the recorded **file count**, the recorded **version provenance**, and the entrypoint file row's **scan status** — none of them checked against the manifest. The scan status is the one worth naming, because it is the field R6 exists for: `files` and `read_file` **refuse** a package whose row and manifest disagree about a file's scan status, while `read` reports the row's status unchecked. That is not an escalation — a row flipped to "scanned" cannot grant more trust than the manifest's own entry already implies, and the conservative direction is reported faithfully. `files` and `read_file` refuse such a package and `verify` reports it; `read` reports what is stored.
 
-**What the `read` response's hash covers — three things, not one.** The `package` object carries `entrypoint_sha256`: the **recorded** hash of the **original entrypoint document**, frontmatter included. It is the hash the store carries, **not** one this reader re-hashes — the accessor is a retrieval, and `verify` is the operation that re-hashes and proves. The **projection** is that whole document, and it differs from the original by exactly one inserted frontmatter line, and only when the package declares no version (§5.2). So for a package that **declares** a version, `entrypoint_sha256` covers the **projection** exactly; for a **versionless** package it does not, and the projection's own hash (`projection_sha256`) lives inside the **manifest**, which the accessor deliberately does not parse.
-
-**The body is a third thing, and no hash in the response covers it.** The `read` action returns the body — the part **after** the frontmatter (§8.2) — while `entrypoint_sha256` covers the whole document. A caller that hashes the returned `body` and compares it with `entrypoint_sha256` mismatches for **every** package, versioned or not, and the frontmatter is not in the response, so the caller cannot reconstruct the document the hash covers. §8.2.1's framing is therefore the right one: the hash lets the caller check that the body **derives from** the recorded file — not that it equals it.
-
-**What the design owner would have to decide.** There are **two** gaps, not one: a `projection_sha256` field would cover the projection of a **versionless** package, and a hash of the **body** would cover the part the caller actually receives. Neither field exists in the design's `package` object (§8.2.1), and both are changes to the design of record — so they belong to **#222's owner**, not to this stage. They are stated here rather than glossed.
-
-**The `read` action's body and its provenance come from two reads.** The body is read from `memories` and the provenance from `skill_packages`, in two separate snapshots — the accessor is one statement by design, so it takes no lock of its own. A package row removed between the two would let a body come back with no `package` object, which is the one shape that would break R6. Every deletion path in the substrate removes the skill row and the package row together (the foreign key cascades), so the shape is a **race rather than a reachable path** — but it is invisible to any single-snapshot reader, and it is disclosed here rather than glossed.
+**The one hash the accessor DOES check against the manifest is the projection's** — because it now reports it, and a recorded value that does not describe the bytes beside it would be a false claim. The asymmetry is deliberate and is stated rather than glossed: the accessor reports the **projection** hash it has validated, and reports the **entrypoint** hash the row claims.
 
 **The failure envelope is wider than it was, deliberately.** A substrate failure while determining whether the skill is a package now fails the `read`. That is the fail-closed direction: the reader cannot know whether the skill is a package, so it cannot know whether the provenance is mandatory, and returning a body without it would break R6. An ordinary skill is unaffected in the normal case — its lookup is one indexed `SELECT` that returns no rows.
+
+#### The `read` action's body and its provenance come from ONE snapshot
+
+P6 disclosed that the `read` action's body and its provenance came from **two** reads — the body from `memories`, the provenance from `skill_packages` — and that a package row removed between them would let a body come back with no `package` object, which is the one shape that would break R6. Every deletion path in the substrate removes the skill row and the package row together (the foreign key cascades), so the shape was a **race rather than a reachable path**. It is now **closed**.
+
+`ReadSkillWithPackageProvenance` reads both halves inside **one** deferred read snapshot. The snapshot is taken at the first read and held until it is released, so a concurrent deletion is either **wholly visible** (both halves gone — the ordinary not-found answer) or **wholly invisible** (both halves present — a consistent pair). There is no state in which a body is returned without the provenance that describes it.
+
+**The invariant, stated exactly:** *a successful read of a packaged skill cannot return its body without its package provenance because a concurrent deletion occurred between queries.* The result is always either a consistent skill/provenance pair or the appropriate not-found response.
+
+The snapshot is **not** a full-package integrity scan. No blob is read and no package byte is hashed: the read loads the skill's projection and the package's metadata, and hashes only the **one** projection document the response is about.
+
+**What it cost, measured.** The P6 hot path was a skill read plus **one** statement. The combined read is a transaction plus three statements and a manifest parse:
+
+| shape | ns/op |
+|---|---|
+| P6 hot path (skill read + one statement) | 83,851 |
+| **combined read (one snapshot)** | **107,465** |
+| two independent calls (the current accessor) | 178,163 |
+
+The overhead is **+23.6 µs (+28%)** over the P6 hot path, and **−70.7 µs (−40%)** against calling the accessor separately. Its components, measured: the transaction itself is **3.3 µs**; the manifest `SELECT` is about **8 µs**; the manifest parse is **6.8 µs**; the manifest **validation** is **0.4 µs** — so the validation is free, and the cost is the manifest round-trip the recorded projection hash requires. The read is **not** an unconditional integrity scan.
+
+**The skill-document loader was extracted so the guard covers it.** The combined read needs the skill-loading logic to run inside a caller's transaction, so it moved from `skill_db.go` into `skill_document.go`, written against the smallest read surface that both `*sql.DB` and `*sql.Tx` satisfy. That file is now part of the reader's **guarded set**: the write-guard walks it, so a write could not hide in the skill loader and go unseen. The loader is **one** implementation — `ReadSkill` and the combined read share it, so they cannot drift.
+
 
 #### The reason vocabulary
 

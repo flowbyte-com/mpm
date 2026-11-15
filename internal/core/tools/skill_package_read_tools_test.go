@@ -22,6 +22,8 @@
 package tools
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"sort"
@@ -280,5 +282,82 @@ func TestMCPReadSkillReadsAPackageByName(t *testing.T) {
 	if provenance.EntrypointSHA256 != imported.EntrypointSHA256 {
 		t.Errorf("the provenance's entrypoint hash is %s, want %s",
 			provenance.EntrypointSHA256, imported.EntrypointSHA256)
+	}
+}
+
+// TestMCPReadSkillProvenanceCarriesTheCompleteHashContract pins the
+// follow-up's hash contract at the MCP boundary — the place where the
+// provenance is actually delivered.
+//
+// The response carries THREE hashes, and the object says which is which:
+//
+//   - `entrypoint_sha256` — the RECORDED hash of the ORIGINAL `SKILL.md`;
+//   - `projection_sha256` — the RECORDED hash of the derived projection;
+//   - `body_sha256` — the RECOMPUTED hash of the exact `body` the
+//     response returns.
+//
+// The body hash is the one a caller can check on its own: it hashes the
+// bytes the caller is holding. The recorded hashes cover the projection,
+// which the response does not carry.
+//
+// The fixture is a VERSIONLESS package, because that is the case where
+// the three hashes are three DIFFERENT hashes: a package that declares a
+// version has a projection byte-identical to its original.
+func TestMCPReadSkillProvenanceCarriesTheCompleteHashContract(t *testing.T) {
+	dm := p3ToolsDM(t)
+	imported := p6ToolsImportPackage(t, dm, "hashed", "", nil)
+
+	raw, err := handleReadSkill(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"skill_id": imported.SkillID,
+	})
+	if err != nil {
+		t.Fatalf("handleReadSkill: %v", err)
+	}
+	response := raw.(map[string]interface{})
+	provenance, ok := response["package"].(*mpminternal.SkillPackageProvenance)
+	if !ok {
+		t.Fatalf("the read carries no provenance: %v", response["package"])
+	}
+
+	// The entrypoint's hash is the ORIGINAL's, and it is recorded.
+	if provenance.EntrypointSHA256 != imported.EntrypointSHA256 {
+		t.Errorf("the entrypoint hash is %s, want the original's %s",
+			provenance.EntrypointSHA256, imported.EntrypointSHA256)
+	}
+	if provenance.HashOrigins.EntrypointSHA256 != mpminternal.PackageHashOriginRecorded {
+		t.Errorf("the entrypoint hash's origin is %q, want recorded",
+			provenance.HashOrigins.EntrypointSHA256)
+	}
+
+	// The projection's hash is recorded, and for a versionless package it
+	// differs from the original's.
+	if provenance.ProjectionSHA256 == "" {
+		t.Fatalf("the provenance carries no projection hash")
+	}
+	if provenance.ProjectionSHA256 == provenance.EntrypointSHA256 {
+		t.Errorf("the projection hash and the entrypoint hash are the same value (%s); "+
+			"a versionless package's projection differs from its original",
+			provenance.ProjectionSHA256)
+	}
+	if provenance.HashOrigins.ProjectionSHA256 != mpminternal.PackageHashOriginRecorded {
+		t.Errorf("the projection hash's origin is %q, want recorded",
+			provenance.HashOrigins.ProjectionSHA256)
+	}
+
+	// The body's hash is RECOMPUTED, and it is the hash of the body the
+	// response actually returns.
+	body, ok := response["body"].(string)
+	if !ok {
+		t.Fatalf("the response's body is %T, want a string", response["body"])
+	}
+	sum := sha256.Sum256([]byte(body))
+	want := hex.EncodeToString(sum[:])
+	if provenance.BodySHA256 != want {
+		t.Errorf("the body hash is %s, want the hash of the returned body %s",
+			provenance.BodySHA256, want)
+	}
+	if provenance.HashOrigins.BodySHA256 != mpminternal.PackageHashOriginRecomputed {
+		t.Errorf("the body hash's origin is %q, want recomputed",
+			provenance.HashOrigins.BodySHA256)
 	}
 }

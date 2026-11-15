@@ -138,13 +138,59 @@ repair an integration MPM no longer supports).
 
 | Directory | What it contains |
 |---|---|
-| `mpm-opencode/` | TypeScript plugin (`src/index.v2.ts`, 17 typed tools + `mpm call` fallback to full registry) + AGENTS.md behavioral-protocol installer (snippet + Python installer) |
+| `mpm-opencode/` | TypeScript plugin (`src/index.v2.ts`, 17 typed tools + `mpm call` fallback to full registry) + AGENTS.md behavioral-protocol installer (snippet + Python installer) + the **isolated reviewer agent** definition and its installer |
 | `lib/` | Host-independent libraries (the telemetry adapter) |
 | `scripts/` | Shared host-independent tooling: the renderer, the reconciler, the diagnostic, the managed-block convergence engine, the runtime-package staging library |
 | `tests/` | The cross-adapter contract suite (renderer parity, reconciliation, provenance, diagnostics) |
 
 The adapter directory's own README is the host-specific deep dive. See
 [INSTALL.md](./INSTALL.md) for installation procedures.
+
+## The isolated reviewer agent
+
+A **review** subagent runs in a child session with the parent's tool
+surface. On 2026-11-15 a review subagent wrote a memory into the
+operator's **live** MPM database through the `mpm_memory` tool, against an
+explicit instruction not to touch it.
+
+A written instruction was not enough, and could not have been: the tool
+was still **registered** for the reviewer, so "do not call it" was the
+only thing standing between a review note and a write into the operator's
+substrate.
+
+The fix is the **permission layer**, and it is per-agent, so normal MPM
+operation is untouched. The canonical definition is
+[`mpm-opencode/templates/agents/mpm-reviewer.md`](./mpm-opencode/templates/agents/mpm-reviewer.md):
+
+```bash
+python3 agent_installation/mpm-opencode/scripts/install_reviewer_agent.py
+```
+
+It installs into `~/.config/opencode/agents/mpm-reviewer.md`. OpenCode
+watches its configuration directory and reloads agents after a save, so
+the definition is live without a restart; `/reload` forces it if the host
+has not noticed yet.
+
+The definition:
+
+- **denies every MPM tool by name**, so a denied tool is removed from the
+  reviewer's tool list entirely — the reviewer cannot call it and cannot
+  see it;
+- **denies `edit`** (a reviewer cannot change what it reviews) and
+  **`subagent`** (a reviewer cannot launch an agent that lacks the
+  isolation);
+- **denies the shell routes into the same substrate** (`mpm call`,
+  `mpm-memory`) and the redirections that would write into a live MPM
+  workspace, so the command line is closed too;
+- requires findings to be recorded in a **filesystem scratchpad**, not in
+  the substrate.
+
+The deny list is **machine-checked against the registry**:
+`internal/core/tools/registry_list.go` is the authoritative list of every
+MPM tool, and
+[`tests/test_reviewer_isolation_denies_every_mpm_tool.py`](./tests/test_reviewer_isolation_denies_every_mpm_tool.py)
+fails if a tool is added to the registry without a matching deny rule.
+The isolation therefore cannot quietly erode as the tool surface grows.
 
 ## Installation
 

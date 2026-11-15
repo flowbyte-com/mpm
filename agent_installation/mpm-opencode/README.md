@@ -270,6 +270,40 @@ persistent-state, skill-discovery, and handoff invariants. The plugin wires
 wake-context injection automatically via `ctx.session.hook("context")`; the
 AGENTS.md managed block delivers the rest of the protocol.
 
+## The isolated reviewer agent
+
+The plugin registers the MPM tools **for every session**, including a
+**review** subagent's. On 2026-11-15 a review subagent wrote a memory into
+the operator's **live** MPM database through `mpm_memory`, against an
+explicit instruction not to touch it — and a written instruction could not
+have prevented it, because the tool was still **registered** for the
+reviewer.
+
+The fix is per-agent and lives at the **permission layer**: the canonical
+reviewer definition denies every MPM tool by name, and a denied tool is
+removed from the reviewer's tool list entirely.
+
+```bash
+python3 agent_installation/mpm-opencode/scripts/install_reviewer_agent.py
+```
+
+It installs `templates/agents/mpm-reviewer.md` into
+`~/.config/opencode/agents/mpm-reviewer.md`. OpenCode watches its
+configuration directory and reloads agents after a save, so the definition
+is live without a restart; `/reload` forces it if the host has not noticed
+yet. Launch it with `subagent(agent="mpm-reviewer", …)`.
+
+The definition denies the MPM tools, `edit` and `subagent`, and closes the
+shell routes into the same substrate (`mpm call`, `mpm-memory`) and the
+redirections that would write into a live MPM workspace. It requires
+findings to be recorded in a **filesystem scratchpad**, not in the substrate.
+
+The deny list is **machine-checked against the registry** —
+`internal/core/tools/registry_list.go` is the authoritative list of every
+MPM tool, and `agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py`
+fails if a tool is added to the registry without a matching deny rule, so
+the isolation cannot quietly erode as the tool surface grows.
+
 ## Verification
 
 ```bash
