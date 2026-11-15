@@ -989,12 +989,29 @@ func (d packageArchiveDirectory) centralDirectoryHeaderParses(r io.ReaderAt, siz
 				break
 			}
 			if tag == archiveZip64ExtraID {
+				// The field's bytes are consumed SEQUENTIALLY, and each
+				// consumption needs eight bytes REMAINING — not eight
+				// bytes in the field. That is what `archive/zip` does,
+				// and it has two consequences the mirror must keep:
+				//
+				//  - a field of exactly eight bytes satisfies ONE
+				//    saturated value, not two; the second saturation
+				//    finds no bytes left and the header is refused;
+				//  - the local-header offset is read from wherever the
+				//    cursor stands, so it is the THIRD eight bytes when
+				//    the two sizes are saturated before it.
 				fieldBuf := extra[4 : 4+fieldSize]
-				if uncompressedSaturated && len(fieldBuf) < 8 {
-					return false
+				if uncompressedSaturated {
+					if len(fieldBuf) < 8 {
+						return false
+					}
+					fieldBuf = fieldBuf[8:]
 				}
-				if compressedSaturated && len(fieldBuf) < 8 {
-					return false
+				if compressedSaturated {
+					if len(fieldBuf) < 8 {
+						return false
+					}
+					fieldBuf = fieldBuf[8:]
 				}
 				if headerOffsetSaturated {
 					if len(fieldBuf) < 8 {
@@ -1229,6 +1246,17 @@ func readPackageArchiveDirectory64(r io.ReaderAt, buf []byte, index int, size in
 	locator := buf[index-archiveZip64LocatorSize:]
 	if binary.LittleEndian.Uint32(locator) != archiveZip64LocatorSignature {
 		return 0, 0, 0, 0, fmt.Errorf("the archive declares ZIP64 fields but carries no locator")
+	}
+	// `archive/zip` accepts a locator only when it names the disk the
+	// ZIP64 record starts on (disk zero) and when the archive is a
+	// single-disk one. A locator that says otherwise is not a usable
+	// locator, and the archive is refused — the same outcome the
+	// reader reaches, by a different route.
+	if binary.LittleEndian.Uint32(locator[4:]) != 0 {
+		return 0, 0, 0, 0, fmt.Errorf("the archive's ZIP64 locator names a disk other than zero")
+	}
+	if binary.LittleEndian.Uint32(locator[16:]) != 1 {
+		return 0, 0, 0, 0, fmt.Errorf("the archive's ZIP64 locator names more than one disk")
 	}
 	offset := int64(binary.LittleEndian.Uint64(locator[8:]))
 	if offset < 0 || offset+archiveZip64EOCDOffsetOffset+8 > size {

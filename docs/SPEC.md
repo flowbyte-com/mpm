@@ -2242,7 +2242,7 @@ Three bounds are applied, and together they hold:
 
 The count must be the **real** record count, and that is a substantive point rather than a detail. A byte-derived *estimate* of it is far too pessimistic to refuse on: a record is at least 46 bytes, but its **name** is not, so the estimate counts a legitimate package's long paths as extra records. Measured, the legitimate worst case — 512 files and 511 directories, every name at the 511-byte archive-path maximum — has **1 023** real records but a byte-derived estimate of **12 387**, and an estimate-based cap that clears the real count would refuse the estimate. (The regression test uses a flatter fixture of the same shape — 246-byte directory paths and 251-byte file paths — whose real count is also 1 023 and whose estimate is 6 555; both exceed the 4 096 cap.) So the records are **counted**, not estimated, before the reader is built: the refusal then costs nothing, a lying header cannot defeat it, and no legitimate package is refused.
 
-**The invariant the bound rests on is this: the count is never lower than the number of records `archive/zip` will parse, and it is equal to it for every archive whose declared offsets are consistent** — which is every well-formed archive, and every self-extracting one. Two things together give it.
+**The invariant the bound rests on is this: the count is never lower than the number of records `archive/zip` will parse, and it is equal to it for every well-formed archive** — every ordinary archive, and every self-extracting one. Two things together give it.
 
 **First, the walk never under-counts.** It uses the same signature test and the same 46-bytes-plus-lengths advance as the reader, and it counts every record whose signature is right. `archive/zip` counts a *subset* of those: it additionally refuses a record whose name, extra field or comment runs past the end of the file, and one whose ZIP64 extra field is malformed. So the walk stops no earlier than the reader does and counts no fewer records. The walk reads only what it needs — one 46-byte header at a time — so a start offset that is not a central directory costs 46 bytes and not the whole window.
 
@@ -2250,12 +2250,14 @@ The count must be the **real** record count, and that is a substantive point rat
 
 The price of that upper bound is that an archive whose declared offsets are **inconsistent** may be counted **higher** than the reader would count it — the reader takes the fallback and reads one record, while the normal start reaches the whole central directory. Such an archive is then **refused** with `file_count_limit`. It is a malformed archive, it fails closed, and the refusal is a clear reason rather than a silent miscount.
 
-The fallback is **decided** by the same test `archive/zip` uses: the record at the declared offset must **parse** — and `archive/zip` can refuse a central-directory header in **four** ways:
+The fallback is **decided** by the same test `archive/zip` uses: the record at the declared offset must **parse** — and `archive/zip` can refuse a central-directory header in **four** ways (the fourth is the ZIP64 extra field, whose bytes are consumed **sequentially**, so a field of eight bytes satisfies one saturated value and not two):
 
 1. the 46-byte fixed header is not readable;
 2. the signature is not the central-directory one;
 3. the name, extra field and comment the header declares are not readable;
-4. the header declares a **saturated** size or offset and carries a **malformed ZIP64 extra field** — shorter than the eight bytes such a field must carry.
+4. the header declares a **saturated** size or offset and carries a **malformed ZIP64 extra field**.
+
+The fourth has two subtleties, and both are easy to miss. The ZIP64 field's bytes are consumed **sequentially** — the saturated uncompressed size takes the first eight, the saturated compressed size the next eight, the saturated local-header offset the next eight — and each consumption needs eight bytes **remaining**, not eight bytes in the field. So a field of exactly eight bytes satisfies **one** saturated value, not two. And resolving the offset **clears** its saturation, so a second ZIP64 field is judged against the resolved value.
 
 The fourth is easy to miss, and it matters in both directions. A **prefixed (self-extracting)** archive's declared offset points into its prefix, so a signature-only test would treat the whole prefix as parseable central directory. And a **crafted** header — the right signature, but lengths that run past the end of the file, or a saturated size with a malformed ZIP64 extra field — is not a header the reader can parse, so a signature-only test would move the parse start onto it and count **one** record where the reader counts the whole central directory.
 
@@ -2263,13 +2265,15 @@ A regression test compares the two counts **directly**, over a range of archive 
 
 A **differential fuzz** checks the invariant across the mutation classes that have historically diverged: the declared offset, the declared size, a crafted header with absurd lengths, a crafted header carrying a malformed ZIP64 extra field, and a lying declared count. It compares the importer's count against the reader's for every mutation the reader accepts, and requires the importer's count never to be lower. Because it measures the importer against `archive/zip` rather than against a hand-written expectation, it cannot disagree with the reader by construction.
 
-A second **differential fuzz** checks the mirror itself, against a transcription of `archive/zip`'s `readDirectoryHeader`, over 200 000 randomised headers, and requires the two to agree in **both** directions. It found a real divergence: resolving a saturated local-header offset from a ZIP64 extra field **clears** the saturation, so a second ZIP64 field is judged against the resolved value — the mirror did not, and so refused 3 924 of the randomised headers that the reader accepts. The direction was the safe one, and the count does not depend on the mirror alone, but an exact mirror is better than a safe one.
+A second **differential fuzz** checks the mirror itself, against a transcription of `archive/zip`'s `readDirectoryHeader`, over 200 000 randomised headers, and requires the two to agree in **both** directions. It found two real divergences: resolving a saturated local-header offset from a ZIP64 extra field **clears** the saturation, and the field's bytes are consumed **sequentially**, so a field of eight bytes satisfies one saturated value and not two. The direction was the safe one — the mirror refused headers the reader accepts — and the count does not depend on the mirror alone, but an exact mirror is better than a safe one.
+
+A **transcription can encode the same wrong model as the code it checks**, so a third regression uses the **real** `archive/zip` as the oracle: it builds archives whose two possible parse starts yield different record counts, so the reader's own count check decides whether the reader took the fallback — and therefore whether it parsed the header. The mirror must agree with the reader on every shape: the plain ones, and a ZIP64 field over a range of sizes with every combination of saturated values.
 
 A third regression pins the **backstop** on its own: an archive whose declared offset points at a **valid** record spliced into the local-header region, so the reader's two candidate starts **disagree** — the reader takes the fallback and reads one record, while the normal start reaches the whole central directory. The importer's count must be the **larger** of the two.
 
 A third regression builds the dangerous shape end to end: an archive whose declared count **lies**, whose declared offset points at a crafted ZIP64-extra header, and which carries 20 001 real records. The reader parses all 20 001 of them; the importer must refuse it **before** the reader is built, and the test asserts the allocation that proves it.
 
-A ZIP64 locator's offset is resolved **absolutely**, exactly as `archive/zip` resolves it, so a prefixed ZIP64 archive is refused rather than mis-parsed — the same behaviour `archive/zip` itself has, and it fails closed.
+A ZIP64 locator is checked the way `archive/zip` checks it: it must name **disk zero** and a **single-disk** archive, and its offset is resolved **absolutely** — so a prefixed ZIP64 archive is refused rather than mis-parsed, the same behaviour `archive/zip` itself has, and it fails closed. An archive that declares ZIP64 fields but carries no usable locator is refused outright, before the reader is built.
 
 #### The limits and their justification
 

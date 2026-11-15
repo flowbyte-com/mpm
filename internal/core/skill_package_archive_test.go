@@ -1833,12 +1833,19 @@ func TestP5_TheCountIsTakenOverBothOfTheReadersStarts(t *testing.T) {
 	}
 
 	// The counts over each candidate start.
+	starts := dir.candidateParseStarts(info.Size())
+	if len(starts) < 2 {
+		t.Fatalf("the archive has %d candidate parse starts, want at least two — "+
+			"the fixture is not the shape it claims", len(starts))
+	}
+	counts := make([]int64, 0, len(starts))
 	var largest int64
-	for _, start := range dir.candidateParseStarts(info.Size()) {
+	for _, start := range starts {
 		n, err := countPackageArchiveRecords(f, start, info.Size(), 1<<20)
 		if err != nil {
 			t.Fatalf("count the records from %d: %v", start, err)
 		}
+		counts = append(counts, n)
 		if n > largest {
 			largest = n
 		}
@@ -1846,6 +1853,13 @@ func TestP5_TheCountIsTakenOverBothOfTheReadersStarts(t *testing.T) {
 	if largest != records {
 		t.Fatalf("the largest candidate count is %d, want %d — the fixture is not the shape it claims",
 			largest, records)
+	}
+
+	// The two starts must DISAGREE, or the test proves nothing: the
+	// count would be the same whichever start was taken.
+	if counts[0] == counts[1] {
+		t.Fatalf("the two candidate starts both count %d records — the fixture is not the shape it claims",
+			counts[0])
 	}
 
 	// The importer's count is the LARGER of them.
