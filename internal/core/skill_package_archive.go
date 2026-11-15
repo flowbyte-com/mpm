@@ -885,9 +885,9 @@ type packageArchiveDirectory struct {
 //     re-reads the record at the declared offset and, if that record
 //     PARSES, parses from THERE.
 //
-// The fallback is CHECKED, not assumed, and the check mirrors
-// `archive/zip`'s own exactly — a COMPLETE central-directory header,
-// not merely its signature. That matters in both directions:
+// The fallback is CHECKED, not assumed. The check is a COMPLETE
+// central-directory header, not merely its signature, and that matters
+// in both directions:
 //
 //   - a PREFIXED (self-extracting) archive has a positive base offset,
 //     and its declared offset is relative to the archive's logical
@@ -895,22 +895,29 @@ type packageArchiveDirectory struct {
 //     the fallback would treat the whole prefix as parseable central
 //     directory;
 //   - a CRAFTED header before the real central directory, carrying the
-//     right signature but lengths that run past the end of the file,
-//     or a saturated size with a malformed ZIP64 extra field, makes
-//     the full parse FAIL. `archive/zip` then parses from the normal
-//     start — and so must this, or the count taken here would be
-//     lower than the count the reader actually parses.
+//     right signature but lengths that run past the end of the file, is
+//     not a header `archive/zip` can parse, so it must not move the
+//     parse start.
 //
-// The count does not rest on this check alone: it is taken over BOTH
+// The check is deliberately the STRUCTURAL rule and nothing more — see
+// `centralDirectoryHeaderIsStructurallyValid` for why it must not
+// mirror any particular Go version's refinements.
+//
+// The count does not rest on this check at all: it is taken over BOTH
 // candidate starts and the larger is kept, so it is never lower than
-// the reader's count even if this check were wrong.
+// the reader's count even if this check were wrong. What this check
+// decides is the parse WINDOW, and for that the rule is one-sided: the
+// check must never be STRICTER than the reader, or the window could be
+// smaller than the window the reader actually scans.
 func (d packageArchiveDirectory) parseStart(r io.ReaderAt, size int64) int64 {
 	start := d.endOffset - d.size
 
 	// The fallback applies only when the base offset is positive AND
-	// the record at the declared offset parses as a complete
-	// central-directory header — the same test `archive/zip` makes.
-	if d.endOffset-d.size-d.offset > 0 && d.centralDirectoryHeaderParses(r, size) {
+	// the record at the declared offset is a structurally valid
+	// central-directory header — the same test `archive/zip` makes,
+	// under a rule that is deliberately more permissive than the
+	// reader's.
+	if d.endOffset-d.size-d.offset > 0 && d.centralDirectoryHeaderIsStructurallyValid(r, size) {
 		start = d.offset
 	}
 
@@ -923,30 +930,53 @@ func (d packageArchiveDirectory) parseStart(r io.ReaderAt, size int64) int64 {
 	return start
 }
 
-// centralDirectoryHeaderParses reports whether `archive/zip` would
-// parse a complete central-directory header at the declared offset.
+// centralDirectoryHeaderIsStructurallyValid reports whether the bytes
+// at the declared offset are a STRUCTURALLY VALID central-directory
+// header: the 46-byte fixed header is readable, its signature is the
+// central-directory one, and the name, extra field and comment it
+// declares are readable.
 //
-// It mirrors `archive/zip`'s `readDirectoryHeader` success condition,
-// which has FOUR ways to fail:
+// # WHY IT IS DELIBERATELY MORE PERMISSIVE THAN ANY GO VERSION
 //
-//  1. the 46-byte fixed header is not readable;
-//  2. the signature is not the central-directory one;
-//  3. the name, extra field and comment the header declares are not
-//     readable;
-//  4. the header declares a saturated size or offset and carries a
-//     malformed ZIP64 extra field — `archive/zip` returns `ErrFormat`
-//     for that.
+// `archive/zip` applies further refinements on top of the structural
+// rule, and they are NOT STABLE ACROSS GO VERSIONS:
 //
-// The fourth is easy to miss, and it matters: such a header is not a
-// header the reader can parse, so the fallback must not be taken for
-// it. A header that the reader refuses must leave the parse start where
-// the reader leaves it.
+//   - Go 1.26.6 refuses a header whose compressed size or local-header
+//     offset is SATURATED and which carries no ZIP64 extra field —
+//     `if needCSize || needHeaderOffset { return ErrFormat }`;
 //
-// The signature ALONE is not enough in the other direction either. A
-// crafted header with the right signature but lengths that run past the
-// end of the file is not a header `archive/zip` can parse, so it must
-// not move the parse start here either.
-func (d packageArchiveDirectory) centralDirectoryHeaderParses(r io.ReaderAt, size int64) bool {
+//   - Go 1.27.3 has no such check, but it refuses a header whose
+//     SECOND ZIP64 extra field is shorter than the eight bytes it
+//     would need, because it does not clear the saturation when it
+//     resolves the first one.
+//
+// So the two versions differ in BOTH directions, no fixed rule mirrors
+// both, and a mirror pinned to one version's internals would make the
+// importer's behaviour depend on the toolchain it was built with —
+// which is exactly the defect this stage's CI caught.
+//
+// # WHAT THE BOUND ACTUALLY NEEDS
+//
+// One direction only: the check must never be STRICTER than the
+// reader's. It may be more permissive, and it is:
+//
+//   - the check says "valid" and the reader says "no" — the reader
+//     keeps the normal start, the importer takes the fallback, and the
+//     importer's window is therefore LARGER than the reader's. That is
+//     the safe direction, and it is what the structural rule gives.
+//
+//   - the check says "invalid" and the reader says "valid" — the
+//     reader takes the fallback, the importer keeps the normal start,
+//     and the importer's window would be SMALLER than the reader's.
+//     That is the unsafe direction, and the structural rule cannot
+//     produce it: every Go version refuses a header that is not
+//     structurally valid.
+//
+// The check is therefore version-independent by construction, and
+// future-proof in the safe direction: a Go version that refuses more
+// headers than this rule does only makes the importer more
+// conservative.
+func (d packageArchiveDirectory) centralDirectoryHeaderIsStructurallyValid(r io.ReaderAt, size int64) bool {
 	const headerLen = archiveCentralDirectoryRecordMinBytes
 	if d.offset < 0 || d.offset+headerLen > size {
 		return false
@@ -959,74 +989,11 @@ func (d packageArchiveDirectory) centralDirectoryHeaderParses(r io.ReaderAt, siz
 		return false
 	}
 
-	compressedSaturated := binary.LittleEndian.Uint32(header[20:]) == 0xffffffff
-	uncompressedSaturated := binary.LittleEndian.Uint32(header[24:]) == 0xffffffff
 	nameLen := int64(binary.LittleEndian.Uint16(header[28:]))
 	extraLen := int64(binary.LittleEndian.Uint16(header[30:]))
 	commentLen := int64(binary.LittleEndian.Uint16(header[32:]))
-	localHeaderOffset := int64(binary.LittleEndian.Uint32(header[42:]))
-	headerOffsetSaturated := localHeaderOffset == int64(0xffffffff)
 
-	if d.offset+headerLen+nameLen+extraLen+commentLen > size {
-		return false
-	}
-
-	// The extra fields, walked exactly as `archive/zip` walks them.
-	//
-	// The ZIP64 handling has one subtlety worth stating: resolving a
-	// saturated local-header offset CLEARS its saturation, so a second
-	// ZIP64 field is judged against the resolved value. The two size
-	// saturations are never cleared.
-	if extraLen > 0 {
-		extra := make([]byte, extraLen)
-		if _, err := r.ReadAt(extra, d.offset+headerLen+nameLen); err != nil {
-			return false
-		}
-		for len(extra) >= 4 {
-			tag := binary.LittleEndian.Uint16(extra[0:])
-			fieldSize := int(binary.LittleEndian.Uint16(extra[2:]))
-			if len(extra) < 4+fieldSize {
-				break
-			}
-			if tag == archiveZip64ExtraID {
-				// The field's bytes are consumed SEQUENTIALLY, and each
-				// consumption needs eight bytes REMAINING — not eight
-				// bytes in the field. That is what `archive/zip` does,
-				// and it has two consequences the mirror must keep:
-				//
-				//  - a field of exactly eight bytes satisfies ONE
-				//    saturated value, not two; the second saturation
-				//    finds no bytes left and the header is refused;
-				//  - the local-header offset is read from wherever the
-				//    cursor stands, so it is the THIRD eight bytes when
-				//    the two sizes are saturated before it.
-				fieldBuf := extra[4 : 4+fieldSize]
-				if uncompressedSaturated {
-					if len(fieldBuf) < 8 {
-						return false
-					}
-					fieldBuf = fieldBuf[8:]
-				}
-				if compressedSaturated {
-					if len(fieldBuf) < 8 {
-						return false
-					}
-					fieldBuf = fieldBuf[8:]
-				}
-				if headerOffsetSaturated {
-					if len(fieldBuf) < 8 {
-						return false
-					}
-					// The offset is resolved from the field, which
-					// clears its saturation for the fields that follow.
-					localHeaderOffset = int64(binary.LittleEndian.Uint64(fieldBuf[:8]))
-					headerOffsetSaturated = localHeaderOffset == int64(0xffffffff)
-				}
-			}
-			extra = extra[4+fieldSize:]
-		}
-	}
-	return true
+	return d.offset+headerLen+nameLen+extraLen+commentLen <= size
 }
 
 // countPackageArchiveRecords counts the central-directory records from
