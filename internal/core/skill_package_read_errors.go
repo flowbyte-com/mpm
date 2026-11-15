@@ -26,6 +26,13 @@ import (
 // `content_hash_mismatch` (§8.6, T34) and `line_too_large` (§8.6, T49).
 // The remaining codes name the distinctions the design states but does not
 // give a code for, and follow the same lower_snake_case shape.
+//
+// `line_too_large` is the ONE exception to "refused": it is never a
+// refusal. It is the reason of the TERMINAL response (§8.6, T49) — the
+// one that carries zero lines and an unchanged `next_offset` — and it is
+// never wrapped in a `PackageReadError`, so `PackageReadReasonOf` can
+// never return it. A caller that branches on REFUSAL reasons will not
+// see this code, and must not expect to.
 type PackageReadReason string
 
 const (
