@@ -2526,9 +2526,16 @@ That is pinned by an **AST walk** over the reader's own source — **both** read
 - a statement must be a **single** statement — a `;` anywhere but at the very end means another statement follows;
 - a statement must carry **no write keyword anywhere** — so `SELECT … WHERE x = 'UPDATE'` is not caught, because the string literal is scrubbed first, and `last_update` is not mistaken for `UPDATE`, because a word is a run of letters, digits and **underscores**.
 
-A **comment is removed entire**, not replaced by a space. That matters: a comment in the middle of a keyword would otherwise *split* it, and `DE/*x*/LETE` would scrub to `DE LLETE` — two words, neither a keyword — and the statement would be misclassified as "not SQL" and skipped.
+**A comment is judged under BOTH readings, and the statement is refused if EITHER says it is not a single read.** SQLite treats a comment as whitespace, so a comment can be read two ways, and each way catches a shape the other misses:
 
-The walk closes these routes, and **every one of them has been proven by injection** — each was injected into the reader, the guard was observed to fail, and the guard was observed to pass again once the injection was removed:
+| the text | comment **removed** | comment **spaced** | what SQLite sees |
+|---|---|---|---|
+| `DE/*x*/LETE FROM t` | `DELETE FROM t` — a write | `DE LETE FROM t` — not a statement | a syntax error |
+| `DELETE/*x*/FROM t` | `DELETEFROM t` — not a statement | `DELETE FROM t` — a write | `DELETE FROM t` — **a write** |
+
+Neither reading alone is sound: removing the comment rejoins a keyword split by it, and spacing it keeps the tokens either side of it separate. So the statement is judged under both, and refused if either says it is not a single read. A string literal, a quoted identifier and a bracket identifier are each consumed **whole**, so their contents are never inspected.
+
+The walk closes these routes, and **every one of them is pinned in the repository**: the evasion matrix in `TestP6TheReadOnlyGuardCatchesEveryEvasion` splices each of them into a **copy** of the reader and requires the guard to report it, and `TestP6TheReadOnlyGuardRefusesNoLegitimateRead` splices the controls into a copy and requires the guard to stay silent. The matrix is evidence that survives the next commit; a manual sweep is not.
 
 | evasion | what the guard says |
 |---|---|
@@ -2541,15 +2548,17 @@ The walk closes these routes, and **every one of them has been proven by injecti
 | a write in a constant, **used** | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT"* |
 | a write in a constant, **unused** | *"the SQL constant X is not a single read statement: the statement begins with DELETE, not SELECT"* |
 | a write in a **concatenated** constant (`"DELETE " + "FROM …"`) | the same — the concatenation is resolved |
-| a write in a `WITH … UPDATE` constant | *"…the statement begins with WITH, not SELECT"* — or the write-keyword rule |
+| a write in a `WITH … UPDATE` constant | *"…the statement carries the write keyword UPDATE"* |
 | a write in a **comment-prefixed** constant | *"…the statement begins with DELETE, not SELECT"* — the comment is removed, not obeyed |
 | a write behind a **comment-split keyword** (`DE/*x*/LETE`) | *"…the statement begins with DELETE, not SELECT"* — the comment is removed whole |
+| a write behind a **comment-split keyword**, line comment (`DE--x⏎LETE`) | the same |
+| a write with a comment **between** its keywords (`DELETE/*x*/FROM t`) | the same — the comment is spaced, and the tokens stay separate |
 | an `EXPLAIN DELETE` | *"…the statement begins with EXPLAIN, not SELECT"* |
 | a statement whose SQL is built at runtime | *"issues a statement whose SQL is neither a literal nor a constant at line N"* |
 | a **multi-statement** `"SELECT 1; DELETE …"` | *"…the statement carries more than one statement"* |
 | a **dead** SQL constant no statement uses | *"the SQL constant X is never used by a statement"* |
 
-The guard's **false positives** were checked too, and it refuses none of them: a `'UPDATE'` string literal, a `last_update` column, a `;` inside a literal, a double-quoted identifier, a `?` bind placeholder, a `UNION` subquery, a trailing semicolon, and a **read-only CTE** (`WITH x AS (SELECT 1) SELECT …`) all pass.
+That is **nineteen routes**. The **thirteen controls** — the legitimate reads the guard must not refuse — are pinned beside them: a plain `SELECT`, a double-quoted `SELECT`, a trailing semicolon, a `UNION` subquery, a read-only CTE, a `'UPDATE'` string literal, a `last_update` column, a `;` inside a literal, a doubled quote inside a literal, a `--` inside a literal, a bracket identifier containing a `;`, a bracket identifier containing a write keyword, and a `?` bind placeholder.
 
 **The scope of the claim.** The walk covers the reader's **own two files**: every statement they issue, every statement they declare as a constant, and every database method they bind. A string literal passed to a non-database function is not inspected — it is not a statement the reader issues — and a statement issued by a helper in another file of the package is outside the walk. The behavioural pin covers the rest: the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read.
 
