@@ -1497,9 +1497,15 @@ package**, and it carries the entrypoint's hash and its scan status:
   "package": {
     "entrypoint": "SKILL.md",
     "entrypoint_sha256": "783ece4b3869ae42d2d46f540d01d1da0f61147a8eada519eff15941b46d423d",
+    "projection_sha256": "9a1f3c22…",
+    "body_sha256": "5d7e9014…",
+    "hash_origins": {"entrypoint_sha256": "recorded",
+                     "projection_sha256": "recorded",
+                     "body_sha256": "recomputed"},
     "file_count": 3,
     "package_hash": "…",
     "scanned": true,
+    "scan_status": {"secret": true, "poison": true},
     "version_override": {"declared": null, "effective": "1.0.0-unversioned",
                          "reason": "package_declares_no_version"}
   }
@@ -1517,6 +1523,78 @@ package**, and it carries the entrypoint's hash and its scan status:
 * For a skill that is **not** a package, the object is **absent** — so C1
   holds exactly: a caller of today's API sees today's response byte-for-byte
   for every skill that is not a package.
+
+**The three hashes, and which of them the store is claiming.** The object
+carries **three** hashes, and they are not interchangeable. Two are
+**recorded** — they are claims the STORE makes, read out of the package's own
+records. One is **recomputed** — it is a measurement the READER takes, over
+the exact bytes the response carries. The `hash_origins` object says which is
+which, so a caller never has to guess whether it is holding a stored claim or
+a fresh observation. The three values are `recorded`, `recomputed` and
+`unavailable` — the last for a hash that could not be produced, so an absent
+hash is never reported as an empty string that reads like one.
+
+| hash | covers | origin | verification semantics |
+|---|---|---|---|
+| `entrypoint_sha256` | the **original** `SKILL.md`, frontmatter included | recorded | the caller can check that the body it is looking at **derives from** the recorded file |
+| `projection_sha256` | the complete **derived projection** — the original plus one inserted `version:` line, and only when the package declares no version (§5.2) | recorded | the caller can check that the projection the store holds is the one the store **recorded** |
+| `body_sha256` | the exact UTF-8 bytes of the **`body` field the response returns** | recomputed | the caller can check the bytes it is actually **holding**, on its own |
+
+**Why three and not one.** The `read` action returns the **body** — the part
+*after* the frontmatter (§8.2). `entrypoint_sha256` covers the whole
+document, so a caller that hashed the returned body and compared it with
+`entrypoint_sha256` would mismatch for **every** package, versioned or not,
+and could not reconstruct the document the hash covers: the frontmatter is not
+in the response. `projection_sha256` closes the second half of that gap — the
+projection's own hash, which for a **versionless** package is the only
+recorded hash that covers the whole document the store actually serves.
+`body_sha256` closes the first: it is the hash of exactly the bytes the
+caller receives.
+
+**`projection_sha256` is obtained from the manifest, and validated.** It is
+not a hash the reader invents: the recorded value lives in the stored
+manifest, so the accessor reads the manifest, parses it, and applies the
+manifest module's **own** rules to it (`PackageManifest.Validate()` — the same
+primitive the importer used to accept the manifest). It then compares the
+recorded value with the hash of the projection it is actually returning. A
+manifest that does not parse, or that does not validate, leaves no recorded
+value that could be validated: the read still returns the body — that is what
+`verify` is for — and the provenance reports the projection hash as
+`unavailable`. A manifest that **does** validate and whose recorded
+projection hash **disagrees** with the projection the store holds is a
+positive claim of corruption, and the read **fails closed** on it.
+
+**`scanned` is the summary; `scan_status` is the detail.** §8.5's `files` and
+`read_file` shapes carry `scanned` as an **object** — `{"secret": true,
+"poison": true}` — while this object carries it as a **boolean**. Both are
+kept, and the difference is named rather than left to be inferred:
+
+* `scanned` (boolean) — the compatibility shape. It is `true` only when every
+  scanner that applies ran and passed. For an entrypoint the two always
+  agree, because `SKILL.md` is text and a binary asset's disclosed poison
+  skip cannot arise for it; the disclosed-skip case is visible in the `files`
+  listing.
+* `scan_status` (object) — the **per-scanner detail**: which scanner ran,
+  per scanner. It is what distinguishes a **disclosed skip** from a clean
+  scan.
+
+`scan_status` is an **additive extension** of this object's original six
+fields, and this section's own prose asks the object to carry *"the
+entrypoint's hash and its scan status"* — so the extension is recorded here.
+§8.2.1's object is otherwise unchanged: `entrypoint`, `file_count`,
+`package_hash` and `version_override` keep their meaning and their values.
+
+**The body and the provenance come from ONE snapshot.** The `read` action
+returns two things that must agree: the body and, for a packaged skill, the
+provenance that describes it. They are read inside a **single** read
+snapshot, so a package row deleted between two separate reads cannot let a
+body return with no provenance — which is the one shape that would break R6.
+The invariant: **a successful read of a packaged skill cannot return its body
+without its package provenance because a concurrent deletion occurred between
+queries.** The result is always either a consistent skill/provenance pair or
+the appropriate not-found response. This costs a transaction on the `read`
+action's hot path; it is not a full-package integrity scan, because no blob is
+read and no package byte is hashed.
 
 **What this guarantee is, and is not.** It is **machine-checkable provenance on
 every response that carries package content**: a hash and a scan status, on
@@ -1681,6 +1759,16 @@ the first cut (§8.3).
 `status` is one of `installed` or `already_installed` (idempotent re-import).
 There is no `replaced`: a published package is immutable (§5.7, §5.8). A
 refused import reports `success: false` with a reason code and writes nothing.
+
+**The `scanned` field has two shapes, and both are named.** In `files` and
+`read_file`, `scanned` is an **object** — `{"secret": true, "poison": true}` —
+that says which scanner ran, per scanner. In the `package` object of §8.2.1,
+`scanned` is a **boolean** — the compatibility summary — and the per-scanner
+detail is carried beside it as `scan_status`, which has the object shape.
+Both shapes are kept deliberately: the boolean says "did every applicable
+scanner run and pass", and the object says "which one did". A **disclosed
+skip** (§7.3 — a binary asset's poison scan) is a `false` in the boolean and
+a `false` under `poison` in the object, and neither is a pass.
 
 ### 8.6 Bounded and partial reads
 
@@ -2169,7 +2257,7 @@ repository contradicts, so each has a row.
 | **T37** | **Atomicity across the whole import** | A failure injected after the blob rows are written and before the commit leaves **zero** rows of every kind, and no blob row is visible to the collector | P3, P4 | **R2**, §3.4 E5 |
 | **T38** | **A versionless package and a later genuine `1.0.0` of the same name** | Both import successfully; the ids are `…-v1.0.0-unversioned` and `…-v1.0.0`; `is_latest` points at the genuine `1.0.0`; the versionless package's files are intact | P4 | **R3**, §5.2 |
 | **T39** | **The agent-facing surface** | The `mpm_skills` registry carries **no** action that accepts a filesystem path; there is no import action; `files`, `read_file` and `verify` take only a skill id or a name and version | P8 | **R4**, §8.3 |
-| **T40** | **The provenance on `read`** | The `read` response for a packaged skill **always** carries the `package` object with `entrypoint_sha256` and `scanned`; for a skill that is not a package the object is **absent** and every other field is byte-identical to today's response | P6 | **R6**, §8.2.1 |
+| **T40** | **The provenance on `read`** | The `read` response for a packaged skill **always** carries the `package` object with `entrypoint_sha256`, `projection_sha256`, `body_sha256` and `scanned`; for a skill that is not a package the object is **absent** and every other field is byte-identical to today's response. The body and the provenance come from **one** snapshot, so a successful read of a packaged skill cannot return its body without its provenance because a concurrent deletion occurred between queries | P6 | **R6**, §8.2.1 |
 | **T41** | **Age-based prune against a packaged skill** | `mpm prune --older-than 1s` leaves the packaged skill and its package row intact. It **also** leaves an ordinary, non-packaged skill of the same age in place — the exclusion is **blanket**, so the prune cannot tell the two apart. The test asserts **both** halves: the packaged skill survives, **and** an ordinary skill of the same age is **not** removed | P3 | **R7**, §6.4, **C-2**, **O17** |
 | **T42** | **The restore allow-list is not weakened** | A dump naming the three package tables is still **rejected** by a binary whose `CanonicalMPMSchema` does not list them — the refusal is unchanged and loud | P1 | **R8**, §6.2 |
 | **T43** | **The scanner cannot be skipped** | With the toxic-phrase file made unreadable, the import is refused with `scanner_unavailable` and **nothing is written**; the response does not report success, and no row records a scan that did not happen | P4 | **R10**, §7.2 |
