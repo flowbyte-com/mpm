@@ -260,3 +260,106 @@ func TestP7JsonPackageArchiveFactsReportsWhatItFound(t *testing.T) {
 		})
 	}
 }
+
+// TestP7MigrateRefusesADocumentWhoseScopeContradictsItself pins the
+// SCOPE's arithmetic.
+//
+// The scope carries three numbers: how many packages the export was
+// ABOUT (`selected`), how many it CARRIED (`carried`), and the marker
+// carries how many of the selected ones it could not carry
+// (`count`). Those are one identity:
+//
+//	selected == carried + omitted
+//
+// and `carried` is the same number as the archive index's `count`. A
+// document that breaks either is contradicting ITSELF, and a
+// contradiction about how many packages it holds leaves that number
+// unknown — so it is refused.
+//
+// The case that matters is the quiet one: a document that says "five
+// packages were selected, none were carried, none were omitted"
+// names no loss at all, and a guard that reads only the counts
+// imports it — leaving five packages' content behind without a word.
+func TestP7MigrateRefusesADocumentWhoseScopeContradictsItself(t *testing.T) {
+	cases := []struct {
+		name    string
+		index   string
+		omitted string
+	}{
+		{"selected but nothing carried and nothing omitted",
+			`{"count": 0, "directory": "d", "archives": []}`,
+			`{"count": 0, "packages": [], "scope": {"total": 9, "selected": 5, "carried": 0}}`},
+		{"the scope's carried disagrees with the archive index",
+			`{"count": 1, "directory": "d", "archives": [{"file_name": "a.skill"}]}`,
+			`{"count": 0, "packages": [], "scope": {"total": 9, "selected": 2, "carried": 2}}`},
+		{"selected is not carried plus omitted",
+			`{"count": 1, "directory": "d", "archives": [{"file_name": "a.skill"}]}`,
+			`{"count": 1, "packages": [{"skill_id": "skill:a"}], "scope": {"total": 9, "selected": 7, "carried": 1}}`},
+		{"a negative selected count",
+			`{"count": 0, "directory": "d", "archives": []}`,
+			`{"count": 0, "packages": [], "scope": {"total": 9, "selected": -1, "carried": 0}}`},
+		{"a scope with no selected count",
+			`{"count": 0, "directory": "d", "archives": []}`,
+			`{"count": 0, "packages": [], "scope": {"total": 9, "carried": 0}}`},
+		{"a scope with no carried count",
+			`{"count": 0, "directory": "d", "archives": []}`,
+			`{"count": 0, "packages": [], "scope": {"total": 9, "selected": 0}}`},
+		{"a scope that is not an object",
+			`{"count": 0, "directory": "d", "archives": []}`,
+			`{"count": 0, "packages": [], "scope": "everything"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dm := p3DM(t)
+			path := p7PackageDocumentWith(t, tc.index, tc.omitted)
+
+			_, err := dm.IngestFromJsonFile(path, "p7-migrate-scope", true)
+			if err == nil {
+				t.Fatalf("the migration accepted a document whose scope contradicts itself")
+			}
+			if !strings.Contains(err.Error(), "MALFORMED") &&
+				!strings.Contains(err.Error(), "package") {
+				t.Errorf("the refusal does not say what is wrong: %v", err)
+			}
+		})
+	}
+}
+
+// TestP7MigrateAcceptsADocumentWithNoScope pins that the scope's
+// arithmetic is checked only where there IS a scope.
+//
+// A pre-P7 document carries no `scope` object, and there is nothing
+// to check its numbers against — so it is imported normally, exactly
+// as it was before the scope existed.
+func TestP7MigrateAcceptsADocumentWithNoScope(t *testing.T) {
+	dm := p3DM(t)
+	path := p7PackageDocumentWith(t,
+		`{"count": 0, "directory": "d", "archives": []}`,
+		`{"count": 0, "packages": []}`)
+
+	if _, err := dm.IngestFromJsonFile(path, "p7-migrate-no-scope", true); err != nil {
+		t.Fatalf("the migration refused a document with no scope: %v", err)
+	}
+}
+
+// TestP7MigrateAcceptsAConsistentScope pins the identity itself: a
+// document whose scope agrees with its counts is imported normally.
+func TestP7MigrateAcceptsAConsistentScope(t *testing.T) {
+	dm := p3DM(t)
+	path := p7PackageDocumentWith(t,
+		`{"count": 1, "directory": "d", "archives": [{"file_name": "a.skill"}]}`,
+		`{"count": 1, "packages": [{"skill_id": "skill:a"}], "scope": {"total": 4, "selected": 2, "carried": 1}}`)
+
+	// This document carries an archive, so it is refused for THAT
+	// reason — and the refusal must not be about the scope.
+	_, err := dm.IngestFromJsonFile(path, "p7-migrate-consistent-scope", true)
+	if err == nil {
+		t.Fatalf("the migration accepted a document that carries an archive")
+	}
+	if !strings.Contains(err.Error(), "archive") {
+		t.Errorf("the refusal is not about the archive: %v", err)
+	}
+	if strings.Contains(err.Error(), "MALFORMED") {
+		t.Errorf("a consistent scope was reported as malformed: %v", err)
+	}
+}

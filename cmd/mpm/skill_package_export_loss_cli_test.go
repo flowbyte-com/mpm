@@ -143,3 +143,83 @@ func TestP7_CLITheStructuredExportStaysConsumableByMigrate(t *testing.T) {
 	}
 	t.Logf("mpm migrate --from reads %d facts from the export", len(facts))
 }
+
+// TestP7_CLIAnEmptyExportIsStillConsumableByMigrate pins the EMPTY
+// case of the same coupling.
+//
+// A nil slice encodes as `null`, and `null` is not an array — so an
+// export of a collection with no rows wrote a document whose
+// `memories` key the migration's parser refused. The export's own
+// claim that its document stays a valid `mpm migrate --from` input
+// was therefore false for every empty collection.
+//
+// The empty collection is produced by a filter, not by a fixture: the
+// export's own filters decide what is in scope, and a collection that
+// holds no rows is the case in question.
+func TestP7_CLIAnEmptyExportIsStillConsumableByMigrate(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "export.json")
+	if rc := handleExport([]string{
+		"export", "--format", "json", "--collection", "p7-no-such-collection",
+		"--output", outPath,
+	}); rc != 0 {
+		t.Fatalf("handleExport returned %d", rc)
+	}
+	body, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read the export: %v", err)
+	}
+
+	// The document's `memories` is an ARRAY, and it is EMPTY.
+	var probe struct {
+		Memories []map[string]interface{} `json:"memories"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		t.Fatalf("the export is not a JSON object with a memories array: %v\n%s", err, body)
+	}
+	if probe.Memories == nil {
+		t.Fatalf("the export wrote a null memories array; null is not an array\n%s", body)
+	}
+	if len(probe.Memories) != 0 {
+		t.Fatalf("the export carried %d row(s); the filter selects none", len(probe.Memories))
+	}
+
+	// And the migration accepts it.
+	source := filepath.Join(t.TempDir(), "import.json")
+	if err := os.WriteFile(source, body, 0o600); err != nil {
+		t.Fatalf("write the source: %v", err)
+	}
+	if rc := handleMigrate([]string{"migrate", "--from", source}); rc != 0 {
+		t.Fatalf("the migration refused an empty export document")
+	}
+}
+
+// TestP7_CLITheEmptyLegacyArrayIsAnArray pins the same thing for the
+// DEPRECATED bare-array shape.
+//
+// The legacy shape is a bare JSON array, and a nil slice encodes as
+// `null` — which is not an array at all.
+func TestP7_CLITheEmptyLegacyArrayIsAnArray(t *testing.T) {
+	outPath := filepath.Join(t.TempDir(), "export.json")
+	var rc int
+	out := captureUserError(t, func() int {
+		rc = handleExport([]string{
+			"export", "--format", "json-array", "--collection", "p7-no-such-collection",
+			"--output", outPath,
+		})
+		return rc
+	})
+	if rc != 0 {
+		t.Fatalf("the legacy array format was refused for an empty collection: %s", out)
+	}
+	body, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read the export: %v", err)
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(body, &rows); err != nil {
+		t.Fatalf("the legacy export is not a bare JSON array: %v\n%s", err, body)
+	}
+	if rows == nil {
+		t.Fatalf("the legacy export wrote null; null is not an array\n%s", body)
+	}
+}

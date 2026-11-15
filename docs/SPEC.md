@@ -2085,12 +2085,13 @@ The JSON document's shape is now an **object**, not a bare array:
         "file_count": 3,
         "package_hash": "…"
       }
-    ]
+    ],
+    "scope": { "total": 12, "selected": 9, "carried": 8 }
   }
 }
 ```
 
-`packages_omitted` is **always present**. It keeps the response's type stable, so a consumer never has to branch on whether the field exists. The marker's scope mirrors the export's own filters exactly, so it names precisely the packages whose skill rows **were** exported and whose content was **not**.
+`packages_omitted` is **always present**. It keeps the response's type stable, so a consumer never has to branch on whether the field exists. The marker's scope mirrors the export's own filters exactly, so it names precisely the packages that were **in the export's scope and whose content was not carried** — which is not quite the same set as "the packages whose skill rows were exported": a package can be in scope and still have no exported skill row, and the export names it too, with the reason `skill_row_not_exported`. The reason field says which.
 
 **The marker's meaning changed with P7, and this section states the current one.** The count is the number of packages that were **selected and not carried** — the packages whose content this export could not carry. It is **not** the number of packages the export carried, and it is **not** the number of packages in the store. A count of zero is a positive statement only against a **known denominator**, which is why the marker carries a `scope` (`total`, `selected`, `carried`): "zero omitted out of twelve selected" is a complete export, while "zero omitted out of zero selected" says nothing about the packages that were never selected. The P7 section (§6.13) states the same rule from the export side.
 
@@ -2664,7 +2665,7 @@ Everything that could vary between two exports is pinned:
 | **header fields** | no extra field of the **caller's** own, no comment, no archive comment — Go's `archive/zip` writer appends its own Info-ZIP extended-timestamp field (`0x5455`) to every entry, and that field's value is the pinned epoch, so it is part of the deterministic shape |
 | **content** | the **original** package bytes, never the derived projection |
 
-**The compression choice is load-bearing, and it is measured rather than assumed.** Go's DEFLATE output is **not stable across Go releases**: the same bytes compressed by Go **1.26.6** and by Go **1.27.3** produce archives of **395** and **396** bytes, with **different digests** (`f3187b20…` and `a1f5b1ab…`). A deflate archive's identity would therefore depend on the **toolchain** that produced it, which defeats the purpose of a deterministic transport. `Store` makes the archive's bytes a function of the package's bytes and the pinned header fields alone, so the same package exports to the same bytes on **every** Go release. The cost is size: an archive is the sum of its files rather than a compressed fraction of it.
+**The compression choice is load-bearing, and it is measured rather than assumed.** Go's DEFLATE output is **not stable across Go releases**: the same bytes compressed by Go **1.26.6** and by Go **1.27.3** produce archives of **different sizes and different digests** — measured on this repository's own fixture, the two digests were `f3187b20…` and `a1f5b1ab…`. (The exact sizes depend on the fixture, so the **digests differing** is the claim and the byte counts are not quoted as a constant.) A deflate archive's identity would therefore depend on the **toolchain** that produced it, which defeats the purpose of a deterministic transport. `Store` makes the archive's bytes a function of the package's bytes and the pinned header fields alone, so the same package exports to the same bytes on **every** Go release. The cost is size: an archive is the sum of its files rather than a compressed fraction of it.
 
 That claim is **pinned as a constant**, not as a comparison: `TestP7ExportArchiveBytesAreIdenticalAcrossGoReleases` asserts the archive's SHA-256 against a literal. A test that compared two exports of the same package would pass on **both** Go releases — and would not have caught the toolchain dependence the `Store` decision avoids. A constant catches both, because the constant is measured on one toolchain and CI runs the other.
 
@@ -2741,6 +2742,8 @@ Reading only the first is a **fail-open**: an export whose every package failed 
 
 **A MALFORMED shape is refused too.** A count that cannot be read, a negative count, and a count that disagrees with the list it accompanies (`package_archives.count` against `package_archives.archives`, `packages_omitted.count` against `packages_omitted.packages`) all leave the number of packages **unknown** — and an unknown number is not zero. A string count, a fractional count, a missing count, a null count, and an index that is not an object at all are all refused, with a diagnostic that says the index is malformed. The safe reading of an unreadable index is the one that refuses; treating it as "no packages" would be a fail-open in a fail-closed design.
 
+**The SCOPE's arithmetic is checked too.** The document carries a third and fourth number, inside the marker's `scope`: `selected` is how many packages the export was about, and `carried` is how many it actually carried. Those and the counts above are one identity — `selected == carried + omitted`, and `carried` is the same number as the archive index's `count`. A document that breaks either identity is contradicting **itself** about how many packages it holds, and is refused. The quiet case is the one that matters: a document that says *"five packages were selected, none were carried and none were omitted"* names no loss at all, and a guard that reads only the counts would import it — leaving five packages' content behind without a word. A document with **no** scope is a pre-P7 document; there is nothing to check its numbers against, so it is imported normally.
+
 A document that carries **both** counts at zero — a complete export of a workspace with no packages — is imported normally.
 
 #### The filesystem safety
@@ -2753,7 +2756,7 @@ Archives and export metadata are written through **private staging paths**:
 - A **symlink** is never followed: the output path and the sibling directory are inspected **without** following links, and a symlink in either place is refused.
 - An existing sibling directory that holds files is **refused**. An export never silently overwrites an archive.
 - Every **published** archive's digest is verified by reading it **back** from the published location.
-- The **document** keeps the mode the export has always published — `0644` — on **both** paths. The package-free path and the package-bearing path use the **same** writer, and the writer sets the mode explicitly before the rename: a temporary file is `0600`, because that is what a temporary file is, and a rename publishes that mode. The **archives** stay private (`0600`, inside a `0700` directory): the document is a shareable artefact, and the packages' contents are not.
+- The **document** is published with the mode `0644` on **both** paths, and the mode is set **explicitly**, so it does not depend on the caller's umask. The package-free path and the package-bearing path use the **same** writer, and the writer sets the mode before the rename: a temporary file is `0600`, because that is what a temporary file is, and a rename publishes that mode. (Before P7 the package-free path published `0666 & ~umask`, which is `0600` under umask `077` and `0644` under umask `022` — so the mode it published depended on the operator's umask.) The **archives** stay private (`0600`, inside a `0700` directory): the document is a shareable artefact, and the packages' contents are not.
 
 **The publication is NOT one atomic operation, and the design does not pretend otherwise.** The directory is published by a rename and the document by a second rename. The **order** makes the intermediate state harmless: the **directory is published first** and the **document second**, so a document is never published pointing at archives that are not there — a lie the consumer could not detect. The reverse — a directory with no document — points at nothing, and the recovery is to remove the directory and run the export again.
 

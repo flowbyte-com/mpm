@@ -281,12 +281,20 @@ func (dm *DatabaseManager) IngestFromJsonFile(sourcePath, importBatch string, dr
 				"document that carries a readable package index",
 			sourcePath, packageFacts.Reason)
 	case packageFacts.Omitted > 0:
+		// The message says what the document DROPPED and where the
+		// archives would have been — a document that carries no
+		// archive index at all dropped every package it was about,
+		// and saying so is more useful than saying nothing.
+		where := "the document carries no package-archive index, so none of them were written beside it"
+		if packageFacts.IndexPresent {
+			where = fmt.Sprintf("the archives belong in %q", packageFacts.Directory)
+		}
 		return nil, fmt.Errorf(
-			"%s DROPPED %d skill package(s): the document's own package-omission marker names them. "+
+			"%s DROPPED %d skill package(s): the document's own package-omission marker names %d of them. "+
 				"This importer reads only the document's projected rows, so importing it would silently drop every "+
-				"dropped package's reference files, scripts and assets. Import the .skill archives themselves, or "+
-				"export a document that carries every package",
-			sourcePath, packageFacts.Omitted)
+				"dropped package's reference files, scripts and assets (%s). "+
+				"Import the .skill archives themselves, or export a document that carries every package",
+			sourcePath, packageFacts.Omitted, packageFacts.OmittedListed, where)
 	case packageFacts.Archives > 0:
 		return nil, fmt.Errorf(
 			"%s carries %d skill package archive(s) in %q; this importer reads only the document's projected rows, "+

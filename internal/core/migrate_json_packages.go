@@ -82,6 +82,20 @@ type jsonPackageArchiveFacts struct {
 	// omission marker alone decides it.
 	IndexPresent bool
 
+	// ScopePresent says the document carries the marker's `scope`
+	// object. A pre-P7 document does not, and the scope's arithmetic
+	// is therefore skipped rather than assumed.
+	ScopePresent bool
+
+	// ScopeSelected is the scope's `selected`: the number of packages
+	// the export's filters chose.
+	ScopeSelected int
+
+	// ScopeCarried is the scope's `carried`: the number of packages
+	// the export actually carried. It is the number of archives the
+	// export produced.
+	ScopeCarried int
+
 	// Malformed says the document's package facts could not be read,
 	// or contradict themselves. Reason names the problem.
 	Malformed bool
@@ -154,6 +168,7 @@ func jsonPackageArchiveFactsOf(content []byte) jsonPackageArchiveFacts {
 		var omitted struct {
 			Count    *int              `json:"count"`
 			Packages []json.RawMessage `json:"packages"`
+			Scope    json.RawMessage   `json:"scope"`
 		}
 		if err := json.Unmarshal(omittedJSON, &omitted); err != nil {
 			facts.Malformed = true
@@ -179,6 +194,72 @@ func jsonPackageArchiveFactsOf(content []byte) jsonPackageArchiveFacts {
 		}
 		facts.Omitted = *omitted.Count
 		facts.OmittedListed = len(omitted.Packages)
+
+		// ── The scope's arithmetic. ─────────────────────────────────
+		//
+		// The scope says how many packages the export was ABOUT
+		// (`selected`), how many it CARRIED (`carried`), and the
+		// marker says how many of the selected ones it could not
+		// carry (`count`). Those three numbers are one identity:
+		//
+		//	selected == carried + omitted
+		//
+		// and the scope's `carried` is the same number as the
+		// archive index's `count`. A document that breaks either
+		// identity is contradicting ITSELF, and a contradiction about
+		// how many packages it holds leaves that number unknown — so
+		// it is malformed, and malformed is refused.
+		//
+		// Reading only the two counts was the fail-open this file
+		// exists to close: a document that says "five packages were
+		// selected, none were carried, none were omitted" names no
+		// loss at all, and the migration would import it — leaving
+		// five packages' content behind without a word.
+		//
+		// A document with NO scope is a pre-P7 document; the identity
+		// is not checked, because there is nothing to check it
+		// against.
+		if scopeJSON := omitted.Scope; len(scopeJSON) > 0 && string(scopeJSON) != "null" {
+			facts.ScopePresent = true
+			var scope struct {
+				Total    *int `json:"total"`
+				Selected *int `json:"selected"`
+				Carried  *int `json:"carried"`
+			}
+			if err := json.Unmarshal(scopeJSON, &scope); err != nil {
+				facts.Malformed = true
+				facts.Reason = "the package-omission marker's scope is not readable"
+				return facts
+			}
+			if scope.Selected == nil || scope.Carried == nil {
+				facts.Malformed = true
+				facts.Reason = "the package-omission marker's scope carries no selected/carried counts"
+				return facts
+			}
+			if *scope.Selected < 0 || *scope.Carried < 0 {
+				facts.Malformed = true
+				facts.Reason = fmt.Sprintf(
+					"the package-omission marker's scope counts %d selected and %d carried",
+					*scope.Selected, *scope.Carried)
+				return facts
+			}
+			facts.ScopeSelected = *scope.Selected
+			facts.ScopeCarried = *scope.Carried
+			if *scope.Carried != facts.Archives {
+				facts.Malformed = true
+				facts.Reason = fmt.Sprintf(
+					"the scope says %d package(s) were carried but the archive index counts %d",
+					*scope.Carried, facts.Archives)
+				return facts
+			}
+			if *scope.Selected != *scope.Carried+facts.Omitted {
+				facts.Malformed = true
+				facts.Reason = fmt.Sprintf(
+					"the scope says %d package(s) were selected but %d were carried and %d were omitted",
+					*scope.Selected, *scope.Carried, facts.Omitted)
+				return facts
+			}
+		}
 	}
 
 	return facts

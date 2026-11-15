@@ -502,7 +502,7 @@ func handleExport(args []string) int {
 		// the loss marker existed. It is only reachable when there is
 		// nothing to lose (the refusal above), so it is never a silent
 		// loss.
-		document, err = encodeExportJSON(memories)
+		document, err = encodeExportJSON(nonNilMemories(memories))
 		if err != nil {
 			return usererrorf("Export failed: %v", err)
 		}

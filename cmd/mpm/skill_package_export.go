@@ -364,6 +364,15 @@ func encodePackageExportDocument(
 	if index.Archives == nil {
 		index.Archives = []*mpminternal.PackageExportArchive{}
 	}
+	// An EMPTY collection is an empty ARRAY, not a null.
+	//
+	// A nil slice encodes as `null`, and `null` is not an array — so
+	// the migration's parser would refuse a document that the export
+	// had just written, and the export's own claim that its document
+	// stays a valid `mpm migrate --from` input would be false for
+	// every collection with no rows. The empty array says the same
+	// thing and parses.
+	memories = nonNilMemories(memories)
 	document := map[string]interface{}{
 		"memories":         memories,
 		"packages_omitted": loss,
@@ -376,6 +385,20 @@ func encodePackageExportDocument(
 		return nil, fmt.Errorf("encode the export document: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// nonNilMemories returns the rows, or an empty slice when there are
+// none.
+//
+// A nil slice encodes as `null`, and `null` is not an array. The
+// export's document carries a `memories` ARRAY, and the migration's
+// parser requires one — so an empty collection has to be an empty
+// array, or the export writes a document its own consumer refuses.
+func nonNilMemories(memories []map[string]interface{}) []map[string]interface{} {
+	if memories == nil {
+		return []map[string]interface{}{}
+	}
+	return memories
 }
 
 // encodeExportJSON renders a value as the export's JSON encoding.
