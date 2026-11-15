@@ -24,17 +24,26 @@
 // ------------------------------
 // SQLite treats a SQL comment as WHITESPACE. So a comment can be
 // removed entirely (which rejoins a keyword split by it) or replaced
-// by a space (which keeps the tokens either side of it separate) — and
-// each reading catches a write the other misses:
+// by a space (which keeps the tokens either side of it separate):
 //
-//	DE/*x*/LETE FROM t   → removed: DELETE FROM t   → a write
-//	DELETE/*x*/FROM t    → spaced:  DELETE FROM t    → a write
+//	DE/*x*/LETE FROM t   -> removed: DELETE FROM t
+//	DELETE/*x*/FROM t    -> spaced:  DELETE FROM t
 //
-// A statement is therefore judged under BOTH readings, and refused if
-// EITHER says it is not a single read. Neither reading alone is
-// sound; together they cover both shapes.
+// The SPACED reading is SQLite's own tokenization: a comment is
+// whitespace, so SQLite NEVER merges the tokens either side of one.
+// Every EXECUTABLE write is therefore visible in the spaced reading,
+// and the full check - the first word, the single-statement rule and
+// the write-keyword scan - runs on it.
 //
-// WHAT THE GUARD CHECKS
+// The REMOVED reading sees what SQLite does not: a keyword split by a
+// comment. It contributes exactly ONE rule - if its first word is a
+// WRITE keyword, the text is refused. That catches `DE/*x*/LETE`,
+// which SQLite rejects as a syntax error and which therefore costs
+// nothing to refuse, WITHOUT manufacturing a keyword out of two
+// unrelated tokens - which is what would make `SELECT up/*x*/date` a
+// false positive.
+//
+//// WHAT THE GUARD CHECKS
 // ---------------------
 //   - a CALL to a database method is inspected, and the SQL it carries
 //     is checked — so a write smuggled through `QueryContext` is caught,
@@ -59,6 +68,7 @@
 package internal
 
 import (
+	"database/sql"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -105,8 +115,8 @@ var p6DatabaseMethodNames = map[string]bool{
 var p6SQLKeywords = []string{
 	"SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE", "DROP", "ALTER",
 	"CREATE", "PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT",
-	"ROLLBACK", "SAVEPOINT", "RELEASE", "REASSIGN", "GRANT", "REINDEX",
-	"ANALYZE", "WITH", "EXPLAIN",
+	"ROLLBACK", "SAVEPOINT", "RELEASE", "REASSIGN", "GRANT", "REVOKE",
+	"REINDEX", "ANALYZE", "WITH", "EXPLAIN", "END",
 }
 
 // p6SQLWriteKeywords are the keywords that make a statement a WRITE.
@@ -250,28 +260,111 @@ func p6ScrubSQL(sql string, spaceComments bool) string {
 	return b.String()
 }
 
+// p6SQLWord is one word of a scrubbed SQL text.
+type p6SQLWord struct {
+	// Text is the word itself.
+	Text string
+
+	// FunctionCall reports whether the word is immediately followed by
+	// an opening parenthesis - that is, whether it names a FUNCTION.
+	FunctionCall bool
+}
+
 // p6SQLWords splits a SQL text into its keywords and identifiers.
 //
 // A word is a run of letters, digits and UNDERSCORES, so an identifier
 // like `last_update` is ONE word and is never mistaken for the keyword
 // `UPDATE`.
-func p6SQLWords(sql string) []string {
-	var words []string
+//
+// A word immediately followed by `(` names a FUNCTION, and a function
+// call is never a statement keyword: `SELECT replace(x,'a','b')` is a
+// read, and `REPLACE` is a write keyword only in `REPLACE INTO`.
+func p6SQLWords(sql string) []p6SQLWord {
+	runes := []rune(sql)
+	var words []p6SQLWord
 	var current strings.Builder
-	for _, r := range sql {
+
+	// flush ends the word that ends just before `end`, and records
+	// whether an opening parenthesis follows it.
+	flush := func(end int) {
+		if current.Len() == 0 {
+			return
+		}
+		word := p6SQLWord{Text: current.String()}
+		i := end
+		for i < len(runes) && (runes[i] == ' ' || runes[i] == '\t' ||
+			runes[i] == '\r' || runes[i] == '\n') {
+			i++
+		}
+		if i < len(runes) && runes[i] == '(' {
+			word.FunctionCall = true
+		}
+		words = append(words, word)
+		current.Reset()
+	}
+
+	for i, r := range runes {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
 			current.WriteRune(r)
 		default:
-			if current.Len() > 0 {
-				words = append(words, current.String())
-				current.Reset()
-			}
+			flush(i)
 		}
 	}
 	if current.Len() > 0 {
-		words = append(words, current.String())
+		flush(len(runes))
 	}
+	return words
+}
+
+// p6SQLTopLevelWords returns the words of a scrubbed SQL text that sit
+// OUTSIDE every parenthesised group.
+//
+// A parenthesised group is a subquery or a CTE body, and SQLite allows
+// no DML in either - a CTE body that holds a DELETE is a syntax error,
+// and so is a subquery that holds one. So the words that can carry a
+// write are the TOP-LEVEL ones: the statement's own verb, and the
+// words around it.
+func p6SQLTopLevelWords(code string) []p6SQLWord {
+	runes := []rune(code)
+	var words []p6SQLWord
+	var current strings.Builder
+	depth := 0
+
+	flush := func(end int) {
+		if current.Len() == 0 {
+			return
+		}
+		word := p6SQLWord{Text: current.String()}
+		i := end
+		for i < len(runes) && (runes[i] == ' ' || runes[i] == '\t' ||
+			runes[i] == '\r' || runes[i] == '\n') {
+			i++
+		}
+		if i < len(runes) && runes[i] == '(' {
+			word.FunctionCall = true
+		}
+		if depth == 0 {
+			words = append(words, word)
+		}
+		current.Reset()
+	}
+
+	for i, r := range runes {
+		switch {
+		case r == '(':
+			depth++
+			flush(i)
+		case r == ')':
+			flush(i)
+			depth--
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			current.WriteRune(r)
+		default:
+			flush(i)
+		}
+	}
+	flush(len(runes))
 	return words
 }
 
@@ -285,20 +378,26 @@ func p6WordIn(word string, list []string) bool {
 	return false
 }
 
-// p6SQLFirstKeyword returns the first keyword of a scrubbed SQL text.
-//
-// It returns the empty string when the text has no words, or when its
-// first word is not a SQL keyword — which is how a non-SQL constant
-// ("skill_package", "manifest_identity") is told from a statement.
-func p6SQLFirstKeyword(code string) string {
+// p6SQLBody normalises a scrubbed SQL text: upper-cased, with the
+// trailing whitespace and a single trailing semicolon removed.
+func p6SQLBody(code string) string {
 	body := strings.TrimRight(strings.ToUpper(code), " \t\r\n")
 	body = strings.TrimSuffix(body, ";")
 	body = strings.TrimRight(body, " \t\r\n")
-	words := p6SQLWords(body)
+	return body
+}
+
+// p6SQLFirstKeyword returns the first keyword of a scrubbed SQL text.
+//
+// It returns the empty string when the text has no words, or when its
+// first word is not a SQL keyword - which is how a non-SQL constant
+// ("skill_package", "manifest_identity") is told from a statement.
+func p6SQLFirstKeyword(code string) string {
+	words := p6SQLWords(p6SQLBody(code))
 	if len(words) == 0 {
 		return ""
 	}
-	first := strings.ToUpper(words[0])
+	first := strings.ToUpper(words[0].Text)
 	if !p6WordIn(first, p6SQLKeywords) {
 		return ""
 	}
@@ -307,74 +406,114 @@ func p6SQLFirstKeyword(code string) string {
 
 // p6IsSQLStatement reports whether a SQL text is a STATEMENT at all.
 //
-// The text is judged under BOTH scrub readings: a text that is a
-// statement under either reading is a statement.
+// A text is a statement if EITHER reading's first word is a SQL
+// keyword: the spaced reading is SQLite's own tokenization, and the
+// removed reading sees a keyword that a comment split.
 func p6IsSQLStatement(sql string) bool {
+	trimmed := strings.TrimSpace(sql)
+	if trimmed == "" {
+		return false
+	}
 	for _, spaceComments := range []bool{false, true} {
-		if p6SQLFirstKeyword(p6ScrubSQL(sql, spaceComments)) != "" {
+		if p6SQLFirstKeyword(p6ScrubSQL(trimmed, spaceComments)) != "" {
 			return true
 		}
 	}
 	return false
 }
 
-// p6SQLStatementProblemUnder describes why ONE scrubbed reading of a SQL
-// text is not a single read statement, or returns the empty string when
-// it is one.
-//
-// The check is STATEMENT-based, not prefix-based, and it covers:
-//
-//   - the statement must BEGIN with `SELECT` — or with `WITH`, because a
-//     CTE is a statement too. A `WITH … UPDATE` is caught by the
-//     write-keyword rule below, so allowing `WITH` does not admit a
-//     write; and `EXPLAIN` is refused, because the reader issues plain
-//     SELECTs and nothing else;
-//   - the statement must be a SINGLE statement — a `;` anywhere but at
-//     the very end means a second statement follows;
-//   - the statement must carry NO write keyword anywhere — so a
-//     `SELECT 1; DELETE …` is caught by the second rule and a
-//     `SELECT … WHERE x = 'UPDATE'` is not, because the string literal
-//     is scrubbed first.
-func p6SQLStatementProblemUnder(code string) string {
-	body := strings.TrimRight(strings.ToUpper(code), " \t\r\n")
-	body = strings.TrimSuffix(body, ";")
-	body = strings.TrimRight(body, " \t\r\n")
-
-	words := p6SQLWords(body)
-	if len(words) == 0 {
-		return ""
-	}
-	first := strings.ToUpper(words[0])
-	if !p6WordIn(first, p6SQLKeywords) {
-		// Not a statement under this reading: no opinion.
-		return ""
-	}
-	if first != "SELECT" && first != "WITH" {
-		return "the statement begins with " + first + ", not SELECT"
-	}
-	if strings.Contains(body, ";") {
-		return "the statement carries more than one statement"
-	}
-	for _, word := range words[1:] {
-		upper := strings.ToUpper(word)
-		if p6WordIn(upper, p6SQLWriteKeywords) {
-			return "the statement carries the write keyword " + upper
-		}
-	}
-	return ""
-}
-
 // p6SQLStatementProblem describes why a SQL text is not a single read
 // statement, or returns the empty string when it is one.
 //
-// The text is judged under BOTH scrub readings, and refused if EITHER
-// says it is not a single read — because a comment is whitespace to
-// SQLite, and each reading catches a shape the other misses.
+// The check is STATEMENT-based, and it is anchored on SQLITE'S OWN
+// GRAMMAR rather than on a keyword list:
+//
+//   - the SPACED reading IS SQLite's tokenization: SQLite treats a
+//     comment as whitespace, so `DELETE/*x*/FROM t` is two tokens,
+//     DELETE and FROM, and every EXECUTABLE write is visible in it;
+//   - a statement must be a SINGLE statement - a `;` anywhere but at
+//     the very end means another statement follows;
+//   - a statement that BEGINS with `SELECT` is a read, full stop:
+//     SQLite allows no DML in a subquery (`SELECT * FROM (DELETE …)` is
+//     a syntax error), no DML in a CTE body, and no `SELECT … INTO`. So
+//     a statement that begins with SELECT needs no further check;
+//   - a statement that BEGINS with `WITH` is a read only if its MAIN
+//     statement - the one after the CTE list - begins with SELECT. The
+//     main statement is at the top level, so the top-level words are
+//     scanned for a write keyword;
+//   - anything else - `DELETE`, `INSERT`, `PRAGMA`, `EXPLAIN`, `END`,
+//     `VACUUM`, … - is refused, because the reader issues plain SELECTs
+//     and nothing else.
+//
+// The REMOVED reading rejoins a keyword that a comment split, which
+// SQLite does NOT do. It contributes exactly ONE rule: if its first word
+// is a WRITE keyword, the text is refused. That catches `DE/*x*/LETE` -
+// which SQLite rejects as a syntax error, so refusing it costs nothing -
+// WITHOUT manufacturing a keyword out of two unrelated tokens, which is
+// what would make `SELECT up/*x*/date` a false positive.
+//
+// A word immediately followed by `(` names a FUNCTION, and a function
+// call is never a statement keyword: `SELECT replace(x,'a','b')` is a
+// read.
 func p6SQLStatementProblem(sql string) string {
-	for _, spaceComments := range []bool{false, true} {
-		if problem := p6SQLStatementProblemUnder(p6ScrubSQL(sql, spaceComments)); problem != "" {
-			return problem
+	trimmed := strings.TrimSpace(sql)
+	if trimmed == "" {
+		return ""
+	}
+
+	spacedWords := p6SQLWords(p6SQLBody(p6ScrubSQL(trimmed, true)))
+	if len(spacedWords) == 0 {
+		return ""
+	}
+	spacedFirst := strings.ToUpper(spacedWords[0].Text)
+
+	removedFirst := ""
+	if removedWords := p6SQLWords(p6SQLBody(p6ScrubSQL(trimmed, false))); len(removedWords) > 0 {
+		removedFirst = strings.ToUpper(removedWords[0].Text)
+	}
+
+	// The effective first keyword: SQLite's own, unless SQLite's is
+	// not a keyword at all and the removed reading has one - which is
+	// what happens when a comment splits the first keyword.
+	effective := spacedFirst
+	if !p6WordIn(spacedFirst, p6SQLKeywords) && p6WordIn(removedFirst, p6SQLKeywords) {
+		effective = removedFirst
+	}
+
+	// A write keyword under EITHER reading is a write.
+	for _, first := range []string{spacedFirst, removedFirst} {
+		if p6WordIn(first, p6SQLWriteKeywords) {
+			return "the statement begins with " + first + ", not SELECT"
 		}
+	}
+
+	// A single statement. The `;` is looked for in the SPACED body,
+	// which is SQLite's tokenization: a `;` inside a comment or a
+	// string literal is not a separator.
+	body := p6SQLBody(p6ScrubSQL(trimmed, true))
+	if strings.Contains(body, ";") {
+		return "the statement carries more than one statement"
+	}
+
+	switch effective {
+	case "SELECT":
+		// A SELECT cannot write: SQLite allows no DML in a
+		// subquery, none in a CTE body, and no `SELECT … INTO`.
+		// Nothing more to check.
+	case "WITH":
+		// The main statement follows the CTE list, at the top
+		// level, so the top-level words carry it.
+		for _, word := range p6SQLTopLevelWords(body) {
+			if word.FunctionCall {
+				continue
+			}
+			upper := strings.ToUpper(word.Text)
+			if p6WordIn(upper, p6SQLWriteKeywords) {
+				return "the statement carries the write keyword " + upper
+			}
+		}
+	default:
+		return "the statement begins with " + effective + ", not SELECT"
 	}
 	return ""
 }
@@ -640,6 +779,41 @@ type p6GuardControl struct {
 	Snippet string
 }
 
+// p6GuardEvasionCount is the number of routes the matrix must have.
+//
+// It is pinned so that the matrix cannot quietly SHRINK: removing a
+// route without changing this number fails the test, and the failure
+// says exactly what happened.
+const p6GuardEvasionCount = 21
+
+// p6GuardControlCount is the number of controls the matrix must have.
+//
+// It is pinned for the same reason: a control that is dropped is a
+// legitimate read the guard is no longer proven to accept.
+const p6GuardControlCount = 17
+
+// p6GuardRequiredRoutes are the routes that have caught a real defect
+// at least once.
+//
+// They are pinned by NAME, so that the route which caught the last bug
+// cannot be deleted and forgotten: the count alone would not notice a
+// swap.
+var p6GuardRequiredRoutes = []string{
+	"a write through ExecContext",
+	"a method value",
+	"a method value passed as an argument",
+	"a write smuggled through QueryContext",
+	"a write smuggled through PrepareContext",
+	"a write in a USED constant",
+	"a write in an UNUSED constant",
+	"a write in a CONCATENATED constant",
+	"a write in a WITH ... UPDATE constant",
+	"a write behind a comment-SPLIT keyword",
+	"a write with a comment BETWEEN its keywords",
+	"an END - a transaction control",
+	"a dead SQL constant",
+}
+
 // p6GuardEvasions are the routes the guard must catch.
 //
 // Each is spliced into a COPY of the reader and the guard is run
@@ -684,6 +858,10 @@ var p6GuardEvasions = []p6GuardEvasion{
 		"\t_, _ = tx.QueryContext(ctx, \"SELECT 1; DELETE FROM skill_package_files\", skillID)\n"},
 	{"a dead SQL constant",
 		"\tconst p6GuardDead = \"SELECT 1 FROM skill_package_files\"\n\t_ = p6GuardDead\n"},
+	{"an END - a transaction control",
+		"\t_, _ = tx.QueryContext(ctx, \"END\", skillID)\n"},
+	{"a REVOKE",
+		"\t_, _ = tx.QueryContext(ctx, \"REVOKE\", skillID)\n"},
 }
 
 // p6GuardControls are the legitimate statements the guard must NOT
@@ -692,9 +870,9 @@ var p6GuardEvasions = []p6GuardEvasion{
 // A guard that refuses a legitimate read is worse than no guard: it
 // teaches its reader to route around it.
 var p6GuardControls = []p6GuardControl{
-	{"a plain SELECT",
-		"\t_, _ = tx.QueryContext(ctx, \"SELECT path FROM skill_package_files WHERE skill_id = ?\", skillID)\n"},
-	{"a double-quoted SELECT",
+	{"a plain SELECT, written as a raw backtick literal",
+		"\t_, _ = tx.QueryContext(ctx, `SELECT path FROM skill_package_files WHERE skill_id = ?`, skillID)\n"},
+	{"a plain SELECT, written as a double-quoted literal",
 		"\t_, _ = tx.QueryContext(ctx, \"SELECT path FROM skill_package_files WHERE skill_id = ?\", skillID)\n"},
 	{"a trailing semicolon",
 		"\t_, _ = tx.QueryContext(ctx, \"SELECT path FROM skill_package_files;\", skillID)\n"},
@@ -718,6 +896,75 @@ var p6GuardControls = []p6GuardControl{
 		"\t_, _ = tx.QueryContext(ctx, \"SELECT [DELETE] FROM skill_package_files\", skillID)\n"},
 	{"a bind placeholder",
 		"\t_, _ = tx.QueryContext(ctx, \"SELECT path FROM skill_package_files WHERE skill_id = ?\", skillID)\n"},
+	{"a function whose name is a statement keyword",
+		"\t_, _ = tx.QueryContext(ctx, \"SELECT replace(path, 'a', 'b') FROM skill_package_files\", skillID)\n"},
+	{"a column named after a statement keyword",
+		"\t_, _ = tx.QueryContext(ctx, \"SELECT replace FROM skill_package_files\", skillID)\n"},
+	{"an identifier split by a comment",
+		"\t_, _ = tx.QueryContext(ctx, \"SELECT up/*x*/date FROM skill_package_files\", skillID)\n"},
+	{"a CTE whose body is a read",
+		"\t_, _ = tx.QueryContext(ctx, \"WITH x AS (SELECT 1 AS n) SELECT n FROM x\", skillID)\n"},
+}
+
+// TestP6TheGuardRefusesARouteSQLiteReallyExecutes pins that the
+// matrix is not merely about the guard's CLASSIFIER.
+//
+// The matrix shows that the guard refuses these texts. That is not the
+// same as showing that the texts would write - a statement SQLite
+// rejects as a syntax error proves nothing. So one route is checked
+// against SQLite itself: it is run against a real database, and the row
+// it would have removed is gone.
+//
+// The database is an in-memory one, created here, with the reader's
+// own table. The live MPM database is never opened.
+func TestP6TheGuardRefusesARouteSQLiteReallyExecutes(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open the in-memory database: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec("CREATE TABLE skill_package_files (skill_id TEXT, path TEXT, role TEXT)"); err != nil {
+		t.Fatalf("create the table: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO skill_package_files VALUES ('s1', 'SKILL.md', 'entrypoint')"); err != nil {
+		t.Fatalf("insert the row: %v", err)
+	}
+
+	// A legitimate read leaves the row alone.
+	if _, err := db.Exec("SELECT path FROM skill_package_files"); err != nil {
+		t.Fatalf("the legitimate read failed: %v", err)
+	}
+	if rows := p6CountRows(t, db); rows != 1 {
+		t.Fatalf("the legitimate read changed the table: %d rows, want 1", rows)
+	}
+
+	// The route: a comment where a space belongs. SQLite treats the
+	// comment as whitespace, so this is a real DELETE.
+	const route = "DELETE/*x*/FROM skill_package_files"
+
+	// The guard refuses it.
+	if problem := p6SQLStatementProblem(route); problem == "" {
+		t.Errorf("the guard did not refuse %q, which SQLite executes", route)
+	}
+
+	// And SQLite really executes it.
+	if _, err := db.Exec(route); err != nil {
+		t.Fatalf("SQLite refused the route %q: %v", route, err)
+	}
+	if rows := p6CountRows(t, db); rows != 0 {
+		t.Errorf("the route %q left %d rows: it does not write, so the matrix proves nothing", route, rows)
+	}
+}
+
+// p6CountRows counts the rows of the reader's own table.
+func p6CountRows(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var rows int
+	if err := db.QueryRow("SELECT COUNT(*) FROM skill_package_files").Scan(&rows); err != nil {
+		t.Fatalf("count the rows: %v", err)
+	}
+	return rows
 }
 
 // p6GuardHelper is the helper the method-value-as-an-argument route
@@ -736,6 +983,23 @@ func p6GuardHelper(f any) {}
 // repository, so that the demonstration survives the next commit. A
 // manual sweep proves nothing on the next commit; a pinned matrix does.
 func TestP6TheReadOnlyGuardCatchesEveryEvasion(t *testing.T) {
+	if len(p6GuardEvasions) != p6GuardEvasionCount {
+		t.Errorf("the evasion matrix has %d routes, want %d: a route cannot be removed without changing the pinned count",
+			len(p6GuardEvasions), p6GuardEvasionCount)
+	}
+	names := map[string]bool{}
+	for _, evasion := range p6GuardEvasions {
+		if names[evasion.Name] {
+			t.Errorf("the evasion matrix has two routes named %q: every route must be distinct", evasion.Name)
+		}
+		names[evasion.Name] = true
+	}
+	for _, required := range p6GuardRequiredRoutes {
+		if !names[required] {
+			t.Errorf("the evasion matrix is missing the route %q: it caught a real defect once, and cannot be dropped", required)
+		}
+	}
+
 	real, err := os.ReadFile("skill_package_read.go")
 	if err != nil {
 		t.Fatalf("read the reader: %v", err)
@@ -761,6 +1025,18 @@ func TestP6TheReadOnlyGuardCatchesEveryEvasion(t *testing.T) {
 // A guard that refuses a legitimate statement is worse than no guard:
 // it teaches its reader to route around it.
 func TestP6TheReadOnlyGuardRefusesNoLegitimateRead(t *testing.T) {
+	if len(p6GuardControls) != p6GuardControlCount {
+		t.Errorf("the control matrix has %d controls, want %d: a control cannot be removed without changing the pinned count",
+			len(p6GuardControls), p6GuardControlCount)
+	}
+	names := map[string]bool{}
+	for _, control := range p6GuardControls {
+		if names[control.Name] {
+			t.Errorf("the control matrix has two controls named %q: every control must be distinct", control.Name)
+		}
+		names[control.Name] = true
+	}
+
 	real, err := os.ReadFile("skill_package_read.go")
 	if err != nil {
 		t.Fatalf("read the reader: %v", err)

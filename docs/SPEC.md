@@ -2520,26 +2520,22 @@ Because the row's `version` and `version_source` columns are `NOT NULL` (§6.8),
 
 **The read snapshot's read-only nature rests on discipline, and the discipline is pinned.** The transaction is opened with `sql.TxOptions{ReadOnly: true}`, but the SQLite driver ignores that option and issues a plain (deferred) `BEGIN`. The snapshot therefore takes a shared lock and no write lock, and it is read-only because the reader issues no write.
 
-That is pinned by an **AST walk** over the reader's own source — **both** reader files, not one — rather than by a hand-maintained list. The check is **statement-based**, not prefix-based: it scrubs the SQL's comments, string literals and quoted identifiers, and then asks what the statement **does**.
+That is pinned by an **AST walk** over the reader's own source — **both** reader files, not one — rather than by a hand-maintained list. The check is **statement-based**, and it is anchored on **SQLite's own grammar**, not on a keyword list.
 
-- a statement must **begin** with `SELECT` — or with `WITH`, because a CTE is a statement too. A `WITH … UPDATE` is caught by the write-keyword rule below, so allowing `WITH` does not admit a write; and `EXPLAIN` is refused, because the reader issues plain `SELECT`s and nothing else;
-- a statement must be a **single** statement — a `;` anywhere but at the very end means another statement follows;
-- a statement must carry **no write keyword anywhere** — so `SELECT … WHERE x = 'UPDATE'` is not caught, because the string literal is scrubbed first, and `last_update` is not mistaken for `UPDATE`, because a word is a run of letters, digits and **underscores**.
+- the **spaced** reading is SQLite's tokenization: SQLite treats a comment as **whitespace**, so `DELETE/*x*/FROM t` is two tokens — `DELETE` and `FROM` — and every **executable** write is visible in it;
+- a statement must be a **single** statement — a `;` anywhere but at the very end means another statement follows, and a `;` inside a comment or a string literal is not a separator;
+- a statement that begins with `SELECT` is a read, **full stop**: SQLite allows no DML in a subquery (`SELECT * FROM (DELETE …)` is a syntax error), none in a CTE body, and no `SELECT … INTO`;
+- a statement that begins with `WITH` is a read only if its **main** statement — the one after the CTE list — is a `SELECT`, and the main statement sits at the **top level**, so the top-level words carry it;
+- anything else — `DELETE`, `INSERT`, `PRAGMA`, `EXPLAIN`, `END`, `VACUUM`, `REVOKE` — is refused, because the reader issues plain `SELECT`s and nothing else.
 
-**A comment is judged under BOTH readings, and the statement is refused if EITHER says it is not a single read.** SQLite treats a comment as whitespace, so a comment can be read two ways, and each way catches a shape the other misses:
+The **removed** reading rejoins a keyword that a comment split, which SQLite does not do. It contributes exactly **one** rule: if its first word is a **write** keyword, the text is refused. That catches `DE/*x*/LETE` — which SQLite rejects as a syntax error, so refusing it costs nothing — **without** manufacturing a keyword out of two unrelated tokens, which is what would make `SELECT up/*x*/date` a false positive. A word immediately followed by `(` names a **function**, and a function call is never a statement keyword: `SELECT replace(x,'a','b')` is a read.
 
-| the text | comment **removed** | comment **spaced** | what SQLite sees |
-|---|---|---|---|
-| `DE/*x*/LETE FROM t` | `DELETE FROM t` — a write | `DE LETE FROM t` — not a statement | a syntax error |
-| `DELETE/*x*/FROM t` | `DELETEFROM t` — not a statement | `DELETE FROM t` — a write | `DELETE FROM t` — **a write** |
-
-Neither reading alone is sound: removing the comment rejoins a keyword split by it, and spacing it keeps the tokens either side of it separate. So the statement is judged under both, and refused if either says it is not a single read. A string literal, a quoted identifier and a bracket identifier are each consumed **whole**, so their contents are never inspected.
-
-The walk closes these routes, and **every one of them is pinned in the repository**: the evasion matrix in `TestP6TheReadOnlyGuardCatchesEveryEvasion` splices each of them into a **copy** of the reader and requires the guard to report it, and `TestP6TheReadOnlyGuardRefusesNoLegitimateRead` splices the controls into a copy and requires the guard to stay silent. The matrix is evidence that survives the next commit; a manual sweep is not.
+The walk closes these routes, and **every one of them is pinned in the repository**: the evasion matrix in `TestP6TheReadOnlyGuardCatchesEveryEvasion` splices each of them into a **copy** of the reader and requires the guard to report it, and `TestP6TheReadOnlyGuardRefusesNoLegitimateRead` splices the controls into a copy and requires the guard to stay silent. The matrix's **size** and its **historically-important routes** are pinned as well — the count is a constant, and the routes that have caught a real defect are pinned by name — so the matrix cannot quietly shrink or be swapped.
 
 | evasion | what the guard says |
 |---|---|
-| a write through `Exec` / `ExecContext` | *"issues a write through ExecContext at line N: the reader must never write"* |
+| a write through `ExecContext` | *"issues a write through ExecContext at line N: the reader must never write"* |
+| a write through `Exec` | *"issues a write through Exec at line N: the reader must never write"* |
 | a **method value** — `exec := db.ExecContext` | *"binds the database method ExecContext at line N: the reader must never bind a database method"* |
 | a method value passed as an **argument** | *"binds the database method ExecContext at line N"* |
 | a write smuggled through `QueryContext` | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT"* |
@@ -2552,15 +2548,21 @@ The walk closes these routes, and **every one of them is pinned in the repositor
 | a write in a **comment-prefixed** constant | *"…the statement begins with DELETE, not SELECT"* — the comment is removed, not obeyed |
 | a write behind a **comment-split keyword** (`DE/*x*/LETE`) | *"…the statement begins with DELETE, not SELECT"* — the comment is removed whole |
 | a write behind a **comment-split keyword**, line comment (`DE--x⏎LETE`) | the same |
-| a write with a comment **between** its keywords (`DELETE/*x*/FROM t`) | the same — the comment is spaced, and the tokens stay separate |
+| a write with a comment **between** its keywords (`DELETE/*x*/FROM t`) | *"…the statement begins with DELETE, not SELECT"* — the comment is spaced, and the tokens stay separate |
 | an `EXPLAIN DELETE` | *"…the statement begins with EXPLAIN, not SELECT"* |
+| an `END` — a transaction control | *"…the statement begins with END, not SELECT"* |
+| a `REVOKE` | *"…the statement begins with REVOKE, not SELECT"* |
 | a statement whose SQL is built at runtime | *"issues a statement whose SQL is neither a literal nor a constant at line N"* |
 | a **multi-statement** `"SELECT 1; DELETE …"` | *"…the statement carries more than one statement"* |
 | a **dead** SQL constant no statement uses | *"the SQL constant X is never used by a statement"* |
 
-That is **nineteen routes**. The **thirteen controls** — the legitimate reads the guard must not refuse — are pinned beside them: a plain `SELECT`, a double-quoted `SELECT`, a trailing semicolon, a `UNION` subquery, a read-only CTE, a `'UPDATE'` string literal, a `last_update` column, a `;` inside a literal, a doubled quote inside a literal, a `--` inside a literal, a bracket identifier containing a `;`, a bracket identifier containing a write keyword, and a `?` bind placeholder.
+That is **twenty-one routes**. The **seventeen controls** — the legitimate reads the guard must not refuse — are pinned beside them: a plain `SELECT` written as a raw backtick literal, the same written as a double-quoted literal, a trailing semicolon, a `UNION` subquery, a read-only CTE, a `'UPDATE'` string literal, a `last_update` column, a `;` inside a literal, a doubled quote inside a literal, a `--` inside a literal, a bracket identifier containing a `;`, a bracket identifier containing a write keyword, a `?` bind placeholder, a **function** whose name is a statement keyword (`replace(x,'a','b')`), a **column** named after a statement keyword, an identifier split by a comment, and a CTE whose body is a read.
+
+**The matrix is not merely about the guard's classifier.** A statement SQLite rejects as a syntax error proves nothing, so one route is checked **against SQLite itself**: `TestP6TheGuardRefusesARouteSQLiteReallyExecutes` runs `DELETE/*x*/FROM skill_package_files` against a real in-memory database and asserts that the row it would have removed is **gone** — and that the guard refuses the same text. The live database is never opened.
 
 **The scope of the claim.** The walk covers the reader's **own two files**: every statement they issue, every statement they declare as a constant, and every database method they bind. A string literal passed to a non-database function is not inspected — it is not a statement the reader issues — and a statement issued by a helper in another file of the package is outside the walk. The behavioural pin covers the rest: the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read.
+
+**The residual over-strictness.** One shape is still refused that SQLite would accept: a `WITH` statement whose **top level** carries a statement keyword used as an identifier — `WITH x AS (SELECT 1) SELECT replace FROM t`. The top-level scan is what catches `WITH … DELETE`, and it cannot tell a write keyword in the main statement from one used as a column name without SQLite's parser. The reader's own statements contain no `WITH`, so nothing it owns is affected, and the refusal fails **closed**.
 
 #### What P6 does **not** add
 
