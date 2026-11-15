@@ -203,6 +203,108 @@ func p6MutateBlob(t *testing.T, dm *DatabaseManager, sha, content string) {
 	}
 }
 
+// TestP6VerifyReportsACorruptedManifestIdentity pins that the package row
+// and the manifest must agree about the DECLARED VERSION and the FORMAT as
+// well as about the name, the version and the entrypoint.
+//
+// The row's `declared_version` and `format` columns are part of the
+// package's identity provenance: a row that disagrees with its own
+// manifest is a damaged package, and it must not verify.
+func TestP6VerifyReportsACorruptedManifestIdentity(t *testing.T) {
+	dm := p3DM(t)
+	result := p6ImportPackage(t, dm, "identity", "1.0.0", nil)
+	sel := p6Selector(result.SkillID)
+
+	// A healthy package verifies.
+	report, err := dm.PackageVerify(context.Background(), sel)
+	if err != nil {
+		t.Fatalf("PackageVerify: %v", err)
+	}
+	if !report.Verified {
+		t.Fatalf("a healthy package did not verify: %+v", report.Failures)
+	}
+
+	// ── A declared version that disagrees with the manifest. ──
+	if _, err := dm.db.Exec(`UPDATE skill_packages SET declared_version = ? WHERE skill_id = ?`,
+		"9.9.9", result.SkillID); err != nil {
+		t.Fatalf("corrupt the declared version: %v", err)
+	}
+	report, err = dm.PackageVerify(context.Background(), sel)
+	if err != nil {
+		t.Fatalf("PackageVerify: %v", err)
+	}
+	if report.Verified {
+		t.Errorf("a package with a corrupted declared version reported itself verified")
+	}
+	if !p6HasFailure(report, PackageVerifyCheckManifestIdentity, "") {
+		t.Errorf("the report does not name the corrupted declared version: %+v", report.Failures)
+	}
+	// And the ordinary reads fail closed on it.
+	if _, err := dm.PackageFiles(context.Background(), sel); p6ReadReason(err) != PackageReadReasonIntegrityFailure {
+		t.Errorf("the listing of a package with a corrupted declared version reported %q, want %q",
+			p6ReadReason(err), PackageReadReasonIntegrityFailure)
+	}
+
+	// ── A format that disagrees with the manifest. ──
+	if _, err := dm.db.Exec(`UPDATE skill_packages SET declared_version = ? WHERE skill_id = ?`,
+		nil, result.SkillID); err != nil {
+		t.Fatalf("restore the declared version: %v", err)
+	}
+	if _, err := dm.db.Exec(`UPDATE skill_packages SET format = ? WHERE skill_id = ?`,
+		"mpm-skill-package/999", result.SkillID); err != nil {
+		t.Fatalf("corrupt the format: %v", err)
+	}
+	report, err = dm.PackageVerify(context.Background(), sel)
+	if err != nil {
+		t.Fatalf("PackageVerify: %v", err)
+	}
+	if report.Verified {
+		t.Errorf("a package with a corrupted format reported itself verified")
+	}
+	if !p6HasFailure(report, PackageVerifyCheckManifestIdentity, "") {
+		t.Errorf("the report does not name the corrupted format: %+v", report.Failures)
+	}
+}
+
+// TestP6TheReaderNeverWrites pins that the reader issues no write.
+//
+// The read snapshot is a DEFERRED transaction: the SQLite driver ignores
+// `sql.TxOptions{ReadOnly}` and issues a plain `BEGIN`, so the snapshot's
+// read-only nature rests on DISCIPLINE. This test makes the discipline
+// structural: the reader's source contains no `Exec` call at all, and
+// every statement it owns is a `SELECT`.
+//
+// It is a STATIC check on purpose. A dynamic one could only prove that
+// the paths a test happens to exercise did not write; a source check
+// proves that there is no statement they could have written.
+func TestP6TheReaderNeverWrites(t *testing.T) {
+	for _, file := range []string{"skill_package_read.go", "skill_package_read_errors.go"} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for _, forbidden := range []string{".Exec(", ".ExecContext("} {
+			if strings.Contains(string(src), forbidden) {
+				t.Errorf("%s contains %q: the reader must issue no write", file, forbidden)
+			}
+		}
+	}
+
+	// Every statement the reader owns is a SELECT.
+	for name, query := range map[string]string{
+		"packageRowQuery":        packageRowQuery,
+		"packageFilesQuery":      packageFilesQuery,
+		"packageFileQuery":       packageFileQuery,
+		"packageBlobQuery":       packageBlobQuery,
+		"packageProjectionQuery": packageProjectionQuery,
+		"packageProvenanceQuery": packageProvenanceQuery,
+	} {
+		if !strings.HasPrefix(strings.TrimSpace(query), "SELECT") {
+			t.Errorf("the query %s does not begin with SELECT: %q", name, query)
+		}
+	}
+}
+
 // ─── T06 — the relative reference read ─────────────────────────────────────
 
 // TestP6ReadFileReturnsTheExactReferenceBytes pins T06.

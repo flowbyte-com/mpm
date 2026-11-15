@@ -2387,6 +2387,8 @@ Every read takes its metadata and its bytes from **one** read snapshot, so a pac
 
 A one-file request loads **one** file row and **one** blob — never the whole package.
 
+The **provenance accessor** is the one exception, and it needs none: its read is a **single statement**, and a single statement sees one consistent snapshot on its own. That keeps the `read` action's hot path free of a connection checkout and a `BEGIN`/`ROLLBACK`.
+
 #### The bounded read (§8.6, exactly)
 
 The three parameters use three **different** units and are never converted into one another: `offset` and `limit` count **lines**, `max_bytes` counts **bytes**.
@@ -2427,7 +2429,7 @@ The checks, each with a stable name:
 | check | what it proves |
 |---|---|
 | `manifest_package_hash` | the canonical manifest matches the recorded package hash |
-| `manifest_identity` | the manifest and the package row describe the same skill, version and entrypoint |
+| `manifest_identity` | the manifest and the package row describe the same skill, version, **declared version**, **format** and entrypoint |
 | `file_metadata_matches_manifest` | the file rows match the manifest |
 | `blob_exists` | every referenced blob exists |
 | `blob_content_hash` | every stored blob's content matches its recorded SHA-256 |
@@ -2469,6 +2471,10 @@ For a skill that is **not** a package the object is **absent** — not present a
 
 The `read` action still returns the entrypoint **projection's** body only. No supporting file is ever inlined beside it: the agent must ask for a specific file.
 
+**The provenance read is ONE statement.** It joins the package row with the file count and the entrypoint's scan status in a single `SELECT`, and a single statement sees one consistent snapshot — so the provenance needs no transaction, and the `read` action's hot path pays for neither a connection checkout nor a `BEGIN`/`ROLLBACK`. The version override is read from the package row's own version provenance (`declared_version`, `version`, `version_source`), which is the same record the manifest's `version_override` carries, because the importer writes both from the same plan.
+
+**The failure envelope is wider than it was, deliberately.** A substrate failure while determining whether the skill is a package now fails the `read`. That is the fail-closed direction: the reader cannot know whether the skill is a package, so it cannot know whether the provenance is mandatory, and returning a body without it would break R6. An ordinary skill is unaffected in the normal case — its lookup is one indexed `SELECT` that returns no rows.
+
 #### The refusal vocabulary
 
 The reader has its own **closed** vocabulary, mirroring the importer's:
@@ -2497,6 +2503,16 @@ Corruption is **never** reported as a missing file, and there is no fallback to 
 **`verify` checks more than the design guarantees, and says so.** The design requires that a corrupt package is never reported as verified. The reader adds the checks that make that claim **demonstrable** — the per-blob content hash, the per-blob size, the manifest-to-rows reconciliation and the projection hash — and each is reported under its own stable name, so a caller can tell **which** guarantee failed rather than only that something did.
 
 **The provenance accessor is tolerant where the rest of the reader is strict.** `read` must keep returning the entrypoint's projection even when the package's manifest is broken — that is what `verify` is for. What the accessor never does is claim a scan that was not recorded: a missing entrypoint file row reports **no** scan.
+
+**The wire shape is P8's.** The internal response types carry no JSON tags, deliberately. The design pins the `files` and `read_file` wire shapes (§8.5), but it also requires that a binary payload's JSON encoding be **explicit and lossless** — and `encoding/json`'s default handling of a `[]byte` is base64, which would silently decide that question for every file, text ones included. The reader therefore stays transport-agnostic and names the encoding explicitly in its `Encoding` field; P8 writes the mapper against §8.5 and honours that field. The one exception is the file record itself, which is P2's `PackageManifestFile` — already carrying §5.5's own tags, so P8's mapper for it is empty.
+
+**`max_bytes` bounds CONTENT bytes, not wire bytes.** A response carried as base64 is about four thirds of the cap in size, because the cap applies to the bytes the reader returned, not to their encoding. A caller that budgets the wire size must budget accordingly; the cap is a bound on the file content, which is what §8.6 specifies.
+
+**`scanned` is a summary; `scan_status` is the detail.** `scanned` is true only when every scanner that applies to the entrypoint ran and passed. For an entrypoint the two always apply — `SKILL.md` is text, and a binary asset's disclosed poison skip can therefore never arise for it — so `scanned` is `scan_status.secret && scan_status.poison` and the two agree. The disclosed-skip case is visible in the `files` listing, where the per-scanner status is reported for every file.
+
+**The read operations are not on the `CoreDB` interface.** Only the provenance accessor is, because the MCP `read` action needs it and the tool layer holds a `CoreDB`. `PackageFiles`, `PackageReadFile` and `PackageVerify` are methods on the concrete `*DatabaseManager`, which is where P8 will reach them — with the interface widening as part of P8's surface, not P6's.
+
+**The read snapshot's read-only nature rests on discipline, and the discipline is pinned.** The transaction is opened with `sql.TxOptions{ReadOnly: true}`, but the SQLite driver ignores that option and issues a plain (deferred) `BEGIN`. The snapshot therefore takes a shared lock and no write lock, and it is read-only because the reader issues no write: the reader's source contains no `Exec` call, every statement it owns is a `SELECT` constant, and `TestP6TheReaderNeverWrites` pins both facts on the source. The behaviour is pinned too — the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read.
 
 #### What P6 does **not** add
 

@@ -3838,6 +3838,16 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	//
 	// Nothing else about the response changes: the body is still the
 	// entrypoint projection's body and no supporting file is ever inlined.
+	//
+	// A FAILURE HERE FAILS THE READ, and that is deliberate: the reader
+	// cannot know whether the skill is a package, so it cannot know
+	// whether the provenance is mandatory — and returning a body without it
+	// would break R6. The lookup is one indexed SELECT, so an ordinary
+	// skill's read is unaffected in the normal case.
+	//
+	// The context is `context.Background()` because the tool surface's
+	// handler signature carries no context at all; the lookup is a single
+	// statement with no timeout, so there is no unbounded work to cancel.
 	provenance, err := dm.SkillPackageProvenance(context.Background(), skill.ID)
 	if err != nil {
 		return nil, err

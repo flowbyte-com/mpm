@@ -123,6 +123,29 @@ const (
 		FROM memories
 		WHERE id = ? AND collection = 'skills'
 	`
+
+	// packageProvenanceQuery reads the provenance of ONE package.
+	//
+	// It is deliberately a SINGLE statement. A single statement sees ONE
+	// consistent snapshot, so the package row, the file count and the
+	// entrypoint's scan status cannot come from two different database
+	// states — and the provenance accessor needs no transaction at all.
+	//
+	// That matters because the provenance accessor runs on the `read`
+	// action's hot path: a transaction would cost a connection checkout
+	// and a BEGIN/ROLLBACK on every skill read, including the ordinary
+	// skills that have no package at all.
+	packageProvenanceQuery = `
+		SELECT p.entrypoint, p.entrypoint_sha256, p.package_hash,
+		       p.declared_version, p.version, p.version_source,
+		       (SELECT COUNT(*) FROM skill_package_files f WHERE f.skill_id = p.skill_id),
+		       (SELECT f.secret_scanned FROM skill_package_files f
+		         WHERE f.skill_id = p.skill_id AND f.path = p.entrypoint),
+		       (SELECT f.poison_scanned FROM skill_package_files f
+		         WHERE f.skill_id = p.skill_id AND f.path = p.entrypoint)
+		FROM skill_packages p
+		WHERE p.skill_id = ?
+	`
 )
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -696,56 +719,66 @@ func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID s
 		return nil, packageReadErrorf(PackageReadReasonSelectorInvalid, "",
 			"a skill id is required")
 	}
-
-	var out *SkillPackageProvenance
-	err := dm.withPackageReadSnapshot(ctx, func(tx *sql.Tx) error {
-		row, err := loadPackageRow(ctx, tx, skillID)
-		if err != nil {
-			if PackageReadReasonOf(err) == PackageReadReasonPackageNotFound {
-				// An ordinary skill. Not an error: the object is simply
-				// absent.
-				out = nil
-				return nil
-			}
-			return err
-		}
-		files, err := loadPackageFileRows(ctx, tx, skillID)
-		if err != nil {
-			return err
-		}
-		prov := &SkillPackageProvenance{
-			Entrypoint:       row.Entrypoint,
-			EntrypointSHA256: row.EntrypointSHA256,
-			FileCount:        len(files),
-			PackageHash:      row.PackageHash,
-		}
-		// The entrypoint's OWN scan status — the actual one, from the
-		// file row, not a constant.
-		for i := range files {
-			if files[i].Path != row.Entrypoint {
-				continue
-			}
-			prov.ScanStatus = files[i].Scanned
-			break
-		}
-		prov.Scanned = prov.ScanStatus.Secret && prov.ScanStatus.Poison
-
-		// The version override comes from the manifest. A manifest that
-		// cannot be parsed simply means the override is not reported —
-		// the rest of the provenance still describes the stored rows.
-		if manifest, _, perr := ParsePackageManifest([]byte(row.ManifestJSON)); perr == nil {
-			if manifest.VersionOverride.Reason != "" || manifest.VersionOverride.Effective != "" {
-				override := manifest.VersionOverride
-				prov.VersionOverride = &override
-			}
-		}
-		out = prov
-		return nil
-	})
-	if err != nil {
-		return nil, err
+	if dm.db == nil {
+		return nil, packageReadErrorf(PackageReadReasonDatabaseFailure, "",
+			"the database is not initialized")
 	}
-	return out, nil
+
+	var (
+		entrypoint      string
+		entrypointSHA   string
+		packageHash     string
+		declaredVersion sql.NullString
+		version         string
+		versionSource   string
+		fileCount       int
+		secretScanned   sql.NullInt64
+		poisonScanned   sql.NullInt64
+	)
+	err := dm.db.QueryRowContext(ctx, packageProvenanceQuery, skillID).Scan(
+		&entrypoint, &entrypointSHA, &packageHash,
+		&declaredVersion, &version, &versionSource,
+		&fileCount, &secretScanned, &poisonScanned)
+	if errors.Is(err, sql.ErrNoRows) {
+		// An ordinary skill. Not an error: the object is simply absent.
+		return nil, nil
+	}
+	if err != nil {
+		return nil, packageReadErrorWrap(PackageReadReasonDatabaseFailure, "", err,
+			"read the package provenance for %s", skillID)
+	}
+
+	provenance := &SkillPackageProvenance{
+		Entrypoint:       entrypoint,
+		EntrypointSHA256: entrypointSHA,
+		FileCount:        fileCount,
+		PackageHash:      packageHash,
+		// The entrypoint's OWN scan status — the actual one, from the
+		// file row, not a constant. A missing row reports no scan.
+		ScanStatus: PackageScanStatus{
+			Secret: secretScanned.Valid && secretScanned.Int64 != 0,
+			Poison: poisonScanned.Valid && poisonScanned.Int64 != 0,
+		},
+	}
+	provenance.Scanned = provenance.ScanStatus.Secret && provenance.ScanStatus.Poison
+
+	// The version override is the package row's own version provenance:
+	// the declared version, the effective version, and how the effective
+	// one was arrived at. The importer writes it and the manifest's
+	// `version_override` from the same plan, so the row carries the same
+	// record — and reading it here costs no manifest parse.
+	if version != "" || versionSource != "" {
+		override := PackageVersionOverride{
+			Effective: version,
+			Reason:    versionSource,
+		}
+		if declaredVersion.Valid {
+			declared := declaredVersion.String
+			override.Declared = &declared
+		}
+		provenance.VersionOverride = &override
+	}
+	return provenance, nil
 }
 
 // ─── The read snapshot ─────────────────────────────────────────────────────
@@ -760,6 +793,27 @@ func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID s
 // its first read and holds it until it is released, and it never takes a
 // write lock. It is released by the deferred rollback — there is nothing
 // to commit, because a read writes nothing.
+//
+// A NOTE ON `ReadOnly`. The transaction is opened with
+// `sql.TxOptions{ReadOnly: true}`, but the SQLite driver
+// (mattn/go-sqlite3) IGNORES that option and issues a plain `BEGIN` —
+// which is deferred, and therefore takes a shared lock on its first read
+// and no write lock at all. The read-only nature of the snapshot
+// therefore rests on DISCIPLINE, not on the driver's enforcement.
+//
+// That discipline is structural rather than merely asserted: the
+// transaction handle is only ever passed to `QueryContext` and
+// `QueryRowContext`, the reader's SQL is a fixed set of `SELECT`
+// constants, and `TestP6TheReaderNeverWrites` pins both facts on the
+// source. The census in `TestP6ReadsChangeNothing` then pins the
+// behaviour: after every read operation, the whole substrate is
+// unchanged.
+//
+// The ONE reader that does not use this helper is
+// `SkillPackageProvenance`: its read is a SINGLE statement, and a single
+// statement sees ONE consistent snapshot on its own — so it needs no
+// transaction, and the `read` action's hot path pays for neither a
+// connection checkout nor a BEGIN/ROLLBACK.
 func (dm *DatabaseManager) withPackageReadSnapshot(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if dm.db == nil {
 		return packageReadErrorf(PackageReadReasonDatabaseFailure, "",
@@ -840,6 +894,16 @@ func loadPackageContext(ctx context.Context, tx *sql.Tx, skillID string) (*packa
 		return nil, packageReadErrorf(PackageReadReasonIntegrityFailure, "",
 			"the manifest of %s describes %s v%s, the package row describes %s v%s",
 			skillID, manifest.Name, manifest.Version, row.Name, row.Version)
+	}
+	if manifest.Format != row.Format {
+		return nil, packageReadErrorf(PackageReadReasonIntegrityFailure, "",
+			"the manifest of %s declares the format %q, the package row records %q",
+			skillID, manifest.Format, row.Format)
+	}
+	if !packageDeclaredVersionEqual(manifest.DeclaredVersion, row.DeclaredVersion) {
+		return nil, packageReadErrorf(PackageReadReasonIntegrityFailure, "",
+			"the manifest of %s and its package row disagree about the declared version",
+			skillID)
 	}
 	if manifest.Entrypoint != row.Entrypoint || manifest.EntrypointSHA256 != row.EntrypointSHA256 {
 		return nil, packageReadErrorf(PackageReadReasonIntegrityFailure, "",
@@ -1200,6 +1264,22 @@ func packageFileMetadataEqual(a, b PackageManifestFile) bool {
 		a.Scanned == b.Scanned
 }
 
+// packageDeclaredVersionEqual reports whether the manifest's declared
+// version and the package row's declared version are the same.
+//
+// A package that declares no version has NO declared version in either
+// place, so nil and nil agree — and nil against a value does not.
+func packageDeclaredVersionEqual(a, b *string) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return *a == *b
+	}
+}
+
 // verifyPackageInTx runs the integrity checks over one package.
 //
 // It reports damage; it never repairs it, and it never refuses to look at
@@ -1266,6 +1346,15 @@ func verifyPackageInTx(ctx context.Context, tx *sql.Tx, skillID string) (*Packag
 		if parsed.EntrypointSHA256 != row.EntrypointSHA256 {
 			fail(PackageVerifyCheckManifestIdentity, row.Entrypoint,
 				"the manifest and the package row disagree about the entrypoint's hash")
+		}
+		if parsed.Format != row.Format {
+			fail(PackageVerifyCheckManifestIdentity, "",
+				"the manifest declares the format "+parsed.Format+
+					", the package row records "+row.Format)
+		}
+		if !packageDeclaredVersionEqual(parsed.DeclaredVersion, row.DeclaredVersion) {
+			fail(PackageVerifyCheckManifestIdentity, "",
+				"the manifest and the package row disagree about the declared version")
 		}
 		if parsed.VersionOverride.Effective != row.Version {
 			fail(PackageVerifyCheckManifestIdentity, "",
