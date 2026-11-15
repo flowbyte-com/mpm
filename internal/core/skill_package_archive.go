@@ -134,8 +134,7 @@ type packageArchiveLimits struct {
 	// cap IS the allocation bound, stated in the unit the allocation
 	// is actually made in.
 	//
-	// It also bounds the walk that counts the records, which reads the
-	// window into one buffer.
+	// It also bounds the scan the reader makes over the window.
 	//
 	// For a well-formed archive the window is the central directory
 	// plus the End-of-Central-Directory record and its comment. The
@@ -299,10 +298,11 @@ func readPackageArchive(archivePath string, limits PackageImportLimits, archiveL
 	//
 	//  1. the DECLARED count — the cheap check, which refuses an
 	//     archive that plainly declares too many entries;
-	//  2. the central directory's BYTE extent — which bounds both the
-	//     walk below and the allocation that follows it;
+	//  2. the parse WINDOW's byte extent — the bytes `archive/zip`
+	//     may scan as central-directory records, which is the unit the
+	//     allocation is made in;
 	//  3. the EXACT record count, counted by walking the directory's
-	//     records in memory before the reader is built.
+	//     records before the reader is built.
 	dir, err := readPackageArchiveDirectory(file, info.Size())
 	if err != nil {
 		return source, packageImportErrorWrap(PackageImportReasonArchiveInvalid, "", err,
@@ -317,7 +317,7 @@ func readPackageArchive(archivePath string, limits PackageImportLimits, archiveL
 	// The parse window. `archive/zip` reads central-directory records
 	// from the parse start to the END OF THE FILE, stopping at the
 	// first byte that is not a record. The window is therefore exactly
-	// the bytes the walk below must cover, and it is also the unit the
+	// the bytes the reader scans, and it is also the unit the
 	// allocation is made in: the allocation `archive/zip` goes on to
 	// make is proportional to the window's size — measured at between
 	// 4.8× and 5.7× — so this cap IS the allocation bound.
@@ -332,18 +332,20 @@ func readPackageArchive(archivePath string, limits PackageImportLimits, archiveL
 			span, archiveLimits.MaxParseWindowBytes)
 	}
 
-	// The EXACT record count. The window is already bounded above, so
-	// this buffer is bounded too.
+	// The EXACT record count, taken BEFORE the reader is built.
 	//
-	// The window is `archive/zip`'s own, to the end of the file, so
-	// the walk sees exactly the bytes it will see and the count it
-	// produces is exactly the count `archive/zip` will produce.
-	spanBytes := make([]byte, span)
-	if _, err := file.ReadAt(spanBytes, start); err != nil && !errors.Is(err, io.EOF) {
+	// It is the maximum of the counts over the reader's candidate
+	// parse starts, and each count is a walk that never under-counts
+	// the reader's records. So the count is never lower than the
+	// number of records `archive/zip` will parse — which is what the
+	// cap needs — and it is exact for a well-formed archive, so it
+	// refuses no legitimate package.
+	records, err := dir.parseRecordCount(file, info.Size(), int64(archiveLimits.MaxArchiveEntries))
+	if err != nil {
 		return source, packageImportErrorWrap(PackageImportReasonArchiveInvalid, "", err,
 			"the archive %q's central directory could not be read: %v", archivePath, err)
 	}
-	if records := countPackageArchiveRecords(spanBytes); records > int64(archiveLimits.MaxArchiveEntries) {
+	if records > int64(archiveLimits.MaxArchiveEntries) {
 		return source, packageImportErrorf(PackageImportReasonFileCountLimit, "",
 			"the archive's central directory holds %d records, over the %d-entry cap",
 			records, archiveLimits.MaxArchiveEntries)
@@ -846,6 +848,10 @@ const (
 	// archiveCentralDirectorySignature is the signature of a
 	// central-directory file header.
 	archiveCentralDirectorySignature = 0x02014b50
+
+	// archiveZip64ExtraID is the extra-field tag that carries the
+	// ZIP64 sizes and offsets.
+	archiveZip64ExtraID = 0x0001
 )
 
 // packageArchiveDirectory is the archive's central directory, as the
@@ -890,9 +896,14 @@ type packageArchiveDirectory struct {
 //     directory;
 //   - a CRAFTED header before the real central directory, carrying the
 //     right signature but lengths that run past the end of the file,
-//     makes the full parse FAIL. `archive/zip` then parses from the
-//     normal start — and so must this, or the count taken here would
-//     be lower than the count the reader actually parses.
+//     or a saturated size with a malformed ZIP64 extra field, makes
+//     the full parse FAIL. `archive/zip` then parses from the normal
+//     start — and so must this, or the count taken here would be
+//     lower than the count the reader actually parses.
+//
+// The count does not rest on this check alone: it is taken over BOTH
+// candidate starts and the larger is kept, so it is never lower than
+// the reader's count even if this check were wrong.
 func (d packageArchiveDirectory) parseStart(r io.ReaderAt, size int64) int64 {
 	start := d.endOffset - d.size
 
@@ -912,18 +923,29 @@ func (d packageArchiveDirectory) parseStart(r io.ReaderAt, size int64) int64 {
 	return start
 }
 
-// centralDirectoryHeaderParses reports whether a complete
-// central-directory header sits at the declared offset.
+// centralDirectoryHeaderParses reports whether `archive/zip` would
+// parse a complete central-directory header at the declared offset.
 //
-// It mirrors `archive/zip`'s `readDirectoryHeader` success condition:
-// the 46-byte fixed header must be readable, its signature must be the
-// central-directory one, and the name, extra field and comment it
-// declares must be readable too.
+// It mirrors `archive/zip`'s `readDirectoryHeader` success condition,
+// which has FOUR ways to fail:
 //
-// The signature ALONE is not enough. A crafted header with the right
-// signature but lengths that run past the end of the file is not a
-// header `archive/zip` can parse, so it must not move the parse start
-// here either.
+//  1. the 46-byte fixed header is not readable;
+//  2. the signature is not the central-directory one;
+//  3. the name, extra field and comment the header declares are not
+//     readable;
+//  4. the header declares a saturated size or offset and carries a
+//     malformed ZIP64 extra field — `archive/zip` returns `ErrFormat`
+//     for that.
+//
+// The fourth is easy to miss, and it matters: such a header is not a
+// header the reader can parse, so the fallback must not be taken for
+// it. A header that the reader refuses must leave the parse start where
+// the reader leaves it.
+//
+// The signature ALONE is not enough in the other direction either. A
+// crafted header with the right signature but lengths that run past the
+// end of the file is not a header `archive/zip` can parse, so it must
+// not move the parse start here either.
 func (d packageArchiveDirectory) centralDirectoryHeaderParses(r io.ReaderAt, size int64) bool {
 	const headerLen = archiveCentralDirectoryRecordMinBytes
 	if d.offset < 0 || d.offset+headerLen > size {
@@ -936,18 +958,50 @@ func (d packageArchiveDirectory) centralDirectoryHeaderParses(r io.ReaderAt, siz
 	if binary.LittleEndian.Uint32(header[:]) != archiveCentralDirectorySignature {
 		return false
 	}
+
+	compressedSize := binary.LittleEndian.Uint32(header[20:])
+	uncompressedSize := binary.LittleEndian.Uint32(header[24:])
 	nameLen := int64(binary.LittleEndian.Uint16(header[28:]))
 	extraLen := int64(binary.LittleEndian.Uint16(header[30:]))
 	commentLen := int64(binary.LittleEndian.Uint16(header[32:]))
-	return d.offset+headerLen+nameLen+extraLen+commentLen <= size
+	localHeaderOffset := binary.LittleEndian.Uint32(header[42:])
+
+	if d.offset+headerLen+nameLen+extraLen+commentLen > size {
+		return false
+	}
+
+	// The extra fields, walked exactly as `archive/zip` walks them.
+	if extraLen > 0 {
+		extra := make([]byte, extraLen)
+		if _, err := r.ReadAt(extra, d.offset+headerLen+nameLen); err != nil {
+			return false
+		}
+		for len(extra) >= 4 {
+			tag := binary.LittleEndian.Uint16(extra[0:])
+			fieldSize := int(binary.LittleEndian.Uint16(extra[2:]))
+			if len(extra) < 4+fieldSize {
+				break
+			}
+			if tag == archiveZip64ExtraID {
+				saturated := compressedSize == 0xffffffff ||
+					uncompressedSize == 0xffffffff ||
+					localHeaderOffset == 0xffffffff
+				if saturated && fieldSize < 8 {
+					return false
+				}
+			}
+			extra = extra[4+fieldSize:]
+		}
+	}
+	return true
 }
 
-// countPackageArchiveRecords counts the central-directory records in a
-// byte span, EXACTLY.
+// countPackageArchiveRecords counts the central-directory records from
+// a start offset, mirroring `archive/zip`'s own walk.
 //
-// It mirrors `archive/zip`'s own walk — the same signature test and
-// the same 46-bytes-plus-lengths advance — but it counts in memory, so
-// it allocates one buffer rather than a header per record.
+// The walk uses the same signature test and the same
+// 46-bytes-plus-lengths advance, and it stops at the first byte that
+// is not a record — exactly as the reader stops.
 //
 // # WHY THE COUNT HAS TO BE EXACT
 //
@@ -965,19 +1019,116 @@ func (d packageArchiveDirectory) centralDirectoryHeaderParses(r io.ReaderAt, siz
 // So the count is EXACT, and it is taken BEFORE the reader is built.
 // That is what makes the refusal both free of false positives and
 // effective against an archive that lies about its entry count.
-func countPackageArchiveRecords(span []byte) int64 {
+//
+// # WHY IT NEVER UNDER-COUNTS
+//
+// The walk here counts a record whenever its signature is right, which
+// is a SUPERSET of the records `archive/zip` counts: the reader
+// additionally refuses a record whose name, extra field or comment runs
+// past the end of the file, and one whose ZIP64 extra field is
+// malformed. So this walk stops no earlier than the reader does and
+// counts no fewer records than it does.
+//
+// The walk reads only what it needs — one 46-byte header at a time —
+// so a start offset that is not a central directory costs 46 bytes and
+// not the whole window.
+//
+// It stops as soon as the count exceeds `limit`: a count over the limit
+// is refused anyway, and the walk must not be unbounded.
+func countPackageArchiveRecords(r io.ReaderAt, start, size, limit int64) (int64, error) {
 	var count int64
-	for off := 0; off+archiveCentralDirectoryRecordMinBytes <= len(span); {
-		if binary.LittleEndian.Uint32(span[off:]) != archiveCentralDirectorySignature {
-			break
+	for off := start; off+archiveCentralDirectoryRecordMinBytes <= size; {
+		var header [archiveCentralDirectoryRecordMinBytes]byte
+		if _, err := r.ReadAt(header[:], off); err != nil {
+			if errors.Is(err, io.EOF) {
+				return count, nil
+			}
+			return count, err
 		}
-		nameLen := int(binary.LittleEndian.Uint16(span[off+28:]))
-		extraLen := int(binary.LittleEndian.Uint16(span[off+30:]))
-		commentLen := int(binary.LittleEndian.Uint16(span[off+32:]))
+		if binary.LittleEndian.Uint32(header[:]) != archiveCentralDirectorySignature {
+			return count, nil
+		}
+		nameLen := int64(binary.LittleEndian.Uint16(header[28:]))
+		extraLen := int64(binary.LittleEndian.Uint16(header[30:]))
+		commentLen := int64(binary.LittleEndian.Uint16(header[32:]))
 		count++
+		if count > limit {
+			return count, nil
+		}
 		off += archiveCentralDirectoryRecordMinBytes + nameLen + extraLen + commentLen
 	}
-	return count
+	return count, nil
+}
+
+// candidateParseStarts returns the offsets at which `archive/zip` could
+// begin reading central-directory records.
+//
+// There are two, and which one it uses is decided by the archive
+// itself:
+//
+//   - the NORMAL start — the central directory's first byte, which
+//     `archive/zip` derives as `endOffset - size`;
+//   - the FALLBACK start — the declared offset, which `archive/zip`
+//     uses only for an archive whose declared offsets are inconsistent:
+//     it re-reads the record at the declared offset and, if that record
+//     PARSES, parses from THERE.
+//
+// The count is taken over BOTH and the LARGER is kept. That makes the
+// count provably no smaller than the reader's, whatever the fallback
+// decision turns out to be — the reader's start is one of the two, and
+// the walk never under-counts.
+//
+// For a well-formed archive the two coincide in effect: the fallback
+// is not a candidate at all, because the base offset is zero.
+func (d packageArchiveDirectory) candidateParseStarts(size int64) []int64 {
+	normal := d.endOffset - d.size
+	if normal < 0 {
+		normal = 0
+	}
+	if normal > size {
+		normal = size
+	}
+	starts := []int64{normal}
+
+	// The fallback is a candidate only when the base offset is
+	// positive — which is exactly when `archive/zip` considers it.
+	if d.endOffset-d.size-d.offset > 0 {
+		fallback := d.offset
+		if fallback < 0 {
+			fallback = 0
+		}
+		if fallback > size {
+			fallback = size
+		}
+		starts = append(starts, fallback)
+	}
+	return starts
+}
+
+// parseRecordCount returns the number of central-directory records
+// `archive/zip` will parse — never fewer than it will.
+//
+// It is the maximum of the counts over the reader's candidate starts,
+// and each count is a walk that never under-counts. So the result is
+// an upper bound on the reader's own count, which is what the entry
+// cap needs.
+func (d packageArchiveDirectory) parseRecordCount(r io.ReaderAt, size, limit int64) (int64, error) {
+	var count int64
+	for _, start := range d.candidateParseStarts(size) {
+		n, err := countPackageArchiveRecords(r, start, size, limit)
+		if err != nil {
+			return count, err
+		}
+		if n > count {
+			count = n
+		}
+		if count > limit {
+			// One of the candidates is already over the cap, so the
+			// archive is refused whatever the reader does.
+			return count, nil
+		}
+	}
+	return count, nil
 }
 
 // readPackageArchiveDirectory reads the End-of-Central-Directory record

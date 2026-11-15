@@ -28,9 +28,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/binary"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1580,6 +1578,159 @@ func p5WriteCraftedHeaderArchive(t *testing.T, path string, records int) {
 	}
 }
 
+// TestP5_ACraftedHeaderCannotDefeatTheEntryCount is the end-to-end
+// consequence of the count's soundness.
+//
+// An archive whose declared offsets are inconsistent, and whose
+// declared offset points at a CRAFTED header the reader refuses, is
+// parsed by `archive/zip` from the NORMAL start — so the reader parses
+// every real record and allocates a header for each.
+//
+// An implementation that takes the crafted header as the parse start
+// counts ONE record, passes the entry cap, and then hands the reader
+// an archive with thousands of records to parse. The count is what
+// bounds that allocation, so a count that is lower than the reader's
+// defeats the bound.
+//
+// This test builds that archive with more records than the cap allows
+// and asserts the importer refuses it — before the reader is built.
+func TestP5_ACraftedHeaderCannotDefeatTheEntryCount(t *testing.T) {
+	dm := p3DM(t)
+	before := p5CensusOf(t, dm)
+
+	// More records than the 4 096-entry cap.
+	const records = 20001
+	archive := filepath.Join(t.TempDir(), "crafted-bomb.skill")
+	// The declared count LIES: it says two, so the cheap
+	// declared-count check cannot catch this archive, and only the
+	// record count can.
+	p5WriteCraftedZip64HeaderArchive(t, archive, records, 2)
+
+	// The reader parses every record on its way through the archive —
+	// that is the allocation the bound has to prevent. It then refuses
+	// the archive, because its own count check sees the lie.
+	f, err := os.Open(archive)
+	if err != nil {
+		t.Fatalf("open the archive: %v", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("stat the archive: %v", err)
+	}
+	reader, rerr := zip.NewReader(f, info.Size())
+	if rerr == nil && len(reader.File) != records {
+		t.Fatalf("the reader parsed %d records, want %d — the fixture is not the shape it claims",
+			len(reader.File), records)
+	}
+	f.Close()
+
+	var beforeStats runtime.MemStats
+	runtime.ReadMemStats(&beforeStats)
+
+	_, err = dm.ImportSkillPackageFromArchive(PackageImportOptions{Path: archive})
+
+	var afterStats runtime.MemStats
+	runtime.ReadMemStats(&afterStats)
+
+	p5AssertReason(t, err, PackageImportReasonFileCountLimit)
+	p5AssertUnchanged(t, dm, before, "a crafted header in front of the central directory")
+
+	// The allocation is the bound. The reader was never built, so no
+	// header was allocated for any of the 20 001 records — the
+	// refusal happened first.
+	allocated := int64(afterStats.TotalAlloc) - int64(beforeStats.TotalAlloc)
+	const allowed = 4 << 20
+	if allocated > allowed {
+		t.Errorf("the refused import allocated %d bytes, over the %d-byte bound — "+
+			"the central directory was parsed before the refusal", allocated, allowed)
+	}
+	t.Logf("the refused import allocated %d bytes for an archive the reader would parse %d records from",
+		allocated, records)
+}
+
+// p5WriteCraftedZip64HeaderArchive writes an archive whose central
+// directory is declared with INCONSISTENT offsets, and whose declared
+// offset points at a CRAFTED header carrying a MALFORMED ZIP64 extra
+// field.
+//
+// The fourth way `archive/zip` refuses a central-directory header is
+// the one this fixture exercises: a header whose compressed size is
+// saturated (0xffffffff) and whose ZIP64 extra field is shorter than
+// the eight bytes such a field must carry. `archive/zip` returns
+// ErrFormat for that, so it does NOT apply its inconsistent-offsets
+// fallback and parses from the normal start.
+//
+// An implementation that checks only the header's signature — or its
+// lengths — accepts the header the reader refuses, moves the parse
+// start onto it, and counts one record where the reader counts the
+// whole central directory.
+//
+// `declaredCount` is the entry count the End-of-Central-Directory
+// record will carry. Zero means "leave the real count alone" — the
+// reader then parses the archive, which is what the count-match test
+// needs. A non-zero value LIES about the count, which is what defeats
+// the cheap declared-count check and reaches the record-count bound.
+func p5WriteCraftedZip64HeaderArchive(t *testing.T, path string, records int, declaredCount uint16) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for i := 0; i < records; i++ {
+		w, err := zw.Create("references/f" + p5Itoa(i) + ".md")
+		if err != nil {
+			t.Fatalf("create the archive entry: %v", err)
+		}
+		if _, err := w.Write([]byte("# F\n")); err != nil {
+			t.Fatalf("write the archive entry: %v", err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close the archive: %v", err)
+	}
+	data := buf.Bytes()
+
+	eocd := bytes.LastIndex(data, []byte{0x50, 0x4b, 0x05, 0x06})
+	cdOffset := int(binary.LittleEndian.Uint32(data[eocd+16:]))
+
+	// The crafted header: the right signature, a SATURATED compressed
+	// size, and a ZIP64 extra field of ZERO bytes — shorter than the
+	// eight such a field must carry.
+	//
+	// The name is empty and the comment is empty, so the header's
+	// variable part is exactly the four extra bytes and IS readable:
+	// the ZIP64 extra field is therefore the ONLY reason the reader
+	// refuses it, which is the point of the fixture.
+	crafted := make([]byte, archiveCentralDirectoryRecordMinBytes+4)
+	binary.LittleEndian.PutUint32(crafted[0:], archiveCentralDirectorySignature)
+	binary.LittleEndian.PutUint32(crafted[20:], 0xffffffff) // the saturated compressed size
+	binary.LittleEndian.PutUint16(crafted[28:], 0)          // the name length
+	binary.LittleEndian.PutUint16(crafted[30:], 4)          // the extra-field length
+	binary.LittleEndian.PutUint16(crafted[32:], 0)          // the comment length
+	binary.LittleEndian.PutUint16(crafted[archiveCentralDirectoryRecordMinBytes:], archiveZip64ExtraID)
+	binary.LittleEndian.PutUint16(crafted[archiveCentralDirectoryRecordMinBytes+2:], 0)
+
+	// Splice it into the local-header region, well before the real
+	// central directory.
+	const insertAt = 500
+	out := make([]byte, 0, len(data)+len(crafted))
+	out = append(out, data[:insertAt]...)
+	out = append(out, crafted...)
+	out = append(out, data[insertAt:]...)
+
+	newEOCD := eocd + len(crafted)
+	// Declare the offset at the crafted header, and the size so that
+	// `endOffset - size` is the REAL central directory's start.
+	binary.LittleEndian.PutUint32(out[newEOCD+16:], uint32(insertAt))
+	binary.LittleEndian.PutUint32(out[newEOCD+12:], uint32(newEOCD-(cdOffset+len(crafted))))
+	if declaredCount != 0 {
+		binary.LittleEndian.PutUint16(out[newEOCD+10:], declaredCount)
+	}
+
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write the crafted archive: %v", err)
+	}
+}
+
 // TestP5_TheCentralDirectoryCountMatchesTheReader pins the count to
 // the reader's OWN count.
 //
@@ -1651,21 +1802,67 @@ func TestP5_TheCentralDirectoryCountMatchesTheReader(t *testing.T) {
 		p5WriteCraftedHeaderArchive(t, archive, 100)
 		p5AssertCountsMatch(t, archive)
 	})
+
+	t.Run("inconsistent offsets pointing at a crafted ZIP64-extra header", func(t *testing.T) {
+		archive := filepath.Join(t.TempDir(), "crafted-zip64.skill")
+		p5WriteCraftedZip64HeaderArchive(t, archive, 100, 0)
+		p5AssertCountsMatch(t, archive)
+	})
 }
 
 // p5AssertCountsMatch asserts that the importer's record count and the
 // reader's record count are the same.
+//
+// The importer's count is the maximum over the reader's candidate
+// parse starts, so it can be HIGHER than the reader's count for a
+// malformed archive. For a well-formed one the two are equal.
 func p5AssertCountsMatch(t *testing.T, archive string) {
 	t.Helper()
 
-	// The reader's count.
+	readerCount := p5ReaderRecordCount(t, archive)
+	got := p5ImporterRecordCount(t, archive)
+
+	if got != readerCount {
+		t.Errorf("the walk counted %d records, the reader parsed %d — they must agree",
+			got, readerCount)
+	}
+}
+
+// p5AssertCountsNotLower asserts that the importer's record count is
+// not lower than the reader's.
+//
+// That is the bound's soundness invariant: the count is what caps the
+// reader's allocation, so it must never be lower than the number of
+// records the reader will parse.
+func p5AssertCountsNotLower(t *testing.T, archive string) {
+	t.Helper()
+
+	readerCount := p5ReaderRecordCount(t, archive)
+	got := p5ImporterRecordCount(t, archive)
+
+	if got < readerCount {
+		t.Errorf("the walk counted %d records, the reader parsed %d — the count must never be lower",
+			got, readerCount)
+	}
+}
+
+// p5ReaderRecordCount returns the number of records `archive/zip`
+// parses.
+func p5ReaderRecordCount(t *testing.T, archive string) int64 {
+	t.Helper()
+
 	reader, err := zip.OpenReader(archive)
 	if err != nil {
 		t.Fatalf("open the archive: %v", err)
 	}
 	defer reader.Close()
+	return int64(len(reader.File))
+}
 
-	// The importer's count, over the reader's own window.
+// p5ImporterRecordCount returns the importer's own record count.
+func p5ImporterRecordCount(t *testing.T, archive string) int64 {
+	t.Helper()
+
 	f, err := os.Open(archive)
 	if err != nil {
 		t.Fatalf("open the archive: %v", err)
@@ -1680,17 +1877,11 @@ func p5AssertCountsMatch(t *testing.T, archive string) {
 	if err != nil {
 		t.Fatalf("read the central directory: %v", err)
 	}
-	start := dir.parseStart(f, info.Size())
-	window := make([]byte, info.Size()-start)
-	if _, err := f.ReadAt(window, start); err != nil && !errors.Is(err, io.EOF) {
-		t.Fatalf("read the parse window: %v", err)
+	count, err := dir.parseRecordCount(f, info.Size(), 1<<20)
+	if err != nil {
+		t.Fatalf("count the central directory's records: %v", err)
 	}
-	got := countPackageArchiveRecords(window)
-
-	if got != int64(len(reader.File)) {
-		t.Errorf("the walk counted %d records, the reader parsed %d — they must agree",
-			got, len(reader.File))
-	}
+	return count
 }
 
 // p5PatchEOCDEntryCount rewrites the End-of-Central-Directory record's
