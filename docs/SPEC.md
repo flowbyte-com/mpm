@@ -1280,19 +1280,21 @@ The isolation is **layered**, and each layer says exactly what it closes:
 | layer | mechanism | what it closes |
 |---|---|---|
 | **tool surface** | every MPM tool is denied **by name**, so a denied tool is removed from the reviewer's tool list entirely — the reviewer cannot call it and cannot see it | the MCP route into the substrate |
-| **command line** | every MPM binary is refused **at the command position** (`mpm`, `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`, `mpm-update`, and their installed paths), and so are the installers (`install.sh`, `uninstall.sh`, `make install`/`uninstall`/`deploy`) and the service-control commands | the CLI route into the substrate |
-| **reads** | the `read` tool cannot open a file inside a live MPM workspace, and the `external_directory` boundary of a runtime root is closed | the reviewer's access to the operator's private substrate |
-| **state changes** | `edit`, `subagent`, `skill`, `question` and Code Mode (`execute`) are denied | the reviewer's ability to change what it reviews, or to reach the tools by another route |
+| **command line** | every MPM binary is refused **wherever it is NAMED** — at the command position and anywhere in the command text (`mpm`, `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`, `mpm-update`, and their installed paths) — and so are the installers (`install.sh`, `uninstall.sh`, `make install`/`uninstall`/`deploy`) and the service-control commands | the CLI route into the substrate |
+| **reads** | the `read` tool cannot open a file inside a live MPM workspace, and the `external_directory` boundary of a runtime root is closed. The **shell** is not path-restricted, so the reads the shell performs are the reviewer's own scope | the reviewer's access to the operator's private substrate, **through the read tool** |
+| **state changes** | `edit`, `subagent`, `question`, Code Mode (`execute`) and the `opencode_*` session and worktree tools are denied | the reviewer's ability to change what it reviews, or to reach the tools by another route |
 | **environment** | a disposable sandbox (`agent_installation/mpm-opencode/scripts/reviewer_sandbox.py`) points `HOME`, `TMPDIR` and `MPM_WORKSPACE` at scratch directories, so a route the rules do not name still cannot write into the operator's runtime root | the residue a pattern match cannot close |
 
 **What the permission layer does NOT close, stated rather than glossed.** The shell runs with the host user's filesystem, process and network authority, and a permission rule is a pattern match on a command string. The `grep` and `glob` actions are **not** path-restricted — their resources are the pattern and the glob, not a path — so the reviewer's own scope (the working tree it was given) is what keeps them off a runtime root. The permission layer is a **barrier, not a jail**; the sandbox is the layer that does not depend on the pattern being complete.
 
-Two residuals are **measured, not assumed**, and both were established by probing the installed definition:
+Four residuals are **measured, not assumed**, and all four were established by probing the installed definition with a subagent:
 
 - **The browser family is not governed by the permission layer.** A deny on the browser action, on the `browser*` wildcard, on the per-tool action names and on `tool.use` all leave every browser tool in the reviewer's catalog and invocable. The browser is inert unless a **desktop** browser is connected to the session; with one connected, a `file://` URL could open the operator's live database. The definition says so in its own prose, and the rule that would have claimed otherwise was **removed** rather than left in place: an ineffective rule that claims to close a surface is worse than no rule.
 - **The shell's redirection targets are not intercepted.** A command that writes into a runtime root is executed unless a rule says otherwise, so the write route is closed by a path **substring** — and a substring matches TEXT as well as a path, so a command that merely QUOTES such a path after a `>` is refused too. That cost is accepted deliberately: the alternative is a reviewer that can overwrite the operator's live database, and a stray file in a runtime root is a nuisance while a corrupted database is a disaster. The workaround is to assemble such a path at runtime.
+- **The capability loader is not governed by the permission layer.** The host does not gate the `skill` tool by any permission action: measured with eighteen candidate action names (`skill`, `capability`, `skills`, `skill.load`, `skill.use`, `tool.use`, and others) and with the V1-style `tools:` frontmatter, the loader stayed in the reviewer's catalogue and a `skill` call **ran**. A rule that does not work is not a closure, so the rule was **removed** rather than left in place, and the definition says in its own prose that a reviewer must not load a capability.
+- **The shell's matcher sees TEXT, not intents.** The command text is matched against the rule's literal, so the binary's name is caught wherever it appears — followed by a space (`env mpm …`, `sh -c 'mpm …'`, `grep -rn mpm .`), followed by a closing parenthesis (`$(echo mpm)`), or preceded by a quote (`"mpm" --version`) — all measured as refused. What is **not** caught is a name **assembled at runtime**: `$(echo mpm)` where the name is the argument of the substitution, a script file (`bash script.sh`), and a name split across an expression. The permission layer matches text; it cannot tell an invocation from an argument. The closure that does not depend on the pattern being complete is the **environment** layer: inside the sandbox, the substrate resolves its workspace to a scratch directory, so a command that got through writes to the sandbox and not to the operator's runtime root. The definition says this in its own prose and makes the sandbox the **default** environment for every command.
 
-The deny list is **machine-checked against the registry** — `internal/core/tools/registry_list.go` is the authoritative list of every MPM tool, and `agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py` fails if a tool is added to the registry without a matching deny rule. The registry parse itself is checked, so a name the parse cannot capture **fails the test** rather than passing it: a dropped name would need no deny rule, and the tool would stay reachable. The binary deny list is checked against the **Makefile's own** binary variables, so a new MPM binary cannot be built without the list being extended. The guard is proven non-vacuous: removing one deny rule fails the test with the name of the uncovered tool.
+The deny list is **machine-checked against the registry** — `internal/core/tools/registry_list.go` is the authoritative list of every MPM tool, and `agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py` fails if a tool is added to the registry without a matching deny rule. The registry parse itself is checked, so a name the parse cannot capture **fails the test** rather than passing it: a dropped name would need no deny rule, and the tool would stay reachable. The binary deny list is checked against the **Makefile's own** binary variables — including the linter, which is run with `go run ./cmd/mpm-lint` rather than installed, and which opens the substrate's workspace — so a new MPM binary cannot be built without the list being extended. The list is checked in three forms per binary: at the command position, wherever the name appears **followed by a space or a closing parenthesis**, and — shared by every binary, because every name starts with `mpm` — wherever it appears **preceded by a quote**. The guard is proven non-vacuous: removing one deny rule fails the test with the name of the uncovered tool.
 
 **The installed copy may not drift.** The definition is MPM-owned state under `~/.config/opencode/agents/`, refreshed by the canonical install, and the guard test **fails when the installed copy differs from the template**: a weaker definition in force is exactly the hazard this exists to close.
 
@@ -2552,28 +2554,31 @@ The snapshot is **not** a full-package integrity scan. No blob is read and no pa
 
 **What it cost, measured.** The P6 hot path was a skill read plus **one** statement. The combined read is a transaction plus three statements and a manifest parse. Every number below is produced by a benchmark in `internal/core/skill_package_provenance_followup_test.go`, so it can be re-measured rather than believed:
 
-| shape | benchmark | ns/op (median of 5, 5,000 iterations) |
-|---|---|---|
-| P6 hot path (skill read + one statement) | `BenchmarkP6FollowupReadSkillOldShape` | 82,659 |
-| **combined read (one snapshot)** | `BenchmarkP6FollowupReadSkillWithProvenance` | **113,551** |
-| the accessor called separately (each call opens its own snapshot) | `BenchmarkP6FollowupReadSkillTwoStatements` | 169,294 |
+| shape | benchmark | ns/op (median) | observed range |
+|---|---|---|---|
+| P6 hot path (skill read + one statement) | `BenchmarkP6FollowupReadSkillOldShape` | 93,215 | 72,902 – 116,488 |
+| **combined read (one snapshot)** | `BenchmarkP6FollowupReadSkillWithProvenance` | **130,657** | 101,181 – 151,664 |
+| the accessor called separately (each call opens its own snapshot) | `BenchmarkP6FollowupReadSkillTwoStatements` | 174,475 | 144,354 – 254,607 |
 
-The overhead is **+30.9 µs (+37%)** over the P6 hot path, and **−55.7 µs (−33%)** against calling the accessor separately.
+On this host the overhead is **+37.4 µs (+40%)** over the P6 hot path and **−43.8 µs (−25%)** against calling the accessor separately.
+
+**The absolute figures MOVE, and the table says so.** Three measurement sessions on the same machine gave the overhead as +31 µs (+37%), +55 µs (+57%) and +37 µs (+40%) — the host's load moves the read by tens of percent, because the read is a transaction with three statements in it. So the claim is the **order of magnitude and the sign**, not the figure: the combined read costs **tens of microseconds more** than the P6 shape, and **less** than calling the accessor separately, which opens a snapshot of its own. A reader who re-measures on a loaded machine will get a different number; that is why the range is quoted beside every figure.
 
 **The third row is labelled for what it measures.** It is *not* "two independent reads": the accessor opens its **own** snapshot now — it has to, because it reads the manifest — so the shape it measures is a skill read on the pool plus an accessor call that takes a transaction of its own. That is the cost of the pre-follow-up arrangement *as it stands today*, not a hypothetical one.
 
-The components, each measured by its own benchmark on the same host:
+The components are the **reproducible** part, because each is a small, self-contained operation:
 
 | component | benchmark | ns/op (median) |
 |---|---|---|
-| the read snapshot itself (BEGIN, ROLLBACK, connection checkout) | `BenchmarkP6FollowupComponentTransaction` | 3,280 |
-| the manifest `SELECT` | `BenchmarkP6FollowupComponentManifestSelect` | 6,502 |
-| the manifest parse | `BenchmarkP6FollowupComponentManifestParse` | 6,133 |
+| the read snapshot itself (BEGIN, ROLLBACK, connection checkout) | `BenchmarkP6FollowupComponentTransaction` | 3,354 |
+| the manifest `SELECT` on the pool | `BenchmarkP6FollowupComponentManifestSelect` | 6,547 |
+| the manifest `SELECT` inside a snapshot | `BenchmarkP6FollowupComponentManifestSelectInSnapshot` | 4,656 |
+| the manifest parse | `BenchmarkP6FollowupComponentManifestParse` | 5,352 |
 | the manifest **validation** | `BenchmarkP6FollowupComponentManifestValidate` | 378 |
 
-So the validation is **free** (0.4 µs against a 113.6 µs read), and the measured components account for about **16 µs** of the 31 µs overhead; the remainder is the extra statement issued **inside** the snapshot rather than on the pool, and the per-statement cost a transaction adds. The read is **not** an unconditional integrity scan: no blob is read and no package byte is hashed.
+So the validation is **free** (0.4 µs against a 131 µs read), and the measured components account for about **20 µs** of the overhead; the remainder is the per-statement cost the transaction adds and the read's own variance. The read is **not** an unconditional integrity scan: no blob is read and no package byte is hashed.
 
-**Measurement host.** The figures above were measured on the development host (Linux x86-64, 12 CPUs, Go 1.27.3, SQLite in WAL mode, the package's own disposable workspace) with `go test -bench 'BenchmarkP6Followup' -benchtime=5000x -count=5`. Absolute numbers are host-specific; the **ratios** are the claim, and the benchmarks are in the repository so a reader can re-measure them on their own host.
+**Measurement host and protocol.** The figures above were measured on the development host (Linux x86-64, 12 CPUs, Go 1.27.3, SQLite in WAL mode, the package's own disposable workspace) with `go test -bench 'BenchmarkP6Followup' -benchtime=5000x -count=7`, on an otherwise idle machine. Absolute numbers are host- and load-specific; the benchmarks are in the repository so a reader can re-measure them on their own host.
 
 **The skill-document loader was extracted so the guard covers it.** The combined read needs the skill-loading logic to run inside a caller's transaction, so it moved from `skill_db.go` into `skill_document.go`, written against the smallest read surface that both `*sql.DB` and `*sql.Tx` satisfy. That file is now part of the reader's **guarded set**: the write-guard walks it, so a write could not hide in the skill loader and go unseen. The loader is **one** implementation — `ReadSkill` and the combined read share it, so they cannot drift.
 

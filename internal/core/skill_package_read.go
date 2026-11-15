@@ -906,6 +906,7 @@ func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID s
 		provenance *SkillPackageProvenance
 		projection string
 		body       string
+		bodyKnown  bool
 	)
 	err := dm.withPackageReadSnapshot(ctx, func(tx *sql.Tx) error {
 		// The projection is the `memories.content` column: the bytes
@@ -921,13 +922,19 @@ func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID s
 			return err
 		}
 		projection = content
+		// The body is KNOWN only when the frontmatter parses. A
+		// document whose frontmatter does not parse has no body to
+		// hash, and the provenance says so rather than reporting the
+		// hash of an empty string as if it were the body's hash.
+		bodyKnown = false
 		if content != "" {
 			if _, b, perr := ParseSkillFrontmatter(content); perr == nil {
 				body = b
+				bodyKnown = true
 			}
 		}
 
-		p, err := skillPackageProvenanceInTx(ctx, tx, skillID, projection, body)
+		p, err := skillPackageProvenanceInTx(ctx, tx, skillID, projection, body, bodyKnown)
 		if err != nil {
 			return err
 		}
@@ -1068,7 +1075,9 @@ func readSkillWithPackageProvenanceTx(ctx context.Context, tx *sql.Tx, nameOrID,
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := skillPackageProvenanceInTx(ctx, tx, s.ID, projection, s.Body)
+	// The combined read returns the skill's own body, so the body is
+	// KNOWN: it is the text the response carries.
+	p, err := skillPackageProvenanceInTx(ctx, tx, s.ID, projection, s.Body, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1080,12 +1089,17 @@ func readSkillWithPackageProvenanceTx(ctx context.Context, tx *sql.Tx, nameOrID,
 //
 // `projection` is the raw projection document the caller is returning —
 // the `memories.content` column, frontmatter included — and `body` is
-// the text the caller is returning as the body. Either may be empty,
-// and then the hash that depends on it is reported as `unavailable`
-// rather than as an empty claim.
+// the text the caller is returning as the body.
+//
+// `bodyKnown` says whether `body` IS that body or whether it could not
+// be determined. The two are different, and the hash that depends on
+// the body must not claim to be a hash of a body that was never
+// found: an EMPTY body is a body with a hash (the hash of the empty
+// byte string), while an UNKNOWN body has no hash at all and is
+// reported as `unavailable`.
 //
 // The returned object is nil for a skill that is not a package.
-func skillPackageProvenanceInTx(ctx context.Context, tx *sql.Tx, skillID, projection, body string) (*SkillPackageProvenance, error) {
+func skillPackageProvenanceInTx(ctx context.Context, tx *sql.Tx, skillID, projection, body string, bodyKnown bool) (*SkillPackageProvenance, error) {
 	var (
 		entrypoint      string
 		entrypointSHA   string
@@ -1160,13 +1174,20 @@ func skillPackageProvenanceInTx(ctx context.Context, tx *sql.Tx, skillID, projec
 	// the exact `body` field this response carries. The recorded hashes
 	// cover the projection, which the response does not carry.
 	//
-	// It is computed UNCONDITIONALLY. The hash of an empty body is
-	// well defined — it is the hash of the empty byte string — so an
-	// empty body is a body with a hash, not a body without one.
-	// `unavailable` is reserved for the case where no body exists at
-	// all, which cannot happen for a readable skill.
-	provenance.BodySHA256 = sha256Hex([]byte(body))
-	provenance.HashOrigins.BodySHA256 = PackageHashOriginRecomputed
+	// The hash of an EMPTY body is well defined — it is the hash of
+	// the empty byte string — so an empty body is a body with a hash,
+	// not a body without one. `unavailable` is reserved for the case
+	// where no body exists at all, and that is exactly the case
+	// `bodyKnown` reports: a document whose frontmatter does not
+	// parse has no body to hash, and hashing the empty string would
+	// report a claim about a body that was never found.
+	if bodyKnown {
+		provenance.BodySHA256 = sha256Hex([]byte(body))
+		provenance.HashOrigins.BodySHA256 = PackageHashOriginRecomputed
+	} else {
+		provenance.BodySHA256 = ""
+		provenance.HashOrigins.BodySHA256 = PackageHashOriginUnavailable
+	}
 
 	// ── The projection's hash: RECORDED in the stored manifest. ──────
 	//

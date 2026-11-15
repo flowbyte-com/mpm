@@ -300,13 +300,15 @@ copy is MPM-owned state: it is refreshed from the template on every
 install, and the guard test fails when it has drifted.
 
 The isolation is **layered**. The definition denies the MPM tools by name;
-denies the MPM **binaries** at the command position (`mpm`, `mpm-mcp`,
-`mpm-scheduler`, `mpm-critic`, `mpm-telemetry`, `mpm-update`, and their
-installed paths); denies the installers and the service-control commands;
-denies the `read` tool a live MPM workspace and closes its
-`external_directory` boundary; denies `edit`, `subagent`, `skill`,
-`question` and Code Mode (`execute`); and requires findings to be recorded
-in a **filesystem scratchpad**, not in the substrate.
+denies the MPM **binaries** wherever they are **named** (`mpm`,
+`mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`, `mpm-update`,
+`mpm-lint`, and their installed paths) — not only at the command position,
+so a prefix (`env mpm …`), a substitution (`$(echo mpm)`) or a quote
+(`"mpm" …`) does not carry a reviewer past it; denies the installers and
+the service-control commands; denies the `read` tool a live MPM workspace
+and closes its `external_directory` boundary; denies `edit`, `subagent`,
+`question` and Code Mode (`execute`); and requires findings to be
+recorded in a **filesystem scratchpad**, not in the substrate.
 
 **What it does not close.** The shell runs with the host user's authority
 and a permission rule is a pattern match on a command string, so the layer
@@ -316,12 +318,16 @@ depend on the pattern being complete: it points `HOME`, `TMPDIR` and
 `MPM_WORKSPACE` at scratch directories, so a route the rules do not name
 still cannot write into the operator's runtime root.
 
-Two residuals were **measured**, by probing the installed definition: the
+Four residuals were **measured**, by probing the installed definition: the
 **browser family is not governed by the permission layer** (every browser
-tool stays in the reviewer's catalog and invocable), and the shell's
-**redirection targets are not intercepted**, so the write route into a
-runtime root is closed by a path substring that also refuses a command
-merely *quoting* such a path.
+tool stays in the reviewer's catalog and invocable); the **capability
+loader** is not gated by any permission action (eighteen candidate action
+names and the V1-style `tools:` frontmatter all leave it callable), so
+the rule was removed and the definition says a reviewer must not load
+one; the shell's **redirection targets are not intercepted**, so the write
+route into a runtime root is closed by a path substring that also refuses
+a command merely *quoting* such a path; and the shell's matcher sees
+**text**, so a binary name **assembled at runtime** is not caught.
 
 The deny list is **machine-checked against the registry** —
 `internal/core/tools/registry_list.go` is the authoritative list of every

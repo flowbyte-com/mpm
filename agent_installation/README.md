@@ -182,22 +182,24 @@ The definition is **layered**, and each layer says what it closes:
 - **denies every MPM tool by name**, so a denied tool is removed from the
   reviewer's tool list entirely — the reviewer cannot call it and cannot
   see it;
-- **denies the MPM binaries at the command position** — `mpm`,
+- **denies the MPM binaries wherever they are NAMED** — `mpm`,
   `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`,
-  `mpm-update`, and their installed paths — and denies the installers
-  (`install.sh`, `uninstall.sh`, `make install`/`uninstall`/`deploy`)
-  and the service-control commands, so the command line cannot reach the
-  substrate either;
+  `mpm-update`, `mpm-lint`, and their installed paths — and not only at
+  the command position: a name preceded by a prefix (`env mpm …`), by a
+  substitution (`$(echo mpm)`) or by a quote (`"mpm" …`) is caught too.
+  The installers (`install.sh`, `uninstall.sh`, `make install`/
+  `uninstall`/`deploy`) and the service-control commands are denied as
+  well, so the command line cannot reach the substrate either;
 - **denies the `read` tool** a live MPM workspace, and closes the
   `external_directory` boundary of a runtime root;
 - **denies `edit`** (a reviewer cannot change what it reviews),
   **`subagent`** (a reviewer cannot launch an agent that lacks the
-  isolation), **`skill`**, **`question`** and Code Mode
-  (**`execute`**, the bridge to every tool the host publishes);
+  isolation), **`question`** and Code Mode (**`execute`**, the bridge
+  to every tool the host publishes);
 - requires findings to be recorded in a **filesystem scratchpad**, not in
-  the substrate, and points at the **disposable sandbox**
-  (`mpm-opencode/scripts/reviewer_sandbox.py`) for anything that would
-  otherwise need the substrate at all.
+  the substrate, and makes the **disposable sandbox**
+  (`mpm-opencode/scripts/reviewer_sandbox.py`) the DEFAULT environment
+  for every command.
 
 **What this does not close.** The shell runs with the host user's
 authority, and a permission rule is a pattern match on a command string:
@@ -209,16 +211,24 @@ depend on the pattern being complete: inside it, `HOME`, `TMPDIR` and
 `MPM_WORKSPACE` point at scratch directories, so a route the rules do
 not name still cannot write into the operator's runtime root.
 
-Two residuals were **measured**, by probing the installed definition:
-the **browser family is not governed by the permission layer** (a deny
+Four residuals were **measured**, by probing the installed definition: the
+**browser family is not governed by the permission layer** (a deny
 on the browser action, the wildcard, the per-tool names and `tool.use`
-all leave the browser tools in the reviewer's catalog and invocable),
-and the shell's **redirection targets are not intercepted** — so the
-write route into a runtime root is closed by a path substring, which
-also refuses a command that merely *quotes* such a path. The first is
-stated in the definition's own prose; the second is accepted
-deliberately, because a corrupted live database is worse than a
-findings report that cannot quote a path literally.
+all leave the browser tools in the reviewer's catalog and invocable);
+the **capability loader** is not gated by any permission action
+(eighteen candidate action names and the V1-style `tools:` frontmatter
+all leave it callable), so the rule was removed and the definition says
+a reviewer must not load one; the shell's **redirection targets are not
+intercepted** — so the write route into a runtime root is closed by a
+path substring, which also refuses a command that merely *quotes* such a
+path; and the shell's matcher sees **text**, so a binary name
+**assembled at runtime** (`$(echo mpm)`, a script file, a name split
+across an expression) is not caught. The first two are stated in the
+definition's own prose; the third is accepted deliberately, because a
+corrupted live database is worse than a findings report that cannot
+quote a path literally; and the fourth is why the **sandbox is the
+default**: inside it, the substrate resolves its workspace to a scratch
+directory, so a command that got through writes to the sandbox.
 
 The deny list is **machine-checked against the registry**:
 `internal/core/tools/registry_list.go` is the authoritative list of every

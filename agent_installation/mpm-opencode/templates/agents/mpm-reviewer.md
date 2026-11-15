@@ -90,15 +90,20 @@ permissions:
     resource: "*"
     effect: deny
 
-  # ── A reviewer loads no capability and asks no question. ───────────
+  # ── A reviewer asks no question. ───────────────────────────────────
   #
-  # Both are stated explicitly, so the definition does not depend on the
-  # host's own policy for them. A capability loader would put a second
-  # agent's tool surface in reach; a question would turn a review into
-  # an interaction with the operator mid-flight.
-  - action: skill
-    resource: "*"
-    effect: deny
+  # A question would turn a review into an interaction with the
+  # operator mid-flight, so the action is closed explicitly and the
+  # definition does not depend on the host's own policy for it.
+  #
+  # THE CAPABILITY LOADER IS NOT CLOSED HERE, and there is no rule for
+  # it: the host does not gate the `skill` tool by any permission
+  # action. Measured on this host with eighteen candidate action names
+  # (`skill`, `capability`, `skills`, `skill.load`, `skill.use`,
+  # `tool.use`, and others) and with the V1-style `tools:` frontmatter:
+  # the loader stayed in the reviewer's catalogue and a `skill` call
+  # ran. A rule that does not work is not a closure, so there is no
+  # rule; the prose below says what a reviewer must therefore do.
   - action: question
     resource: "*"
     effect: deny
@@ -205,22 +210,17 @@ permissions:
   # The tool surface is closed above; these close the command line,
   # which is the other way into the same substrate.
   #
-  # The patterns are ANCHORED AT THE COMMAND POSITION. A shell rule
-  # whose resource is the raw command text matches the WHOLE value, so
-  # `mpm *` matches a command that BEGINS with `mpm ` and does not
-  # match a command that merely mentions the word - which is why the
-  # old `*mpm-memory *` style rule (a straw man: no such binary
-  # exists) was removed rather than repaired.
-  #
   # Every MPM binary is covered: the CLI itself, the MCP bridge, the
-  # scheduler, the critic, the telemetry sidecar and the updater. A
-  # shell pattern ending in ` *` also matches the bare command, so
-  # `mpm` on its own is covered by `mpm *`; the bare forms are listed
-  # anyway so that the closure does not rest on that rule alone.
-  #
-  # The list is machine-checked against the Makefile's own binary
+  # scheduler, the critic, the telemetry sidecar and the updater. The
+  # list is machine-checked against the Makefile's own binary
   # variables, so a NEW MPM binary cannot be built without this list
   # being extended.
+  #
+  # A shell rule's resource is the raw command text and the match is
+  # over the WHOLE value, so a rule that does not begin with a
+  # wildcard is anchored AT THE COMMAND POSITION: `mpm *` matches a
+  # command that BEGINS with `mpm ` and does not match a command that
+  # merely mentions the word.
   - action: shell
     resource: "mpm"
     effect: deny
@@ -258,6 +258,12 @@ permissions:
     resource: "mpm-update *"
     effect: deny
   - action: shell
+    resource: "mpm-lint"
+    effect: deny
+  - action: shell
+    resource: "mpm-lint *"
+    effect: deny
+  - action: shell
     resource: "*/bin/mpm"
     effect: deny
   - action: shell
@@ -276,7 +282,99 @@ permissions:
     resource: "*/bin/mpm-update"
     effect: deny
   - action: shell
+    resource: "*/bin/mpm-lint"
+    effect: deny
+  - action: shell
     resource: "*/bin/mpm*"
+    effect: deny
+
+  # ── The CLI is closed wherever it is NAMED, not only at the
+  #    command position. ─────────────────────────────────────────────
+  #
+  # A command-position rule is defeated by a ONE-WORD PREFIX, and the
+  # prefixes are ordinary ones: `env`, `sh -c`, `timeout`, `xargs`,
+  # `nohup`, `nice`, `command`, `exec`. Measured on this host with
+  # only the command-position rules in force: `env mpm --version`
+  # RAN, `sh -c 'mpm --version'` RAN, and `env mpm remember "..."`
+  # wrote a memory into the substrate's live database. That is the
+  # incident this whole mechanism exists to prevent, so a rule that a
+  # prefix defeats is not a closure.
+  #
+  # The shell's matcher is a TEXT matcher over the whole command: a
+  # rule's literal has to appear in the command text, and the text is
+  # padded at the end, so a name followed by a SPACE or by the end of
+  # the command is caught wherever it sits.
+  #
+  # So the binaries are closed by their NAME, in three forms:
+  #
+  #   - the name followed by a space — `env mpm ...`, `sh -c 'mpm
+  #     ...'`, `grep -rn mpm .`, and the bare `mpm` at the end of a
+  #     command;
+  #   - the name followed by a closing parenthesis — `$(echo mpm)`,
+  #     where the name is the argument of a substitution;
+  #   - the name preceded by a quote — `"mpm" --version` and
+  #     `'mpm' --version`, where the name is a quoted word.
+  #
+  # The last two are shared by every binary because every one of them
+  # starts with `mpm`.
+  #
+  # The cost is a false denial: a command that merely MENTIONS the
+  # name followed by a space is refused too. That is accepted
+  # deliberately — the same trade the write-route rules make — because
+  # a stray file in a runtime root is a nuisance and a corrupted live
+  # database is a disaster. The workaround is to assemble the name at
+  # runtime rather than writing it literally.
+  #
+  # The list is machine-checked against the Makefile's own binary
+  # variables, so a NEW MPM binary cannot be built without this list
+  # being extended.
+  - action: shell
+    resource: "*mpm *"
+    effect: deny
+  - action: shell
+    resource: "*mpm-mcp *"
+    effect: deny
+  - action: shell
+    resource: "*mpm-scheduler *"
+    effect: deny
+  - action: shell
+    resource: "*mpm-critic *"
+    effect: deny
+  - action: shell
+    resource: "*mpm-telemetry *"
+    effect: deny
+  - action: shell
+    resource: "*mpm-update *"
+    effect: deny
+  - action: shell
+    resource: "*mpm-lint *"
+    effect: deny
+  - action: shell
+    resource: "*mpm)*"
+    effect: deny
+  - action: shell
+    resource: "*mpm-mcp)*"
+    effect: deny
+  - action: shell
+    resource: "*mpm-scheduler)*"
+    effect: deny
+  - action: shell
+    resource: "*mpm-critic)*"
+    effect: deny
+  - action: shell
+    resource: "*mpm-telemetry)*"
+    effect: deny
+  - action: shell
+    resource: "*mpm-update)*"
+    effect: deny
+  - action: shell
+    resource: "*mpm-lint)*"
+    effect: deny
+  - action: shell
+    resource: "*\"mpm*"
+    effect: deny
+  - action: shell
+    resource: "*'mpm*"
     effect: deny
 
   # ── A reviewer must not operate services or install anything. ──────
@@ -319,13 +417,34 @@ permissions:
   - action: shell
     resource: "make deploy*"
     effect: deny
+  # The `-C` form is closed too: `make -C <dir> install` runs the same
+  # recipe, and it does not begin with `make install`.
+  - action: shell
+    resource: "make -C * install*"
+    effect: deny
+  - action: shell
+    resource: "make -C * uninstall*"
+    effect: deny
+  - action: shell
+    resource: "make -C * deploy*"
+    effect: deny
 
   # ── The installers are closed at the command position. ─────────────
   #
   # `./install.sh` is the canonical "build plus systemd plus PATH
-  # symlinks" installer. A rule of the form `* install.sh*` needs a
-  # SPACE before the name and therefore misses `./install.sh`, so the
-  # rules are anchored at the command position instead.
+  # symlinks" installer, and `install.sh` is the bare form. A rule of
+  # the form `* install.sh*` needs a SPACE before the name and
+  # therefore misses `./install.sh`, so the rules are anchored at the
+  # command position instead.
+  #
+  # The harm is RUNNING the installer, not READING it: a review of this
+  # repository needs to read `install.sh`, and a rule of the form
+  # `*/install.sh` refuses that read as well — it matches any command
+  # that MENTIONS the path, `ls -la agent_installation/mpm-opencode/
+  # install.sh` included. So the path forms are closed at the command
+  # position (`./install.sh`) and through the interpreters that can
+  # run a script file (`sh`, `bash`), and a bare path in an argument
+  # is not closed at all.
   - action: shell
     resource: "install.sh"
     effect: deny
@@ -333,10 +452,22 @@ permissions:
     resource: "install.sh *"
     effect: deny
   - action: shell
-    resource: "*/install.sh"
+    resource: "./install.sh"
     effect: deny
   - action: shell
-    resource: "*/install.sh *"
+    resource: "./install.sh *"
+    effect: deny
+  - action: shell
+    resource: "sh install.sh *"
+    effect: deny
+  - action: shell
+    resource: "bash install.sh *"
+    effect: deny
+  - action: shell
+    resource: "sh */install.sh *"
+    effect: deny
+  - action: shell
+    resource: "bash */install.sh *"
     effect: deny
   - action: shell
     resource: "uninstall.sh"
@@ -345,10 +476,22 @@ permissions:
     resource: "uninstall.sh *"
     effect: deny
   - action: shell
-    resource: "*/uninstall.sh"
+    resource: "./uninstall.sh"
     effect: deny
   - action: shell
-    resource: "*/uninstall.sh *"
+    resource: "./uninstall.sh *"
+    effect: deny
+  - action: shell
+    resource: "sh uninstall.sh *"
+    effect: deny
+  - action: shell
+    resource: "bash uninstall.sh *"
+    effect: deny
+  - action: shell
+    resource: "sh */uninstall.sh *"
+    effect: deny
+  - action: shell
+    resource: "bash */uninstall.sh *"
     effect: deny
 
   # ── Nothing may be written into a live MPM workspace. ──────────────
@@ -412,14 +555,16 @@ tool list, or refused when you attempt them:
 - The MCP resource surface and the session and worktree management
   tools are closed: a resource can carry the substrate's bytes just as
   a tool can, and a reviewer does not move its own session.
-- You cannot EDIT anything, you cannot launch another agent, you cannot
-  load a capability and you cannot ask the operator a question.
+- You cannot EDIT anything, you cannot launch another agent and you
+  cannot ask the operator a question.
 - You cannot open a file inside a live MPM workspace with the read
   tool, and the external-directory boundary of a runtime root is closed.
-- The MPM binaries are refused at the command position: the CLI, the
-  MCP bridge, the scheduler, the critic, the telemetry sidecar and the
-  updater. So is `install.sh`, `uninstall.sh`, the make install target,
-  and the service-control commands.
+- The MPM binaries are refused wherever they are NAMED: the CLI, the
+  MCP bridge, the scheduler, the critic, the telemetry sidecar, the
+  updater and the linter. A name preceded by a prefix (`env mpm ...`)
+  or by a quote (`"mpm" ...`) is caught too. So is `install.sh`,
+  `uninstall.sh`, the make install target, and the service-control
+  commands.
 - `grep` and `glob` are NOT path-restricted by the permission layer -
   their resources are the pattern and the glob, not a path. Point them
   at the working tree you were given, and at nothing else.
@@ -431,27 +576,42 @@ authority. The permission rules above close the KNOWN routes to the
 production substrate; they are a barrier, not a jail, and a determined
 command can still find a way the rules do not name.
 
-Two things are NOT closed, and you must not rely on them being closed:
+THREE things are NOT closed, and you must not rely on them being closed:
 
 - The BROWSER is still available to you. Its tools are not governed by
   the permission rules, so a `file://` URL could open a file on this
   machine. The browser is inert unless a desktop browser is connected
   to this session, but if one IS connected, do not use it. A code
   review does not need a browser.
-- The shell's redirection targets are not intercepted either. The rules
-  above close the write routes into a runtime root by matching the
-  path, so a command that merely QUOTES such a path after a ">" is
-  refused as well. If a command of yours is refused for that reason,
-  assemble the path at runtime instead of writing it literally.
+- The CAPABILITY LOADER is still available to you. The host does not
+  gate the `skill` tool by any permission action, so loading a
+  capability is your own discipline. Do not load one: a capability is
+  text from elsewhere, and a review that has read instructions it did
+  not ask for is not a review you can trust.
+- The shell's matcher sees TEXT, and a command that ASSEMBLES the
+  binary's name at runtime is not caught: `$(echo mpm)`, a script
+  file, and a name split across an expression all run the binary.
+  The rules also close the write routes into a runtime root by
+  matching the path, so a command that merely QUOTES such a path
+  after a ">" is refused. If a command of yours is refused for either
+  reason, assemble the text at runtime instead of writing it
+  literally.
 
 So:
 
-- NEVER run an MPM command against the operator's workspace. If you
-  need the substrate at all, run it inside the SANDBOX: the launcher
-  `agent_installation/mpm-opencode/scripts/reviewer_sandbox.py` creates a
-  disposable HOME, TMPDIR and MPM_WORKSPACE and runs a command inside
-  them, so that anything it writes lands in the sandbox and not in the
-  operator's runtime root. The launcher prints the paths it created.
+- RUN EVERY COMMAND INSIDE THE SANDBOX. That is the default, not an
+  option: the launcher
+  `agent_installation/mpm-opencode/scripts/reviewer_sandbox.py` creates
+  a disposable HOME, TMPDIR and MPM_WORKSPACE and runs a command
+  inside them, so that anything it writes lands in the sandbox and not
+  in the operator's runtime root. Use it as
+  `reviewer_sandbox.py run -- <command>`; the launcher prints the
+  paths it created. The permission rules above are a barrier, not a
+  jail: a route they do not name is still a route, and the sandbox is
+  what makes such a route harmless.
+- NEVER run an MPM command against the operator's workspace, in any
+  spelling. If you need the substrate at all, run it inside the
+  sandbox.
 - NEVER record a finding into MPM. Put your findings in the FILESYSTEM
   SCRATCHPAD directory you were given, in a file named `review.md`. A
   scratchpad is a directory on disk; it is not the substrate.

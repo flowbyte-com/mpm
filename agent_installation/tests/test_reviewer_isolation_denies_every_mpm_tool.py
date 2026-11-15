@@ -108,6 +108,7 @@ MPM_BINARY_VARIABLES = (
     "CRITIC_BINARY",
     "TELEMETRY_BINARY",
     "UPDATE_BINARY",
+    "LINT_BINARY",
 )
 
 
@@ -163,6 +164,14 @@ def _permission_rules() -> list[dict[str, str]]:
         raise AssertionError("the reviewer agent's frontmatter is unterminated")
     frontmatter = text[4:end]
 
+    # The value is unescaped the way the host's YAML reader unescapes
+    # it: a double-quoted scalar's `\"` is a literal quote and its
+    # `\\` is a literal backslash. Without that, a rule whose literal
+    # contains a quote would be compared with the escape still on it,
+    # and the comparison would fail for the wrong reason.
+    def unescape(value: str) -> str:
+        return value.replace('\\"', '"').replace("\\\\", "\\")
+
     rules: list[dict[str, str]] = []
     current: dict[str, str] = {}
     for line in frontmatter.splitlines():
@@ -170,11 +179,11 @@ def _permission_rules() -> list[dict[str, str]]:
         if item:
             if current:
                 rules.append(current)
-            current = {item.group(1): item.group(2).strip('"')}
+            current = {item.group(1): unescape(item.group(2).strip('"'))}
             continue
         field = re.match(r"^\s+(\w+):\s*(.+?)\s*$", line)
         if field and current:
-            current[field.group(1)] = field.group(2).strip('"')
+            current[field.group(1)] = unescape(field.group(2).strip('"'))
     if current:
         rules.append(current)
     return rules
@@ -297,13 +306,34 @@ class ReviewerIsolationTest(unittest.TestCase):
         """A reviewer must not launch a further agent without the isolation."""
         self.assertIn("subagent", _denied_actions())
 
-    def test_the_reviewer_loads_no_capability(self) -> None:
-        """The `skill` action must be closed explicitly.
+    def test_the_definition_does_not_claim_the_capability_loader_is_closed(self) -> None:
+        """The definition must not claim a closure it does not have.
 
-        Without a rule of its own the action falls through to the
-        host's policy, which is not a property of this definition.
+        The host does not gate the `skill` tool by any permission
+        action: measured here with eighteen candidate action names and
+        with the V1-style `tools:` frontmatter, the loader stayed in
+        the reviewer's catalogue and a `skill` call ran.
+
+        A rule that does not work is not a closure, so there is no
+        rule - and a definition that still CLAIMS the closure is
+        making a false statement about a barrier. This test fails if
+        the claim comes back.
         """
-        self.assertIn("skill", _denied_actions())
+        text = REVIEWER.read_text(encoding="utf-8")
+        self.assertNotIn(
+            "action: skill\n",
+            text,
+            "the reviewer denies the `skill` action, but the host does not "
+            "gate the capability loader by it; the rule claims a closure "
+            "that does not exist",
+        )
+        body = text[text.find("\n---\n", 4):]
+        self.assertNotIn(
+            "you cannot load a capability",
+            body,
+            "the reviewer definition claims the capability loader is closed; "
+            "the host does not gate it, so the claim is false",
+        )
 
     def test_the_reviewer_asks_no_question(self) -> None:
         """The `question` action must be closed explicitly."""
@@ -350,6 +380,39 @@ class ReviewerIsolationTest(unittest.TestCase):
                 f"run {binary} by its installed path",
             )
 
+    def test_the_shell_cannot_reach_a_prefixed_binary(self) -> None:
+        """A command-position rule is defeated by a ONE-WORD PREFIX.
+
+        Measured on this host with only the command-position rules in
+        force: `env mpm --version` RAN, `sh -c 'mpm --version'` RAN,
+        and `env mpm remember "..."` wrote a memory into the
+        substrate's live database. So every binary is also refused
+        WHEREVER ITS NAME APPEARS, and the name is caught in the three
+        forms a shell command can put it in: followed by a space,
+        followed by a closing parenthesis, and preceded by a quote.
+
+        The first two are per binary; the third is shared, because
+        every binary's name starts with `mpm`.
+        """
+        denials = _shell_denials()
+        binaries = _mpm_binaries()
+        for binary in binaries:
+            for pattern in (f"*{binary} *", f"*{binary})*"):
+                self.assertIn(
+                    pattern,
+                    denials,
+                    f"the shell rule {pattern!r} is missing; a prefix or a "
+                    f"substitution would carry the reviewer past the "
+                    f"command-position rules and into the {binary} binary",
+                )
+        for pattern in ('*"mpm*', "*'mpm*"):
+            self.assertIn(
+                pattern,
+                denials,
+                f"the shell rule {pattern!r} is missing; a quoted binary name "
+                f"would carry the reviewer past the command-position rules",
+            )
+
     def test_the_shell_cannot_reach_the_installers(self) -> None:
         """The installers are refused at the command position.
 
@@ -357,20 +420,38 @@ class ReviewerIsolationTest(unittest.TestCase):
         symlinks" installer. A rule of the form `* install.sh*` needs a
         SPACE before the name, so it misses `./install.sh` - which is
         the form the installer is actually run in.
+
+        The harm is RUNNING the installer, not READING it: a rule of
+        the form `*/install.sh` also refuses `ls -la
+        agent_installation/mpm-opencode/install.sh`, which is a review
+        of this repository's own installer. So the path forms are
+        closed at the command position and through the interpreters
+        that can run a script file.
         """
         denials = _shell_denials()
         for pattern in (
             "install.sh",
             "install.sh *",
-            "*/install.sh",
-            "*/install.sh *",
+            "./install.sh",
+            "./install.sh *",
+            "sh install.sh *",
+            "bash install.sh *",
+            "sh */install.sh *",
+            "bash */install.sh *",
             "uninstall.sh",
             "uninstall.sh *",
-            "*/uninstall.sh",
-            "*/uninstall.sh *",
+            "./uninstall.sh",
+            "./uninstall.sh *",
+            "sh uninstall.sh *",
+            "bash uninstall.sh *",
+            "sh */uninstall.sh *",
+            "bash */uninstall.sh *",
             "make install*",
             "make uninstall*",
             "make deploy*",
+            "make -C * install*",
+            "make -C * uninstall*",
+            "make -C * deploy*",
         ):
             self.assertIn(
                 pattern,

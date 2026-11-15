@@ -882,3 +882,137 @@ func BenchmarkP6FollowupComponentManifestValidate(b *testing.B) {
 		}
 	}
 }
+
+// TestP6FollowupTheAccessorReportsAnUnknownBodyAsUnavailable pins the
+// difference between an EMPTY body and an UNKNOWN one.
+//
+// The body hash is the one hash the caller can check on its own: it
+// covers the exact bytes the response carries. The hash of an EMPTY
+// body is well defined — it is the hash of the empty byte string — so
+// an empty body is a body with a hash.
+//
+// An UNKNOWN body is a different thing: a document whose frontmatter
+// does not parse has no body to hash at all. Reporting the hash of
+// the empty string there would be a claim about a body that was never
+// found, and the origin would say "recomputed" about it. So the
+// origin is `unavailable` and the hash is empty.
+func TestP6FollowupTheAccessorReportsAnUnknownBodyAsUnavailable(t *testing.T) {
+	dm := p6fuDM(t)
+	imported := p6fuImport(t, dm, "unknownbody", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	// The stored projection is replaced with a document whose
+	// frontmatter does not parse — a state the importer cannot
+	// produce, and the one that makes the body unknown.
+	//
+	// The manifest's RECORDED projection hash is updated with it, so
+	// the fixture describes a package that is INTACT: the accessor
+	// fails closed on a projection that contradicts the manifest, and
+	// this test is about what it reports when the two AGREE and the
+	// document still has no body.
+	corrupted := "this is not a frontmatter document\n"
+	if _, err := dm.db.Exec(`UPDATE memories SET content = ? WHERE id = ?`,
+		corrupted, imported.SkillID); err != nil {
+		t.Fatalf("corrupt the stored projection: %v", err)
+	}
+	if _, err := dm.db.Exec(
+		`UPDATE skill_packages SET manifest = json_set(manifest, '$.projection_sha256', ?) WHERE skill_id = ?`,
+		p6fuDigest([]byte(corrupted)), imported.SkillID); err != nil {
+		t.Fatalf("update the manifest's recorded projection hash: %v", err)
+	}
+
+	provenance, err := dm.SkillPackageProvenance(context.Background(), imported.SkillID)
+	if err != nil {
+		t.Fatalf("read the provenance: %v", err)
+	}
+	if provenance == nil {
+		t.Fatalf("the provenance is absent for a packaged skill")
+	}
+	if provenance.HashOrigins.BodySHA256 != PackageHashOriginUnavailable {
+		t.Errorf("the body hash's origin is %q, want %q",
+			provenance.HashOrigins.BodySHA256, PackageHashOriginUnavailable)
+	}
+	if provenance.BodySHA256 != "" {
+		t.Errorf("the body hash is %q, want an empty string for an unknown body",
+			provenance.BodySHA256)
+	}
+}
+
+// TestP6FollowupTheAccessorHashesAnEmptyBody pins the other half.
+//
+// A document whose frontmatter parses but whose body is EMPTY is a
+// body with a hash: the hash of the empty byte string. The origin is
+// `recomputed`, because the hash really was recomputed over the bytes
+// the accessor returned.
+func TestP6FollowupTheAccessorHashesAnEmptyBody(t *testing.T) {
+	dm := p6fuDM(t)
+	imported := p6fuImport(t, dm, "emptybody", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	// The projection keeps its frontmatter and loses its body.
+	fm := "---\nname: emptybody\ndescription: a test skill\nwhen_to_use: when a test needs this exact skill\nversion: 1.0.0\n---\n"
+	if _, err := dm.db.Exec(`UPDATE memories SET content = ? WHERE id = ?`,
+		fm, imported.SkillID); err != nil {
+		t.Fatalf("rewrite the stored projection: %v", err)
+	}
+	// The manifest's recorded projection hash follows, so the package
+	// stays intact and the accessor reports on it.
+	if _, err := dm.db.Exec(
+		`UPDATE skill_packages SET manifest = json_set(manifest, '$.projection_sha256', ?) WHERE skill_id = ?`,
+		p6fuDigest([]byte(fm)), imported.SkillID); err != nil {
+		t.Fatalf("update the manifest's recorded projection hash: %v", err)
+	}
+
+	provenance, err := dm.SkillPackageProvenance(context.Background(), imported.SkillID)
+	if err != nil {
+		t.Fatalf("read the provenance: %v", err)
+	}
+	if provenance == nil {
+		t.Fatalf("the provenance is absent for a packaged skill")
+	}
+	if provenance.HashOrigins.BodySHA256 != PackageHashOriginRecomputed {
+		t.Errorf("the body hash's origin is %q, want %q",
+			provenance.HashOrigins.BodySHA256, PackageHashOriginRecomputed)
+	}
+	if provenance.BodySHA256 != p6fuDigest([]byte("")) {
+		t.Errorf("the body hash is %q, want the hash of the empty byte string (%q)",
+			provenance.BodySHA256, p6fuDigest([]byte("")))
+	}
+}
+
+// BenchmarkP6FollowupComponentManifestSelectInSnapshot measures the
+// manifest `SELECT` issued INSIDE a snapshot.
+//
+// The same statement on the pool is
+// `BenchmarkP6FollowupComponentManifestSelect`. The difference between
+// the two is the per-statement cost a transaction adds — and it is the
+// part of the combined read's overhead that the other three components
+// do not account for.
+//
+// The statement is the SAME one the combined read issues, so the
+// comparison is like for like.
+func BenchmarkP6FollowupComponentManifestSelectInSnapshot(b *testing.B) {
+	p6fuWorkspace(b)
+	dm := p6fuDM(b)
+	imported := p6fuImport(b, dm, "bench", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		err := dm.withPackageReadSnapshot(ctx, func(tx *sql.Tx) error {
+			var manifestJSON string
+			if err := tx.QueryRowContext(ctx, packageManifestQuery, imported.SkillID).
+				Scan(&manifestJSON); err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			b.Fatalf("read the manifest in the snapshot: %v", err)
+		}
+	}
+}
