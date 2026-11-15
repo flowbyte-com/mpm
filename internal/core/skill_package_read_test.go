@@ -33,6 +33,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -264,6 +267,37 @@ func TestP6VerifyReportsACorruptedManifestIdentity(t *testing.T) {
 	if !p6HasFailure(report, PackageVerifyCheckManifestIdentity, "") {
 		t.Errorf("the report does not name the corrupted format: %+v", report.Failures)
 	}
+
+	// ── A version SOURCE that disagrees with the manifest. ──
+	//
+	// The version source is how the effective version was arrived at: the
+	// manifest's `version_override.reason` and the row's `version_source`
+	// are the same record. A row that disagrees with its own manifest
+	// about it is damaged in exactly the way the effective version is.
+	if _, err := dm.db.Exec(`UPDATE skill_packages SET format = ? WHERE skill_id = ?`,
+		PackageFormatV1, result.SkillID); err != nil {
+		t.Fatalf("restore the format: %v", err)
+	}
+	if _, err := dm.db.Exec(`UPDATE skill_packages SET version_source = ? WHERE skill_id = ?`,
+		"declared", result.SkillID); err != nil {
+		t.Fatalf("corrupt the version source: %v", err)
+	}
+	report, err = dm.PackageVerify(context.Background(), sel)
+	if err != nil {
+		t.Fatalf("PackageVerify: %v", err)
+	}
+	if report.Verified {
+		t.Errorf("a package with a corrupted version source reported itself verified")
+	}
+	if !p6HasFailure(report, PackageVerifyCheckManifestIdentity, "") {
+		t.Errorf("the report does not name the corrupted version source: %+v", report.Failures)
+	}
+	// And the ordinary reads fail closed on it, exactly as they do on the
+	// effective version.
+	if _, err := dm.PackageFiles(context.Background(), sel); p6ReadReason(err) != PackageReadReasonIntegrityFailure {
+		t.Errorf("the listing of a package with a corrupted version source reported %q, want %q",
+			p6ReadReason(err), PackageReadReasonIntegrityFailure)
+	}
 }
 
 // TestP6TheReaderNeverWrites pins that the reader issues no write.
@@ -272,35 +306,124 @@ func TestP6VerifyReportsACorruptedManifestIdentity(t *testing.T) {
 // `sql.TxOptions{ReadOnly}` and issues a plain `BEGIN`, so the snapshot's
 // read-only nature rests on DISCIPLINE. This test makes the discipline
 // structural: the reader's source contains no `Exec` call at all, and
-// every statement it owns is a `SELECT`.
+// EVERY statement it issues is a `SELECT`.
 //
 // It is a STATIC check on purpose. A dynamic one could only prove that
 // the paths a test happens to exercise did not write; a source check
 // proves that there is no statement they could have written.
+//
+// The statement check is an AST walk, not a hand-maintained list: it
+// finds EVERY call that issues a query and checks the SQL that call
+// carries. A list would go stale the moment a statement were added, and
+// a write smuggled through `QueryContext` would evade it.
 func TestP6TheReaderNeverWrites(t *testing.T) {
-	for _, file := range []string{"skill_package_read.go", "skill_package_read_errors.go"} {
-		src, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatalf("read %s: %v", file, err)
+	const sourceFile = "skill_package_read.go"
+
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, sourceFile, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", sourceFile, err)
+	}
+
+	// The SQL the reader's own constants declare.
+	consts := map[string]string{}
+	for _, decl := range parsed.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
 		}
-		for _, forbidden := range []string{".Exec(", ".ExecContext("} {
-			if strings.Contains(string(src), forbidden) {
-				t.Errorf("%s contains %q: the reader must issue no write", file, forbidden)
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				consts[name.Name] = strings.Trim(lit.Value, "`")
 			}
 		}
 	}
 
-	// Every statement the reader owns is a SELECT.
-	for name, query := range map[string]string{
-		"packageRowQuery":        packageRowQuery,
-		"packageFilesQuery":      packageFilesQuery,
-		"packageFileQuery":       packageFileQuery,
-		"packageBlobQuery":       packageBlobQuery,
-		"packageProjectionQuery": packageProjectionQuery,
-		"packageProvenanceQuery": packageProvenanceQuery,
-	} {
-		if !strings.HasPrefix(strings.TrimSpace(query), "SELECT") {
-			t.Errorf("the query %s does not begin with SELECT: %q", name, query)
+	queries := 0
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "Exec", "ExecContext":
+			t.Errorf("%s issues a write through %s at line %d: the reader must never write",
+				sourceFile, sel.Sel.Name, fset.Position(call.Pos()).Line)
+			return true
+		case "Query", "QueryRow", "QueryContext", "QueryRowContext":
+		default:
+			return true
+		}
+		queries++
+		// The context variants take the context first; the plain ones do
+		// not. The SQL is the first argument after the context.
+		sqlArg := 0
+		switch sel.Sel.Name {
+		case "QueryContext", "QueryRowContext":
+			sqlArg = 1
+		}
+		if len(call.Args) <= sqlArg {
+			t.Errorf("%s issues a query with no SQL at line %d", sourceFile, fset.Position(call.Pos()).Line)
+			return true
+		}
+		// The SQL is either a literal or one of the reader's own
+		// constants; both are resolved here, so a statement smuggled in
+		// through either route is caught.
+		var sql string
+		switch arg := call.Args[sqlArg].(type) {
+		case *ast.BasicLit:
+			if arg.Kind != token.STRING {
+				t.Errorf("%s issues a query whose SQL is not a string at line %d",
+					sourceFile, fset.Position(call.Pos()).Line)
+				return true
+			}
+			sql = strings.Trim(arg.Value, "`")
+		case *ast.Ident:
+			resolved, ok := consts[arg.Name]
+			if !ok {
+				t.Errorf("%s issues a query whose SQL is %s, which is not one of its own constants at line %d",
+					sourceFile, arg.Name, fset.Position(call.Pos()).Line)
+				return true
+			}
+			sql = resolved
+		default:
+			t.Errorf("%s issues a query whose SQL is neither a literal nor a constant at line %d",
+				sourceFile, fset.Position(call.Pos()).Line)
+			return true
+		}
+		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sql)), "SELECT") {
+			t.Errorf("%s issues a non-SELECT statement at line %d: %q",
+				sourceFile, fset.Position(call.Pos()).Line, sql)
+		}
+		return true
+	})
+	if queries == 0 {
+		t.Fatalf("%s issues no query at all: the static guard found nothing to check", sourceFile)
+	}
+
+	// Every SQL constant the reader declares is a SELECT too — a constant
+	// that no call site uses yet is still a statement the reader owns.
+	for name, sql := range consts {
+		if !strings.Contains(strings.ToUpper(sql), "SELECT") {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sql)), "SELECT") {
+			t.Errorf("the SQL constant %s is not a SELECT: %q", name, sql)
 		}
 	}
 }

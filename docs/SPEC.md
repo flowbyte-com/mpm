@@ -2429,7 +2429,7 @@ The checks, each with a stable name:
 | check | what it proves |
 |---|---|
 | `manifest_package_hash` | the canonical manifest matches the recorded package hash |
-| `manifest_identity` | the manifest and the package row describe the same skill, version, **declared version**, **format** and entrypoint |
+| `manifest_identity` | the manifest and the package row describe the same name, effective version, declared version, format, entrypoint, entrypoint hash, and version source |
 | `file_metadata_matches_manifest` | the file rows match the manifest |
 | `blob_exists` | every referenced blob exists |
 | `blob_content_hash` | every stored blob's content matches its recorded SHA-256 |
@@ -2502,6 +2502,12 @@ Corruption is **never** reported as a missing file, and there is no fallback to 
 
 **`verify` checks more than the design guarantees, and says so.** The design requires that a corrupt package is never reported as verified. The reader adds the checks that make that claim **demonstrable** — the per-blob content hash, the per-blob size, the manifest-to-rows reconciliation and the projection hash — and each is reported under its own stable name, so a caller can tell **which** guarantee failed rather than only that something did.
 
+**The provenance's `version_override` comes from the PACKAGE ROW, and it is always present.** The row's `declared_version`, `version` and `version_source` are the same record the manifest's `version_override` carries — the importer writes both from the same plan — so the accessor reads the row and does not parse the manifest. For an importer-written package the two are identical.
+
+**That is the decision of record for the disagreement case: the ROW wins.** If a row and its manifest ever disagree about the version provenance, the provenance reports the **row's** values and `verify` reports the disagreement as a `manifest_identity` failure. The row is what the package IS, in the store the reader reads; the manifest is what the package CLAIMS about itself. A reader that silently preferred the claim would be reporting the manifest's story rather than the package's state.
+
+Because the row's `version` is `NOT NULL`, the object is **always** present for a packaged skill — including when the stored manifest does not parse. That is a change from the first commit, where the override was recovered from the manifest and was therefore absent when the manifest was unreadable; it is disclosed here because it changes the `read` response's shape for a damaged package.
+
 **The provenance accessor is tolerant where the rest of the reader is strict.** `read` must keep returning the entrypoint's projection even when the package's manifest is broken — that is what `verify` is for. What the accessor never does is claim a scan that was not recorded: a missing entrypoint file row reports **no** scan.
 
 **The wire shape is P8's.** The internal response types carry no JSON tags, deliberately. The design pins the `files` and `read_file` wire shapes (§8.5), but it also requires that a binary payload's JSON encoding be **explicit and lossless** — and `encoding/json`'s default handling of a `[]byte` is base64, which would silently decide that question for every file, text ones included. The reader therefore stays transport-agnostic and names the encoding explicitly in its `Encoding` field; P8 writes the mapper against §8.5 and honours that field. The one exception is the file record itself, which is P2's `PackageManifestFile` — already carrying §5.5's own tags, so P8's mapper for it is empty.
@@ -2512,7 +2518,11 @@ Corruption is **never** reported as a missing file, and there is no fallback to 
 
 **The read operations are not on the `CoreDB` interface.** Only the provenance accessor is, because the MCP `read` action needs it and the tool layer holds a `CoreDB`. `PackageFiles`, `PackageReadFile` and `PackageVerify` are methods on the concrete `*DatabaseManager`, which is where P8 will reach them — with the interface widening as part of P8's surface, not P6's.
 
-**The read snapshot's read-only nature rests on discipline, and the discipline is pinned.** The transaction is opened with `sql.TxOptions{ReadOnly: true}`, but the SQLite driver ignores that option and issues a plain (deferred) `BEGIN`. The snapshot therefore takes a shared lock and no write lock, and it is read-only because the reader issues no write: the reader's source contains no `Exec` call, every statement it owns is a `SELECT` constant, and `TestP6TheReaderNeverWrites` pins both facts on the source. The behaviour is pinned too — the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read.
+**The read snapshot's read-only nature rests on discipline, and the discipline is pinned.** The transaction is opened with `sql.TxOptions{ReadOnly: true}`, but the SQLite driver ignores that option and issues a plain (deferred) `BEGIN`. The snapshot therefore takes a shared lock and no write lock, and it is read-only because the reader issues no write.
+
+That is pinned by an **AST walk** over the reader's own source, not by a hand-maintained list: the walk finds **every** call that issues a query and checks the SQL that call carries — whether the call is `Exec`, `ExecContext`, `Query`, `QueryRow`, `QueryContext` or `QueryRowContext`, and whether the SQL is a literal or one of the reader's own constants. Both evasion routes are closed: a write through `Exec` is refused by name, and a write smuggled through `QueryContext` is refused because its SQL is not a `SELECT`. (Both routes have been proven by injection: each makes the guard fail, and the guard passes again once the injection is removed.)
+
+The behaviour is pinned too — the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read.
 
 #### What P6 does **not** add
 

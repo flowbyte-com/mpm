@@ -1361,6 +1361,11 @@ func verifyPackageInTx(ctx context.Context, tx *sql.Tx, skillID string) (*Packag
 				"the manifest records the effective version "+parsed.VersionOverride.Effective+
 					", the package row records "+row.Version)
 		}
+		if parsed.VersionOverride.Reason != row.VersionSource {
+			fail(PackageVerifyCheckManifestIdentity, "",
+				"the manifest records the version source "+parsed.VersionOverride.Reason+
+					", the package row records "+row.VersionSource)
+		}
 	}
 
 	// ── The file rows. ──────────────────────────────────────────────────
