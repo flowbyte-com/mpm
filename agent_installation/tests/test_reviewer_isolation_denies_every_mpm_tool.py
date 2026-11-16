@@ -77,6 +77,7 @@ import re
 import re
 import unittest
 from pathlib import Path
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 REGISTRY = REPO_ROOT / "internal" / "core" / "tools" / "registry_list.go"
@@ -324,6 +325,11 @@ def _load_installer():
 # group - `( )` or `{ }`; an unclosed substitution - `$(` or `<(`; and
 # a bare function definition - `f()`.
 #
+# TRAILING TEXT after a closed compound construct is refused too: an
+# `if ... fi`, a brace group, a subshell and a function body that are
+# followed by anything but a separator are constructs the host cannot
+# analyse (`invalid-structure`).
+#
 # MEASURED twice and independently: the review's own round and a
 # dedicated measurement round - thirteen malformed forms and their
 # thirteen well-formed counterparts, three isolated repeats every one,
@@ -461,37 +467,80 @@ def _matcher_split_branches(body: str):
     return branches
 
 
-def _matcher_empty_condition(command: str) -> bool:
-    """Does this command carry an EMPTY condition?
+def _matcher_empty_condition(segments, position: int, keyword: str) -> bool:
+    """Is the CONDITION of this segment empty?
 
     MEASURED: `if ; then echo hi; fi`, `while ; do echo hi; done` and
     `until ; do echo hi; done` are all REFUSED with "compound-command",
     and none of them names a binary - so the refusal is about the
     CONSTRUCT.
 
-    The condition is empty when the keyword is followed by nothing but
-    a separator.  MEASURED: `if true; then echo hi; fi`,
-    `while false; do echo hi; done` and `until false; do echo hi; done`
-    are ALLOWED, and so is a condition on the next LINE
-    (`if` and then `true;`), because the text between the keyword and
-    the separator is not empty.
+    The keyword has to BE the condition's keyword, not an argument:
+    MEASURED, `echo if; echo hi` is ALLOWED - so the keyword has to be
+    the first word of a segment, and the next segment has to open the
+    condition's BODY.
+
+    A condition that is only a COMMENT is empty, because the comment
+    is stripped before the command is parsed: MEASURED, `if` and then
+    a comment and then `then echo hi; fi` is REFUSED.
+
+    MEASURED: `if true; then echo hi; fi`, `while false; do echo hi;
+    done` and `until false; do echo hi; done` are ALLOWED, and so is a
+    condition on the next LINE (`if` and then `true;`), because the
+    text between the keyword and the separator is not empty.
     """
-    return bool(re.search(r"(?<![A-Za-z0-9_=])(?:if|while|until)\s*;", command))
+    if keyword == "if":
+        if _matcher_next_keyword(segments, position) != "then":
+            return False
+    else:
+        if _matcher_next_keyword(segments, position) != "do":
+            return False
+    return True
 
 
-def _matcher_empty_group(segment: str) -> bool:
-    """Is this an EMPTY group - a subshell or a brace group with no body?
+_MATCHER_EMPTY_GROUP = re.compile(r"(?<![A-Za-z0-9_$])\(\s+\)|(?<!\$)\{\s+\}")
+
+
+def _matcher_empty_group(command: str) -> bool:
+    """Does this command carry an EMPTY group?
 
     MEASURED: `( )` and `{ }` are both REFUSED with "invalid-structure",
     and neither names a binary at all - so the refusal is about the
     CONSTRUCT.
 
-    The well-formed forms are ALLOWED: `( echo hi )` and `{ echo hi; }`.
+    The group is empty WHEREVER it appears: MEASURED, `{ { } }` and a
+    brace group whose braces are on separate LINES are REFUSED too.
+
+    The braces have to CARRY WHITESPACE: MEASURED, `{ }` is REFUSED
+    and `{}` is ALLOWED - because a reserved word is followed by a
+    separator, so `{}` is an ordinary word and not a group at all.
+
+    A function definition's PARAMETER LIST is not a group: `f()` is
+    refused for a different reason - it is a bare function definition
+    with no body - and `f() { echo hi; }` is ALLOWED.
+
+    An empty COMMAND SUBSTITUTION is not a group either: MEASURED,
+    `echo $( )` is ALLOWED.
+
+    A PARAMETER EXPANSION is not a group either: `${}` is an ordinary
+    parameter expansion, and `${x}` does not match the pattern at all.
     """
-    text = segment.strip()
-    if re.match(r"\(\s*\)$", text):
-        return True
-    return bool(re.match(r"\{\s*\}$", text))
+    return bool(_MATCHER_EMPTY_GROUP.search(command))
+
+
+def _matcher_has_body(segments, position: int) -> bool:
+    """Does the segment at `position` open a BODY?
+
+    A function definition's body is a brace group, and it may sit on
+    the next LINE: MEASURED, `f()` and then `{ echo hi; }` is ALLOWED,
+    while `f()` on its own is REFUSED.
+    """
+    for text, _ in segments[position + 1 :]:
+        stripped = text.strip()
+        if not stripped:
+            continue
+        return stripped.startswith("{")
+    return False
 
 
 def _matcher_bare_function(segment: str) -> bool:
@@ -556,6 +605,54 @@ def _matcher_unclosed_substitution(segment: str) -> bool:
             index = end + 1
             continue
         index += 1
+    return False
+
+
+def _matcher_pattern_text(part: str) -> str:
+    """The text of one `case` PATTERN, with its quotes removed.
+
+    A pattern that is QUOTED and EMPTY is still empty.  MEASURED:
+    `case x in "" ) echo hi;; esac` is REFUSED with "invalid-structure",
+    and it names no binary at all.
+    """
+    text = part.strip()
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
+
+
+def _matcher_next_keyword(segments, position: int) -> str:
+    """The first word of the next segment that carries one."""
+    for text, _ in segments[position + 1 :]:
+        words = text.split()
+        if words:
+            return words[0]
+    return ""
+
+
+def _matcher_subshell_trailing(segment: str) -> bool:
+    """Does a SUBSHELL carry TRAILING TEXT after it?
+
+    MEASURED: `( echo hi ) extra` is REFUSED with "invalid-structure",
+    and it names no binary at all - so the refusal is about the
+    CONSTRUCT.  `( echo hi )` is ALLOWED.
+
+    Only a BARE WORD after the group is trailing text: another
+    construct after it - `(echo hi) (echo bye)` - is a second command,
+    and a shell accepts that.
+    """
+    text = segment.strip()
+    if not text.startswith("("):
+        return False
+    depth = 0
+    for index, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                rest = text[index + 1 :].strip()
+                return bool(rest) and (rest[0].isalnum() or rest[0] in "_")
     return False
 
 
@@ -654,11 +751,16 @@ def _matcher_extract_cases(command: str):
             index += 1
             continue
         patterns = command[in_at + 4 : close]
-        if any(not part.strip() for part in patterns.split("|")):
-            # An EMPTY PATTERN LIST is a construct the host cannot
-            # analyse.  MEASURED: `case x in ) echo hi;; esac` and
-            # `case x in |) echo hi;; esac` are REFUSED with
-            # "compound-command", and neither names a binary.
+        first_pattern = _matcher_pattern_text(patterns.split("|")[0])
+        if not first_pattern:
+            # The FIRST pattern has to be non-empty.  MEASURED:
+            # `case x in ) echo hi;; esac`, `case x in |) echo hi;; esac`,
+            # `case x in |y) echo hi;; esac` and `case x in "" ) echo hi;; esac`
+            # are all REFUSED, and none of them names a binary.
+            #
+            # A LATER pattern may be empty: MEASURED,
+            # `case x in y|) echo hi;; esac` and `case x in y|'') echo hi;; esac`
+            # are ALLOWED.
             opaque.append(command[index : close + 1])
             index = close + 1
             continue
@@ -711,6 +813,40 @@ def _matcher_has_context(text: str) -> bool:
         re.search(r"(?<!\$)\(\(", text)
     )
 
+
+# The RECORDED DIVERGENCES: the forms the host ALLOWS and the model
+# REFUSES.  Every one of them is in the SAFE direction - the model
+# refuses more than the host - and every one of them was MEASURED.
+#
+#     x=$(( mpm ))              an assignment's value is matched differently
+#     coproc mpm { echo hi; }   a coproc's name is not a command
+#     eval                      the host allows a bare `eval`
+#     eval "hello world"        the host allows this one too
+#     eval [[ x == y ]]         and this one as well
+#
+# The list IS the count the documents publish, and the SPEC is
+# asserted to publish THIS number - so a new divergence has to be
+# added here, and the published number has to follow it.
+_DIVERGENCES = [
+    "x=$(( mpm ))",
+    "coproc mpm { echo hi; }",
+    "eval",
+    'eval "hello world"',
+    "eval [[ x == y ]]",
+]
+
+_NUMBER_WORDS = {
+    1: "one",
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+}
 
 _MATCHER_COMMAND = "command"
 _MATCHER_HEADER = "header"
@@ -1009,7 +1145,7 @@ def _matcher_bodies(segments):
     """
     out = []
     depth = 0
-    for text, kind in segments:
+    for position, (text, kind) in enumerate(segments):
         words = text.split()
         keyword = words[0] if words else ""
         if keyword in _MATCHER_CONTINUATION_KEYWORDS:
@@ -1023,8 +1159,22 @@ def _matcher_bodies(segments):
                 continue
             depth -= 1
         elif keyword == "if":
+            # The CONDITION of an `if` may not be EMPTY.
+            if (
+                not text.strip()[len("if") :].strip()
+                and _matcher_empty_condition(segments, position, "if")
+            ):
+                out.append((text, _MATCHER_OPAQUE))
+                continue
             depth += 1
         if keyword not in ("for", "while", "until", "select") or "do" not in words:
+            # A bare FUNCTION DEFINITION with no body is a construct
+            # the host cannot analyse.  MEASURED: `f()` is REFUSED with
+            # "dynamic-execution".  A definition whose BODY follows is
+            # fine: MEASURED, `f()` and then `{ echo hi; }` is ALLOWED.
+            if _matcher_bare_function(text) and not _matcher_has_body(segments, position):
+                out.append((text, _MATCHER_OPAQUE))
+                continue
             out.append((text, kind))
             continue
         cut = words.index("do")
@@ -1043,6 +1193,13 @@ def _matcher_bodies(segments):
                 # A COMMAND LIST: matched, command by command.
                 for part in _matcher_segments(header, marked=True):
                     out.append(part)
+        elif keyword in ("while", "until"):
+            # The CONDITION of a `while`/`until` may not be EMPTY.
+            # MEASURED: `while ; do echo hi; done` and
+            # `until ; do echo hi; done` are REFUSED with
+            # "compound-command".
+            out.append((text, _MATCHER_OPAQUE))
+            continue
         if body:
             for part in _matcher_segments(body, marked=True):
                 out.append(part)
@@ -1375,11 +1532,21 @@ def _matcher_unanalysable(segment: str) -> bool:
         return True
     if _matcher_broken_context(segment):
         return True
-    if _matcher_empty_group(segment):
-        return True
-    if _matcher_bare_function(segment):
-        return True
     if _matcher_unclosed_substitution(segment):
+        return True
+    # Only a SEPARATOR may follow a closed compound construct.
+    # MEASURED: `if true; then echo hi; fi extra`, `{ echo hi; } extra`,
+    # `( echo hi ) extra` and `f() { echo hi; } extra` are all REFUSED
+    # with "invalid-structure", and none of them names a binary.
+    stripped = segment.strip()
+    words = stripped.split()
+    if words:
+        first = words[0]
+        if (first in _MATCHER_CLOSING_KEYWORDS or first == "}") and stripped[
+            len(first) :
+        ].strip():
+            return True
+    if _matcher_subshell_trailing(segment):
         return True
     # A `<(` is a PROCESS SUBSTITUTION, not a refusal by itself: the
     # scanner parses its content as a command, so the names inside are
@@ -1567,10 +1734,9 @@ def _matcher_candidates(segment: str, kind: str = _MATCHER_COMMAND, depth: int =
 
 def _matcher_denies(command: str, rules) -> bool:
     """Would the host deny this command, given these (resource, effect)?"""
-    if _matcher_empty_condition(command):
-        # An `if`/`while`/`until` with an EMPTY condition is a
-        # construct the host cannot analyse.  MEASURED: `if ; then
-        # echo hi; fi` is REFUSED with "compound-command".
+    if _matcher_empty_group(command):
+        # An EMPTY GROUP is a construct the host cannot analyse.
+        # MEASURED: `{ }` and `( )` are REFUSED with "invalid-structure".
         return True
     for segment, kind in _matcher_segments(command):
         if kind == _MATCHER_OPAQUE:
@@ -1905,6 +2071,33 @@ class ReviewerIsolationTest(unittest.TestCase):
             "$(",
             "<(",
             "f()",
+            # TRAILING TEXT after a closed compound construct is a
+            # construct the host cannot analyse - and none of these
+            # names a binary
+            "if true; then echo hi; fi extra",
+            "{ echo hi; } extra",
+            "( echo hi ) extra",
+            "f() { echo hi; } extra",
+            # a `case` whose pattern list holds a QUOTED EMPTY pattern
+            'case x in "" ) echo hi;; esac',
+            # an empty group NESTED, or spread over two LINES
+            "{ { } }",
+            "{\n}",
+            # an `if` whose CONDITION is only a COMMENT
+            "if # comment\nthen echo hi; fi",
+            # the FIRST pattern of a `case` has to be non-empty
+            "case x in |y) echo hi;; esac",
+            "case x in ''|y) echo hi;; esac",
+            "case x in ''|'') echo hi;; esac",
+            # a construct DIRECTLY AFTER a closed compound construct is
+            # refused as well - only a separator may follow one
+            "(echo hi) (echo bye)",
+            "(echo hi) echo bye",
+            "if true; then echo hi; fi (echo bye)",
+            "{ echo hi; } (echo bye)",
+            "case x in y) echo hi;; esac (echo bye)",
+            "while true; do echo hi; done extra",
+            "for i in 1; do echo hi; done extra",
             # a CONTINUATION keyword with nothing to continue is a
             # construct the host cannot analyse - and the form that
             # names NO binary is refused the same way
@@ -1971,6 +2164,34 @@ class ReviewerIsolationTest(unittest.TestCase):
             "<(echo hi)",
             "for ((i=0;i<1;i++)); do echo hi; done",
             "select ((i=0;i<1;i++)); do echo hi; done",
+            # the WELL-FORMED form of each trailing-text row: the
+            # construct CLOSED, and nothing after it
+            "if true; then echo hi; fi",
+            "{ echo hi; }",
+            "( echo hi )",
+            "f() { echo hi; }",
+            # a pattern list that holds a NON-EMPTY pattern is fine,
+            # even when one of its patterns is empty
+            "case x in y|) echo hi;; esac",
+            # a keyword that is an ARGUMENT is not a condition
+            "echo if; echo hi",
+            "echo while; echo hi",
+            "echo until; echo hi",
+            # a function definition whose BODY follows is fine
+            "f()\n{ echo hi; }",
+            # a LATER pattern of a `case` may be empty
+            "case x in y|'') echo hi;; esac",
+            "case x in y|'') echo hi;; esac",
+            # an empty command substitution is not an empty group, and
+            # neither is a parameter expansion or a `{}` word
+            "echo $( )",
+            "echo ${}",
+            "echo {}",
+            # a SEPARATOR after a closed compound construct is fine
+            "case x in y) echo hi;; esac; echo bye",
+            "if true; then echo hi; fi; echo bye",
+            "(echo hi); (echo bye)",
+            "case x in y) echo hi;; esac; (echo bye)",
             # a search for the name, unquoted, is not an invocation
             "grep -rn mpm_memory .",
             'echo "the mpm_memory tool"',
@@ -2098,6 +2319,48 @@ class ReviewerIsolationTest(unittest.TestCase):
                 f"is allowed; a residual that has been closed is a claim that "
                 f"has gone stale",
             )
+
+    def test_the_recorded_divergences_are_pinned(self) -> None:
+        """The RECORDED divergences must be refused, and their COUNT pinned.
+
+        The documents publish how many commands the host allows and the
+        model refuses.  That number is a claim, and a claim that is
+        not checked is a number that drifts - so the ledger lives HERE,
+        every entry is asserted to be refused in the RECORDED direction
+        (the host allows it, so the model refusing it is the safe
+        side), and the SPEC is asserted to publish the length of this
+        ledger.
+
+        A NEW divergence therefore has two places to go: this ledger,
+        and the corpus - and the documents follow both.
+        """
+        rules = _shell_rules()
+        self.assertGreater(
+            len(_DIVERGENCES), 0, "the divergence ledger is empty, so the "
+            "published count is vacuous",
+        )
+        for command in _DIVERGENCES:
+            self.assertTrue(
+                _matcher_denies(command, rules),
+                f"the model no longer refuses {command!r}, so it is no longer "
+                f"a divergence; the recorded direction has changed and the "
+                f"documents have to be updated",
+            )
+        spec = (
+            Path(__file__).resolve().parents[2] / "docs" / "SPEC.md"
+        ).read_text(encoding="utf-8")
+        word = _NUMBER_WORDS.get(len(_DIVERGENCES))
+        self.assertIsNotNone(
+            word,
+            f"the ledger holds {len(_DIVERGENCES)} divergences and there is no "
+            f"number word for that in the guard",
+        )
+        self.assertIn(
+            f"it refuses {word} commands the host allows",
+            spec,
+            f"docs/SPEC.md does not publish {word} recorded divergences; the "
+            f"guard's ledger holds {len(_DIVERGENCES)}",
+        )
 
     def test_the_definition_does_not_claim_the_capability_loader_is_closed(self) -> None:
         """The definition must not claim a closure it does not have.
