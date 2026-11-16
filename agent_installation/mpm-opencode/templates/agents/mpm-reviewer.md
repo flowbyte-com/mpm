@@ -303,7 +303,11 @@ permissions:
   # The shell's matcher is a TEXT matcher, so a rule's literal has to
   # appear in the command text. What matters is WHERE it appears.
   #
-  # The binaries are closed in SEVEN shapes, each measured as refused:
+  # The binaries are closed in SEVEN forms PER BINARY, plus THREE
+  # forms SHARED by every binary - the same decomposition the SPEC
+  # and both READMEs use. Every one of them is measured as refused.
+  #
+  # The SEVEN forms per binary:
   #
   #   1. the name at the COMMAND POSITION — `mpm ...` (the rules
   #      above);
@@ -311,27 +315,33 @@ permissions:
   #      `grep -rn mpm .`, the bare `mpm` at the end of a command,
   #      and `$(echo mpm)` — the rule is `* mpm *`, so a SPACE
   #      precedes the name;
-  #   3. the name separated from its neighbours by a TAB —
-  #      `mpm<TAB>--version`, `env mpm<TAB>--version`,
-  #      `echo<TAB>mpm` — the rules are `*mpm\t*` (a tab AFTER the
-  #      name) and `*\tmpm*` (a tab BEFORE it, shared by every
-  #      binary);
+  #   3. the name FOLLOWED BY A TAB — `mpm<TAB>--version`,
+  #      `env mpm<TAB>--version` — the rule is `*mpm\t*`;
   #   4. the name as the LAST SEGMENT OF A PATH — `go run ./cmd/mpm`,
   #      `go run ./cmd/mpm remember "..."`, `go build -o /tmp/x
-  #      ./cmd/mpm`, `/home/v/.local/bin/mpm` — the rule is
-  #      `*/mpm *`;
+  #      ./cmd/mpm` — the rule is `*/mpm *`;
   #   5. the name as the last segment of a path with a TRAILING SLASH
   #      — `go run ./cmd/mpm/` — the rule is `*/mpm/`;
   #   6. the name inside a GO PACKAGE PATTERN — `go run ./cmd/mpm/...`,
   #      `go list ./cmd/mpm/...`, and the OTHER spellings of the same
   #      pattern (`go run ./cmd/mpm/./...`, `go run ./cmd/mpm//...`,
   #      `go run mpm/...`) — the rule is `*mpm/*...*`;
-  #   7. the name inside a QUOTE — `"mpm" --version`,
-  #      `'mpm' --version` and `sh -c 'mpm --version'` — the rules
-  #      are `*"mpm*` and `*'mpm*`; and the name inside an ANSI-C
-  #      QUOTED string — `$'\x6dpm' --version` is the binary, because
-  #      the shell DECODES the escape before the matcher sees the
-  #      text — so the opener `$'` is denied outright.
+  #   7. the INSTALLED PATH — `/home/v/.local/bin/mpm` — the rule is
+  #      `*/bin/mpm`.
+  #
+  # The THREE forms shared by every binary:
+  #
+  #   A. a TAB BEFORE the name — `echo<TAB>mpm` — the rule is
+  #      `*\tmpm*`; it is shared because every binary's name starts
+  #      with `mpm`;
+  #   B. the QUOTED form — `"mpm" --version`, `'mpm' --version` and
+  #      `sh -c 'mpm --version'` — the rules are `*"mpm*` and
+  #      `*'mpm*`; it is shared for the same reason;
+  #   C. the ANSI-C QUOTING OPENER — `$'\x6dpm' --version` is the
+  #      binary, because the shell DECODES the escape before the
+  #      matcher sees the text — so the opener `$'` is denied
+  #      outright; it is shared because it is about the QUOTING and
+  #      not about the name.
   #
   # Shape 4 is the one that closes the WRITE route, and its earlier
   # form was WRONG. The rule used to be `*/mpm ?*`, which was
@@ -371,27 +381,24 @@ permissions:
   # (`cd /path/to/mpm && git log`) — but the `cd` spelling is the
   # SAME MECHANISM as an open route, so it is not recommended.
   #
-  # Shape 3 is load-bearing too, and it was MEASURED: with the tab
-  # rules removed, `mpm<TAB>--version`, `env mpm<TAB>--version` and
-  # `echo<TAB>mpm` all RAN the binary. The host's YAML reader expands
-  # the `\t` escape into a real tab, which is what the rules carry.
+  # Shape 3 and the shared form A are load-bearing too, and it was
+  # MEASURED: with the tab rules removed, `mpm<TAB>--version`,
+  # `env mpm<TAB>--version` and `echo<TAB>mpm` all RAN the binary.
+  # The host's YAML reader expands the `\t` escape into a real tab,
+  # which is what the rules carry.
   #
-  # Shape 7 is load-bearing, and the measurement is unambiguous:
-  # with these two rules REMOVED, `"mpm" --version`,
+  # The shared forms B and C are load-bearing, and the measurement is
+  # unambiguous: with those rules REMOVED, `"mpm" --version`,
   # `'mpm' --version`, `sh -c 'mpm --version'` and
   # `bash -c "mpm --version"` all RAN the binary. So the quoted
-  # forms are closed by these rules and by nothing else.
-  #
-  # The last three rules are shared by every binary: the first two
-  # because every one of them starts with `mpm`, and the third
-  # because it is about the QUOTING and not about the name.
+  # forms are closed by those rules and by nothing else.
   #
   # The cost that REMAINS is the quoted form: `grep -rn
-  # "mpm_memory" .` is refused — by shape 7, which is THIS
+  # "mpm_memory" .` is refused — by the shared form B, which is THIS
   # definition's rule, not the host's — while the unquoted
   # `grep -rn mpm_memory .` is allowed. Quoting is the natural way
   # to write a search, so a reviewer that meets the refusal should
-  # retry unquoted. The alternative — dropping shape 7 — was
+  # retry unquoted. The alternative — dropping the shared form B — was
   # measured, and it lets the binary run.
   #
   # The list is machine-checked against the Makefile's own binary
@@ -802,6 +809,13 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   shell syntax (bash rejects it), so nothing is reached. A
   process substitution inside a CONDITIONAL is analysed, and the
   name inside it is caught.
+  A construct the scanner cannot ANALYSE at all is refused for the
+  CONSTRUCT's sake, not for any name in it: a `case` with no subject
+  or an empty pattern list or no `esac`, an `if`/`while`/`until` with
+  an empty condition, an empty group - `( )` or `{ }` - an unclosed
+  substitution - `$(` or `<(` - and a bare function definition -
+  `f()`. Every one of those names no binary, and every one of them is
+  refused.
   And the host
   does not match a `cd` segment's TEXT, so the name can
   be parked in a directory argument and the binary run without it:

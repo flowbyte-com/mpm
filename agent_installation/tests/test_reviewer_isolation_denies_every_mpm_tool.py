@@ -317,6 +317,23 @@ def _load_installer():
 # A CONTEXT the host cannot parse is UNANALYSABLE: `[[ x; y ]]`,
 # `((x;y))` and an unclosed `[[ x` are REFUSED (invalid-structure).
 #
+# A MALFORMED CONSTRUCT is UNANALYSABLE too, and every form of it
+# names NO binary - so the refusal is about the construct: a `case`
+# with no subject, an empty pattern list, no `esac` or trailing text
+# after it; an `if`/`while`/`until` with an empty condition; an empty
+# group - `( )` or `{ }`; an unclosed substitution - `$(` or `<(`; and
+# a bare function definition - `f()`.
+#
+# MEASURED twice and independently: the review's own round and a
+# dedicated measurement round - thirteen malformed forms and their
+# thirteen well-formed counterparts, three isolated repeats every one,
+# every verdict STABLE and every reason text identical. The six
+# reasons the host gives for this class are `compound-command` (the
+# malformed `case`, the empty condition), `invalid-structure` (the
+# empty group, the trailing text after an `esac`),
+# `command-substitution` (the unclosed substitution) and
+# `dynamic-execution` (the bare function).
+#
 # A `#` COMMENT is not text: the host strips it before it matches, so
 # `echo hi # mpm` is ALLOWED.
 #
@@ -360,6 +377,188 @@ def _matcher_u2(value: str, pattern: str) -> bool:
         return False
 
 
+def _matcher_word_at(text: str, index: int, word: str) -> bool:
+    """Is the WORD at `index` exactly `word`?
+
+    A `case` may be NESTED, so the closing `esac` has to be found by
+    counting `case` and `esac` words - and a word inside a longer
+    word (`cases`, `mycase`) is not the keyword.
+    """
+    if not text.startswith(word, index):
+        return False
+    end = index + len(word)
+    before = text[index - 1] if index else ""
+    after = text[end] if end < len(text) else ""
+    for char in (before, after):
+        if char and (char.isalnum() or char in "_-."):
+            return False
+    return True
+
+
+def _matcher_matching_esac(command: str, start: int) -> int:
+    """The `esac` that closes the `case` whose body starts at `start`.
+
+    A `case` may be NESTED, so the matching `esac` is the one at which
+    the nesting returns to zero.  MEASURED:
+    `case y in z) case w in q) echo hi;; esac;; esac` is ALLOWED.
+    """
+    depth = 0
+    index = start
+    length = len(command)
+    while index < length:
+        if _matcher_word_at(command, index, "case"):
+            depth += 1
+            index += 4
+            continue
+        if _matcher_word_at(command, index, "esac"):
+            if depth == 0:
+                return index
+            depth -= 1
+            index += 4
+            continue
+        index += 1
+    return -1
+
+
+def _matcher_split_branches(body: str):
+    """The BRANCHES of a `case` body, split at the TOP LEVEL only.
+
+    A nested `case` has its own `;;`, so the split counts the nesting.
+    MEASURED: `case y in z) case w in q) echo hi;; esac;; esac` is
+    ALLOWED - and the inner `;;` belongs to the INNER construct.
+    """
+    branches = []
+    current = []
+    depth = 0
+    index = 0
+    length = len(body)
+    while index < length:
+        if _matcher_word_at(body, index, "case"):
+            depth += 1
+            current.append("case")
+            index += 4
+            continue
+        if _matcher_word_at(body, index, "esac"):
+            if depth > 0:
+                depth -= 1
+            current.append("esac")
+            index += 4
+            continue
+        if depth == 0:
+            if body.startswith(";;&", index):
+                branches.append("".join(current))
+                current = []
+                index += 3
+                continue
+            if body.startswith(";;", index) or body.startswith(";&", index):
+                branches.append("".join(current))
+                current = []
+                index += 2
+                continue
+        current.append(body[index])
+        index += 1
+    branches.append("".join(current))
+    return branches
+
+
+def _matcher_empty_condition(command: str) -> bool:
+    """Does this command carry an EMPTY condition?
+
+    MEASURED: `if ; then echo hi; fi`, `while ; do echo hi; done` and
+    `until ; do echo hi; done` are all REFUSED with "compound-command",
+    and none of them names a binary - so the refusal is about the
+    CONSTRUCT.
+
+    The condition is empty when the keyword is followed by nothing but
+    a separator.  MEASURED: `if true; then echo hi; fi`,
+    `while false; do echo hi; done` and `until false; do echo hi; done`
+    are ALLOWED, and so is a condition on the next LINE
+    (`if` and then `true;`), because the text between the keyword and
+    the separator is not empty.
+    """
+    return bool(re.search(r"(?<![A-Za-z0-9_=])(?:if|while|until)\s*;", command))
+
+
+def _matcher_empty_group(segment: str) -> bool:
+    """Is this an EMPTY group - a subshell or a brace group with no body?
+
+    MEASURED: `( )` and `{ }` are both REFUSED with "invalid-structure",
+    and neither names a binary at all - so the refusal is about the
+    CONSTRUCT.
+
+    The well-formed forms are ALLOWED: `( echo hi )` and `{ echo hi; }`.
+    """
+    text = segment.strip()
+    if re.match(r"\(\s*\)$", text):
+        return True
+    return bool(re.match(r"\{\s*\}$", text))
+
+
+def _matcher_bare_function(segment: str) -> bool:
+    """Is this a FUNCTION DEFINITION with no body?
+
+    MEASURED: `f()` is REFUSED with "dynamic-execution", and it names
+    no binary at all - so the refusal is about the CONSTRUCT.
+
+    The well-formed form is ALLOWED: `f() { echo hi; }` is analysed,
+    and the host matches the BODY (`f() { mpm --version; }` is refused
+    by a RULE).
+    """
+    return bool(re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)$", segment.strip()))
+
+
+def _matcher_unclosed_substitution(segment: str) -> bool:
+    """Is there a SUBSTITUTION the host cannot finish parsing?
+
+    MEASURED: `$(` and `<(` are both REFUSED with "command-substitution",
+    and neither names a binary - so the refusal is about the CONSTRUCT.
+
+    A CLOSED substitution is fine: `$(echo hi)` and `<(echo hi)` are
+    ALLOWED.
+
+    A backtick inside SINGLE quotes is a literal - the host does not
+    treat it as a substitution - so a quoted region is skipped.
+    """
+    index = 0
+    length = len(segment)
+    while index < length:
+        char = segment[index]
+        if char == "'":
+            end = segment.find("'", index + 1)
+            if end < 0:
+                return False
+            index = end + 1
+            continue
+        if char == "`":
+            end = segment.find("`", index + 1)
+            if end < 0:
+                return True
+            index = end + 1
+            continue
+        if (
+            segment.startswith("$(", index)
+            or segment.startswith("<(", index)
+            or segment.startswith(">(", index)
+        ):
+            depth = 0
+            end = index + 1
+            while end < length:
+                if segment[end] == "(":
+                    depth += 1
+                elif segment[end] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                end += 1
+            if end >= length:
+                # Never closed.
+                return True
+            index = end + 1
+            continue
+        index += 1
+    return False
+
+
 def _matcher_extract_cases(command: str):
     """The BODY of every `case` construct, and the command without them.
 
@@ -398,6 +597,24 @@ def _matcher_extract_cases(command: str):
 
     The reason is the scanner's own limit ("compound-command"), so the
     model reproduces the VERDICT and names the right reason.
+
+    A MALFORMED `case` is a construct the host cannot analyse either.
+    MEASURED - every one of them names no binary at all, so the
+    refusal is about the CONSTRUCT:
+
+        case x in ) echo hi;; esac      REFUSED  (compound-command)
+                                          - an empty PATTERN LIST
+        case in y) echo hi;; esac       REFUSED  (compound-command)
+                                          - no SUBJECT
+        case x in |) echo hi;; esac      REFUSED  (compound-command)
+                                          - an empty pattern in the list
+        case x in y) echo hi;;          REFUSED  (compound-command)
+                                          - no `esac`
+        case x in y) echo hi;; esac extra REFUSED (invalid-structure)
+                                          - text after the `esac`
+
+    A `case` may be NESTED, and the well-formed nested form is
+    ALLOWED: `case y in z) case w in q) echo hi;; esac;; esac`.
     """
     bodies = []
     headers = []
@@ -423,30 +640,60 @@ def _matcher_extract_cases(command: str):
             kept.append(command[index])
             index += 1
             continue
+        subject = command[index + 4 : in_at]
+        if not subject.strip():
+            # A `case` with NO SUBJECT is a construct the host cannot
+            # analyse.  MEASURED: `case in y) echo hi;; esac` is
+            # REFUSED with "compound-command", and it names no binary.
+            opaque.append(command[index : in_at])
+            index = in_at
+            continue
         close = command.find(")", in_at + 4)
         if close < 0:
             kept.append(command[index])
             index += 1
             continue
-        end = command.find("esac", close)
+        patterns = command[in_at + 4 : close]
+        if any(not part.strip() for part in patterns.split("|")):
+            # An EMPTY PATTERN LIST is a construct the host cannot
+            # analyse.  MEASURED: `case x in ) echo hi;; esac` and
+            # `case x in |) echo hi;; esac` are REFUSED with
+            # "compound-command", and neither names a binary.
+            opaque.append(command[index : close + 1])
+            index = close + 1
+            continue
+        end = _matcher_matching_esac(command, close + 1)
         if end < 0:
-            kept.append(command[index])
-            index += 1
+            # A `case` with NO `esac` is a construct the host cannot
+            # analyse.  MEASURED: `case x in y) echo hi;;` is REFUSED
+            # with "compound-command", and it names no binary.
+            opaque.append(command[index : close + 1])
+            index = close + 1
+            continue
+        after = command[end + 4 :].lstrip()
+        if after and after[0] not in ";&)|}\n":
+            # Only a SEPARATOR may follow the `esac`.  MEASURED:
+            # `case x in y) echo hi;; esac extra` is REFUSED with
+            # "invalid-structure", and it names no binary.
+            opaque.append(command[index : end + 4])
+            index = end + 4
             continue
         kept.append(" ")
         # The header is not matched, but the substitutions inside it
         # ARE - the host descends into a substitution anywhere.
         headers.append(command[index : close + 1])
-        subject = command[index + 4 : in_at]
         if _matcher_has_context(subject):
             # A SUBJECT that carries a context is a construct the
             # host cannot analyse.
             opaque.append(subject.strip())
-        for chunk in re.split(r";;&|;;|;&", command[close + 1 : end]):
-            # A branch may carry the NEXT pattern before its `)`.
-            cut = chunk.find(")")
-            if cut >= 0:
-                chunk = chunk[cut + 1 :]
+        for chunk in _matcher_split_branches(command[close + 1 : end]):
+            # A branch may carry the NEXT pattern before its `)` - but
+            # a branch that IS a nested `case` construct carries none,
+            # and the recursion below has to see it whole.
+            if not _matcher_word_at(chunk.strip(), 0, "case"):
+                cut = chunk.find(")")
+                if cut >= 0:
+                    chunk = chunk[cut + 1 :]
             if chunk.strip():
                 bodies.append(chunk)
         index = end + 4
@@ -1105,7 +1352,15 @@ def _matcher_unanalysable(segment: str) -> bool:
     about the REDIRECTION and not about the name.
 
     A command the host classifies as DYNAMIC EXECUTION is refused too:
-    `alias NAME=value` returns "dynamic-execution".
+    `alias NAME=value` returns "dynamic-execution" - and so is a bare
+    FUNCTION DEFINITION with no body, `f()`, which returns
+    "dynamic-execution" as well.
+
+    An EMPTY GROUP is refused: `( )` and `{ }` both return
+    "invalid-structure", and neither names a binary at all.
+
+    An UNCLOSED SUBSTITUTION is refused: `$(` and `<(` both return
+    "command-substitution", and neither names a binary at all.
 
     A PROCESS SUBSTITUTION inside a CONTEXT is NOT such a command:
     the host parses a context's operands as words and never looks for
@@ -1119,6 +1374,12 @@ def _matcher_unanalysable(segment: str) -> bool:
     if _matcher_dynamic_execution(segment):
         return True
     if _matcher_broken_context(segment):
+        return True
+    if _matcher_empty_group(segment):
+        return True
+    if _matcher_bare_function(segment):
+        return True
+    if _matcher_unclosed_substitution(segment):
         return True
     # A `<(` is a PROCESS SUBSTITUTION, not a refusal by itself: the
     # scanner parses its content as a command, so the names inside are
@@ -1306,6 +1567,11 @@ def _matcher_candidates(segment: str, kind: str = _MATCHER_COMMAND, depth: int =
 
 def _matcher_denies(command: str, rules) -> bool:
     """Would the host deny this command, given these (resource, effect)?"""
+    if _matcher_empty_condition(command):
+        # An `if`/`while`/`until` with an EMPTY condition is a
+        # construct the host cannot analyse.  MEASURED: `if ; then
+        # echo hi; fi` is REFUSED with "compound-command".
+        return True
     for segment, kind in _matcher_segments(command):
         if kind == _MATCHER_OPAQUE:
             # A construct the host's scanner cannot ANALYSE at all —
@@ -1318,7 +1584,15 @@ def _matcher_denies(command: str, rules) -> bool:
         # target (`invalid-redirect`) or a dynamic execution
         # (`dynamic-execution`). It does not run, and the reason is
         # the scanner's limit rather than a rule match.
-        if _matcher_unanalysable(segment):
+        #
+        # A HEADER is not a command: a `for`/`select` header is a WORD
+        # LIST and a `case` header is not matched at all, so the host
+        # does not analyse either as a command.  MEASURED:
+        # `for ((i=0;i<1;i++)); do echo hi; done` and
+        # `select ((i=0;i<1;i++)); do echo hi; done` are ALLOWED - the
+        # `;` inside the arithmetic header is arithmetic and not a
+        # separator the host rejects.
+        if kind != _MATCHER_HEADER and _matcher_unanalysable(segment):
             return True
         for candidate in _matcher_candidates(segment, kind):
             # The host TRIMS each segment before matching it.  This
@@ -1615,6 +1889,22 @@ class ReviewerIsolationTest(unittest.TestCase):
             "[[ x; y ]]",
             "((x;y))",
             "[[ x",
+            # a MALFORMED construct is a construct the host cannot
+            # ANALYSE, and every one of these names NO binary at all -
+            # so the refusal is about the CONSTRUCT, not about a name
+            "case x in ) echo hi;; esac",
+            "case in y) echo hi;; esac",
+            "case x in |) echo hi;; esac",
+            "case x in y) echo hi;;",
+            "case x in y) echo hi;; esac extra",
+            "if ; then echo hi; fi",
+            "while ; do echo hi; done",
+            "until ; do echo hi; done",
+            "{ }",
+            "( )",
+            "$(",
+            "<(",
+            "f()",
             # a CONTINUATION keyword with nothing to continue is a
             # construct the host cannot analyse - and the form that
             # names NO binary is refused the same way
@@ -1665,6 +1955,22 @@ class ReviewerIsolationTest(unittest.TestCase):
             )
 
         must_allow = [
+            # the WELL-FORMED form of every malformed construct above
+            # is allowed - so the model's class rule refuses the
+            # broken forms without refusing ordinary shell
+            "case x in y) echo hi;; esac",
+            "case x in y|z) echo hi;; esac",
+            "case y in z) case w in q) echo hi;; esac;; esac",
+            "if true; then echo hi; fi",
+            "while false; do echo hi; done",
+            "until false; do echo hi; done",
+            "{ echo hi; }",
+            "( echo hi )",
+            "f() { echo hi; }",
+            "$(echo hi)",
+            "<(echo hi)",
+            "for ((i=0;i<1;i++)); do echo hi; done",
+            "select ((i=0;i<1;i++)); do echo hi; done",
             # a search for the name, unquoted, is not an invocation
             "grep -rn mpm_memory .",
             'echo "the mpm_memory tool"',
