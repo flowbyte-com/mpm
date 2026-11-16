@@ -651,6 +651,23 @@ func (h *capturingHandler) contains(sub string) bool {
 	return false
 }
 
+// snapshot returns a COPY of the captured messages.
+//
+// The queue's worker goroutine appends to h.msgs, so reading the slice
+// directly from the test goroutine is a DATA RACE. The read happens
+// precisely when an assertion FAILS — the message is the argument of the
+// Fatalf — so the race was reached only on the failure path, and it
+// turned a plain assertion failure into a race report that pointed at
+// the wrong thing.
+//
+// The copy is taken under the handler's lock, so it is a consistent
+// view of the capture rather than a torn one.
+func (h *capturingHandler) snapshot() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.msgs...)
+}
+
 // captureLogs installs a capturing slog handler for the duration of a
 // test and returns it.
 func captureLogs(t *testing.T) *capturingHandler {
@@ -695,10 +712,10 @@ func TestDeferredWriteQueue_RetryDiagnosticMatchesTheActualOutcome(t *testing.T)
 		t.Fatalf("the contended obligation never landed (attempts=%d)", attempts.Load())
 	}
 	if !logs.contains("a retry is scheduled") {
-		t.Fatalf("the queue did not report the scheduled retry; captured: %v", logs.msgs)
+		t.Fatalf("the queue did not report the scheduled retry; captured: %v", logs.snapshot())
 	}
 	if logs.contains("will not be retried") {
-		t.Fatalf("the queue reported a terminal failure for an obligation it retried; captured: %v", logs.msgs)
+		t.Fatalf("the queue reported a terminal failure for an obligation it retried; captured: %v", logs.snapshot())
 	}
 
 	// CASE 2: the queue is CLOSED. The same failure cannot be retried,
@@ -730,11 +747,24 @@ func TestDeferredWriteQueue_RetryDiagnosticMatchesTheActualOutcome(t *testing.T)
 		return q2.inflight == 0
 	})
 
+	// The queue decrements `inflight` BEFORE it logs the diagnostic:
+	// `attempt()` releases the queue's lock and returns, and the
+	// `slog.Warn` that reports the outcome comes AFTER that. So waiting
+	// for the counter is NOT waiting for the message, and the assertion
+	// below could read an EMPTY capture while the worker was still
+	// writing the line it is about to write.
+	//
+	// Wait for the MESSAGE itself. That is what the test is about, and
+	// it is the only wait that can make the assertion deterministic.
+	waitForDeferred(t, "the queue to report the loss", func() bool {
+		return logs2.contains("dropped")
+	})
+
 	if logs2.contains("a retry is scheduled") {
-		t.Fatalf("the queue promised a retry it did not schedule; captured: %v", logs2.msgs)
+		t.Fatalf("the queue promised a retry it did not schedule; captured: %v", logs2.snapshot())
 	}
 	if !logs2.contains("dropped") {
-		t.Fatalf("the queue did not report the loss; captured: %v", logs2.msgs)
+		t.Fatalf("the queue did not report the loss; captured: %v", logs2.snapshot())
 	}
 }
 
