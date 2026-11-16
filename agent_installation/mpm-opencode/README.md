@@ -336,7 +336,10 @@ a command merely *quoting* such a path; the shell's matcher sees
 **text**, so a name **split by a substitution** (`$(echo mp)m`), a name
 held in a **variable** (`M=mpm; $M --version`), a **script file**, a name
 **expanded by a shell glob** (`go run ./cmd/mp?`), a name **expanded by a
-brace** (`go run ./cmd/mpm{,.mcp}`), and the host's refusal
+brace** (`go run ./cmd/mpm{,.mcp}`), a pattern that names a **DIRECTORY
+of packages** (`go build ./cmd/...` — the text holds no name to match,
+so the build is not refused, but the binaries it produces are refused
+when they are RUN), and the host's refusal
 to match a **`cd`** segment's text (`cd cmd/mpm && go run . --version`)
 are not caught; and the permission layer reads the **content of
 a file write**, so a document that merely mentions the name is refused.

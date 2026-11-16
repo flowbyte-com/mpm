@@ -282,8 +282,15 @@ def _load_installer():
 # and the last matching rule wins.  The command text is split into
 # simple commands on `&&`, `||`, `;`, `|`, a single `&` and a
 # NEWLINE, and each segment is TRIMMED before it is matched; a `cd`
-# segment's text is not matched; `$( ... )` substitutions are
-# descended into.
+# segment's text is not matched; `$( ... )`, BACKTICK and PROCESS
+# substitutions are descended into.
+#
+# ONE THING the host does that this model does NOT: the host's
+# scanner REFUSES a COMPOUND COMMAND it cannot analyse (`echo (mpm
+# --version)` is refused with "Portable shell scanner cannot analyze
+# command: compound-command", and so is `echo (hello)`). That refusal
+# is the scanner's own limit, not an MPM rule, so the model does not
+# reproduce it.
 #
 # The model is a MODEL.  Every outcome in the corpus below was measured
 # against the installed definition before it was written here, and a
@@ -359,23 +366,56 @@ def _matcher_segments(command: str):
 
 
 def _matcher_substitutions(segment: str):
-    """The text inside each $( ... ) substitution."""
+    """The text inside each substitution the host descends into.
+
+    The host has a portable shell scanner, and it descends into
+    `$( ... )`, into BACKTICK substitutions (`` `...` ``) and into
+    PROCESS substitutions (`<( ... )` and `>( ... )`), so the name
+    inside them is matched.
+
+    That was MEASURED, not assumed: `echo `mpm --version`` and
+    `echo <(mpm --version)>` are REFUSED by the host, and a model that
+    could not see them would UNDER-APPROXIMATE it — and a model that
+    under-approximates the host cannot argue that a command the
+    definition states is open really is open.
+
+    The scan respects QUOTES: a substitution inside a quoted string is
+    a literal, and the host's scanner does not descend into it.
+    """
     index = 0
-    while True:
-        index = segment.find("$(", index)
-        if index < 0:
-            return
-        depth, end = 0, index + 1
-        while end < len(segment):
-            if segment[end] == "(":
-                depth += 1
-            elif segment[end] == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            end += 1
-        yield segment[index + 2 : end]
-        index = end + 1
+    quote = None
+    while index < len(segment):
+        char = segment[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            index += 1
+            continue
+        if segment.startswith("$(", index) or segment.startswith("<(", index) or segment.startswith(">(", index):
+            depth, end = 0, index + 1
+            while end < len(segment):
+                if segment[end] == "(":
+                    depth += 1
+                elif segment[end] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                end += 1
+            yield segment[index + 2 : end]
+            index = end + 1
+            continue
+        if char == "`":
+            end = segment.find("`", index + 1)
+            if end < 0:
+                return
+            yield segment[index + 1 : end]
+            index = end + 1
+            continue
+        index += 1
 
 
 def _matcher_denies(command: str, rules) -> bool:
@@ -580,7 +620,8 @@ class ReviewerIsolationTest(unittest.TestCase):
             # the name inside a GO PACKAGE PATTERN, which puts
             # something after the name and so escaped the
             # last-segment shapes — in EVERY spelling of the pattern,
-            # not only the canonical one
+            # not only the canonical one, and with or without
+            # anything in FRONT of the name
             "go run ./cmd/mpm/...",
             "go run ./cmd/mpm/... --version",
             'go run ./cmd/mpm/... remember "probe"',
@@ -594,6 +635,13 @@ class ReviewerIsolationTest(unittest.TestCase):
             "go run ./cmd/mpm-mcp/./...",
             "go run ./cmd/mpm-scheduler/./...",
             'go run ./cmd/mpm/./... remember "probe"', 
+            "go run mpm/...",
+            "go run mpm/... --version",
+            # the name inside a substitution the host descends into:
+            # a backtick and a process substitution as well as `$( )`
+            "echo `mpm --version`",
+            "echo <(mpm --version)>",
+            "echo `echo mpm`",
             # the name delimited by a TAB, which the shell splits on
             "mpm\t--version",
             "env mpm\t--version",
@@ -765,7 +813,7 @@ class ReviewerIsolationTest(unittest.TestCase):
             for path_pattern in (
                 f"*/{binary} *",
                 f"*/{binary}/",
-                f"*/{binary}/*...*",
+                f"*{binary}/*...*",
             ):
                 self.assertIn(
                     path_pattern,
