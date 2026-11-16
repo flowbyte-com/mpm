@@ -355,9 +355,30 @@ def _matcher_extract_cases(command: str):
     The construct is extracted BEFORE the command is split, because the
     `;;` that separates the branches is a separator the host does not
     split on — the branches are part of one construct.
+
+    A SUBJECT that carries a CONTEXT is a construct the host cannot
+    analyse at all.  MEASURED:
+
+        case [[ mpm == x ]] in y) echo hi;; esac   REFUSED
+        case [[ x == y ]] in z) echo hi;; esac      REFUSED — and it
+                                                      names no binary at
+                                                      all, so the refusal
+                                                      is about the
+                                                      CONSTRUCT
+        case (( x )) in z) echo hi;; esac           REFUSED
+        case $(( x )) in z) echo hi;; esac          ALLOWED — a `$( … )`
+                                                      substitution is not
+                                                      a context
+        case x in [[ y ]]) echo hi;; esac          ALLOWED — a context
+                                                      in the PATTERN list
+                                                      is not the subject
+
+    The reason is the scanner's own limit ("compound-command"), so the
+    model reproduces the VERDICT and names the right reason.
     """
     bodies = []
     headers = []
+    opaque = []
     kept = []
     index = 0
     length = len(command)
@@ -393,6 +414,11 @@ def _matcher_extract_cases(command: str):
         # The header is not matched, but the substitutions inside it
         # ARE - the host descends into a substitution anywhere.
         headers.append(command[index : close + 1])
+        subject = command[index + 4 : in_at]
+        if _matcher_has_context(subject):
+            # A SUBJECT that carries a context is a construct the
+            # host cannot analyse.
+            opaque.append(subject.strip())
         for chunk in re.split(r";;&|;;|;&", command[close + 1 : end]):
             # A branch may carry the NEXT pattern before its `)`.
             cut = chunk.find(")")
@@ -401,16 +427,33 @@ def _matcher_extract_cases(command: str):
             if chunk.strip():
                 bodies.append(chunk)
         index = end + 4
-    return bodies, headers, "".join(kept)
+    return bodies, headers, opaque, "".join(kept)
+
+
+def _matcher_has_context(text: str) -> bool:
+    """Does this text carry a `[[ … ]]` or a `(( … ))` CONTEXT?
+
+    A `$( … )` substitution is NOT a context: the host parses it as a
+    substitution, so `case $(( x )) in z)` is allowed while
+    `case (( x )) in z)` is refused.
+    """
+    return bool(re.search(r"(?<!\$)\[\[", text)) or bool(
+        re.search(r"(?<!\$)\(\(", text)
+    )
 
 
 _MATCHER_COMMAND = "command"
 _MATCHER_HEADER = "header"
+# A construct the host's scanner cannot ANALYSE at all.
+_MATCHER_OPAQUE = "opaque"
 
 # The keywords the host gives a special meaning to.  A `(` that
 # follows one of them opens a COMMAND, not an argument.
 _MATCHER_KEYWORDS = (
+    "!",
+    "builtin",
     "case",
+    "command",
     "coproc",
     "do",
     "elif",
@@ -425,6 +468,80 @@ _MATCHER_KEYWORDS = (
     "until",
     "while",
 )
+
+
+def _matcher_blank_heredocs(command: str) -> str:
+    """The command with every HERE-DOCUMENT BODY blanked.
+
+    The host treats a here-document's body as DATA, not as a command.
+    MEASURED: `cat <<EOF` + `mpm --version` + `EOF` is ALLOWED — the
+    body is not a command — while a here-STRING (`cat <<< mpm`) is
+    REFUSED, because its TARGET is matched.
+
+    So the body is blanked before the command is split: a name inside
+    a here-document is data, and the newline that ends the body does
+    not separate two commands.
+    """
+    masked = list(command)
+    index = 0
+    length = len(command)
+    quote = None
+    while index < length:
+        char = command[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            index += 1
+            continue
+        if not (
+            command.startswith("<<", index) and not command.startswith("<<<", index)
+        ):
+            index += 1
+            continue
+        look = index + 2
+        strip_tabs = False
+        if look < length and command[look] == "-":
+            strip_tabs = True
+            look += 1
+        while look < length and command[look].isspace():
+            look += 1
+        if look < length and command[look] in "\"'":
+            closer = command[look]
+            close = command.find(closer, look + 1)
+            delimiter = command[look + 1 : close] if close > 0 else ""
+            look = close + 1 if close > 0 else length
+        else:
+            start = look
+            while look < length and not command[look].isspace():
+                look += 1
+            delimiter = command[start:look]
+        newline = command.find("\n", look)
+        if newline < 0:
+            index = look
+            continue
+        body = newline + 1
+        cursor = body
+        end = length
+        while cursor < length:
+            line_end = command.find("\n", cursor)
+            if line_end < 0:
+                line_end = length
+            probe = command[cursor:line_end]
+            if strip_tabs:
+                probe = probe.lstrip("\t")
+            if probe.strip() == delimiter:
+                end = line_end
+                break
+            cursor = line_end + 1
+        for position in range(body, end):
+            masked[position] = " "
+        index = max(index + 1, body)
+        continue
+    return "".join(masked)
 
 
 def _matcher_segments(command: str):
@@ -456,10 +573,15 @@ def _matcher_segments(command: str):
     split, because the `;;` between its branches is a separator the
     host does not split on.
     """
-    case_bodies, case_headers, without_cases = _matcher_extract_cases(command)
+    command = _matcher_blank_heredocs(command)
+    case_bodies, case_headers, opaque, without_cases = _matcher_extract_cases(
+        command
+    )
     segments = _matcher_split(without_cases)
     for header in case_headers:
         segments.append((header, _MATCHER_HEADER))
+    for subject in opaque:
+        segments.append((subject, _MATCHER_OPAQUE))
     for body in case_bodies:
         segments.extend(_matcher_segments(body))
     return _matcher_bodies(segments)
@@ -737,6 +859,30 @@ def _matcher_mask_contexts(segment: str) -> str:
     return "".join(masked)
 
 
+# The words that may stand in front of a CONTEXT.  Each of them
+# introduces a COMMAND LIST or a command, so the host recognises a
+# context there.  MEASURED: `if [[ mpm == x ]]; then echo hi; fi`,
+# `if (( mpm )); then echo hi; fi`, `else [[ mpm == x ]]`,
+# `else (( mpm ))`, `{ [[ mpm == x ]]; }`, `time [[ mpm == x ]]` and
+# `! (( mpm ))` are all ALLOWED by the host.
+_MATCHER_COMMAND_PREFIXES = (
+    "!",
+    "{",
+    "coproc",
+    "do",
+    "elif",
+    "else",
+    "fi",
+    "for",
+    "if",
+    "select",
+    "then",
+    "time",
+    "until",
+    "while",
+)
+
+
 def _matcher_keyword_prefix(prefix: str) -> bool:
     """Is everything before a context only KEYWORDS and separators?
 
@@ -753,7 +899,7 @@ def _matcher_keyword_prefix(prefix: str) -> bool:
     for word in re.split(r"[\s;&|()]+", prefix):
         if not word:
             continue
-        if word not in ("if", "elif", "then", "while", "until", "do", "!"):
+        if word not in _MATCHER_COMMAND_PREFIXES:
             return False
     return True
 
@@ -811,7 +957,11 @@ def _matcher_dynamic_execution(segment: str) -> bool:
     `eval` is refused on the same principle, and it is the SAFE
     direction: a model that refuses more than the host only costs a
     nuisance, while a model that refuses less would claim a route is
-    closed when it is not.  (A bare `eval` was not measured.)
+    closed when it is not.
+
+    MEASURED, and it is a divergence in that safe direction: the host
+    allows a bare `eval` and `eval "hello world"`, and the model
+    refuses both.
     """
     words = segment.strip().split()
     if not words:
@@ -941,6 +1091,11 @@ def _matcher_candidates(segment: str, kind: str = _MATCHER_COMMAND, depth: int =
 def _matcher_denies(command: str, rules) -> bool:
     """Would the host deny this command, given these (resource, effect)?"""
     for segment, kind in _matcher_segments(command):
+        if kind == _MATCHER_OPAQUE:
+            # A construct the host's scanner cannot ANALYSE at all —
+            # e.g. a `case` whose SUBJECT is a context — is refused
+            # outright, with the scanner's own reason.
+            return True
         # A command the host's scanner cannot ANALYSE is refused
         # outright — a process substitution (`invalid-redirect`), a
         # compound command (`compound-command`), a redirection with no
@@ -1205,6 +1360,30 @@ class ReviewerIsolationTest(unittest.TestCase):
             # a FUNCTION DEFINITION is analysed, and its BODY is
             # matched
             "f() { mpm --version; }",
+            # a `case` whose SUBJECT is a CONTEXT is a construct the
+            # host's scanner cannot analyse at all - and the form
+            # that names NO binary is refused the same way, so the
+            # refusal is about the construct
+            "case [[ mpm == x ]] in y) echo hi;; esac",
+            "case [[ x == y ]] in z) echo hi;; esac",
+            "case (( x )) in z) echo hi;; esac",
+            "case [[ mpm == x ]]) echo hi;; esac",
+            # a `case` whose SUBJECT is a CONTEXT is a construct the
+            # host's scanner cannot analyse at all - and the form
+            # that names NO binary is refused the same way, so the
+            # refusal is about the construct
+            "case [[ mpm == x ]] in y) echo hi;; esac",
+            "case [[ x == y ]] in z) echo hi;; esac",
+            "case (( x )) in z) echo hi;; esac",
+            "case [[ mpm == x ]]) echo hi;; esac",
+            # a `case` whose SUBJECT is a CONTEXT is a construct the
+            # host's scanner cannot analyse at all - and the form
+            # that names NO binary is refused the same way, so the
+            # refusal is about the construct
+            "case [[ mpm == x ]] in y) echo hi;; esac",
+            "case [[ x == y ]] in z) echo hi;; esac",
+            "case (( x )) in z) echo hi;; esac",
+            "case [[ mpm == x ]]) echo hi;; esac",
             # a CONTEXT in ARGUMENT position is ordinary text, and
             # the word shape matches it
             "echo $(( mpm ))",
@@ -1284,6 +1463,54 @@ class ReviewerIsolationTest(unittest.TestCase):
             # a BARE `alias` lists the aliases and defines nothing,
             # and the host allows it
             "alias",
+            # a CONTEXT is a construct in more positions than the
+            # command position: the `else` branch of an `if`, a brace
+            # group, a `time` prefix, a `!` prefix
+            "if true; then echo a; else [[ mpm == x ]]; fi",
+            "if true; then echo a; else (( mpm )); fi",
+            "{ [[ mpm == x ]]; }",
+            "time [[ mpm == x ]]",
+            "! (( mpm ))",
+            # a `case` whose PATTERN list carries a context is fine,
+            # and so is a `$( ... )` substitution in the subject
+            "case x in y) echo hi;; esac",
+            "case x in [[ y ]]) echo hi;; esac",
+            "case $(( x )) in z) echo hi;; esac",
+            "for i in [[ mpm == x ]]; do echo hi; break; done",
+            # a here-document's BODY is DATA, not a command
+            "cat <<EOF\nmpm --version\nEOF",
+            # a CONTEXT is a construct in more positions than the
+            # command position: the `else` branch of an `if`, a brace
+            # group, a `time` prefix, a `!` prefix
+            "if true; then echo a; else [[ mpm == x ]]; fi",
+            "if true; then echo a; else (( mpm )); fi",
+            "{ [[ mpm == x ]]; }",
+            "time [[ mpm == x ]]",
+            "! (( mpm ))",
+            # a `case` whose PATTERN list carries a context is fine,
+            # and so is a `$( ... )` substitution in the subject
+            "case x in y) echo hi;; esac",
+            "case x in [[ y ]]) echo hi;; esac",
+            "case $(( x )) in z) echo hi;; esac",
+            "for i in [[ mpm == x ]]; do echo hi; break; done",
+            # a here-document's BODY is DATA, not a command
+            "cat <<EOF\nmpm --version\nEOF",
+            # a CONTEXT is a construct in more positions than the
+            # command position: the `else` branch of an `if`, a brace
+            # group, a `time` prefix, a `!` prefix
+            "if true; then echo a; else [[ mpm == x ]]; fi",
+            "if true; then echo a; else (( mpm )); fi",
+            "{ [[ mpm == x ]]; }",
+            "time [[ mpm == x ]]",
+            "! (( mpm ))",
+            # a `case` whose PATTERN list carries a context is fine,
+            # and so is a `$( ... )` substitution in the subject
+            "case x in y) echo hi;; esac",
+            "case x in [[ y ]]) echo hi;; esac",
+            "case $(( x )) in z) echo hi;; esac",
+            "for i in [[ mpm == x ]]; do echo hi; break; done",
+            # a here-document's BODY is DATA, not a command
+            "cat <<EOF\nmpm --version\nEOF",
             # the routes the residual list names, which stay OPEN
             "echo $(echo mp)m",
             "M=mpm; $M --version",
