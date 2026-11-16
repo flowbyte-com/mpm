@@ -314,6 +314,12 @@ def _load_installer():
 # `cat <<EOF` / `echo mpm --version` / `EOF` is REFUSED (the rule
 # matcher sees the body).
 #
+# A CONTEXT the host cannot parse is UNANALYSABLE: `[[ x; y ]]`,
+# `((x;y))` and an unclosed `[[ x` are REFUSED (invalid-structure).
+#
+# A `#` COMMENT is not text: the host strips it before it matches, so
+# `echo hi # mpm` is ALLOWED.
+#
 # A SUBSHELL at the command position is ANALYSED, and the command
 # inside it is matched: `(echo hi)` is ALLOWED and `(mpm --version)`
 # is REFUSED - by a RULE, not by the scanner. A `(` that follows a
@@ -633,6 +639,7 @@ def _matcher_split(command: str):
     word = ""
     while index < len(command):
         char = command[index]
+        word_before = word
         if quote is None and (char.isspace() or char in ";|&()"):
             # The keyword test, at a word boundary.
             if word in ("for", "while", "until", "select"):
@@ -652,6 +659,13 @@ def _matcher_split(command: str):
             quote = char
             current.append(char)
             index += 1
+            continue
+        if char == "#" and not word_before:
+            # The host strips a COMMENT before it matches, and the
+            # newline that ends it still separates commands.
+            # MEASURED: `echo hi # mpm` is ALLOWED.
+            end = command.find("\n", index)
+            index = len(command) if end < 0 else end
             continue
         if char == "(":
             if command.startswith("((", index):
@@ -970,6 +984,51 @@ def _matcher_keyword_prefix(prefix: str) -> bool:
     return True
 
 
+def _matcher_broken_context(segment: str) -> bool:
+    """Is this segment carrying a CONTEXT the host cannot analyse?
+
+    MEASURED:
+
+        [[ x; y ]]   REFUSED (invalid-structure)
+        ((x;y))      REFUSED (invalid-structure)
+        [[ x         REFUSED (invalid-structure) - never closed
+
+    A `;` inside a context is not a separator the host accepts, and a
+    context that is never closed is a construct it cannot finish
+    parsing.
+    """
+    index = 0
+    length = len(segment)
+    quote = None
+    while index < length:
+        char = segment[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            index += 1
+            continue
+        if segment.startswith("[[", index):
+            closer = "]]"
+            start = index + 2
+        elif segment.startswith("((", index):
+            closer = "))"
+            start = index + 2
+        else:
+            index += 1
+            continue
+        end = segment.find(closer, start)
+        if end < 0:
+            return True
+        if ";" in segment[start:end]:
+            return True
+        index = end + len(closer)
+    return False
+
+
 def _matcher_unanalysable(segment: str) -> bool:
     """Would the host REFUSE this segment because it cannot analyse it?
 
@@ -992,6 +1051,8 @@ def _matcher_unanalysable(segment: str) -> bool:
     reason it gives is the scanner's limit rather than a rule match.
     """
     if _matcher_dynamic_execution(segment):
+        return True
+    if _matcher_broken_context(segment):
         return True
     index = 0
     while index < len(segment):
@@ -1449,6 +1510,11 @@ class ReviewerIsolationTest(unittest.TestCase):
             "cat <<EOF\nmpm --version\n  EOF",
             "cat <<-EOF\nmpm --version\n  EOF",
             "cat <<EOF\nmpm --version",
+            # a CONTEXT the host cannot PARSE is unanalysable: a `;`
+            # inside it, or a context that is never closed
+            "[[ x; y ]]",
+            "((x;y))",
+            "[[ x",
             # a CONTINUATION keyword with nothing to continue is a
             # construct the host cannot analyse - and the form that
             # names NO binary is refused the same way
@@ -1552,6 +1618,9 @@ class ReviewerIsolationTest(unittest.TestCase):
             "case x in [[ y ]]) echo hi;; esac",
             "case $(( x )) in z) echo hi;; esac",
             "for i in [[ mpm == x ]]; do echo hi; break; done",
+            # a `#` COMMENT is not text the rules are matched against
+            "echo hi # mpm",
+            "echo hi # mpm --version",
             # a here-document's BODY is DATA for the command analysis
             # - so the body is not a command - and the rule matcher
             # still sees its TEXT
