@@ -775,8 +775,8 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   That cost is accepted deliberately: a stray file in a runtime root
   is a nuisance, and a corrupted live database is a disaster.
 - The shell's matcher sees TEXT, and nine routes are NOT caught. A
-  name SPLIT by a substitution is not the name: `$(echo mp)m`
-  assembles it and runs the binary. A name in a VARIABLE is not the
+  name SPLIT by a substitution or by a quote is not the name:
+  `$(echo mp)m` and `mp""m` assemble it and run the binary. A name in a VARIABLE is not the
   name either: `M=mpm; $M --version` runs the binary. A SCRIPT FILE
   runs whatever it says: `bash script.sh` never names the binary at
   all. A SHELL GLOB expands to the name before the matcher ever sees

@@ -338,8 +338,7 @@ the rule was removed and the definition says a reviewer must not load
 one; the shell's **redirection targets are not intercepted**, so the write
 route into a runtime root is closed by a path substring that also refuses
 a command merely *quoting* such a path; the shell's matcher sees
-**text**, and **nine** routes are not caught: a name **split by a
-substitution** (`$(echo mp)m`), a name
+**text**, and **ten** routes are not caught: a name **split by a substitution or by a quote** (`$(echo mp)m` and `mp""m` assemble it and run the binary), a name
 held in a **variable** (`M=mpm; $M --version`), a **script file**, a name
 **expanded by a shell glob** (`go run ./cmd/mp?`), a name **expanded by a
 brace** (`go run ./cmd/mpm{,.mcp}`), a name **glued to punctuation**

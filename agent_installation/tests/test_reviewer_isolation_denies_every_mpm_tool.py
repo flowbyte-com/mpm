@@ -498,9 +498,6 @@ def _matcher_empty_condition(segments, position: int, keyword: str) -> bool:
     return True
 
 
-_MATCHER_EMPTY_GROUP = re.compile(r"(?<![A-Za-z0-9_$])\(\s*\)|(?<!\$)\{\s+\}")
-
-
 def _matcher_empty_group(command: str) -> bool:
     """Does this command carry an EMPTY group?
 
@@ -629,6 +626,587 @@ def _matcher_unclosed_substitution(segment: str) -> bool:
                 return True
             index = end + 1
             continue
+        index += 1
+    return False
+
+
+def _matcher_is_boundary(char: str) -> bool:
+    """Is this character a WORD BOUNDARY?
+
+    A boundary is whitespace or an OPERATOR - the characters that end
+    a word.
+    """
+    return not char or char.isspace() or char in ";|&()<>"
+
+
+def _matcher_skip_heredoc(command: str, index: int) -> int:
+    """The index just after a here-document's BODY, or -1.
+
+    A here-document's BODY is DATA, not code: the host does not
+    analyse it, so a `}` or an unbalanced quote inside it is not a
+    structural defect.  MEASURED: `cat <<EOF`, then `}`, then `EOF` is
+    ALLOWED - and so is `cat <<EOF`, then `echo 'unclosed`, then `EOF`.
+    """
+    length = len(command)
+    look = index + 2
+    strip_tabs = False
+    if look < length and command[look] == "-":
+        strip_tabs = True
+        look += 1
+    while look < length and command[look].isspace():
+        look += 1
+    if look < length and command[look] in "\"'":
+        closer = command[look]
+        close = command.find(closer, look + 1)
+        delimiter = command[look + 1 : close] if close > 0 else ""
+        look = close + 1 if close > 0 else length
+    else:
+        start = look
+        while look < length and not command[look].isspace():
+            look += 1
+        delimiter = command[start:look]
+    newline = command.find("\n", look)
+    if newline < 0:
+        return -1
+    cursor = newline + 1
+    while cursor < length:
+        line_end = command.find("\n", cursor)
+        if line_end < 0:
+            line_end = length
+        probe = command[cursor:line_end]
+        if strip_tabs:
+            probe = probe.lstrip("\t")
+        if probe == delimiter:
+            return cursor
+        cursor = line_end + 1
+    return -1
+
+
+def _matcher_word_at_boundary(text: str, index: int, word: str) -> bool:
+    """Is the WORD at `index` exactly `word`, at a word boundary?
+
+    MEASURED: `case x in` is REFUSED with "compound-command" - so the
+    `in` is a KEYWORD, and the keyword is recognised whether or not a
+    space follows it.  A word boundary is what keeps `print` from
+    reading as the keyword `in`.
+    """
+    if not text.startswith(word, index):
+        return False
+    before = text[index - 1] if index else ""
+    after = text[index + len(word)] if index + len(word) < len(text) else ""
+    return _matcher_is_boundary(before) and _matcher_is_boundary(after)
+
+
+def _matcher_case_header(command: str, start: int):
+    """The `case` construct's SUBJECT and the end of its `in` keyword.
+
+    MEASURED: `case x in` is REFUSED with "compound-command", and
+    `case in y) echo hi;; esac` is REFUSED too - so the construct is
+    recognised by the KEYWORD `in`, and the subject is what stands
+    between `case` and it.
+    """
+    index = start
+    length = len(command)
+    while index < length:
+        if _matcher_word_at_boundary(command, index, "in"):
+            return command[start:index], index + 2
+        index += 1
+    return None
+
+
+def _matcher_pattern_list_close(command: str, start: int) -> int:
+    """The `)` that closes a `case` PATTERN LIST, or -1.
+
+    The pattern list may hold quoted patterns and substitutions, so
+    the search skips both.  MEASURED: `case x in y) echo hi;; esac` is
+    ALLOWED, so this `)` is not a bracket.
+    """
+    index = start
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if char in "\"'":
+            end = command.find(char, index + 1)
+            if end < 0:
+                return -1
+            index = end + 1
+            continue
+        if char == "(":
+            depth = 0
+            end = index
+            while end < length:
+                if command[end] == "(":
+                    depth += 1
+                elif command[end] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                end += 1
+            if end >= length:
+                return -1
+            index = end + 1
+            continue
+        if char == ")":
+            return index
+        index += 1
+    return -1
+
+
+def _matcher_structure(command: str):
+    """The STRUCTURAL defect this command carries, or None.
+
+    The host's portable scanner PARSES the command, and it refuses
+    what it cannot parse.  This is the structural model of that
+    scanner: it walks the command the way the shell's grammar does,
+    and it reports the first defect it finds.
+
+    MEASURED - every form below names no binary at all, so the
+    refusal is about the CONSTRUCT:
+
+        echo 'unclosed            unterminated-quote
+        echo "unclosed            unterminated-quote
+        echo hi \\                unterminated-escape
+        (                        command-substitution
+        )                        compound-command
+        { echo hi                invalid-structure
+        }                        invalid-structure
+        ;                        invalid-structure
+        echo hi;;                invalid-structure
+        echo a { echo hi; }      invalid-structure
+        if true; then echo hi    compound-command   (no `fi`)
+        while false; do echo hi  compound-command   (no `done`)
+        for ; do echo hi         compound-command   (an empty header)
+        if true; then fi         compound-command   (an empty body)
+        case echo x in y) ...    compound-command   (a subject that is
+                                                    a command)
+
+    Five things the scanner knows, all MEASURED:
+
+    - a here-document's BODY is DATA, so it is skipped entirely;
+    - a quote must be CLOSED - a quote pair inside a longer word is
+      fine, because the host removes the quotes and continues;
+    - a `;` must be PRECEDED by a command, and the slot between two
+      `;` is empty - but a TRAILING empty slot is fine, and inside a
+      `case` the `;;` separates two case ITEMS;
+    - a `{` opens a GROUP only when it carries whitespace after it,
+      so `{}` is an ordinary word and `{ }` is an empty group;
+    - a GROUP is a COMPOUND COMMAND, so it may only stand where a
+      command is expected - in command position, or as the body of a
+      function definition or of a `coproc` declaration.
+    """
+    length = len(command)
+    index = 0
+    # Each frame is one nesting level of the command: the top level, a
+    # brace GROUP, a `case` BODY, a SUBSHELL or a SUBSTITUTION.  The
+    # frame tracks whether the current COMMAND SLOT is empty, and
+    # where the slot began.
+    frames = [{"kind": "top", "empty": True, "seen": True, "start": 0}]
+    compound = []      # the compound commands that are still open
+    expect_command = True
+
+    while index < length:
+        char = command[index]
+
+        # ── a here-document's BODY is DATA ──
+        if (
+            char == "<"
+            and command.startswith("<<", index)
+            and not command.startswith("<<<", index)
+        ):
+            after = _matcher_skip_heredoc(command, index)
+            if after < 0:
+                return "heredoc"
+            index = after
+            expect_command = True
+            continue
+
+        # ── an escape ──
+        if char == "\\":
+            if index + 1 >= length:
+                return "unterminated-escape"
+            index += 2
+            frames[-1]["empty"] = False
+            expect_command = False
+            continue
+
+        # ── a comment ──
+        if char == "#" and (index == 0 or _matcher_is_boundary(command[index - 1])):
+            end = command.find("\n", index)
+            index = length if end < 0 else end
+            continue
+
+        # ── a NEWLINE is a separator, but it does not need a command
+        #    before it: `if` and then `true;` on the next line is
+        #    ALLOWED, and so is the slot after a `;` ──
+        if char == "\n":
+            index += 1
+            frames[-1]["empty"] = True
+            frames[-1]["start"] = index
+            expect_command = True
+            continue
+
+        # ── whitespace ──
+        if char.isspace():
+            index += 1
+            continue
+
+        # ── a SEPARATOR ──
+        if char in ";&|":
+            if char == "&" and index + 1 < length and command[index + 1] == "&":
+                index += 2
+            elif char == "|" and index + 1 < length and command[index + 1] == "|":
+                index += 2
+            else:
+                index += 1
+            if frames[-1]["empty"] and frames[-1]["kind"] != "case":
+                # An EMPTY command slot.  MEASURED: `;`, `;;` and
+                # `echo hi;;` are REFUSED with "invalid-structure",
+                # while `echo hi;` is ALLOWED - a TRAILING empty slot
+                # is fine - and `case x in y) echo hi;; esac` is
+                # ALLOWED, because inside a `case` the `;;` separates
+                # two case ITEMS.
+                #
+                # The same rule explains a brace group: `{ ; }` and
+                # `{ ; echo hi; }` are REFUSED because the group's
+                # FIRST slot is empty, while `{ echo hi; }` is
+                # ALLOWED.
+                return "invalid-structure"
+            frames[-1]["empty"] = True
+            frames[-1]["start"] = index
+            expect_command = True
+            continue
+
+        # ── a redirection operator ──
+        if char in "<>":
+            if char == "<" and command.startswith("<<<", index):
+                # A here-STRING is ONE operator: `cat <<< "hi there"` is
+                # ALLOWED, and the two `<` that are left over must not
+                # be read as a here-document opener.
+                index += 3
+            else:
+                index += 1
+            frames[-1]["empty"] = False
+            expect_command = True
+            continue
+
+        # ── a SUBSHELL or a SUBSTITUTION ──
+        if char == "(":
+            previous = command[index - 1] if index else ""
+            # NOTE: `"" in "$<>"` is TRUE in Python, so the guard has
+            # to test the character, not the membership.
+            if previous and previous in "$<>":
+                kind = "subst"
+            elif previous and not previous.isspace():
+                # A PARAMETER LIST, not a group: `f()` is a function
+                # definition's parameter list, and it is not an empty
+                # subshell.  MEASURED: `f()` is REFUSED with
+                # "dynamic-execution" - a different reason - and
+                # `f() { echo hi; }` is ALLOWED.
+                kind = "params"
+            else:
+                kind = "paren"
+            frames.append({"kind": kind, "empty": True, "seen": False, "start": index + 1})
+            index += 1
+            expect_command = True
+            continue
+        if char == ")":
+            if len(frames) == 1:
+                # An unmatched `)`.  MEASURED: `)` and `echo )` are
+                # REFUSED with "compound-command".
+                return "compound-command"
+            frame = frames.pop()
+            if frame["kind"] == "brace" or frame["kind"] == "case":
+                return "invalid-structure"
+            if frame["kind"] == "paren" and frame["empty"]:
+                # An EMPTY subshell.  MEASURED: `()` and `( )` are
+                # REFUSED with "invalid-structure", while
+                # `echo $( )` is ALLOWED - a SUBSTITUTION is not a
+                # group.
+                return "invalid-structure"
+            frames[-1]["empty"] = False
+            frames[-1]["seen"] = True
+            index += 1
+            expect_command = True
+            continue
+
+        # ── a GROUP ──
+        if char == "{":
+            following = command[index + 1] if index + 1 < length else ""
+            if following.isspace() and (
+                index == 0 or _matcher_is_boundary(command[index - 1])
+            ):
+                # The braces have to CARRY WHITESPACE: MEASURED,
+                # `{ }` is REFUSED and `{}` is ALLOWED, because a
+                # reserved word is followed by a separator.
+                if not _matcher_group_stands_where_a_command_may_stand(
+                    command, frames[-1]["start"], index
+                ):
+                    # A GROUP is a COMPOUND COMMAND, so it may only
+                    # stand where a command is expected.  MEASURED:
+                    # `echo a { echo hi; }` and `true { echo hi; }`
+                    # are REFUSED with "invalid-structure", while
+                    # `{ echo hi; }` and
+                    # `echo "a"; { echo hi; }` are ALLOWED.
+                    return "invalid-structure"
+                frames.append(
+                    {"kind": "brace", "empty": True, "seen": False, "start": index + 1}
+                )
+                index += 1
+                expect_command = True
+                continue
+            frames[-1]["empty"] = False
+            index += 1
+            expect_command = False
+            continue
+        if char == "}":
+            if len(frames) > 1 and frames[-1]["kind"] == "brace":
+                frame = frames.pop()
+                if not frame["seen"]:
+                    # An EMPTY group.  MEASURED: `{ }` is REFUSED with
+                    # "invalid-structure".
+                    return "invalid-structure"
+                frames[-1]["empty"] = False
+                frames[-1]["seen"] = True
+                index += 1
+                expect_command = True
+                continue
+            if index == 0 or _matcher_is_boundary(command[index - 1]):
+                # An unmatched `}`.  MEASURED: `}` and `echo }` are
+                # REFUSED with "invalid-structure".
+                return "invalid-structure"
+            frames[-1]["empty"] = False
+            index += 1
+            expect_command = False
+            continue
+
+        # ── a WORD ──
+        end = index
+        while end < length:
+            c = command[end]
+            if c.isspace() or c in ";|&()<>":
+                break
+            if c == "\\":
+                end += 2
+                continue
+            if c in "\"'":
+                closer = command.find(c, end + 1)
+                if closer < 0:
+                    # A quote that is never closed.  MEASURED:
+                    # `echo 'unclosed` and `echo "unclosed` are
+                    # REFUSED with "unterminated-quote".
+                    return "unterminated-quote"
+                end = closer + 1
+                continue
+            end += 1
+        word = command[index:end]
+        index = end
+        frames[-1]["empty"] = False
+        frames[-1]["seen"] = True
+
+        # ── the `case` CONSTRUCT ──
+        if expect_command and word == "case":
+            header = _matcher_case_header(command, end)
+            if header is not None:
+                subject, in_end = header
+                if _matcher_subject_is_command(subject):
+                    # A SUBJECT that is a COMMAND is a construct the
+                    # host cannot analyse.  MEASURED:
+                    # `case echo x in y) echo hi;; esac` is REFUSED with
+                    # "compound-command", and it names no binary at all.
+                    return "compound-command"
+                close = _matcher_pattern_list_close(command, in_end)
+                if close < 0:
+                    # The PATTERN LIST has no `)`.  MEASURED:
+                    # `case x in esac` is ALLOWED - the construct is
+                    # closed by its own `esac` - while `case x in` and
+                    # `case x in y z` are REFUSED with
+                    # "compound-command", because nothing closes them.
+                    esac_at = _matcher_matching_esac(command, in_end)
+                    if esac_at < 0 or command[in_end:esac_at].strip():
+                        return "compound-command"
+                    trailing = command[esac_at + 4 :].lstrip()
+                    if trailing and trailing[0] not in ";&)|}\n":
+                        # Only a SEPARATOR may follow the `esac`.
+                        # MEASURED: `case x in esac extra` is REFUSED
+                        # with "invalid-structure", and it names no
+                        # binary at all.
+                        return "invalid-structure"
+                    index = esac_at + 4
+                    expect_command = False
+                    continue
+                frames.append(
+                    {"kind": "case", "empty": True, "seen": False, "start": close + 1}
+                )
+                index = close + 1
+                expect_command = True
+                continue
+
+        # ── the COMPOUND COMMANDS ──
+        if expect_command:
+            if word == "esac":
+                if len(frames) > 1 and frames[-1]["kind"] == "case":
+                    frames.pop()
+                    frames[-1]["empty"] = False
+                expect_command = False
+                continue
+            if word == "if":
+                compound.append({"kind": "if", "phase": "cond", "seen": False})
+            elif word == "while" or word == "until":
+                compound.append({"kind": "loop", "phase": "cond", "seen": False})
+            elif word == "for" or word == "select":
+                compound.append({"kind": "loop", "phase": "header", "seen": False})
+            elif word == "then":
+                if (
+                    not compound
+                    or compound[-1]["kind"] != "if"
+                    or compound[-1]["phase"] != "cond"
+                ):
+                    return "compound-command"
+                compound[-1]["phase"] = "body"
+                compound[-1]["seen"] = False
+            elif word == "do":
+                if not compound or compound[-1]["kind"] != "loop":
+                    return "compound-command"
+                if compound[-1]["phase"] == "body":
+                    return "compound-command"
+                if compound[-1]["phase"] == "header" and not compound[-1]["seen"]:
+                    # An EMPTY header.  MEASURED: `for ; do echo hi;
+                    # done` and `select ; do echo hi; done` are REFUSED
+                    # with "compound-command".
+                    return "compound-command"
+                compound[-1]["phase"] = "body"
+                compound[-1]["seen"] = False
+            elif word == "else" or word == "elif":
+                if not compound or compound[-1]["kind"] != "if":
+                    return "compound-command"
+                compound[-1]["phase"] = "body"
+                compound[-1]["seen"] = False
+            elif word == "fi":
+                if not compound or compound[-1]["kind"] != "if":
+                    return "compound-command"
+                if compound[-1]["phase"] == "body" and not compound[-1]["seen"]:
+                    # An EMPTY body.  MEASURED: `if true; then fi` and
+                    # `if true; then echo hi; else fi` are REFUSED with
+                    # "compound-command".
+                    return "compound-command"
+                compound.pop()
+            elif word == "done":
+                if not compound or compound[-1]["kind"] != "loop":
+                    return "compound-command"
+                if compound[-1]["phase"] == "body" and not compound[-1]["seen"]:
+                    # An EMPTY body.  MEASURED: `while false; do done`
+                    # and `for i in 1; do done` are REFUSED with
+                    # "compound-command".
+                    return "compound-command"
+                compound.pop()
+            else:
+                if compound and compound[-1]["phase"] in ("body", "header"):
+                    compound[-1]["seen"] = True
+            expect_command = False
+            continue
+        if compound and compound[-1]["phase"] in ("body", "header"):
+            compound[-1]["seen"] = True
+        expect_command = False
+
+    if compound:
+        # A compound command that is never CLOSED.  MEASURED:
+        # `if true; then echo hi`, `while false; do echo hi` and
+        # `for i in 1; do echo hi` are REFUSED with "compound-command".
+        return "compound-command"
+    if len(frames) > 1:
+        kind = frames[-1]["kind"]
+        if kind == "subst":
+            return "command-substitution"
+        return "invalid-structure"
+    return None
+
+
+def _matcher_group_stands_where_a_command_may_stand(
+    command: str, start: int, index: int
+) -> bool:
+    """May this brace GROUP stand where it does?
+
+    A GROUP is a COMPOUND COMMAND, and a compound command may only
+    stand where a command is expected.  MEASURED:
+
+        { echo hi; }                 ALLOWED  (command position)
+        echo "a"; { echo hi; }       ALLOWED  (command position)
+        echo a { echo hi; }          REFUSED  invalid-structure
+        true { echo hi; }            REFUSED  invalid-structure
+        echo 'a' { echo hi; }        REFUSED  invalid-structure
+        f() { echo hi; }             ALLOWED  (a definition's body)
+        coproc <name> { echo hi; }   ALLOWED  (a declaration's body)
+        coproc "" { echo hi; }       REFUSED  invalid-structure
+        coproc mp""m { echo hi; }    REFUSED  invalid-structure
+
+    So the slot before the group has to be EMPTY - or a function
+    definition's parameter list, or a `coproc` declaration whose name
+    is a PLAIN literal word.
+    """
+    slot = command[start:index].strip()
+    if not slot:
+        return True
+    if re.match(r"^(function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)$", slot):
+        # A FUNCTION DEFINITION's body: `f() { echo hi; }` and the
+        # `function` keyword form, `function f() { echo hi; }`, are both
+        # ALLOWED.
+        return True
+    if re.match(r"^function\s+[A-Za-z_][A-Za-z0-9_]*$", slot):
+        # The `function` keyword form without a parameter list.
+        return True
+    if re.match(r"^coproc(\s+[A-Za-z_][A-Za-z0-9_.-]*)?$", slot):
+        return True
+    return False
+
+
+def _matcher_subject_is_command(subject: str) -> bool:
+    """Is this `case` SUBJECT a command rather than a word?
+
+    MEASURED: `case echo x in y) echo hi;; esac` is REFUSED with
+    "compound-command", and it names no binary at all - so the refusal
+    is about the CONSTRUCT.
+
+    A subject that is ONE WORD is fine, and so is one that is an
+    EXPANSION: `case x in y) ...`, `case "echo x" in y) ...` and
+    `case $(( x )) in z) ...` are all ALLOWED.  So the test is whether
+    the subject carries a space outside its quoted regions and its
+    substitutions.
+
+    The subject is STRIPPED first: the text between `case` and ` in `
+    carries the spaces that SEPARATE the keyword from the subject,
+    and those are not part of the subject.
+    """
+    subject = subject.strip()
+    index = 0
+    length = len(subject)
+    while index < length:
+        char = subject[index]
+        if char in "\"'":
+            end = subject.find(char, index + 1)
+            if end < 0:
+                return False
+            index = end + 1
+            continue
+        if char == "$" and index + 1 < length and subject[index + 1] == "(":
+            # An EXPANSION: `$( ... )` and `$(( ... ))`.
+            if subject.startswith("$((", index):
+                end = subject.find("))", index + 3)
+                index = length if end < 0 else end + 2
+                continue
+            depth = 0
+            end = index + 1
+            while end < length:
+                if subject[end] == "(":
+                    depth += 1
+                elif subject[end] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                end += 1
+            index = end + 1 if end < length else length
+            continue
+        if char.isspace():
+            return True
         index += 1
     return False
 
@@ -763,6 +1341,12 @@ def _matcher_extract_cases(command: str):
             index += 1
             continue
         subject = command[index + 4 : in_at]
+        # A SUBJECT that is a COMMAND is a construct the host cannot
+        # analyse, and the SCANNER reads it - MEASURED:
+        # `case echo x in y) echo hi;; esac` is REFUSED with
+        # "compound-command", and it names no binary at all.  So the
+        # rule lives in ONE place, and the mutation sweep can revert
+        # it and see the guard go red.
         if not subject.strip():
             # A `case` with NO SUBJECT is a construct the host cannot
             # analyse.  MEASURED: `case in y) echo hi;; esac` is
@@ -1169,21 +1753,22 @@ def _matcher_bodies(segments):
     about the construct and not about the name.
     """
     out = []
-    depth = 0
+    # The compound commands have to be CLOSED, their bodies may not be
+    # EMPTY, a continuation keyword may not continue nothing, and a
+    # closing keyword may not close nothing.  MEASURED: `if true; then
+    # echo hi` (no `fi`), `while false; do echo hi` (no `done`),
+    # `for ; do echo hi` (an empty header), `if true; then fi` (an empty
+    # body), `if true; then echo hi; else fi`, `do echo hi` and `fi
+    # echo hi` are all REFUSED with "compound-command", and none of them
+    # names a binary.
+    #
+    # The SCANNER reads all of that, in ONE place, so the rule lives
+    # in ONE place - and the mutation sweep can revert it and see the
+    # guard go red.
     for position, (text, kind) in enumerate(segments):
         words = text.split()
         keyword = words[0] if words else ""
-        if keyword in _MATCHER_CONTINUATION_KEYWORDS:
-            # A continuation keyword with nothing to continue.
-            if depth == 0:
-                out.append((text, _MATCHER_OPAQUE))
-                continue
-        elif keyword in _MATCHER_CLOSING_KEYWORDS:
-            if depth == 0:
-                out.append((text, _MATCHER_OPAQUE))
-                continue
-            depth -= 1
-        elif keyword == "if":
+        if keyword == "if":
             # The CONDITION of an `if` may not be EMPTY.
             if (
                 not text.strip()[len("if") :].strip()
@@ -1191,7 +1776,6 @@ def _matcher_bodies(segments):
             ):
                 out.append((text, _MATCHER_OPAQUE))
                 continue
-            depth += 1
         if keyword not in ("for", "while", "until", "select") or "do" not in words:
             # A bare FUNCTION DEFINITION with no body is a construct
             # the host cannot analyse.  MEASURED: `f()` is REFUSED with
@@ -1776,9 +2360,10 @@ def _matcher_candidates(segment: str, kind: str = _MATCHER_COMMAND, depth: int =
 
 def _matcher_denies(command: str, rules) -> bool:
     """Would the host deny this command, given these (resource, effect)?"""
-    if _matcher_empty_group(command):
-        # An EMPTY GROUP is a construct the host cannot analyse.
-        # MEASURED: `{ }` and `( )` are REFUSED with "invalid-structure".
+    if _matcher_structure(command):
+        # A construct the host's scanner cannot PARSE: an unterminated
+        # quote or escape, an unbalanced bracket, a quote that splits a
+        # word.
         return True
     for segment, kind in _matcher_segments(command):
         if kind == _MATCHER_OPAQUE:
@@ -2142,6 +2727,76 @@ class ReviewerIsolationTest(unittest.TestCase):
             "echo f()",
             # a `case` whose FIRST pattern is empty
             "case x in ''|y) echo hi;; esac",
+            # ── the twenty-first review: the STRUCTURAL class ──
+            # an unmatched delimiter
+            "}",
+            "echo }",
+            ")",
+            "echo )",
+            # an unclosed group
+            "{ echo hi",
+            "( echo hi",
+            "f() { echo hi;",
+            # an empty command slot - the `;` has to be preceded by a
+            # command, and the slot between two `;` is empty
+            ";",
+            ";;",
+            "echo hi;;",
+            "echo hi;; echo bye",
+            # a brace group whose FIRST slot is empty
+            "{ ; }",
+            "{ ; echo hi; }",
+            "echo { ; }",
+            # a GROUP is a compound command, so it may only stand
+            # where a command is expected
+            "echo a { echo hi; }",
+            "echo hi { echo hi; }",
+            "true { echo hi; }",
+            "echo 'a' { echo hi; }",
+            'echo "a" { echo hi; }',
+            'echo "" { echo hi; }',
+            'echo "a" ( echo hi )',
+            # a quoted or empty `coproc` NAME is not a name
+            'coproc "" { echo hi; }',
+            'coproc mp""m { echo hi; }',
+            'echo mp""m { echo hi; }',
+            # an EMPTY for/select header
+            "for ; do echo hi; done",
+            "select ; do echo hi; done",
+            "select ; do done",
+            # a `case` whose SUBJECT is a command
+            "case echo x in y) echo hi;; esac",
+            # a compound command that is never CLOSED
+            "if true; then echo hi",
+            "while false; do echo hi",
+            "for i in 1; do echo hi",
+            # an EMPTY body
+            "if true; then fi",
+            "while false; do done",
+            "for i in 1; do done",
+            "if true; then echo hi; else fi",
+            # an EMPTY body, in the NEWLINE spelling, and with a
+            # separator between the body keyword and the closer
+            "if true; then\nfi",
+            "while false; do\ndone",
+            "for i in 1; do\ndone",
+            "if true; then ; fi",
+            "while false; do ; done",
+            # a closer with NO SEPARATOR before it
+            "if true; then echo hi fi",
+            # a `case` whose PATTERN LIST has no `)` and no `esac`
+            "case x in",
+            "case x in y z",
+            # a `case` that is closed, with TEXT after it
+            "case x in esac extra",
+            "case x in esac ;; esac",
+            # an unterminated quote or escape
+            "echo 'unclosed",
+            'echo "unclosed',
+            "echo hi \\",
+            # a bare function definition in ARGUMENT position
+            "echo a()",
+            "a() b()",
             # the FIRST pattern of a `case` has to be non-empty
             "case x in |y) echo hi;; esac",
             "case x in ''|y) echo hi;; esac",
@@ -2256,6 +2911,55 @@ class ReviewerIsolationTest(unittest.TestCase):
             # a LATER pattern of a `case` may be empty
             "case x in y|'') echo hi;; esac",
             "case x in y|''|z) echo hi;; esac",
+            # ── the twenty-first review: the well-formed forms ──
+            # a quote pair inside a longer word is fine - the host
+            # removes the quotes and continues
+            'echo mp""m',
+            'echo m""pm',
+            'echo a"b"c',
+            'echo ""',
+            "x=''",
+            "x='a'",
+            'echo a"b"',
+            'echo "a"b',
+            'echo mp"m"',
+            'echo "mp"m',
+            # a TRAILING empty slot is fine
+            "echo hi;",
+            # a `;` inside a `case` separates two case ITEMS
+            "case x in y) echo hi; ;; esac",
+            # `{}` is an ordinary WORD
+            "{}",
+            "echo {}",
+            # an empty command substitution is not a group
+            "echo $( )",
+            "x=$( )",
+            # a quoted word beside a pipe or an `&&` is fine
+            'echo "a" | cat',
+            'echo "a" && echo hi',
+            "echo a && echo hi",
+            # a quoted word inside a GROUP is fine
+            '{ echo "a"; }',
+            '{ echo "a"; echo hi; }',
+            'echo "a" ;',
+            'echo "a" > /dev/null',
+            'echo "a" &',
+            # a GROUP in command position is fine
+            'echo "a"; { echo hi; }',
+            # a here-document's BODY is DATA - the host does not
+            # analyse it at all
+            "cat <<EOF\n}\nEOF",
+            "cat <<EOF\n)\nEOF",
+            "cat <<EOF\necho 'unclosed\nEOF",
+            # a `case` whose PATTERN LIST holds a substitution or a
+            # quoted `)` - the list's own `)` comes after them
+            "case x in $(echo y)) echo hi;; esac",
+            'case x in "y)z") echo hi;; esac',
+            # a `case` with an EMPTY pattern list, closed by its own
+            # `esac`
+            "case x in esac",
+            # a body that is not empty, in the NEWLINE spelling
+            "if true; then\necho hi\nfi",
             # a search for the name, unquoted, is not an invocation
             "grep -rn mpm_memory .",
             'echo "the mpm_memory tool"',
@@ -2351,6 +3055,10 @@ class ReviewerIsolationTest(unittest.TestCase):
             "cat <<-EOF\nmpm --version\nEOF",
             # the routes the residual list names, which stay OPEN
             "echo $(echo mp)m",
+            # a name split by a QUOTE is the same family: the matcher
+            # sees the text, and the text does not hold the name
+            'mp""m --version',
+            'm"pm" --version',
             "M=mpm; $M --version",
             "cd cmd/mpm && go run . --version",
             # a SHELL GLOB expands to the name before the matcher
