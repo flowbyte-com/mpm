@@ -237,157 +237,30 @@ func highestSemver(rows []skillSemverRow) skillSemverRow {
 // wins when no version is recorded" behaviour for legacy rows while
 // making the authoritative semver comparison the primary sort key.
 func loadActiveSkillRows(db *sql.DB, name, excludeID string) ([]skillSemverRow, error) {
-	prefix := "skill:" + name + "-v"
-	rows, err := db.Query(`
-		SELECT id, COALESCE(json_extract(metadata, '$.version'), '')
-		FROM memories
-		WHERE collection = 'skills' AND deleted_at IS NULL
-		  AND substr(id, 1, length(?)) = ?
-		  AND id != ?
-	`, prefix, prefix, excludeID)
-	if err != nil {
-		return nil, fmt.Errorf("query active skill rows for %s: %w", name, err)
-	}
-	defer rows.Close()
-	var out []skillSemverRow
-	for rows.Next() {
-		var r skillSemverRow
-		if err := rows.Scan(&r.id, &r.version); err != nil {
-			return nil, fmt.Errorf("scan: %w", err)
-		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate: %w", err)
-	}
-	return out, nil
+	return loadActiveSkillRowsFrom(db, name, excludeID)
 }
 
 // loadActiveSkillRowsTx is the transaction-scoped variant for the
 // SaveSkill new-row path. Same shape as loadActiveSkillRows but uses
 // the transaction's Query to keep the read inside the tx.
 func loadActiveSkillRowsTx(tx *sql.Tx, name, excludeID string) ([]skillSemverRow, error) {
-	prefix := "skill:" + name + "-v"
-	rows, err := tx.Query(`
-		SELECT id, COALESCE(json_extract(metadata, '$.version'), '')
-		FROM memories
-		WHERE collection = 'skills' AND deleted_at IS NULL
-		  AND substr(id, 1, length(?)) = ?
-		  AND id != ?
-	`, prefix, prefix, excludeID)
-	if err != nil {
-		return nil, fmt.Errorf("query active skill rows for %s: %w", name, err)
-	}
-	defer rows.Close()
-	var out []skillSemverRow
-	for rows.Next() {
-		var r skillSemverRow
-		if err := rows.Scan(&r.id, &r.version); err != nil {
-			return nil, fmt.Errorf("scan: %w", err)
-		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate: %w", err)
-	}
-	return out, nil
+	return loadActiveSkillRowsFrom(tx, name, excludeID)
 }
 
 // ReadSkill fetches a skill by id (exact) or name (latest version).
 // version is ignored when name is given; pass exact id (skill:<name>-v<ver>)
 // to bypass version resolution.
+//
+// The loading itself lives in skill_document.go, because the `read`
+// action must load the skill and its package provenance from ONE
+// snapshot — and that needs the loader to run inside a transaction.
 func (dm *DatabaseManager) ReadSkill(nameOrID, version string) (*Skill, error) {
 	db := dm.db
 	if db == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
-
-	var (
-		id, content, tagsJSON, metaJSON, collection, createdAt string
-		isGlobal, isPrime                                      int
-		weight                                                 float64
-		deletedAt                                              sql.NullString
-	)
-
-	// Try exact-id lookup first.
-	row := db.QueryRow(`
-		SELECT id, collection, content, tags, metadata, is_global, is_prime_directive,
-		       weight, created_at, deleted_at
-		FROM memories
-		WHERE collection = 'skills' AND deleted_at IS NULL
-		  AND id = ?
-		LIMIT 1
-	`, nameOrID)
-
-	err := row.Scan(&id, &collection, &content, &tagsJSON, &metaJSON,
-		&isGlobal, &isPrime, &weight, &createdAt, &deletedAt)
-	if err == sql.ErrNoRows {
-		// Fall back to name lookup: find the semver-max row. The
-		// previous shape used ORDER BY id DESC LIMIT 1 as a proxy
-		// for "highest semver" — equal-width semver sorts in the
-		// same order, but unequal-width semver breaks the proxy
-		// (e.g. id-sort puts v1.9.0 above v1.10.0 because '9' > '1').
-		// Load the candidates and pick the semver max in Go so the
-		// name-latest lookup matches the `is_latest = highest
-		// semantic version` invariant.
-		rows, qerr := loadActiveSkillRows(db, nameOrID, "")
-		if qerr != nil {
-			return nil, qerr
-		}
-		max := highestSemver(rows)
-		if max.id == "" {
-			err = sql.ErrNoRows
-		} else {
-			row = db.QueryRow(`
-				SELECT id, collection, content, tags, metadata, is_global, is_prime_directive,
-				       weight, created_at, deleted_at
-				FROM memories
-				WHERE id = ? AND deleted_at IS NULL
-				LIMIT 1
-			`, max.id)
-			err = row.Scan(&id, &collection, &content, &tagsJSON, &metaJSON,
-				&isGlobal, &isPrime, &weight, &createdAt, &deletedAt)
-		}
-	}
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("skill %q not found", nameOrID)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("query skill: %w", err)
-	}
-
-	fm, body, parseErr := ParseSkillFrontmatter(content)
-	if parseErr != nil {
-		return nil, fmt.Errorf("parse skill %s frontmatter: %w", id, parseErr)
-	}
-
-	meta := parseJSONMeta(metaJSON)
-	isLatest, _ := meta["is_latest"].(bool)
-	// content_hash is written by SaveSkill into metadata; surface it on
-	// the read-side Skill struct so callers (dedup, drift checks) don't
-	// have to reach into the metadata map. Matches the `is_latest`
-	// extraction pattern immediately above. Absent hash → empty string.
-	contentHash, _ := meta["content_hash"].(string)
-
-	return &Skill{
-		ID:          id,
-		Collection:  collection,
-		Tags:        parseJSONTags(tagsJSON),
-		Metadata:    meta,
-		IsGlobal:    isGlobal == 1,
-		IsLatest:    isLatest,
-		Weight:      int(weight),
-		CreatedAt:   createdAt,
-		Name:        fm.Name,
-		Version:     fm.Version,
-		WhenToUse:   fm.WhenToUse,
-		Domain:      fm.Domain,
-		Constraints: fm.Constraints,
-		Steps:       fm.Steps,
-		Frontmatter: fm,
-		Body:        body,
-		ContentHash: contentHash,
-	}, nil
+	skill, _, err := readSkillDocument(db, nameOrID, version)
+	return skill, err
 }
 
 // ListSkills returns the latest version of each skill in scope.

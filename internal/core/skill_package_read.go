@@ -47,6 +47,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -138,6 +139,30 @@ const (
 		         WHERE f.skill_id = p.skill_id AND f.path = p.entrypoint)
 		FROM skill_packages p
 		WHERE p.skill_id = ?
+	`
+
+	// packageManifestQuery reads the stored manifest of ONE package.
+	//
+	// It is a separate statement from the provenance query on purpose.
+	// The manifest is needed only for the RECORDED projection hash, and
+	// only a PACKAGED skill has one — so an ordinary skill's read pays
+	// for the provenance statement alone, exactly as it did before.
+	packageManifestQuery = `
+		SELECT manifest
+		FROM skill_packages
+		WHERE skill_id = ?
+	`
+
+	// skillProjectionQuery reads a skill's raw `memories.content` — the
+	// projection document — by its exact id.
+	//
+	// It carries NO skill-scope predicate: the caller asks about one
+	// specific skill id, and a soft-shredded skill's package row still
+	// describes a projection.
+	skillProjectionQuery = `
+		SELECT content
+		FROM memories
+		WHERE id = ? AND collection = 'skills'
 	`
 )
 
@@ -461,12 +486,78 @@ type PackageVerificationResult struct {
 	Failures []PackageVerificationFailure
 }
 
+// PackageHashOrigin says where a hash in the provenance object came
+// from.
+//
+// The distinction is load-bearing. A hash READ from the store is a
+// RECORDED hash: the package's own record of what it holds. A hash
+// COMPUTED during the retrieval is a RECOMPUTED hash: what the reader
+// saw this time. Presenting one as the other would let a caller
+// believe it had checked a stored claim when it had merely observed a
+// fresh value.
+type PackageHashOrigin string
+
+const (
+	// PackageHashOriginRecorded — the hash was READ from the store. It
+	// is the package's own record, and it is what `verify` re-derives
+	// and proves.
+	PackageHashOriginRecorded PackageHashOrigin = "recorded"
+
+	// PackageHashOriginRecomputed — the hash was COMPUTED during the
+	// retrieval, over the bytes the response carries.
+	PackageHashOriginRecomputed PackageHashOrigin = "recomputed"
+
+	// PackageHashOriginUnavailable — no hash could be produced, and
+	// the response says so rather than carrying an empty string that
+	// reads like a hash.
+	PackageHashOriginUnavailable PackageHashOrigin = "unavailable"
+)
+
+// PackageHashOrigins names, per hash, whether it was READ from the
+// store or COMPUTED during the retrieval.
+//
+// It is a struct rather than a map so the JSON shape is STABLE: a
+// consumer can read `hash_origins.projection_sha256` without first
+// checking that the key exists.
+type PackageHashOrigins struct {
+	// EntrypointSHA256 is the origin of `entrypoint_sha256`. It is
+	// always `recorded`: the value is the package row's own.
+	EntrypointSHA256 PackageHashOrigin `json:"entrypoint_sha256"`
+
+	// ProjectionSHA256 is the origin of `projection_sha256`. It is
+	// `recorded` when the stored manifest carried a value that was
+	// obtained and validated against the projection being returned, and
+	// `unavailable` when it could not be.
+	ProjectionSHA256 PackageHashOrigin `json:"projection_sha256"`
+
+	// BodySHA256 is the origin of `body_sha256`. It is always
+	// `recomputed`: the body is derived from the projection during the
+	// retrieval, and the hash is of the bytes the response carries.
+	BodySHA256 PackageHashOrigin `json:"body_sha256"`
+}
+
 // SkillPackageProvenance is the §8.2.1 provenance object.
 //
 // It is present whenever the skill IS a package, and it is absent for an
 // ordinary single-document skill. It carries the ORIGINAL entrypoint's
 // hash — NOT the projection's — so a caller can check that the body it is
 // looking at derives from the file the package recorded.
+//
+// It carries THREE hashes, and they are not interchangeable:
+//
+//   - `entrypoint_sha256` — the RECORDED hash of the original,
+//     unchanged `SKILL.md`.
+//   - `projection_sha256` — the RECORDED hash of the complete derived
+//     entrypoint projection: the original document, plus the one
+//     inserted `version:` line, and only when the package declares no
+//     version.
+//   - `body_sha256` — the RECOMPUTED hash of the exact UTF-8 bytes of
+//     the `body` field this response returns.
+//
+// The first two are claims the STORE makes; the third is a measurement
+// the READER takes. `hash_origins` says which is which, so a caller
+// never has to guess whether it is holding a recorded claim or a fresh
+// observation.
 type SkillPackageProvenance struct {
 	// Entrypoint is the canonical path of the package's entrypoint.
 	Entrypoint string `json:"entrypoint"`
@@ -474,6 +565,32 @@ type SkillPackageProvenance struct {
 	// EntrypointSHA256 is the hash of the ORIGINAL entrypoint bytes, as
 	// supplied (§5.2) — not the hash of the derived projection.
 	EntrypointSHA256 string `json:"entrypoint_sha256"`
+
+	// ProjectionSHA256 is the RECORDED hash of the complete derived
+	// entrypoint projection — the bytes written to `memories.content`.
+	//
+	// It is the manifest's own `projection_sha256`, obtained from the
+	// stored manifest and VALIDATED against the projection this
+	// response is returning. It is empty, with the origin reported as
+	// `unavailable`, when the stored manifest could not be read or did
+	// not validate — in which case no recorded value could be
+	// validated, and an unvalidated value is not reported as if it
+	// were one.
+	ProjectionSHA256 string `json:"projection_sha256"`
+
+	// BodySHA256 is the hash of the exact UTF-8 bytes of the `body`
+	// field this response returns.
+	//
+	// It is RECOMPUTED during the retrieval: it is a measurement of the
+	// bytes the caller holds, not a claim the store makes. It is what
+	// lets a caller check the body it received — the one thing the
+	// recorded hashes cannot do, because the response does not carry
+	// the frontmatter the projection's hash covers.
+	BodySHA256 string `json:"body_sha256"`
+
+	// HashOrigins says, for each hash above, whether it was read from
+	// the store or recomputed during the retrieval.
+	HashOrigins PackageHashOrigins `json:"hash_origins"`
 
 	// FileCount is the number of files the package carries.
 	FileCount int `json:"file_count"`
@@ -770,6 +887,11 @@ func (dm *DatabaseManager) PackageVerify(ctx context.Context, sel PackageSelecto
 // manifest is broken — that is what `verify` is for. What it never does is
 // claim a scan that was not recorded: the scan status is the entrypoint
 // file row's own status, and a missing row reports no scan at all.
+//
+// It is also the STANDALONE form of the provenance: the `read` action
+// uses ReadSkillWithPackageProvenance instead, because the action must
+// return the skill and the provenance from ONE snapshot. Both go through
+// skillPackageProvenanceInTx, so the two cannot disagree.
 func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID string) (*SkillPackageProvenance, error) {
 	if strings.TrimSpace(skillID) == "" {
 		return nil, packageReadErrorf(PackageReadReasonSelectorInvalid, "",
@@ -781,6 +903,204 @@ func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID s
 	}
 
 	var (
+		provenance *SkillPackageProvenance
+		projection string
+		body       string
+		bodyKnown  bool
+	)
+	err := dm.withPackageReadSnapshot(ctx, func(tx *sql.Tx) error {
+		// The projection is the `memories.content` column: the bytes
+		// the manifest's recorded `projection_sha256` covers, and the
+		// bytes the body is derived from.
+		//
+		// The skill row is read WITHOUT the skill-scope predicates,
+		// because this accessor answers "what package does this skill
+		// id have?" — and a soft-shredded skill's package row is still
+		// there, and still describes a projection.
+		content, err := loadSkillProjection(ctx, tx, skillID)
+		if err != nil {
+			return err
+		}
+		projection = content
+		// The body is KNOWN only when the frontmatter parses. A
+		// document whose frontmatter does not parse has no body to
+		// hash, and the provenance says so rather than reporting the
+		// hash of an empty string as if it were the body's hash.
+		bodyKnown = false
+		if content != "" {
+			if _, b, perr := ParseSkillFrontmatter(content); perr == nil {
+				body = b
+				bodyKnown = true
+			}
+		}
+
+		p, err := skillPackageProvenanceInTx(ctx, tx, skillID, projection, body, bodyKnown)
+		if err != nil {
+			return err
+		}
+		provenance = p
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return provenance, nil
+}
+
+// ReadSkillWithPackageProvenance reads a skill AND its package
+// provenance from ONE consistent database snapshot.
+//
+// The `read` action returns two things that must agree: the skill's
+// body and, for a packaged skill, the provenance that describes it. The
+// two used to come from two independent statements, so a package deleted
+// between them could let a body return with NO provenance — which breaks
+// R6, because the provenance object is mandatory for a packaged skill.
+//
+// One snapshot closes the window. The snapshot is taken at the first
+// read and held until it is released, so a concurrent deletion is
+// either wholly visible (both halves gone → the ordinary not-found
+// answer) or wholly invisible (both halves present → a consistent
+// pair). There is no state in which the body is returned without the
+// provenance that describes it.
+//
+// The cost is one transaction where there were two independent
+// statements. It is NOT a full-package integrity scan: no blob is read
+// and no package byte is hashed, so the read stays as cheap as it was.
+func (dm *DatabaseManager) ReadSkillWithPackageProvenance(ctx context.Context, nameOrID, version string) (*Skill, *SkillPackageProvenance, error) {
+	if dm.db == nil {
+		return nil, nil, packageReadErrorf(PackageReadReasonDatabaseFailure, "",
+			"the database is not initialized")
+	}
+
+	var (
+		skill      *Skill
+		provenance *SkillPackageProvenance
+	)
+	err := withSkillReadSnapshot(ctx, dm, func(tx *sql.Tx) error {
+		s, p, err := readSkillWithPackageProvenanceTx(ctx, tx, nameOrID, version)
+		if err != nil {
+			return err
+		}
+		skill, provenance = s, p
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return skill, provenance, nil
+}
+
+// withSkillReadSnapshot runs fn inside the snapshot the combined read
+// uses.
+//
+// It exists as a NAMED SEAM rather than an inline call to
+// `dm.withPackageReadSnapshot` for one reason: the concurrency
+// invariant has to be testable DETERMINISTICALLY against the EXPORTED
+// `ReadSkillWithPackageProvenance`, not only against an internal
+// helper.
+//
+// A test that drives the internal helper proves the helper takes one
+// snapshot. It does NOT prove the exported function does — and an
+// exported function that had been rewritten as two independent reads
+// would pass such a test every time. This seam lets a test supply the
+// snapshot the exported function runs inside, so the interleaving is
+// chosen rather than raced for, and so the test can prove the exported
+// function really took ONE snapshot (the seam is not called at all if
+// it does not).
+//
+// The seam is a package-level variable, so it is guarded by a mutex
+// and it is only ever set by a test. Production always takes the
+// default path.
+var skillReadSnapshotHook struct {
+	mu   sync.Mutex
+	hook func(ctx context.Context, fn func(*sql.Tx) error) error
+}
+
+// setSkillReadSnapshotHook installs a snapshot provider for the
+// combined read, and returns a function that restores the previous one.
+//
+// It exists for ONE reason: the concurrency invariant has to be
+// testable DETERMINISTICALLY against the EXPORTED
+// `ReadSkillWithPackageProvenance`, not only against an internal
+// helper.
+//
+// A test that drives the internal helper proves the helper takes one
+// snapshot. It does NOT prove the exported function does — and an
+// exported function that had been rewritten as two independent reads
+// would pass such a test every time. This seam lets a test supply the
+// snapshot the exported function runs inside, so the interleaving is
+// CHOSEN rather than raced for — and so the test can prove the
+// exported function really took ONE snapshot, because the seam is not
+// called at all if it does not.
+//
+// It lives here rather than in a test file so that the production
+// function and the test seam cannot drift apart: the production
+// function calls the seam, and the test drives the seam.
+func setSkillReadSnapshotHook(hook func(ctx context.Context, fn func(*sql.Tx) error) error) (restore func()) {
+	skillReadSnapshotHook.mu.Lock()
+	previous := skillReadSnapshotHook.hook
+	skillReadSnapshotHook.hook = hook
+	skillReadSnapshotHook.mu.Unlock()
+	return func() {
+		skillReadSnapshotHook.mu.Lock()
+		skillReadSnapshotHook.hook = previous
+		skillReadSnapshotHook.mu.Unlock()
+	}
+}
+
+// withSkillReadSnapshot runs fn inside one read snapshot.
+//
+// The default path is `dm.withPackageReadSnapshot`. When a test has
+// installed a seam, the seam provides the snapshot instead — which is
+// how the concurrent deletion is made deterministic.
+func withSkillReadSnapshot(ctx context.Context, dm *DatabaseManager, fn func(*sql.Tx) error) error {
+	skillReadSnapshotHook.mu.Lock()
+	hook := skillReadSnapshotHook.hook
+	skillReadSnapshotHook.mu.Unlock()
+	if hook == nil {
+		return dm.withPackageReadSnapshot(ctx, fn)
+	}
+	return hook(ctx, fn)
+}
+
+// readSkillWithPackageProvenanceTx is the snapshot-scoped form of the
+// combined read.
+//
+// It is a separate function so that the two reads are visibly ONE
+// operation on ONE transaction handle — and so a test can drive it on a
+// transaction whose snapshot it controls, which is how the concurrent
+// deletion is made deterministic.
+func readSkillWithPackageProvenanceTx(ctx context.Context, tx *sql.Tx, nameOrID, version string) (*Skill, *SkillPackageProvenance, error) {
+	s, projection, err := readSkillDocument(tx, nameOrID, version)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The combined read returns the skill's own body, so the body is
+	// KNOWN: it is the text the response carries.
+	p, err := skillPackageProvenanceInTx(ctx, tx, s.ID, projection, s.Body, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	return s, p, nil
+}
+
+// skillPackageProvenanceInTx builds the §8.2.1 provenance object for
+// skillID inside tx.
+//
+// `projection` is the raw projection document the caller is returning —
+// the `memories.content` column, frontmatter included — and `body` is
+// the text the caller is returning as the body.
+//
+// `bodyKnown` says whether `body` IS that body or whether it could not
+// be determined. The two are different, and the hash that depends on
+// the body must not claim to be a hash of a body that was never
+// found: an EMPTY body is a body with a hash (the hash of the empty
+// byte string), while an UNKNOWN body has no hash at all and is
+// reported as `unavailable`.
+//
+// The returned object is nil for a skill that is not a package.
+func skillPackageProvenanceInTx(ctx context.Context, tx *sql.Tx, skillID, projection, body string, bodyKnown bool) (*SkillPackageProvenance, error) {
+	var (
 		entrypoint      string
 		entrypointSHA   string
 		packageHash     string
@@ -791,7 +1111,7 @@ func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID s
 		secretScanned   sql.NullInt64
 		poisonScanned   sql.NullInt64
 	)
-	err := dm.db.QueryRowContext(ctx, packageProvenanceQuery, skillID).Scan(
+	err := tx.QueryRowContext(ctx, packageProvenanceQuery, skillID).Scan(
 		&entrypoint, &entrypointSHA, &packageHash,
 		&declaredVersion, &version, &versionSource,
 		&fileCount, &secretScanned, &poisonScanned)
@@ -814,6 +1134,14 @@ func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID s
 		ScanStatus: PackageScanStatus{
 			Secret: secretScanned.Valid && secretScanned.Int64 != 0,
 			Poison: poisonScanned.Valid && poisonScanned.Int64 != 0,
+		},
+		HashOrigins: PackageHashOrigins{
+			// The entrypoint's hash is the package ROW's own. It is
+			// recorded, never recomputed here.
+			EntrypointSHA256: PackageHashOriginRecorded,
+			// Filled in below, once the manifest has been consulted.
+			ProjectionSHA256: PackageHashOriginUnavailable,
+			BodySHA256:       PackageHashOriginUnavailable,
 		},
 	}
 	provenance.Scanned = provenance.ScanStatus.Secret && provenance.ScanStatus.Poison
@@ -839,7 +1167,94 @@ func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID s
 		override.Declared = &declared
 	}
 	provenance.VersionOverride = &override
+
+	// ── The body's hash: RECOMPUTED over the bytes being returned. ──
+	//
+	// This is the one hash the caller can check on its own: it hashes
+	// the exact `body` field this response carries. The recorded hashes
+	// cover the projection, which the response does not carry.
+	//
+	// The hash of an EMPTY body is well defined — it is the hash of
+	// the empty byte string — so an empty body is a body with a hash,
+	// not a body without one. `unavailable` is reserved for the case
+	// where no body exists at all, and that is exactly the case
+	// `bodyKnown` reports: a document whose frontmatter does not
+	// parse has no body to hash, and hashing the empty string would
+	// report a claim about a body that was never found.
+	if bodyKnown {
+		provenance.BodySHA256 = sha256Hex([]byte(body))
+		provenance.HashOrigins.BodySHA256 = PackageHashOriginRecomputed
+	} else {
+		provenance.BodySHA256 = ""
+		provenance.HashOrigins.BodySHA256 = PackageHashOriginUnavailable
+	}
+
+	// ── The projection's hash: RECORDED in the stored manifest. ──────
+	//
+	// The recorded value has to come from the manifest, because that is
+	// where it lives, and it has to be VALIDATED, because a recorded
+	// value that does not describe the projection being returned is a
+	// false claim. So the manifest is read in this same snapshot,
+	// parsed, and checked with the manifest module's OWN rules
+	// (`Validate`) — not with a second rule set.
+	//
+	// A manifest that does not parse, or that does not validate, is the
+	// TOLERANT case: the read still returns the body, the recorded
+	// projection hash is reported as unavailable, and `verify` is where
+	// the damage is reported. A manifest that DOES validate and whose
+	// recorded projection hash disagrees with the projection being
+	// returned is a positive claim of corruption, and the read fails
+	// closed on it.
+	var manifestJSON string
+	if err := tx.QueryRowContext(ctx, packageManifestQuery, skillID).Scan(&manifestJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, packageReadErrorf(PackageReadReasonIntegrityFailure, "",
+				"the package row of %s carries no manifest", skillID)
+		}
+		return nil, packageReadErrorWrap(PackageReadReasonDatabaseFailure, "", err,
+			"read the manifest of %s", skillID)
+	}
+	manifest, _, err := ParsePackageManifest([]byte(manifestJSON))
+	if err != nil {
+		return provenance, nil
+	}
+	if err := manifest.Validate(); err != nil {
+		return provenance, nil
+	}
+	if projection == "" {
+		// There is no projection to validate the recorded hash
+		// against, so no recorded hash is reported as validated.
+		return provenance, nil
+	}
+	actual := sha256Hex([]byte(projection))
+	if actual != manifest.ProjectionSHA256 {
+		return nil, packageReadErrorf(PackageReadReasonIntegrityFailure, "",
+			"the stored manifest of %s records a projection hash of %s, but the stored projection hashes to %s",
+			skillID, manifest.ProjectionSHA256, actual)
+	}
+	provenance.ProjectionSHA256 = manifest.ProjectionSHA256
+	provenance.HashOrigins.ProjectionSHA256 = PackageHashOriginRecorded
 	return provenance, nil
+}
+
+// loadSkillProjection reads a skill's raw `memories.content` — the
+// projection document — by its exact id.
+//
+// It is deliberately WITHOUT the skill-scope predicates: the caller
+// asks about a specific skill id, and a soft-shredded skill's package
+// row still describes a projection. A missing row is not an error here;
+// the caller decides what an absent skill means.
+func loadSkillProjection(ctx context.Context, tx *sql.Tx, skillID string) (string, error) {
+	var content string
+	err := tx.QueryRowContext(ctx, skillProjectionQuery, skillID).Scan(&content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", packageReadErrorWrap(PackageReadReasonDatabaseFailure, "", err,
+			"read the projection of %s", skillID)
+	}
+	return content, nil
 }
 
 // ─── The read snapshot ─────────────────────────────────────────────────────
@@ -870,11 +1285,20 @@ func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID s
 // behaviour: after every read operation, the whole substrate is
 // unchanged.
 //
-// The ONE reader that does not use this helper is
-// `SkillPackageProvenance`: its read is a SINGLE statement, and a single
-// statement sees ONE consistent snapshot on its own — so it needs no
-// transaction, and the `read` action's hot path pays for neither a
-// connection checkout nor a BEGIN/ROLLBACK.
+// EVERY reader uses this helper now.
+//
+// `SkillPackageProvenance` was the ONE exception in P6: its read was a
+// SINGLE statement, and a single statement sees ONE consistent snapshot
+// on its own — so it needed no transaction, and the `read` action's hot
+// path paid for neither a connection checkout nor a BEGIN/ROLLBACK.
+//
+// The follow-up changed that. The accessor now reads the MANIFEST for
+// the recorded projection hash, so it needs the snapshot: the manifest
+// and the package row have to come from the same database state, or the
+// accessor could report a recorded hash that describes a different
+// package. The `read` action's hot path therefore pays for a
+// connection checkout and a BEGIN/ROLLBACK now, and the cost is
+// measured and stated in `docs/SPEC.md` §6.12.
 func (dm *DatabaseManager) withPackageReadSnapshot(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if dm.db == nil {
 		return packageReadErrorf(PackageReadReasonDatabaseFailure, "",
