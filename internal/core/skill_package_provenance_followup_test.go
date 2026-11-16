@@ -542,13 +542,18 @@ func TestP6FollowupProvenanceRefusesAPackageRowWhoseHashContradictsItsManifest(t
 //
 // A manifest that describes a DIFFERENT package — one that is entirely
 // coherent and entirely valid — can be written into another package's
-// row. That manifest describes ITSELF, so its own hash is sound; but the
-// row records the other package's identity, and the two disagree.
+// row, together with the projection it describes. That manifest describes
+// ITSELF, so its own hash is sound; and its recorded projection hash
+// describes the projection the store holds, so the projection comparison
+// is satisfied too. The row's own `package_hash` is the only thing left
+// that disagrees — and the identity check is what catches it.
 //
-// Without the identity check the read would have returned the substituted
-// manifest's projection hash as a validated claim, beside the row's own
-// `package_hash`, with nothing in the response saying which of the two
-// recorded values was unchecked.
+// The fixture substitutes BOTH halves on purpose. A fixture that
+// substituted only the manifest would be caught by the PROJECTION
+// comparison, and would therefore not pin the identity rule at all: the
+// read would fail closed for the wrong reason, and it would keep failing
+// closed with the identity check deleted. With both halves substituted,
+// the read reaches the identity check and only the identity check.
 func TestP6FollowupProvenanceRefusesAManifestThatDescribesAnotherPackage(t *testing.T) {
 	dm := p3DM(t)
 	first := p6ImportPackage(t, dm, "identityone", "1.0.0", map[string][]byte{
@@ -559,16 +564,27 @@ func TestP6FollowupProvenanceRefusesAManifestThatDescribesAnotherPackage(t *test
 	})
 
 	// The second package's manifest, written into the first package's
-	// row. The row's own `package_hash` is left alone — it still names
-	// the first package.
-	var manifest string
+	// row, and the second package's projection, written into the first
+	// package's skill row — so that the substituted manifest's
+	// recorded projection hash describes the projection the store holds.
+	// The package row's own `package_hash` is left alone: it still names
+	// the FIRST package, and that is the disagreement.
+	var manifest, projection string
 	if err := dm.db.QueryRow(`SELECT manifest FROM skill_packages WHERE skill_id = ?`,
 		second.SkillID).Scan(&manifest); err != nil {
 		t.Fatalf("read the other package's manifest: %v", err)
 	}
+	if err := dm.db.QueryRow(`SELECT content FROM memories WHERE id = ?`,
+		second.SkillID).Scan(&projection); err != nil {
+		t.Fatalf("read the other package's projection: %v", err)
+	}
 	if _, err := dm.db.Exec(`UPDATE skill_packages SET manifest = ? WHERE skill_id = ?`,
 		manifest, first.SkillID); err != nil {
 		t.Fatalf("substitute the manifest: %v", err)
+	}
+	if _, err := dm.db.Exec(`UPDATE memories SET content = ? WHERE id = ?`,
+		projection, first.SkillID); err != nil {
+		t.Fatalf("substitute the projection: %v", err)
 	}
 
 	_, _, err := dm.ReadSkillWithPackageProvenance(context.Background(), first.SkillID, "")
@@ -1161,6 +1177,31 @@ func BenchmarkP6FollowupComponentManifestParse(b *testing.B) {
 //
 // It is the check that turns a recorded value into a validated one, so
 // its cost is the price of the `recorded` origin.
+func BenchmarkP6FollowupComponentManifestValidate(b *testing.B) {
+	p6fuWorkspace(b)
+	dm := p6fuDM(b)
+	imported := p6fuImport(b, dm, "bench", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	var manifestJSON string
+	if err := dm.db.QueryRow(packageManifestQuery, imported.SkillID).
+		Scan(&manifestJSON); err != nil {
+		b.Fatalf("read the manifest: %v", err)
+	}
+	manifest, _, err := ParsePackageManifest([]byte(manifestJSON))
+	if err != nil {
+		b.Fatalf("parse the manifest: %v", err)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := manifest.Validate(); err != nil {
+			b.Fatalf("validate the manifest: %v", err)
+		}
+	}
+}
+
 // BenchmarkP6FollowupComponentPackageIdentity measures the package's
 // IDENTITY check.
 //
@@ -1188,31 +1229,6 @@ func BenchmarkP6FollowupComponentPackageIdentity(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if _, err := VerifyPackageHash(payload); err != nil {
 			b.Fatalf("verify the package hash: %v", err)
-		}
-	}
-}
-
-func BenchmarkP6FollowupComponentManifestValidate(b *testing.B) {
-	p6fuWorkspace(b)
-	dm := p6fuDM(b)
-	imported := p6fuImport(b, dm, "bench", "1.0.0", map[string][]byte{
-		"references/templates.md": []byte("the reference body\n"),
-	})
-
-	var manifestJSON string
-	if err := dm.db.QueryRow(packageManifestQuery, imported.SkillID).
-		Scan(&manifestJSON); err != nil {
-		b.Fatalf("read the manifest: %v", err)
-	}
-	manifest, _, err := ParsePackageManifest([]byte(manifestJSON))
-	if err != nil {
-		b.Fatalf("parse the manifest: %v", err)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := manifest.Validate(); err != nil {
-			b.Fatalf("validate the manifest: %v", err)
 		}
 	}
 }
