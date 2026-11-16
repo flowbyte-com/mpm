@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -743,6 +744,26 @@ func TestP7TheArchiveOrderIsAStrictWeakOrdering(t *testing.T) {
 	// copy of it. A test that checks its own copy of the logic proves
 	// nothing about the archive.
 	less := packageExportEntryLess
+
+	// And the writer really calls THAT function. A named comparator
+	// that the writer does not use is a dead function, and a test
+	// pointed at it proves nothing at all: the writer's own inline
+	// copy could be broken while the test stayed green. The check is
+	// a string check on the source, which is the same shape as the
+	// repository's other architecture guards.
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("could not resolve the test file's path")
+	}
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "skill_package_export.go"))
+	if err != nil {
+		t.Fatalf("read the exporter's source: %v", err)
+	}
+	if !strings.Contains(string(source), "packageExportEntryLess(ordered[i], ordered[j])") {
+		t.Errorf("the writer does not call packageExportEntryLess; it keeps its " +
+			"own copy of the ordering, so the named comparator is dead code " +
+			"and the contract above is not the one the archive is written with")
+	}
 
 	for _, e := range entries {
 		if less(e, e) {

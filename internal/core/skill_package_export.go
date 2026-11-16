@@ -208,13 +208,13 @@ func writePackageArchive(entries []packageExportEntry) ([]byte, error) {
 	// contract is a real one and the earlier form broke it. The order
 	// it produced for DISTINCT paths is unchanged, so the pinned
 	// digests do not move.
+	//
+	// The comparator is the NAMED function, so the test checks the
+	// one the writer uses rather than a second copy of the same
+	// logic. A copy is a trap: it can drift, and a test that checks
+	// the copy proves nothing about the archive.
 	sort.SliceStable(ordered, func(i, j int) bool {
-		iIsEntrypoint := ordered[i].Path == packageEntrypointName
-		jIsEntrypoint := ordered[j].Path == packageEntrypointName
-		if iIsEntrypoint != jIsEntrypoint {
-			return iIsEntrypoint
-		}
-		return ordered[i].Path < ordered[j].Path
+		return packageExportEntryLess(ordered[i], ordered[j])
 	})
 
 	var buf bytes.Buffer
