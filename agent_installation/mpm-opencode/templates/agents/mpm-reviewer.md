@@ -843,6 +843,31 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   A `)` that closes a `case` or a group - `case x in y) echo hi)`,
   `{ echo hi )` - is refused as `compound-command`; a subshell that is
   closed properly, `( echo hi )`, is allowed.
+  THE FAMILIES, each with the reason the host gives it.  Every line
+  below is CHECKED against the model by the guard, so this list cannot
+  drift away from the code: the form must be refused with the reason
+  written here.
+
+  - a `(` GLUED to a word -> dynamic-execution: `a(b)`
+  - a `(` SPACED after a word -> compound-command: `echo (hello)`
+  - a trailing `&&`, `||` or `|` -> invalid-structure: `echo hi &&`
+  - a trailing `&&`, `||` or `|` inside a compound command's BODY -> compound-command: `if true; then echo hi && fi`
+  - a COMPOUND COMMAND whose keyword never arrived -> compound-command: `for i in 1; echo hi; done`
+  - a CLOSING KEYWORD that closes nothing -> compound-command: `echo hi; esac`
+  - an `if` with NO `then` -> compound-command: `if true; echo hi; fi`
+  - an `else` or an `elif` with no `then` -> compound-command: `if true; else echo hi; fi`
+  - an EMPTY command slot after a compound keyword -> invalid-structure: `if true; then; echo hi; fi`
+  - a REDIRECTION with no target -> invalid-redirect: `( echo hi > )`
+  - a `case` with NO SUBJECT -> compound-command: `case in) echo hi;; esac`
+  - a `case` with no `in` KEYWORD -> compound-command: `case x`
+  - a `case` that is never CLOSED -> compound-command: `case x in y) echo hi;;`
+  - a `case` whose SUBJECT carries a `)` -> compound-command: `case x) in y) echo hi;; esac`
+  - a `;&` BRANCH separator outside a `case` -> invalid-structure: `echo hi ;& echo bye`
+  - a `;;&` FALL-THROUGH separator inside a `case` -> compound-command: `case x in y) echo hi;;& echo bye;; esac`
+  - an unbalanced or unterminated construct -> invalid-structure: `{ }`
+  - an unterminated quote or escape -> unterminated-quote: `echo 'unclosed`
+  - an unclosed substitution -> command-substitution: `$(`
+  - a `)` that closes a `case` or a group -> compound-command: `case x in y) echo hi)`
   And the host
   does not match a `cd` segment's TEXT, so the name can
   be parked in a directory argument and the binary run without it:

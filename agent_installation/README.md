@@ -285,6 +285,22 @@ checked against the **Makefile's own** binary variables, so a new MPM
 binary cannot be built without the list being extended. The isolation
 therefore cannot quietly erode as the tool surface grows.
 
+**The guard also models the host's SCANNER, and the model is measured
+against the host.** The host refuses a command it cannot parse, and
+the reason it gives depends on the construct that holds the defect - a
+trailing `&&` is `invalid-structure` inside a brace group and
+`compound-command` inside a compound command's body. The guard's model
+is therefore a **parser**, not a list of spellings, and it is the
+**single enforcer** for the structural class, so the model cannot be
+internally inconsistent about what a structural defect is. Its
+**class-level table** carries a **reason per form** - one reason per
+family could not express a construct-dependent reason - so a family
+the model stops catching shows up as a **failing reason** rather than
+as a missing row. The definition's own **family list is checked
+against the model**, so the prose a reviewer reads cannot drift away
+from the code. Every one of these checks is a claim that is CHECKED,
+and the counts are published in `docs/SPEC.md` §6.4.
+
 ## Installation
 
 **See [INSTALL.md](./INSTALL.md)** for the full installation manual —

@@ -373,6 +373,16 @@ than passing it), the binary deny list is checked against the Makefile's
 own binary variables, and the **installed copy** is checked against the
 template.
 
+The same guard also **models the host's SCANNER**, and the model is
+measured against the host: the host refuses a command it cannot parse,
+and the reason it gives depends on the construct that holds the defect.
+The model is therefore a **parser** — not a list of spellings — and it is
+the **single enforcer** for the structural class, so it cannot be
+internally inconsistent about what a structural defect is. Its
+**class-level table** carries a **reason per form**, and the
+definition's own **family list is checked against the model**, so the
+prose a reviewer reads cannot drift away from the code.
+
 ## Verification
 
 ```bash
