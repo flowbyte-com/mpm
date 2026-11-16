@@ -301,6 +301,12 @@ def _load_installer():
 # `case x in "mpm") echo hi;; esac`, while the BODY is matched
 # (`case x in *) mpm --version;; esac` is REFUSED).
 #
+# A CONTEXT - a `[[ ... ]]` conditional or an arithmetic context - is
+# a construct only when it IS the command. MEASURED: `[[ mpm == x ]]`
+# and `(( mpm ))` are ALLOWED, while `echo $(( mpm ))` and
+# `echo [[ mpm == x ]]` are REFUSED - in ARGUMENT position the text is
+# ordinary text and the word shape matches it.
+#
 # A SUBSHELL at the command position is ANALYSED, and the command
 # inside it is matched: `(echo hi)` is ALLOWED and `(mpm --version)`
 # is REFUSED - by a RULE, not by the scanner. A `(` that follows a
@@ -674,35 +680,45 @@ def _matcher_substitutions(segment: str, depth: int = 0):
 
 
 def _matcher_mask_contexts(segment: str) -> str:
-    """The segment with the CONTEXTS the host does not match blanked.
+    """The segment with the CONTEXT the host does not match blanked.
 
     A `[[ … ]]` conditional's operands are words and patterns, not
-    commands, and an arithmetic context (`(( … ))`, `$(( … ))`) is
-    arithmetic, not a command.  MEASURED: `[[ mpm == x ]]` is ALLOWED,
-    `((mpm))` is ALLOWED and `echo $(( mpm ))` is ALLOWED.
+    commands, and an arithmetic context's operands are arithmetic, not
+    commands — but ONLY when the context IS the command.
 
-    The spans are blanked with SPACES rather than removed, so a word
+    MEASURED:
+
+        [[ mpm == x ]]       ALLOWED  — the context IS the command
+        (( mpm ))            ALLOWED
+        ((mpm))              ALLOWED
+        [[ -n mpm ]]         ALLOWED
+        [[ mpm ]]            ALLOWED
+        echo $(( mpm ))      REFUSED  — ARGUMENT position: the text is
+                                       ordinary text and the word
+                                       shape matches it
+        echo $(( mpm + 1 ))  REFUSED
+        echo $(( 1 + mpm ))  REFUSED
+        echo a $(( mpm )) b  REFUSED
+        echo [[ mpm == x ]]  REFUSED
+
+    So the context is blanked only when it LEADS the segment.  The
+    spans are blanked with SPACES rather than removed, so a word
     boundary is never invented.
     """
+    text = segment.lstrip()
+    lead = len(segment) - len(text)
+    if text.startswith("[["):
+        opener, closer = "[[", "]]"
+    elif text.startswith("(("):
+        opener, closer = "((", "))"
+    else:
+        return segment
+    end = segment.find(closer, lead + len(opener))
+    if end < 0:
+        return segment
     masked = list(segment)
-    index = 0
-    length = len(segment)
-    while index < length:
-        opener = closer = None
-        if segment.startswith("[[", index):
-            opener, closer = "[[", "]]"
-        elif segment.startswith("((", index):
-            opener, closer = "((", "))"
-        if opener is None:
-            index += 1
-            continue
-        end = segment.find(closer, index + len(opener))
-        if end < 0:
-            index += 1
-            continue
-        for position in range(index, end + len(closer)):
-            masked[position] = " "
-        index = end + len(closer)
+    for position in range(lead, end + len(closer)):
+        masked[position] = " "
     return "".join(masked)
 
 
@@ -1142,6 +1158,16 @@ class ReviewerIsolationTest(unittest.TestCase):
             # a FUNCTION DEFINITION is analysed, and its BODY is
             # matched
             "f() { mpm --version; }",
+            # a CONTEXT in ARGUMENT position is ordinary text, and
+            # the word shape matches it
+            "echo $(( mpm ))",
+            "echo $(( mpm + 1 ))",
+            "echo $(( 1 + mpm ))",
+            "echo a $(( mpm )) b",
+            "echo [[ mpm == x ]]",
+            "if true; then echo $(( mpm )); fi",
+            "f() { echo $(( mpm )); }",
+            "for i in 1; do echo $(( mpm )); done",
             # an `alias` DEFINES a command at run time, and the host
             # refuses it as `dynamic-execution`
             "alias NAME=value",
@@ -1198,11 +1224,14 @@ class ReviewerIsolationTest(unittest.TestCase):
             "function f() { echo hi; }",
             # a `(` after a KEYWORD opens a command, not an argument
             "if true; then (echo hi); fi",
-            # a `[[ … ]]` conditional's operands and an arithmetic
-            # context's operands are words, not commands
+            # a `[[ … ]]` conditional and an arithmetic context are
+            # CONTEXTS - their operands are words, not commands - but
+            # only when the context IS the command
             "[[ mpm == x ]]",
             "((mpm))",
-            "echo $(( mpm ))",
+            "(( mpm ))",
+            "[[ -n mpm ]]",
+            "[[ mpm ]]",
             # the routes the residual list names, which stay OPEN
             "echo $(echo mp)m",
             "M=mpm; $M --version",
