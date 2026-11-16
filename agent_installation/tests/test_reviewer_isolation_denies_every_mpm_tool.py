@@ -282,16 +282,24 @@ def _load_installer():
 # and the last matching rule wins.  The command text is split into
 # simple commands on `&&`, `||`, `;`, `|`, a single `&` and a
 # NEWLINE, and each segment is TRIMMED before it is matched; a `cd`
-# segment's text is not matched; `$( ... )`, BACKTICK and PROCESS
-# substitutions are descended into.
+# segment's text is not matched; `$( ... )` and BACKTICK substitutions
+# are descended into, as are the ones inside DOUBLE quotes.
 #
 # The host REFUSES a command its scanner cannot ANALYSE: a process
 # substitution (`echo <(mpm --version)>` -> "invalid-redirect", and so
-# is `echo <(echo hello)>`, which names nothing at all) and a compound
+# is `echo <(echo hello)>`, which names nothing at all), a compound
 # command (`echo (mpm --version)` -> "compound-command", and so is
-# `echo (hello)`). Such a command does not run, but the reason is the
-# scanner's own limit and not an MPM rule - so the model reproduces the
-# VERDICT and names the right reason.
+# `echo (hello)`) and a REDIRECTION with an EMPTY TARGET (`echo mpm>`
+# and `echo hi >`, and the second names nothing at all). Such a
+# command does not run, but the reason is the scanner's own limit and
+# not an MPM rule - so the model reproduces the VERDICT and names the
+# right reason.
+#
+# A `case` STATEMENT is one construct whose HEADER - the pattern list
+# included - is not matched, exactly like a loop's header. MEASURED:
+# `case x in mpm) echo hi;; esac` is ALLOWED, and so is
+# `case x in "mpm") echo hi;; esac`, while the BODY is matched
+# (`case x in *) mpm --version;; esac` is REFUSED).
 #
 # The model is a MODEL.  Every outcome in the corpus below was measured
 # against the installed definition before it was written here, and a
@@ -313,6 +321,69 @@ def _matcher_u2(value: str, pattern: str) -> bool:
         return False
 
 
+def _matcher_extract_cases(command: str):
+    """The BODY of every `case` construct, and the command without them.
+
+    The host treats a `case` statement as ONE construct whose HEADER
+    is not matched — exactly like a loop's header — and whose BODY is
+    matched.  MEASURED:
+
+        case x in mpm) echo hi;; esac      ALLOWED (the pattern list
+                                           is not a command)
+        case x in "mpm") echo hi;; esac    ALLOWED (the quoted pattern
+                                           is not a command either)
+        case mpm in mpm) echo hi;; esac     ALLOWED (the WORD is not a
+                                           command either)
+        case x in *) mpm --version;; esac   REFUSED (the body is)
+
+    The construct is extracted BEFORE the command is split, because the
+    `;;` that separates the branches is a separator the host does not
+    split on — the branches are part of one construct.
+    """
+    bodies = []
+    kept = []
+    index = 0
+    length = len(command)
+    while index < length:
+        if not command.startswith("case", index):
+            kept.append(command[index])
+            index += 1
+            continue
+        before = command[index - 1] if index else ""
+        after = command[index + 4 : index + 5]
+        if (before and not (before.isspace() or before in ";|&()\n")) or (
+            after and not after.isspace()
+        ):
+            kept.append(command[index])
+            index += 1
+            continue
+        in_at = command.find(" in ", index + 4)
+        if in_at < 0:
+            kept.append(command[index])
+            index += 1
+            continue
+        close = command.find(")", in_at + 4)
+        if close < 0:
+            kept.append(command[index])
+            index += 1
+            continue
+        end = command.find("esac", close)
+        if end < 0:
+            kept.append(command[index])
+            index += 1
+            continue
+        kept.append(" ")
+        for chunk in re.split(r";;&|;;|;&", command[close + 1 : end]):
+            # A branch may carry the NEXT pattern before its `)`.
+            cut = chunk.find(")")
+            if cut >= 0:
+                chunk = chunk[cut + 1 :]
+            if chunk.strip():
+                bodies.append(chunk)
+        index = end + 4
+    return bodies, "".join(kept)
+
+
 def _matcher_segments(command: str):
     """Split a command into the simple commands the host matches.
 
@@ -330,7 +401,21 @@ def _matcher_segments(command: str):
     ALLOWED, and the loop's HEADER would match the word shape
     `* mpm *` if the host matched it as a command — so the host does
     not split the header from the body, and does not match the header.
+
+    A `case` STATEMENT is one construct too, and its header — the
+    pattern list included — is not matched either.  It is extracted
+    before the split, because the `;;` between its branches is a
+    separator the host does not split on.
     """
+    case_bodies, without_cases = _matcher_extract_cases(command)
+    segments = _matcher_split(without_cases)
+    for body in case_bodies:
+        segments.extend(_matcher_segments(body))
+    return _matcher_bodies(segments)
+
+
+def _matcher_split(command: str):
+    """The simple commands of a command, split on the separator set."""
     segments, current, depth, quote = [], [], 0, None
     index = 0
     loop = 0
@@ -509,6 +594,11 @@ def _matcher_unanalysable(segment: str) -> bool:
     `echo (mpm --version)` and `echo (hello)` both return
     "compound-command".
 
+    A REDIRECTION with an EMPTY TARGET is refused the same way, and
+    the measurement says so: `echo mpm>` and `echo hi >` are both
+    REFUSED, and the second names nothing at all — so the refusal is
+    about the REDIRECTION and not about the name.
+
     The host refuses to LOOK at such a command, so it does not run,
     whatever the rules say. The model reproduces that verdict, and the
     reason it gives is the scanner's limit rather than a rule match.
@@ -522,6 +612,39 @@ def _matcher_unanalysable(segment: str) -> bool:
             return True
         if segment[index] == "(" and not segment.startswith("$(", index):
             if index == 0 or segment[index - 1].isspace():
+                return True
+        index += 1
+    return _matcher_empty_redirect(segment)
+
+
+def _matcher_empty_redirect(segment: str) -> bool:
+    """Does this segment carry a REDIRECTION with no target?
+
+    MEASURED: `echo mpm>` and `echo hi >` are both REFUSED with
+    "invalid-redirect", and `echo hi >` names nothing at all.
+
+    A quoted `>` is a literal, so it does not count.
+    """
+    index = 0
+    quote = None
+    while index < len(segment):
+        char = segment[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            index += 1
+            continue
+        if char in "<>":
+            look = index + 1
+            if look < len(segment) and segment[look] in "&|":
+                look += 1
+            while look < len(segment) and segment[look].isspace():
+                look += 1
+            if look >= len(segment):
                 return True
         index += 1
     return False
@@ -779,6 +902,12 @@ class ReviewerIsolationTest(unittest.TestCase):
             "echo <(echo hello)>",
             "echo (mpm --version)",
             "echo `echo mpm`",
+            # a `case` STATEMENT's BODY is matched
+            "case x in *) mpm --version;; esac",
+            # a REDIRECTION with an EMPTY TARGET is refused by the
+            # host's scanner, whether or not it names anything
+            "echo mpm>",
+            "echo hi >",
             # the name delimited by a TAB, which the shell splits on
             "mpm\t--version",
             "env mpm\t--version",
@@ -810,6 +939,16 @@ class ReviewerIsolationTest(unittest.TestCase):
             # sees it, so the text is not the name
             "go run ./cmd/mp?",
             "go build -o /tmp/x ./cmd/mp?",
+            # a `case` STATEMENT is ONE construct whose header — the
+            # pattern list included — is not matched, exactly like a
+            # loop's header
+            "case x in mpm) echo hi;; esac",
+            'case x in "mpm") echo hi;; esac',
+            "case mpm in mpm) echo hi;; esac",
+            # the shell removes a BACKSLASH ESCAPE before it parses
+            # the command word, and the matcher sees the raw text
+            "m\\pm --version",
+            "m\\\npm --version",
             # a name GLUED to punctuation rather than delimited by
             # whitespace
             "${x:-mpm} --version",

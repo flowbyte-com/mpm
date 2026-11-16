@@ -749,7 +749,7 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   command that merely QUOTES such a path after a ">" is refused too.
   That cost is accepted deliberately: a stray file in a runtime root
   is a nuisance, and a corrupted live database is a disaster.
-- The shell's matcher sees TEXT, and eight routes are NOT caught. A
+- The shell's matcher sees TEXT, and nine routes are NOT caught. A
   name SPLIT by a substitution is not the name: `$(echo mp)m`
   assembles it and runs the binary. A name in a VARIABLE is not the
   name either: `M=mpm; $M --version` runs the binary. A SCRIPT FILE
@@ -770,7 +770,16 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   punctuation rather than delimited by whitespace is not caught
   either: `${x:-mpm} --version` and `for i in mpm; do $i --version;
   done` run the binary, because every rule is anchored on whitespace,
-  on a path separator or on the command position. And the host
+  on a path separator or on the command position.
+  A name hidden behind a BACKSLASH ESCAPE is not caught
+  either: `m\pm --version` is the binary, because the shell removes
+  the backslash BEFORE it parses the command word, and the matcher
+  sees the raw text. A backslash-newline LINE CONTINUATION is the
+  same case, except that the matcher splits the command on that
+  newline and sees two halves that each hold no name. It is not
+  closable by a rule: the host replaces every backslash with a slash
+  before it matches, so no pattern can name a backslash at all.
+  And the host
   does not match a `cd` segment's TEXT, so the name can
   be parked in a directory argument and the binary run without it:
   `cd cmd/mpm && go run . --version` reaches the binary, and
