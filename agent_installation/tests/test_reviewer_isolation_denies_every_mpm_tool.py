@@ -498,7 +498,7 @@ def _matcher_empty_condition(segments, position: int, keyword: str) -> bool:
     return True
 
 
-_MATCHER_EMPTY_GROUP = re.compile(r"(?<![A-Za-z0-9_$])\(\s+\)|(?<!\$)\{\s+\}")
+_MATCHER_EMPTY_GROUP = re.compile(r"(?<![A-Za-z0-9_$])\(\s*\)|(?<!\$)\{\s+\}")
 
 
 def _matcher_empty_group(command: str) -> bool:
@@ -515,6 +515,9 @@ def _matcher_empty_group(command: str) -> bool:
     and `{}` is ALLOWED - because a reserved word is followed by a
     separator, so `{}` is an ordinary word and not a group at all.
 
+    The PARENS do not make that distinction: MEASURED, `()` and
+    `( )` are both REFUSED with "invalid-structure".
+
     A function definition's PARAMETER LIST is not a group: `f()` is
     refused for a different reason - it is a bare function definition
     with no body - and `f() { echo hi; }` is ALLOWED.
@@ -529,12 +532,17 @@ def _matcher_empty_group(command: str) -> bool:
 
 
 def _matcher_has_body(segments, position: int) -> bool:
-    """Does the segment at `position` open a BODY?
+    """Does the segment at `position` carry a BODY?
 
-    A function definition's body is a brace group, and it may sit on
-    the next LINE: MEASURED, `f()` and then `{ echo hi; }` is ALLOWED,
-    while `f()` on its own is REFUSED.
+    A function definition's body is a brace group.  It may sit in the
+    SAME segment - `f() { echo hi; }` - or on the next LINE: MEASURED,
+    `f()` and then `{ echo hi; }` is ALLOWED, while `f()` on its own
+    is REFUSED.
     """
+    text = segments[position][0]
+    found = re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)", text)
+    if found and "{" in text[found.end() :]:
+        return True
     for text, _ in segments[position + 1 :]:
         stripped = text.strip()
         if not stripped:
@@ -544,16 +552,18 @@ def _matcher_has_body(segments, position: int) -> bool:
 
 
 def _matcher_bare_function(segment: str) -> bool:
-    """Is this a FUNCTION DEFINITION with no body?
+    """Does this segment carry a FUNCTION DEFINITION?
 
     MEASURED: `f()` is REFUSED with "dynamic-execution", and it names
-    no binary at all - so the refusal is about the CONSTRUCT.
+    no binary at all - so the refusal is about the CONSTRUCT.  The
+    host sees the parameter list WHEREVER it stands: MEASURED,
+    `echo f()` is REFUSED the same way.
 
-    The well-formed form is ALLOWED: `f() { echo hi; }` is analysed,
+    A definition with a BODY is fine: `f() { echo hi; }` is analysed,
     and the host matches the BODY (`f() { mpm --version; }` is refused
     by a RULE).
     """
-    return bool(re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)$", segment.strip()))
+    return bool(re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)", segment))
 
 
 def _matcher_unclosed_substitution(segment: str) -> bool:
@@ -567,6 +577,10 @@ def _matcher_unclosed_substitution(segment: str) -> bool:
 
     A backtick inside SINGLE quotes is a literal - the host does not
     treat it as a substitution - so a quoted region is skipped.
+
+    A `)` inside a QUOTED STRING does not close the substitution
+    either: MEASURED, `echo <(echo "a)b"`, `echo $(echo "a)b"` and
+    `echo <(echo 'a)b'` are all REFUSED with "command-substitution".
     """
     index = 0
     length = len(segment)
@@ -591,10 +605,21 @@ def _matcher_unclosed_substitution(segment: str) -> bool:
         ):
             depth = 0
             end = index + 1
+            quote = None
             while end < length:
-                if segment[end] == "(":
+                char = segment[end]
+                if quote is not None:
+                    if char == quote:
+                        quote = None
+                    end += 1
+                    continue
+                if char in "\"'":
+                    quote = char
+                    end += 1
+                    continue
+                if char == "(":
                     depth += 1
-                elif segment[end] == ")":
+                elif char == ")":
                     depth -= 1
                     if depth == 0:
                         break
@@ -1207,7 +1232,13 @@ def _matcher_bodies(segments):
 
 
 def _matcher_substitution_body(segment: str, index: int):
-    """The body of the substitution that starts at `index`, and the index after it."""
+    """The body of the substitution that starts at `index`, and the index after it.
+
+    A `)` inside a QUOTED STRING does not close the substitution: the
+    shell does not expand it there, and the host's scanner knows
+    that.  MEASURED: `echo <(echo "a)b"` is REFUSED with
+    "command-substitution" - the substitution is never closed.
+    """
     if segment[index] == "`":
         end = segment.find("`", index + 1)
         if end < 0:
@@ -1215,10 +1246,21 @@ def _matcher_substitution_body(segment: str, index: int):
         return segment[index + 1 : end], end + 1
     depth = 0
     end = index + 1
+    quote = None
     while end < len(segment):
-        if segment[end] == "(":
+        char = segment[end]
+        if quote is not None:
+            if char == quote:
+                quote = None
+            end += 1
+            continue
+        if char in "\"'":
+            quote = char
+            end += 1
+            continue
+        if char == "(":
             depth += 1
-        elif segment[end] == ")":
+        elif char == ")":
             depth -= 1
             if depth == 0:
                 break
@@ -2085,6 +2127,21 @@ class ReviewerIsolationTest(unittest.TestCase):
             "{\n}",
             # an `if` whose CONDITION is only a COMMENT
             "if # comment\nthen echo hi; fi",
+            # a `)` inside a QUOTED STRING does not close a
+            # substitution, so these are never closed at all
+            'echo <(echo "a)b"',
+            'echo $(echo "a)b"',
+            "echo <(echo 'a)b'",
+            # an empty PAREN group, with or without a space, and an
+            # empty brace group in ARGUMENT position
+            "()",
+            "( ) ; echo hi",
+            "echo hi | ( )",
+            "echo { }",
+            # a FUNCTION DEFINITION wherever it stands
+            "echo f()",
+            # a `case` whose FIRST pattern is empty
+            "case x in ''|y) echo hi;; esac",
             # the FIRST pattern of a `case` has to be non-empty
             "case x in |y) echo hi;; esac",
             "case x in ''|y) echo hi;; esac",
@@ -2192,6 +2249,13 @@ class ReviewerIsolationTest(unittest.TestCase):
             "if true; then echo hi; fi; echo bye",
             "(echo hi); (echo bye)",
             "case x in y) echo hi;; esac; (echo bye)",
+            # `{}` is an ordinary WORD, and an empty command
+            # substitution is not a group
+            "{}",
+            "x=$( )",
+            # a LATER pattern of a `case` may be empty
+            "case x in y|'') echo hi;; esac",
+            "case x in y|''|z) echo hi;; esac",
             # a search for the name, unquoted, is not an invocation
             "grep -rn mpm_memory .",
             'echo "the mpm_memory tool"',
