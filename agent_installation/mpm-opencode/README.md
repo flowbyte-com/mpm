@@ -309,7 +309,8 @@ a path** (`go run ./cmd/mpm`, `/home/v/.local/bin/mpm`), as the last
 segment of a path with a **trailing slash** (`go run ./cmd/mpm/`), inside
 a **Go package pattern** (`go run ./cmd/mpm/...`,
 `go run ./cmd/mpm/./...`) and inside a **quote** (`"mpm" …`,
-`sh -c 'mpm …'`);
+`sh -c 'mpm …'`) or an **ANSI-C quoted** string (`$'\x6dpm' …`,
+whose escapes the shell decodes before the matcher sees the text);
 denies the installers and the service-control commands; denies the `read`
 tool a live MPM workspace and closes its `external_directory` boundary;
 denies `edit`, `subagent`, `question` and Code Mode (`execute`); and
@@ -336,7 +337,8 @@ a command merely *quoting* such a path; the shell's matcher sees
 **text**, and **nine** routes are not caught: a name **split by a
 substitution** (`$(echo mp)m`), a name
 held in a **variable** (`M=mpm; $M --version`), a **script file**, a name
-**expanded by a shell glob** (`go run ./cmd/mp?`), a name **expanded by a
+**expanded by a shell glob** (`go run ./cmd/mp?`), a name behind a
+**backslash-newline line continuation**, a name **expanded by a
 brace** (`go run ./cmd/mpm{,.mcp}`), a name **glued to punctuation**
 rather than delimited by whitespace (`${x:-mpm} --version`), a name
 hidden behind a **backslash escape** (`m\pm --version` is the binary,

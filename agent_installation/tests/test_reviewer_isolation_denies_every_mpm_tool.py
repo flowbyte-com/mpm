@@ -351,6 +351,7 @@ def _matcher_extract_cases(command: str):
     split on — the branches are part of one construct.
     """
     bodies = []
+    headers = []
     kept = []
     index = 0
     length = len(command)
@@ -383,6 +384,9 @@ def _matcher_extract_cases(command: str):
             index += 1
             continue
         kept.append(" ")
+        # The header is not matched, but the substitutions inside it
+        # ARE - the host descends into a substitution anywhere.
+        headers.append(command[index : close + 1])
         for chunk in re.split(r";;&|;;|;&", command[close + 1 : end]):
             # A branch may carry the NEXT pattern before its `)`.
             cut = chunk.find(")")
@@ -391,34 +395,65 @@ def _matcher_extract_cases(command: str):
             if chunk.strip():
                 bodies.append(chunk)
         index = end + 4
-    return bodies, "".join(kept)
+    return bodies, headers, "".join(kept)
+
+
+_MATCHER_COMMAND = "command"
+_MATCHER_HEADER = "header"
+
+# The keywords the host gives a special meaning to.  A `(` that
+# follows one of them opens a COMMAND, not an argument.
+_MATCHER_KEYWORDS = (
+    "case",
+    "coproc",
+    "do",
+    "elif",
+    "else",
+    "for",
+    "function",
+    "if",
+    "in",
+    "select",
+    "then",
+    "time",
+    "until",
+    "while",
+)
 
 
 def _matcher_segments(command: str):
-    """Split a command into the simple commands the host matches.
+    """The simple commands of a command, each with its KIND.
 
-    The host splits on `&&`, `||`, `;`, `|`, a single `&` and a
-    NEWLINE.  The separator set was MEASURED against the installed
-    definition, not guessed: `true<NL>systemctl` and
-    `true&systemctl` are refused, while `true systemctl` — the same
-    words with whitespace between them and no separator — is allowed.
+    A KIND is either "command" — the text is matched against the
+    rules — or "header" — the text is NOT matched, but the
+    substitutions inside it ARE descended into.
 
-    The `&&` and `||` pairs are consumed as pairs, so a single `&`
-    never splits one of them in half.
+    The host gives a loop TWO structures, and the distinction is the
+    whole point.  MEASURED:
 
-    A shell LOOP is ONE construct, so the separators inside it do not
-    split it.  MEASURED: `for i in mpm; do $i --version; done` is
-    ALLOWED, and the loop's HEADER would match the word shape
-    `* mpm *` if the host matched it as a command — so the host does
-    not split the header from the body, and does not match the header.
+        for i in mpm; do $i --version; done     ALLOWED  — a `for`
+                                                     header is a WORD
+                                                     LIST, and it is not
+                                                     matched
+        while mpm; do echo hi; done             REFUSED  — a `while`
+                                                     CONDITION is a
+                                                     COMMAND LIST, and it
+                                                     IS matched
+        until mpm --version; do echo hi; done   REFUSED  — the same
+        for i in $(echo mpm); do echo hi; done  REFUSED  — the host
+                                                     descends into a
+                                                     substitution ANYWHERE,
+                                                     header included
 
-    A `case` STATEMENT is one construct too, and its header — the
-    pattern list included — is not matched either.  It is extracted
-    before the split, because the `;;` between its branches is a
-    separator the host does not split on.
+    A `case` STATEMENT is one construct whose header — the pattern
+    list included — is not matched either.  It is extracted before the
+    split, because the `;;` between its branches is a separator the
+    host does not split on.
     """
-    case_bodies, without_cases = _matcher_extract_cases(command)
+    case_bodies, case_headers, without_cases = _matcher_extract_cases(command)
     segments = _matcher_split(without_cases)
+    for header in case_headers:
+        segments.append((header, _MATCHER_HEADER))
     for body in case_bodies:
         segments.extend(_matcher_segments(body))
     return _matcher_bodies(segments)
@@ -434,7 +469,7 @@ def _matcher_split(command: str):
         char = command[index]
         if quote is None and (char.isspace() or char in ";|&()"):
             # The keyword test, at a word boundary.
-            if word in ("for", "while", "until"):
+            if word in ("for", "while", "until", "select"):
                 loop += 1
             elif word == "done" and loop > 0:
                 loop -= 1
@@ -453,18 +488,27 @@ def _matcher_split(command: str):
             index += 1
             continue
         if char == "(":
+            if command.startswith("((", index):
+                # An ARITHMETIC context is not a group: its `;`
+                # separates arithmetic, not commands, and the host
+                # parses it as one thing.
+                end = command.find("))", index)
+                if end >= 0:
+                    current.append(command[index : end + 2])
+                    index = end + 2
+                    continue
             depth += 1
         elif char == ")":
             depth = max(0, depth - 1)
         pair = command[index : index + 2]
         if depth == 0 and pair in ("&&", "||"):
-            segments.append("".join(current))
+            segments.append(("".join(current), _MATCHER_COMMAND))
             current = []
             index += 2
             continue
         if depth == 0 and char in ";|\n":
             if loop == 0:
-                segments.append("".join(current))
+                segments.append(("".join(current), _MATCHER_COMMAND))
                 current = []
                 index += 1
                 continue
@@ -484,31 +528,49 @@ def _matcher_split(command: str):
                 current.append(char)
                 index += 1
                 continue
-            segments.append("".join(current))
+            segments.append(("".join(current), _MATCHER_COMMAND))
             current = []
             index += 1
             continue
         current.append(char)
         index += 1
-    segments.append("".join(current))
-    return _matcher_bodies(segments)
+    segments.append(("".join(current), _MATCHER_COMMAND))
+    return segments
 
 
 def _matcher_bodies(segments):
-    """The BODY of every shell loop among the segments.
+    """The BODY of every shell loop among the segments, and its header.
 
-    A loop's header is not a command, so it is not matched; the body
-    is, and it may be a list of commands of its own.
+    A `for`/`select` header is a WORD LIST and is not matched — but
+    the substitutions inside it ARE descended into.  A `while`/`until`
+    CONDITION is a COMMAND LIST and IS matched.
     """
     out = []
-    for segment in segments:
-        words = segment.split()
-        if "do" not in words:
-            out.append(segment)
+    for text, kind in segments:
+        words = text.split()
+        keyword = words[0] if words else ""
+        if keyword not in ("for", "while", "until", "select") or "do" not in words:
+            out.append((text, kind))
             continue
         cut = words.index("do")
+        # The `;` that separates the header from `do` is a separator,
+        # not part of the header.
+        header = " ".join(words[1:cut]).strip().rstrip(";").strip()
         body = " ".join(words[cut + 1 :])
-        out.extend(_matcher_segments(body) if body else [])
+        if body.endswith("done"):
+            body = body[: -len("done")].strip()
+        if header:
+            if keyword in ("for", "select"):
+                # A WORD LIST: not matched, but the substitutions
+                # inside it are.
+                out.append((header, _MATCHER_HEADER))
+            else:
+                # A COMMAND LIST: matched, command by command.
+                for part in _matcher_segments(header):
+                    out.append(part)
+        if body:
+            for part in _matcher_segments(body):
+                out.append(part)
     return out
 
 
@@ -589,6 +651,10 @@ def _matcher_substitutions(segment: str, depth: int = 0):
                         continue
                 index += 1
             continue
+        if segment.startswith("$((", index):
+            # An ARITHMETIC context is not a command substitution.
+            index += 1
+            continue
         if (
             segment.startswith("$(", index)
             or segment.startswith("<(", index)
@@ -607,6 +673,39 @@ def _matcher_substitutions(segment: str, depth: int = 0):
     return bodies
 
 
+def _matcher_mask_contexts(segment: str) -> str:
+    """The segment with the CONTEXTS the host does not match blanked.
+
+    A `[[ … ]]` conditional's operands are words and patterns, not
+    commands, and an arithmetic context (`(( … ))`, `$(( … ))`) is
+    arithmetic, not a command.  MEASURED: `[[ mpm == x ]]` is ALLOWED,
+    `((mpm))` is ALLOWED and `echo $(( mpm ))` is ALLOWED.
+
+    The spans are blanked with SPACES rather than removed, so a word
+    boundary is never invented.
+    """
+    masked = list(segment)
+    index = 0
+    length = len(segment)
+    while index < length:
+        opener = closer = None
+        if segment.startswith("[[", index):
+            opener, closer = "[[", "]]"
+        elif segment.startswith("((", index):
+            opener, closer = "((", "))"
+        if opener is None:
+            index += 1
+            continue
+        end = segment.find(closer, index + len(opener))
+        if end < 0:
+            index += 1
+            continue
+        for position in range(index, end + len(closer)):
+            masked[position] = " "
+        index = end + len(closer)
+    return "".join(masked)
+
+
 def _matcher_unanalysable(segment: str) -> bool:
     """Would the host REFUSE this segment because it cannot analyse it?
 
@@ -621,20 +720,15 @@ def _matcher_unanalysable(segment: str) -> bool:
     REFUSED, and the second names nothing at all — so the refusal is
     about the REDIRECTION and not about the name.
 
+    A command the host classifies as DYNAMIC EXECUTION is refused too:
+    `alias NAME=value` returns "dynamic-execution".
+
     The host refuses to LOOK at such a command, so it does not run,
     whatever the rules say. The model reproduces that verdict, and the
     reason it gives is the scanner's limit rather than a rule match.
-
-    A `(` that FOLLOWS A WORD is a compound command — `echo (hello)`
-    is refused with `compound-command` — but a `(` at the COMMAND
-    POSITION is a SUBSHELL, and the host analyses it.  MEASURED:
-    `(echo hi)` is ALLOWED, and `(mpm --version)` is refused by a
-    RULE rather than by the scanner.
-
-    A `(` that follows a WORD is not a compound command either — `f()
-    { … }` is a function definition — so the check is about the word
-    BEFORE the group, not about the character before the `(`.
     """
+    if _matcher_dynamic_execution(segment):
+        return True
     index = 0
     while index < len(segment):
         if segment.startswith("<(", index) or segment.startswith(">(", index):
@@ -650,18 +744,53 @@ def _matcher_unanalysable(segment: str) -> bool:
     return _matcher_empty_redirect(segment)
 
 
-def _matcher_follows_a_word(segment: str, index: int) -> bool:
-    """Is the `(` at `index` an ARGUMENT rather than a subshell?
+def _matcher_dynamic_execution(segment: str) -> bool:
+    """Is this command one the host classifies as DYNAMIC EXECUTION?
 
-    MEASURED: `echo (hello)` is refused as `compound-command`, and
-    `(echo hi)` is ALLOWED — so the difference is the WORD before the
-    group, not the character before the `(`.
+    MEASURED: `alias NAME=value` is refused with "dynamic-execution".
+    An `alias` DEFINES a command at run time, so the text after it is
+    not what will run — and `eval` does the same.
+
+    `eval` is refused on the same principle, and it is the SAFE
+    direction: a model that refuses more than the host only costs a
+    nuisance, while a model that refuses less would claim a route is
+    closed when it is not.
     """
-    before = segment[:index].rstrip()
-    if not before:
+    words = segment.strip().split()
+    return bool(words) and words[0] in ("alias", "eval")
+
+
+def _matcher_follows_a_word(segment: str, index: int) -> bool:
+    """Is the `(` at `index` an ARGUMENT rather than a group?
+
+    MEASURED:
+
+      `echo (hello)`    REFUSED as `compound-command` — the group is an
+                        argument;
+      `f() { … }`       ALLOWED — the group is a function definition's
+                        parameter list, and the host analyses the BODY
+                        (`f() { mpm --version; }` is refused by a RULE);
+      `(echo hi)`       ALLOWED — the group is a SUBSHELL, and the host
+                        analyses it (`(mpm --version)` is refused by a
+                        rule);
+      `then (echo hi)`  ALLOWED — the group is a command in an `if`
+                        body.
+
+    So a `(` is an argument only when it follows an ordinary WORD,
+    with a space before it.
+    """
+    before = segment[:index]
+    stripped = before.rstrip()
+    if not stripped:
         return False
-    last = before[-1]
-    if last in ";|&\n=(){}<>":
+    if stripped[-1] in ";|&(\n":
+        return False
+    if not before[-1].isspace():
+        # No space before the `(`: it is a function definition's
+        # parameter list (`f()`), not an argument.
+        return False
+    words = stripped.split()
+    if words and words[-1] in _MATCHER_KEYWORDS:
         return False
     return True
 
@@ -721,38 +850,43 @@ def _matcher_empty_redirect(segment: str) -> bool:
     return False
 
 
-def _matcher_candidates(segment: str, depth: int = 0):
+def _matcher_candidates(segment: str, kind: str = _MATCHER_COMMAND, depth: int = 0):
     """Every text the host matches against the rules.
 
-    The segment itself, and the contents of every substitution inside
-    it — re-split on the separator set, because the host matches each
-    simple command of a substitution's contents, not the contents as
-    one blob.
+    A "header" candidate is NOT matched itself — but the
+    substitutions inside it are, because the host descends into a
+    substitution ANYWHERE.
     """
-    yield segment
+    masked = _matcher_mask_contexts(segment)
+    if kind == _MATCHER_COMMAND:
+        yield masked
     if depth > 8:
         return
     # A SUBSHELL is analysed by the host, and the command inside it is
-    # matched — so `(mpm --version)` is refused by a rule.
-    inner = _matcher_subshell_inner(segment)
-    if inner:
-        yield from _matcher_candidates(inner, depth + 1)
+    # matched — so `(mpm --version)` is refused by a rule.  A CONTEXT
+    # (`[[ … ]]`, `(( … ))`) is not a subshell, so it has no inner
+    # command to match.
+    if masked == segment:
+        inner = _matcher_subshell_inner(segment)
+        if inner:
+            yield from _matcher_candidates(inner, _MATCHER_COMMAND, depth + 1)
     for body in _matcher_substitutions(segment, depth):
-        for part in _matcher_segments(body):
-            yield part
-            yield from _matcher_candidates(part, depth + 1)
+        for part, part_kind in _matcher_segments(body):
+            yield from _matcher_candidates(part, part_kind, depth + 1)
 
 
 def _matcher_denies(command: str, rules) -> bool:
     """Would the host deny this command, given these (resource, effect)?"""
-    for segment in _matcher_segments(command):
+    for segment, kind in _matcher_segments(command):
         # A command the host's scanner cannot ANALYSE is refused
-        # outright — a process substitution (`invalid-redirect`) or a
-        # compound command (`compound-command`). It does not run, and
-        # the reason is the scanner's limit rather than a rule match.
+        # outright — a process substitution (`invalid-redirect`), a
+        # compound command (`compound-command`), a redirection with no
+        # target (`invalid-redirect`) or a dynamic execution
+        # (`dynamic-execution`). It does not run, and the reason is
+        # the scanner's limit rather than a rule match.
         if _matcher_unanalysable(segment):
             return True
-        for candidate in _matcher_candidates(segment):
+        for candidate in _matcher_candidates(segment, kind):
             # The host TRIMS each segment before matching it.  This
             # was MEASURED: `echo hi & systemctl` is refused, and the
             # only reason is that the trimmed segment is `systemctl`.
@@ -989,6 +1123,32 @@ class ReviewerIsolationTest(unittest.TestCase):
             "echo hi 2>&",
             # the command INSIDE a subshell is matched
             "(mpm --version)",
+            # a `while`/`until` CONDITION is a command list and IS
+            # matched, while a `for`/`select` header is a word list
+            # and is not
+            "while mpm; do echo hi; done",
+            "while mpm --version; do echo hi; done",
+            "until mpm; do echo hi; done",
+            "until mpm --version; do echo hi; done",
+            "while echo mpm; do echo hi; done",
+            "until echo mpm; do echo hi; done",
+            "while mpm > /dev/null; do echo hi; done",
+            "while $(mpm); do echo hi; done",
+            # the host descends into a substitution ANYWHERE, a loop
+            # header included
+            "for i in $(echo mpm); do echo hi; done",
+            "for i in `echo mpm`; do echo hi; done",
+            "case x in $(echo mpm)) echo hi;; esac",
+            # a FUNCTION DEFINITION is analysed, and its BODY is
+            # matched
+            "f() { mpm --version; }",
+            # an `alias` DEFINES a command at run time, and the host
+            # refuses it as `dynamic-execution`
+            "alias NAME=value",
+            # the ANSI-C QUOTING form decodes the escape inside the
+            # quoted word, so the text carries no name
+            "$'\\x6dpm' --version",
+            "$'\\155\\160\\155' --version",
             # the name delimited by a TAB, which the shell splits on
             "mpm\t--version",
             "env mpm\t--version",
@@ -1027,6 +1187,22 @@ class ReviewerIsolationTest(unittest.TestCase):
             "(echo hi)",
             "(echo hello)",
             "(echo hi) && echo yes",
+            # a `for`/`select` header is a WORD LIST and is not
+            # matched — the `for` counterpart of the `while` forms
+            # the rule set denies
+            "for mpm; do echo hi; done",
+            "select mpm in a b; do echo hi; done",
+            # a FUNCTION DEFINITION is not a compound command: the
+            # host analyses the BODY
+            "f() { echo hi; }",
+            "function f() { echo hi; }",
+            # a `(` after a KEYWORD opens a command, not an argument
+            "if true; then (echo hi); fi",
+            # a `[[ … ]]` conditional's operands and an arithmetic
+            # context's operands are words, not commands
+            "[[ mpm == x ]]",
+            "((mpm))",
+            "echo $(( mpm ))",
             # the routes the residual list names, which stay OPEN
             "echo $(echo mp)m",
             "M=mpm; $M --version",

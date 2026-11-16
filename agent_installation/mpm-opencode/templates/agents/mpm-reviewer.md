@@ -328,7 +328,10 @@ permissions:
   #      `go run mpm/...`) — the rule is `*mpm/*...*`;
   #   7. the name inside a QUOTE — `"mpm" --version`,
   #      `'mpm' --version` and `sh -c 'mpm --version'` — the rules
-  #      are `*"mpm*` and `*'mpm*`.
+  #      are `*"mpm*` and `*'mpm*`; and the name inside an ANSI-C
+  #      QUOTED string — `$'\x6dpm' --version` is the binary, because
+  #      the shell DECODES the escape before the matcher sees the
+  #      text — so the opener `$'` is denied outright.
   #
   # Shape 4 is the one that closes the WRITE route, and its earlier
   # form was WRONG. The rule used to be `*/mpm ?*`, which was
@@ -379,8 +382,9 @@ permissions:
   # `bash -c "mpm --version"` all RAN the binary. So the quoted
   # forms are closed by these rules and by nothing else.
   #
-  # The last two rules are shared by every binary because every one
-  # of them starts with `mpm`.
+  # The last three rules are shared by every binary: the first two
+  # because every one of them starts with `mpm`, and the third
+  # because it is about the QUOTING and not about the name.
   #
   # The cost that REMAINS is the quoted form: `grep -rn
   # "mpm_memory" .` is refused — by shape 7, which is THIS
@@ -527,6 +531,18 @@ permissions:
     effect: deny
   - action: shell
     resource: "*'mpm*"
+    effect: deny
+  # The ANSI-C QUOTING form decodes the escape inside the quoted word,
+  # so the text carries no name: `$'\x6dpm' --version` is the binary.
+  # The plain `$'mpm'` form is caught by the rule above, so it is the
+  # ESCAPE that defeats it - and the opener `$'` is denied outright.
+  # A backslash cannot be named in a rule (the matcher turns every
+  # backslash into a slash before it matches), but the quoting opener
+  # can be, and the opener is what says "an escape follows".  The
+  # trailing `*` matters: a pattern matches the WHOLE text, so the
+  # rule has to be able to match a `$'` anywhere in it.
+  - action: shell
+    resource: "*$'*"
     effect: deny
 
   # ── A reviewer must not operate services or install anything. ──────
@@ -757,6 +773,10 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   all. A SHELL GLOB expands to the name before the matcher ever sees
   it: `go run ./cmd/mp?` runs the binary, and `go build -o /tmp/x
   ./cmd/mp?` produces a runnable binary under a name no rule can see.
+  A BACKSLASH-NEWLINE LINE CONTINUATION is the same case: `m\` and a
+  newline and `pm` is ONE word to the shell, and the matcher splits
+  the command on that newline and sees two halves that each hold no
+  name.
   A BRACE is expanded the same way: `go run ./cmd/mpm{,.mcp}` runs
   the binary, and the matcher never sees the name, because the shell
   expands braces before it does.

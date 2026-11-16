@@ -191,7 +191,9 @@ The definition is **layered**, and each layer says what it closes:
   `/home/v/.local/bin/mpm`); as the last segment of a path with a **trailing
   slash** (`go run ./cmd/mpm/`); inside a **Go package pattern**
   (`go run ./cmd/mpm/...`, `go run ./cmd/mpm/./...`); and inside a **quote**
-  (`"mpm" …`, `sh -c 'mpm …'`).
+  (`"mpm" …`, `sh -c 'mpm …'`) or an **ANSI-C quoted** string
+  (`$'\x6dpm' …`, whose escapes the shell decodes before the matcher
+  sees the text).
   The installers (`install.sh`, `uninstall.sh`, `make install`/
   `uninstall`/`deploy`) and the service-control commands are denied as
   well, so the command line cannot reach the substrate either;
@@ -230,7 +232,9 @@ path; the shell's matcher sees **text**, and **nine** routes are not
 caught: a name **split by a
 substitution** (`$(echo mp)m`), a name held in a **variable**
 (`M=mpm; $M --version`), a **script file**, a name **expanded by a
-shell glob** (`go run ./cmd/mp?`), a name **expanded by a brace**
+shell glob** (`go run ./cmd/mp?`), a name behind a **backslash-newline
+line continuation** (`m\` and a newline and `pm` is one word to the
+shell), a name **expanded by a brace**
 (`go run ./cmd/mpm{,.mcp}`), a name **glued to punctuation** rather
 than delimited by whitespace (`${x:-mpm} --version`, `for i in mpm; do
 $i --version; done`), a name hidden behind a **backslash escape**
