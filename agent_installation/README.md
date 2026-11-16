@@ -232,9 +232,7 @@ path; the shell's matcher sees **text**, and **nine** routes are not
 caught: a name **split by a
 substitution** (`$(echo mp)m`), a name held in a **variable**
 (`M=mpm; $M --version`), a **script file**, a name **expanded by a
-shell glob** (`go run ./cmd/mp?`), a name behind a **backslash-newline
-line continuation** (`m\` and a newline and `pm` is one word to the
-shell), a name **expanded by a brace**
+shell glob** (`go run ./cmd/mp?`), a name **expanded by a brace**
 (`go run ./cmd/mpm{,.mcp}`), a name **glued to punctuation** rather
 than delimited by whitespace (`${x:-mpm} --version`, `for i in mpm; do
 $i --version; done`), a name hidden behind a **backslash escape**

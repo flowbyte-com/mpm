@@ -733,8 +733,10 @@ tool list, or refused when you attempt them:
   mpm ...`, `$(echo mpm)`), separated by a TAB (`mpm<TAB>--version`),
   as the LAST SEGMENT OF A PATH (`go run ./cmd/mpm`, `go run
   ./cmd/mpm/`, `/home/v/.local/bin/mpm`), inside a GO PACKAGE PATTERN
-  (`go run ./cmd/mpm/...`, `go run ./cmd/mpm/./...`), and inside a
-  QUOTE (`"mpm" ...`, `sh -c 'mpm ...'`). So is `install.sh`,
+  (`go run ./cmd/mpm/...`, `go run ./cmd/mpm/./...`), inside a
+  QUOTE (`"mpm" ...`, `sh -c 'mpm ...'`) and inside an ANSI-C QUOTED
+  string (`$'\x6dpm' ...`, whose escapes the shell DECODES before the
+  matcher ever sees the text). So is `install.sh`,
   `uninstall.sh`, the make install target, and the service-control
   commands.
 - `grep` and `glob` are NOT path-restricted by the permission layer -
@@ -773,10 +775,6 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   all. A SHELL GLOB expands to the name before the matcher ever sees
   it: `go run ./cmd/mp?` runs the binary, and `go build -o /tmp/x
   ./cmd/mp?` produces a runnable binary under a name no rule can see.
-  A BACKSLASH-NEWLINE LINE CONTINUATION is the same case: `m\` and a
-  newline and `pm` is ONE word to the shell, and the matcher splits
-  the command on that newline and sees two halves that each hold no
-  name.
   A BRACE is expanded the same way: `go run ./cmd/mpm{,.mcp}` runs
   the binary, and the matcher never sees the name, because the shell
   expands braces before it does.

@@ -707,19 +707,55 @@ def _matcher_mask_contexts(segment: str) -> str:
     """
     text = segment.lstrip()
     lead = len(segment) - len(text)
-    if text.startswith("[["):
-        opener, closer = "[[", "]]"
-    elif text.startswith("(("):
-        opener, closer = "((", "))"
-    else:
+    index = lead
+    opener = closer = None
+    while index < len(segment):
+        if segment.startswith("[[", index):
+            opener, closer = "[[", "]]"
+            break
+        if segment.startswith("((", index):
+            opener, closer = "((", "))"
+            break
+        index += 1
+    if opener is None:
         return segment
-    end = segment.find(closer, lead + len(opener))
+    # Only KEYWORDS may stand between the start of the segment and
+    # the context: the `if`, `elif`, `then`, `while`, `until` and
+    # `do` keywords introduce a COMMAND LIST, and the host
+    # recognises a context there.  MEASURED: `if [[ mpm == x ]]; then
+    # echo hi; fi` and `if (( mpm )); then echo hi; fi` are ALLOWED.
+    # Anything else means the context is in ARGUMENT position, where
+    # its text is ordinary text and IS matched.
+    if not _matcher_keyword_prefix(segment[lead:index]):
+        return segment
+    end = segment.find(closer, index + len(opener))
     if end < 0:
         return segment
     masked = list(segment)
-    for position in range(lead, end + len(closer)):
+    for position in range(index, end + len(closer)):
         masked[position] = " "
     return "".join(masked)
+
+
+def _matcher_keyword_prefix(prefix: str) -> bool:
+    """Is everything before a context only KEYWORDS and separators?
+
+    The keywords that introduce a COMMAND LIST are `if`, `elif`,
+    `then`, `while`, `until` and `do`; the host parses the condition
+    of an `if` as a command list and recognises a `[[ … ]]` or
+    `(( … ))` context there.
+
+    MEASURED: `if [[ mpm == x ]]; then echo hi; fi` and `if (( mpm ));
+    then echo hi; fi` are ALLOWED by the host.
+    """
+    if not prefix.strip():
+        return True
+    for word in re.split(r"[\s;&|()]+", prefix):
+        if not word:
+            continue
+        if word not in ("if", "elif", "then", "while", "until", "do", "!"):
+            return False
+    return True
 
 
 def _matcher_unanalysable(segment: str) -> bool:
@@ -763,17 +799,28 @@ def _matcher_unanalysable(segment: str) -> bool:
 def _matcher_dynamic_execution(segment: str) -> bool:
     """Is this command one the host classifies as DYNAMIC EXECUTION?
 
-    MEASURED: `alias NAME=value` is refused with "dynamic-execution".
-    An `alias` DEFINES a command at run time, so the text after it is
-    not what will run — and `eval` does the same.
+    MEASURED: `alias NAME=value` and `alias mpm=mpm` are refused with
+    "dynamic-execution".  An `alias` DEFINES a command at run time, so
+    the text after it is not what will run — and `eval` does the
+    same.
+
+    A BARE `alias` is ALLOWED by the host — it lists the aliases
+    and defines nothing — so the model refuses an `alias` only
+    when it CARRIES AN ASSIGNMENT.
 
     `eval` is refused on the same principle, and it is the SAFE
     direction: a model that refuses more than the host only costs a
     nuisance, while a model that refuses less would claim a route is
-    closed when it is not.
+    closed when it is not.  (A bare `eval` was not measured.)
     """
     words = segment.strip().split()
-    return bool(words) and words[0] in ("alias", "eval")
+    if not words:
+        return False
+    if words[0] == "eval":
+        return True
+    if words[0] == "alias":
+        return any("=" in word for word in words[1:])
+    return False
 
 
 def _matcher_follows_a_word(segment: str, index: int) -> bool:
@@ -1232,6 +1279,11 @@ class ReviewerIsolationTest(unittest.TestCase):
             "(( mpm ))",
             "[[ -n mpm ]]",
             "[[ mpm ]]",
+            "if [[ mpm == x ]]; then echo hi; fi",
+            "if (( mpm )); then echo hi; fi",
+            # a BARE `alias` lists the aliases and defines nothing,
+            # and the host allows it
+            "alias",
             # the routes the residual list names, which stay OPEN
             "echo $(echo mp)m",
             "M=mpm; $M --version",
