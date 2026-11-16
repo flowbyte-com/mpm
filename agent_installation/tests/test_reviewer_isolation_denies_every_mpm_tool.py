@@ -301,6 +301,16 @@ def _load_installer():
 # `case x in "mpm") echo hi;; esac`, while the BODY is matched
 # (`case x in *) mpm --version;; esac` is REFUSED).
 #
+# A SUBSHELL at the command position is ANALYSED, and the command
+# inside it is matched: `(echo hi)` is ALLOWED and `(mpm --version)`
+# is REFUSED - by a RULE, not by the scanner. A `(` that follows a
+# WORD is a compound command and is refused as `compound-command`
+# (`echo (hello)`).
+#
+# The `&` of a REDIRECT OPERATOR is not a separator: `2>&1`
+# duplicates a descriptor and `&>` redirects both streams, and the
+# host parses each as ONE operator (`echo hi 2>&1` is ALLOWED).
+#
 # The model is a MODEL.  Every outcome in the corpus below was measured
 # against the installed definition before it was written here, and a
 # host that changes its matcher would need this model revisited.
@@ -462,6 +472,18 @@ def _matcher_split(command: str):
             index += 1
             continue
         if depth == 0 and char == "&":
+            # The `&` of a REDIRECT OPERATOR is not a separator:
+            # `2>&1` duplicates a descriptor and `&>` redirects both
+            # streams, and the host parses each as ONE operator.
+            # MEASURED: `echo hi 2>&1` is ALLOWED, and it is the most
+            # common redirection idiom there is - `cmd > log 2>&1`.
+            previous = "".join(current).rstrip()
+            if previous.endswith(">") or (
+                index + 1 < len(command) and command[index + 1] == ">"
+            ):
+                current.append(char)
+                index += 1
+                continue
             segments.append("".join(current))
             current = []
             index += 1
@@ -603,18 +625,67 @@ def _matcher_unanalysable(segment: str) -> bool:
     whatever the rules say. The model reproduces that verdict, and the
     reason it gives is the scanner's limit rather than a rule match.
 
-    A `(` that follows a WORD is not a compound command — `f() { … }`
-    is a function definition — so only a `(` that starts a word counts.
+    A `(` that FOLLOWS A WORD is a compound command — `echo (hello)`
+    is refused with `compound-command` — but a `(` at the COMMAND
+    POSITION is a SUBSHELL, and the host analyses it.  MEASURED:
+    `(echo hi)` is ALLOWED, and `(mpm --version)` is refused by a
+    RULE rather than by the scanner.
+
+    A `(` that follows a WORD is not a compound command either — `f()
+    { … }` is a function definition — so the check is about the word
+    BEFORE the group, not about the character before the `(`.
     """
     index = 0
     while index < len(segment):
         if segment.startswith("<(", index) or segment.startswith(">(", index):
             return True
-        if segment[index] == "(" and not segment.startswith("$(", index):
-            if index == 0 or segment[index - 1].isspace():
+        if segment[index] == "(":
+            # The `(` of a `$( ... )` substitution is not a group.
+            if index > 0 and segment[index - 1] == "$":
+                index += 1
+                continue
+            if _matcher_follows_a_word(segment, index):
                 return True
         index += 1
     return _matcher_empty_redirect(segment)
+
+
+def _matcher_follows_a_word(segment: str, index: int) -> bool:
+    """Is the `(` at `index` an ARGUMENT rather than a subshell?
+
+    MEASURED: `echo (hello)` is refused as `compound-command`, and
+    `(echo hi)` is ALLOWED — so the difference is the WORD before the
+    group, not the character before the `(`.
+    """
+    before = segment[:index].rstrip()
+    if not before:
+        return False
+    last = before[-1]
+    if last in ";|&\n=(){}<>":
+        return False
+    return True
+
+
+def _matcher_subshell_inner(segment: str):
+    """The command inside a subshell that IS the whole segment.
+
+    The host analyses a subshell and matches the command INSIDE it,
+    which is why `(mpm --version)` is refused by a RULE rather than by
+    the scanner.  MEASURED: `(echo hi)` is ALLOWED and `(mpm
+    --version)` is REFUSED.
+    """
+    text = segment.strip()
+    if not text.startswith("(") or not text.endswith(")"):
+        return None
+    depth = 0
+    for position, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[1:position] if position == len(text) - 1 else None
+    return None
 
 
 def _matcher_empty_redirect(segment: str) -> bool:
@@ -661,6 +732,11 @@ def _matcher_candidates(segment: str, depth: int = 0):
     yield segment
     if depth > 8:
         return
+    # A SUBSHELL is analysed by the host, and the command inside it is
+    # matched — so `(mpm --version)` is refused by a rule.
+    inner = _matcher_subshell_inner(segment)
+    if inner:
+        yield from _matcher_candidates(inner, depth + 1)
     for body in _matcher_substitutions(segment, depth):
         for part in _matcher_segments(body):
             yield part
@@ -908,6 +984,11 @@ class ReviewerIsolationTest(unittest.TestCase):
             # host's scanner, whether or not it names anything
             "echo mpm>",
             "echo hi >",
+            # a REDIRECTION with a descriptor target and NO target at
+            # all — the host refuses the second as `invalid-redirect`
+            "echo hi 2>&",
+            # the command INSIDE a subshell is matched
+            "(mpm --version)",
             # the name delimited by a TAB, which the shell splits on
             "mpm\t--version",
             "env mpm\t--version",
@@ -931,6 +1012,21 @@ class ReviewerIsolationTest(unittest.TestCase):
             # a file INSIDE a directory named after the binary
             "cat cmd/mpm/main.go",
             "ls /opt/checkout/mpm/docs",
+            # a REDIRECTION with a DESCRIPTOR TARGET — the `&` of
+            # `>&` is part of the operator, not a separator, and
+            # `cmd > log 2>&1` is the commonest idiom there is
+            "echo hi 2>&1",
+            "echo hi >&1",
+            "echo hi >& out",
+            "echo hi >&-",
+            "echo hi > out.log 2>&1",
+            "echo hi 2>&1 | cat",
+            "make build > build.log 2>&1",
+            # a SUBSHELL at the command position is ANALYSED, and it
+            # names nothing
+            "(echo hi)",
+            "(echo hello)",
+            "(echo hi) && echo yes",
             # the routes the residual list names, which stay OPEN
             "echo $(echo mp)m",
             "M=mpm; $M --version",
