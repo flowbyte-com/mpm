@@ -373,6 +373,22 @@ than passing it), the binary deny list is checked against the Makefile's
 own binary variables, and the **installed copy** is checked against the
 template.
 
+**The reviewer's shell is confined by the OS, not by a pattern.** The
+permission layer is a pattern match on a command string, so it is
+advisory for the shell. `scripts/reviewer_bwrap.py` builds a bubblewrap
+**mount namespace** instead: the runtime is bound read-only, the
+reviewer's disposable tree is bound read-write, every other path is
+**not bound at all** — so it does not exist inside — `/tmp` is a
+private tmpfs, the network is unshared, the environment is cleared and
+every capability is dropped. Measured: a disposable sentinel tree, the
+live runtime root and the operator's home are all invisible from
+inside, the disposable tree is writable, and there is no network.
+`tests/test_reviewer_bwrap_sandbox.py` pins that contract. The
+namespace is **not wired into the reviewer's shell yet**, so the
+protection today is best-effort; the wiring is a plugin change, and
+the host's `create.before` hook was measured to honour a rewritten
+command.
+
 The same guard also **models the host's SCANNER**, and the model is
 measured against the host: the host refuses a command it cannot parse,
 and the reason it gives depends on the construct that holds the defect.

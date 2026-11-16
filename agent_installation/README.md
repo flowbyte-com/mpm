@@ -216,10 +216,48 @@ authority, and a permission rule is a pattern match on a command string:
 the layer is a **barrier, not a jail**. `grep` and `glob` are not
 path-restricted (their resources are the pattern and the glob), so the
 reviewer's own scope — the working tree it was given — is what keeps
-them off a runtime root. The **sandbox** is the layer that does not
-depend on the pattern being complete: inside it, `HOME`, `TMPDIR` and
-`MPM_WORKSPACE` point at scratch directories, so a route the rules do
-not name still cannot write into the operator's runtime root.
+them off a runtime root.
+
+**The three layers, and what each one actually guarantees.**
+
+1. **The permission layer** — the MPM tools are removed from the
+   reviewer's catalogue and the binaries are refused wherever they are
+   named. This is a **pattern match on a command string**: it is
+   *advisory* for the shell, and it is *enforced* for the tool
+   catalogue, which is a capability, not a string.
+2. **The environment sandbox** (`reviewer_sandbox.py`) — inside it,
+   `HOME`, `TMPDIR` and `MPM_WORKSPACE` point at scratch directories,
+   so a route the rules do not name still cannot write into the
+   operator's runtime root. This is a **resolution rule**, not a
+   boundary: the process still sees the operator's files.
+3. **The namespace sandbox** (`reviewer_bwrap.py`) — bubblewrap builds
+   a mount namespace, so a path that is **not bound does not exist
+   inside**. This is a **boundary**: the kernel refuses the access, and
+   there is no pattern to get wrong. The runtime is bound read-only,
+   the reviewer's disposable tree is bound read-write at `/sandbox`,
+   `/tmp` is a private tmpfs, the network is unshared, the
+   environment is cleared, and every capability is dropped.
+
+Layer three is **in the tree and proved, but not wired in yet** — a
+review still runs outside it. **Until it is wired in, the shell
+protection is best-effort**, and the residual list below is the honest
+statement of what is left open. The measured evidence for layer three
+is in `tests/test_reviewer_bwrap_sandbox.py`: a disposable sentinel
+tree, the live runtime root and the operator's home are all
+**invisible** from inside the namespace; the disposable tree is
+writable; and there is **no network**.
+
+The wiring has two parts, and both are measured:
+
+* the host **executes what the shell hook hands it**. OpenCode reads
+  the command *after* the `create.before` hook has run, so a plugin can
+  rewrite every shell command into a namespace invocation — measured
+  live, with a marker prefix that the shell actually ran;
+* the hook's event carries the command, the working directory, the
+  shell, the timeout and the environment — and **no session
+  identifier** — so a plugin cannot yet tell a reviewer's command from
+  the operator's. The environment does carry `OPENCODE_SESSION_ID`, so
+  the correlation is possible; it is not implemented.
 
 Five residuals were **measured**, by probing the installed definition: the
 **browser family is not governed by the permission layer** (a deny
