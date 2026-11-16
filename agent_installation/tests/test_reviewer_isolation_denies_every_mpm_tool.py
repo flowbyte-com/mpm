@@ -780,7 +780,7 @@ def _matcher_structure(command: str):
         case echo x in y) ...    compound-command   (a subject that is
                                                     a command)
 
-    Five things the scanner knows, all MEASURED:
+    Six things the scanner knows, all MEASURED:
 
     - a here-document's BODY is DATA, so it is skipped entirely;
     - a quote must be CLOSED - a quote pair inside a longer word is
@@ -792,7 +792,11 @@ def _matcher_structure(command: str):
       so `{}` is an ordinary word and `{ }` is an empty group;
     - a GROUP is a COMPOUND COMMAND, so it may only stand where a
       command is expected - in command position, or as the body of a
-      function definition or of a `coproc` declaration.
+      function definition or of a `coproc` declaration;
+    - a `case` construct is recognised by its KEYWORD `in` and not by
+      the text " in ", so `case x in` is refused, while `case x in
+      esac` - an empty pattern list closed by its own `esac` - is
+      allowed.
     """
     length = len(command)
     index = 0
