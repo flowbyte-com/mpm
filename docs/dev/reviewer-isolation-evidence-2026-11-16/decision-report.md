@@ -4,7 +4,7 @@
 **PR B** `feat/skill-packages-p7` → #245 · head `bd0236e375c9d4711ee9aaf3a7c3ff952e864265` — APPROVED, open, unmerged, unchanged
 
 Nothing was merged, deployed or scheduled. The live substrate was never opened.
-The operator's checkout (`/home/v/src/mpm`) is untouched: 20 dirty files, HEAD `c2ed9e82`, branch `feat/runtime-migration-cutover`.
+The operator's checkout is untouched: 20 dirty files, HEAD `c2ed9e82`, branch `feat/runtime-migration-cutover`.
 
 ---
 
@@ -140,5 +140,5 @@ The ten documented residual routes stay documented, and they become **closed by 
 
 * **Committed and pushed** `2f85712a` — the round-23 remediation (the scanner as a parser and the single enforcer; the reason per form; the review's forms pinned in both directions; the housekeeping assertion widened; the definition's family list checked against the model). 91 sweep directions, all failing with an assertion; 414 measured pairs; 523 tests OK; `make docs-check` OK; `go vet` ×3 clean; `go build -tags fts5` clean; `mpm-lint --gate` PASS. CI at that SHA: "Full test suite" **PASS**, "Build + core tests" **PASS**, "Release gate" running.
 * **Committed and pushed** `173e50e9` — the namespace sandbox and its twelve-test contract, the three-layer classification in both READMEs and the SPEC, and the honest statement in the PR body that the namespace is **not wired in yet** and that today's shell protection is **best-effort**.
-* **No review round was commissioned.** The round-24 brief was written (`/tmp/opencode/review-a24-brief.md`) and **not** used, per the direction to stop the matcher-fidelity cycle.
+* **No review round was commissioned.** The round-24 brief was written (`review-a24-brief.md`) and **not** used, per the direction to stop the matcher-fidelity cycle.
 * The live substrate was never opened; the probes used disposable trees and disposable sentinels only.

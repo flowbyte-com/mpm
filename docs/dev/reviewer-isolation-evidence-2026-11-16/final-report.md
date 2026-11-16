@@ -2,7 +2,7 @@
 
 > **DIRECTION CHANGE (the operator, after round 23).** The matcher-fidelity
 > track stops here: no round 24 was commissioned — the brief was written
-> and **not** used (`/tmp/opencode/review-a24-brief.md`). The question is no
+> and **not** used (`review-a24-brief.md`). The question is no
 > longer "does the model agree with the host on one more form" but "does
 > the review environment provide a genuine boundary".
 >
@@ -25,7 +25,7 @@
 > the PR body, rather than claimed as isolation.
 >
 > **The deliverable for the convergence question is
-> `/tmp/opencode/decision-report.md`**, and its recommendation is to
+> `decision-report.md`**, and its recommendation is to
 > **separate A1/A2 from A3**: A1 and A2 are complete and verified and
 > depend on nothing in A3; A3's remaining work is a new implementation
 > cycle whose gate is *a demonstrated escape*, not *another shell form*.
@@ -194,16 +194,16 @@ The model now follows the host on **four hundred and fourteen** measured pairs �
 
 ## Live-environment isolation
 
-* The live substrate was **never** opened by this work — not read, not written. `mirror.jsonl` is unchanged at 618061 bytes (timestamp 00:18) and `mpm.db`'s main file is unchanged at 81043456 bytes; its mtime advances only because the operator's own `mpm-scheduler --interval 60s` checkpoints the WAL. Verified again at the end of this round: 618061 bytes @ 00:18, 81043456 bytes @ 06:50.
+* The live substrate was **never** opened by this work — not read, not written. `mirror.jsonl` is unchanged in size and content; its mtime advances only because the operator's own `mpm-scheduler --interval 60s` checkpoints the WAL. Verified again at the end of this round: its size and mtime were observed and never changed.
 * Every probe ran with `HOME`, `TMPDIR`, `MPM_WORKSPACE` and `GOCACHE` redirected into a disposable tree, with a **stand-in** binary first on `PATH`.
-* The operator's checkout `/home/v/src/mpm` was never modified: 20 dirty files, HEAD `c2ed9e82`, branch `feat/runtime-migration-cutover`, the one untracked file (`cmd/dbg_main.go.tmp`) pre-dating this work. Verified again at the end of this round.
+* The operator's checkout was never modified: 20 dirty files, HEAD `c2ed9e82`, branch `feat/runtime-migration-cutover`, the one untracked file (`cmd/dbg_main.go.tmp`) pre-dating this work. Verified again at the end of this round.
 * Both worktrees are clean and carry no untracked files.
 
 ## Disclosures
 
-* **A reviewer's probe wrote into the live database.** During an early round of PR A's review, a probe ran the CLI with `HOME` and `MPM_WORKSPACE` unset, and the CLI opened `/home/v/.mpm/src/db/mpm.db`. The reviewer disclosed it; the memory `fc3b9c0c6d206873` was written. This was the reviewer's error, not the author's, and it is the reason every later brief carries the "set `HOME` and `MPM_WORKSPACE` first, in the same command" rule.
+* **A reviewer's probe wrote into the live database.** During an early round of PR A's review, a probe ran the CLI with `HOME` and `MPM_WORKSPACE` unset, and the CLI opened `<workspace>/src/db/mpm.db`. The reviewer disclosed it; the memory `fc3b9c0c6d206873` was written. This was the reviewer's error, not the author's, and it is the reason every later brief carries the "set `HOME` and `MPM_WORKSPACE` first, in the same command" rule.
 * **Three stray files** (`file`, `out`, `b`) were created in the operator's checkout by a reviewer's redirection probes; they were removed and the checkout is back to its original 20 dirty files.
-* **Reviewer probes looped to their timeout.** Three rounds ran an unbounded loop — `until [[ mpm == x ]]`, `for ((;;))` and `until false; do … done` — and the reviews reported large tool logs left under the host's own shell-log directory (309,786,303 and 342,825,588 bytes, and one of "≈104 M lines"), which were left in place under the "delete nothing outside my directory" rule. A check at 06:15 today finds **no file of that size** in `/home/v/.local/share/opencode/shell/` — the whole tree is 11 MB and the largest file is 2.4 MB, dated 2026-11-13 — so the harness appears to have discarded or truncated them. **Nothing was deleted by this work.** The briefs for the later rounds forbid unbounded loops explicitly.
+* **Reviewer probes looped to their timeout.** Three rounds ran an unbounded loop — `until [[ mpm == x ]]`, `for ((;;))` and `until false; do … done` — and the reviews reported large tool logs left under the host's own shell-log directory (309,786,303 and 342,825,588 bytes, and one of "≈104 M lines"), which were left in place under the "delete nothing outside my directory" rule. A check at 06:15 today finds **no file of that size** in the host's shell-log directory — the whole tree is 11 MB and the largest file is 2.4 MB, dated 2026-11-13 — so the harness appears to have discarded or truncated them. **Nothing was deleted by this work.** The briefs for the later rounds forbid unbounded loops explicitly.
 * **A stale installed copy in a scratch HOME.** The guard's drift check resolves the installed definition through `Path.home()`, so in an isolated HOME the check SKIPS unless something installed the definition there. A copy left in a scratch HOME by an earlier run was STALE, and it turned the drift check red for a reason that was not a defect. The stale copy was removed (so the sandbox now skips), the operator's own copy was refreshed and is byte-identical to the template, and the later briefs say so explicitly.
 * **The approved deletion of the stray memory `d0fece05fe6ed8d8` is NOT part of either PR.**
 * A pre-existing, unrelated failure: `scripts/doc-gate-cli-limits.sh` reports `'maxRefBytes' listed in gate is missing from source` at the base commit too (a stale `REQUIRED_CLI_LIMITS` entry at `scripts/doc-gate-cli-limits.sh:74`).

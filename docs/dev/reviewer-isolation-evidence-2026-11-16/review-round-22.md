@@ -9,7 +9,7 @@
 **Head under review:** `6d4734929c7602905fbb6da85dd19719c22727e4` (branch `fix/skill-packages-p6-provenance`)
 **Previous head (same tree, docstring only):** `bd7e4121ae5bbefd038494f42fe51ab5b8f8ff66`
 **Base:** `69bc212e207ddcf50b9c09d662d63403925a702e`
-**Worktree:** `/tmp/opencode/p6fu` — verified at the head, `git status` clean.
+**Worktree:** the review worktree — verified at the head, `git status` clean.
 
 The delta between the two heads is one file and is a COMMENT only: `agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py`, the `_matcher_structure` docstring ("Five things the scanner knows" → "Six") plus one added bullet. No behaviour changed. Every measurement below was taken against this tree.
 
@@ -41,7 +41,7 @@ So the structural fix moves the problem, it does not close it. The twenty-first 
 | `echo hi && mpm --version` | DENY 3/3 | `Permission denied: shell` (rule `mpm *`) | DENY (rule) |
 | `until false do mpm --version; done` | DENY 3/3 | `… compound-command` | DENY (rule) |
 
-The first row is the one that matters: a route the rules cannot see, inside a form the model believes is open, closed **only** by a structural refusal the model does not reproduce. The binary is on `PATH` (`/home/v/.local/bin/mpm`), so an ALLOW would have executed it. It did not.
+The first row is the one that matters: a route the rules cannot see, inside a form the model believes is open, closed **only** by a structural refusal the model does not reproduce. The binary is on `PATH` (the installed `mpm` binary on `PATH`), so an ALLOW would have executed it. It did not.
 
 **So there is no live exposure today.** The exposure is *epistemic*: the guard's published model of the host is incomplete, and the corpus does not notice. The reviewer's isolation is currently carried by the host's real behaviour, not by the model the PR says is a faithful reproduction of it — and the guard cannot tell the difference.
 
@@ -167,10 +167,10 @@ Bash rejects all seven (`bash -n` rc=2) — a separate fact, reported separately
 
 **File / line:** the corpus lists — `…test_reviewer_isolation_denies_every_mpm_tool.py:2559-2854` (`must_deny`) and `:2862-3086` (`must_allow`).
 
-**What is wrong.** This is the same proof the twenty-first review used, repeated against this head. I copied the tree to `/tmp/opencode/review-a21/scratch/tree`, patched `_matcher_structure` so it reproduces the host on all five families above (the `params` frame, the trailing separator, the missing `do`, the stray `esac`, the empty `case` subject and the `;;&` separator), and ran the guard's own suite:
+**What is wrong.** This is the same proof the twenty-first review used, repeated against this head. I copied the tree to the review scratch tree, patched `_matcher_structure` so it reproduces the host on all five families above (the `params` frame, the trailing separator, the missing `do`, the stray `esac`, the empty `case` subject and the `;;&` separator), and ran the guard's own suite:
 
 ```
-$ cd /tmp/opencode/review-a21/scratch/tree
+$ cd the review scratch tree
 $ python3 -m unittest agent_installation.tests.test_reviewer_isolation_denies_every_mpm_tool
 .....................
 ----------------------------------------------------------------------
@@ -214,7 +214,7 @@ It has one real consequence worth stating: because the model refuses these for a
 
 ### MINOR-2 — Five of the 72 published mutation directions fail because the mutated file no longer parses, not because the behaviour was removed
 
-**File / line:** the published sweep `/tmp/opencode/run_mutations.py` (the direction list) — and the published log `/tmp/opencode/mutations-96.log`.
+**File / line:** the published sweep `run_mutations.py` (the direction list) — and the published log `mutations-96.log`.
 
 The head claims "every one of the seventy-two published mutation directions now fails **with a reason**". I re-ran the sweep myself (in an isolated copy, with `HOME` redirected so the operator's installed reviewer definition was never touched):
 
@@ -243,7 +243,7 @@ A direction that only breaks the file's syntax proves **nothing** about the beha
 
 ### MINOR-3 — Two of the 72 directions are byte-identical edits, and one is mislabelled
 
-**File / line:** the direction list in `/tmp/opencode/run_mutations.py`.
+**File / line:** the direction list in `run_mutations.py`.
 
 Comparing the 72 `(needle, replacement)` pairs programmatically:
 
@@ -469,7 +469,7 @@ The forms that **agreed** are worth naming too, because they show the model is n
 
 ## REPRODUCTION
 
-All artefacts are under `/tmp/opencode/review-a21/scratch/`:
+All artefacts are under the review scratch directory/:
 
 | file | what it is |
 |---|---|
@@ -485,4 +485,4 @@ All artefacts are under `/tmp/opencode/review-a21/scratch/`:
 | `vacuity.py` | the per-direction corpus-flip analysis |
 | `installed_diff.txt` | the installed-copy drift check (empty = identical) |
 
-Nothing was written under `/home/v/src/mpm` or `/tmp/opencode/p6fu`; the worktree is still clean at `6d4734929c7602905fbb6da85dd19719c22727e4`. The live database was never opened.
+Nothing was written under the operator's checkout or the review worktree; the worktree is still clean at `6d4734929c7602905fbb6da85dd19719c22727e4`. The live database was never opened.

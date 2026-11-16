@@ -2,7 +2,7 @@
 
 **HEAD under review:** `2f85712a9fe1af4da9826dda12ba12882a834dec` (branch `fix/skill-packages-p6-provenance`)
 **BASE:** `69bc212e207ddcf50b9c09d662d63403925a702e`
-**WORKTREE to review:** `/tmp/opencode/p6fu` — confirm it is at that head (`git rev-parse HEAD`) and clean
+**WORKTREE to review:** the review worktree — confirm it is at that head (`git rev-parse HEAD`) and clean
 before and after your experiments.
 
 ## What changed in this head
@@ -67,7 +67,7 @@ export HOME=<your scratch>/home TMPDIR=<your scratch>/tmp MPM_WORKSPACE=<your sc
 
 **Rules that matter:**
 
-- **Never** open the live substrate: `/home/v/.mpm/src/db/mpm.db` and `mirror.jsonl` are
+- **Never** open the live substrate: `<workspace>/src/db/mpm.db` and `mirror.jsonl` are
   off-limits, including read-only. Set `HOME` and `MPM_WORKSPACE` **first, in the same command**.
 - **Never** run an unbounded loop (`until false`, `for ((;;))`, `while true`).
 - **Never** append `; echo "RC=$?"` to a probe that ends in `&` — it manufactures an empty-slot
@@ -87,7 +87,7 @@ reason (three runs), the model's verdict, and the corpus check that shows the fo
 pinned. State the **exposure** explicitly: for every divergent form, did the host refuse the
 command or reach the binary?
 
-Write the review to `/tmp/opencode/review-a24/review.md` and report it back. Keep your scratch under
-`/tmp/opencode/review-a24/`. Do not modify `/tmp/opencode/p6fu` — restore anything you change in
+Write the review to `review-a24/review.md` and report it back. Keep your scratch under
+`review-a24/`. Do not modify the review worktree — restore anything you change in
 it (sha256 the guard and the template before and after), and do not modify the operator's checkout
-at `/home/v/src/mpm`.
+at the operator's checkout.

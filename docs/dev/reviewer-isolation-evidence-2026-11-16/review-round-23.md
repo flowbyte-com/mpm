@@ -2,7 +2,7 @@
 
 **HEAD under review:** `0ee25aaf381cbc35d2760def5b006b6b57b93720` (branch `fix/skill-packages-p6-provenance`)
 **BASE:** `69bc212e207ddcf50b9c09d662d63403925a702e`
-**WORKTREE reviewed:** `/tmp/opencode/p6fu` — confirmed at that head, `git status` clean before and after
+**WORKTREE reviewed:** the review worktree — confirmed at that head, `git status` clean before and after
 every experiment (sha256 of the guard and of the template re-verified; the mutation sweep restores both).
 
 ---
@@ -74,7 +74,7 @@ nine representatives for this family, **all of them top-level** (`echo hi &&`, `
 | `for i in 1; do echo hi \|\| done` | DENY 3/3 | `compound-command` | ALLOW |
 
 Probe form (one isolated tool call each, three times):
-`export HOME=... TMPDIR=... MPM_WORKSPACE=...; cd /tmp/opencode/review-a22/scratch; { echo hi && } ; echo "RC=$?"`
+`export HOME=... TMPDIR=... MPM_WORKSPACE=...; cd the review scratch directory; { echo hi && } ; echo "RC=$?"`
 
 Note the host's reason **varies with the construct** (`invalid-structure` inside a brace group or a
 case branch; `compound-command` inside an `if`/`while`/`for` body). A class-level fix therefore
@@ -581,7 +581,7 @@ DENY/DENY — `f() { echo hi; ; }` (invalid-structure), `{ echo hi; ; }` (invali
   closed; the capability loader is deliberately **not** closed and the definition says so in prose
   (`test_the_definition_does_not_claim_the_capability_loader_is_closed`).
 * **Installed-copy drift**: `diff` of the operator's installed
-  `/home/v/.config/opencode/agents/mpm-reviewer.md` against
+  `~/.config/opencode/agents/mpm-reviewer.md` against
   `agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md` → **identical**
   (sha256 `899d37e9f735af88ae65e2125984fd3e9091b227e8845de545e6bdc17e0397ae`).
 * **Sandbox launcher**: `agent_installation/mpm-opencode/scripts/reviewer_sandbox.py` creates
@@ -594,7 +594,7 @@ DENY/DENY — `f() { echo hi; ; }` (invalid-structure), `{ echo hi; ; }` (invali
 
 ### The seventy-three mutation directions — **HOLDS**
 
-I re-ran `/tmp/opencode/run_mutations.py` myself (it restores the files it touches; it does not
+I re-ran `run_mutations.py` myself (it restores the files it touches; it does not
 touch any Go file, so it ran safely alongside the Go tests).
 
 ```
@@ -674,7 +674,7 @@ the guard FAILED for 73 of them
   back as `{"error":{"type":"unknown","message":"Portable shell scanner cannot analyze command:
   <reason>"}}`.
 * No unbounded loop was run; no write command was run; the live MPM database was never opened;
-  nothing was created under `/home/v/src/mpm` or `/tmp/opencode/p6fu` (the mutation sweep edits
+  nothing was created under the operator's checkout or the review worktree (the mutation sweep edits
   and restores the two guard files, and both were sha256-verified afterwards).
 
 ---
