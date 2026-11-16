@@ -704,7 +704,12 @@ func (dm *DatabaseManager) ExportSkillDocument(ctx context.Context, skillID stri
 		}
 		base, err := packageExportBaseName(frontmatter.Name, frontmatter.Version)
 		if err != nil {
-			return packageReadErrorf(PackageReadReasonIntegrityFailure, "",
+			// The same reason as the package path: the skill is
+			// INTACT and cannot be PUBLISHED. Reporting it as an
+			// integrity failure would be a false statement about
+			// content that is consistent — and the two paths must not
+			// disagree about the same fact.
+			return packageReadErrorf(PackageReadReasonUnpublishable, "",
 				"the skill %s cannot be published under a safe file name: %v", skillID, err)
 		}
 

@@ -723,6 +723,37 @@ func TestP7ExportNamesTheIdentityOfAPackageItCouldNotCarry(t *testing.T) {
 	}
 }
 
+// TestP7TheDocumentPathRefusesAnUnpublishableNameWithTheSameReason pins
+// that the ORDINARY-skill path and the PACKAGE path agree about why a
+// name cannot be published.
+//
+// A skill's name is an identifier, and `a/b` is a legal one, so the
+// derived file name can be refused. The package path reports that as
+// `unpublishable`; if the ordinary-skill path reported it as an
+// integrity failure, the two paths would disagree about the same
+// fact, and the reason table would tell an operator only half of it.
+func TestP7TheDocumentPathRefusesAnUnpublishableNameWithTheSameReason(t *testing.T) {
+	dm := p7DM(t)
+	// An ORDINARY skill — a row with no package — whose name is an
+	// identifier that is not a safe file name.
+	skillID := "skill:a/b-v1.0.0"
+	if _, err := dm.db.Exec(`INSERT INTO memories (id, collection, content, tags, metadata, weight, is_global, deleted_at)
+		VALUES (?, 'skills', ?, '[]', '{}', 5, 0, NULL)`,
+		skillID, p7SkillDoc("a/b", "1.0.0", "a body\n")); err != nil {
+		t.Fatalf("seed the ordinary skill: %v", err)
+	}
+
+	_, err := dm.ExportSkillDocument(context.Background(), skillID)
+	if err == nil {
+		t.Fatalf("the export of a skill named %q was accepted", "a/b")
+	}
+	if reason := PackageReadReasonOf(err); reason != PackageReadReasonUnpublishable {
+		t.Errorf("the refusal's reason is %q, want %q: the skill is INTACT and "+
+			"cannot be PUBLISHED, and the package path says the same thing",
+			reason, PackageReadReasonUnpublishable)
+	}
+}
+
 // TestP7TheArchiveOrderIsAStrictWeakOrdering pins the writer's
 // comparator.
 //

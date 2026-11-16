@@ -2517,7 +2517,7 @@ The reader has its own **closed** vocabulary, mirroring the importer's. It is sh
 | `invalid_path` | the requested path is not a canonical package path |
 | `content_hash_mismatch` | the stored bytes are not the bytes that were recorded |
 | `integrity_failure` | the stored package is not internally consistent |
-| `unpublishable` | the package is intact, but it cannot be **published** under a safe file name — a skill's name is an identifier, and `a/b` is a legal one |
+| `unpublishable` | the package — or the ordinary skill — is intact, but it cannot be **published** under a safe file name. A skill's name is an identifier, and `a/b` is a legal one |
 | `invalid_bounds` | the read's bounds are not admissible |
 | `database_failure` | the substrate failed |
 | `binary_requires_raw` | the content cannot be carried as text without loss |
@@ -2648,7 +2648,18 @@ That is a change in the marker's **meaning**, so the marker is stated again here
 | `packages_omitted.scope.selected` | the number of packages the export's filters chose — the denominator the omission count is measured against |
 | `packages_omitted.scope.carried` | the number of `.skill` archives the export actually produced |
 
-**The omission reason is a closed vocabulary, and it separates "the bytes are bad" from "the publication failed".** `integrity_failure` means the package did not verify — its bytes are inconsistent. A package that **verified** and could not be published under a safe file name is `export_failed`, not `integrity_failure`: its bytes are consistent, and only the publication failed. The `detail` names the cause in both cases.
+**The omission reason is a closed vocabulary, and it separates "the bytes are bad" from "the publication failed".** The six reasons are:
+
+| reason | meaning |
+|---|---|
+| `integrity_failure` | the package did not verify — its bytes are inconsistent |
+| `package_not_found` | the package row is gone |
+| `file_name_collision` | another package in the same export derives the same published file name |
+| `skill_row_not_exported` | the package is in the export's scope, but its skill row is not among the exported rows |
+| `database_failure` | the substrate failed |
+| `export_failed` | the **catch-all**: any other cause. A package that **verified** and could not be published under a safe file name is one of them — it is not an `integrity_failure`, because its bytes are consistent and only the publication failed |
+
+The `detail` field names the cause in every case, so a consumer that needs to know WHICH failure occurred reads it rather than the reason.
 
 **A zero omission count is a positive statement only in the light of the scope.** Zero omitted out of twelve selected packages is a *complete* export; zero omitted out of zero selected packages says nothing about the packages that were never selected. That is why the scope is part of the marker.
 
