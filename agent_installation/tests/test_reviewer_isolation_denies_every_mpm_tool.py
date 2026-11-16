@@ -307,6 +307,13 @@ def _load_installer():
 # `echo [[ mpm == x ]]` are REFUSED - in ARGUMENT position the text is
 # ordinary text and the word shape matches it.
 #
+# A HERE-DOCUMENT's BODY is data for the command analysis and still
+# TEXT for the rule matcher: `cat <<EOF` / `mpm` / `EOF` is ALLOWED
+# (the body is not a command), `cat <<EOF` / `echo mpm` / `EOF` is
+# ALLOWED ("mpm" at the end of a line is not `* mpm *`), and
+# `cat <<EOF` / `echo mpm --version` / `EOF` is REFUSED (the rule
+# matcher sees the body).
+#
 # A SUBSHELL at the command position is ANALYSED, and the command
 # inside it is matched: `(echo hi)` is ALLOWED and `(mpm --version)`
 # is REFUSED - by a RULE, not by the scanner. A `(` that follows a
@@ -470,22 +477,40 @@ _MATCHER_KEYWORDS = (
 )
 
 
-def _matcher_blank_heredocs(command: str) -> str:
-    """The command with every HERE-DOCUMENT BODY blanked.
+def _matcher_mark_heredocs(command: str):
+    """The command with every HERE-DOCUMENT BODY marked, and a flag.
 
-    The host treats a here-document's body as DATA, not as a command.
-    MEASURED: `cat <<EOF` + `mpm --version` + `EOF` is ALLOWED — the
-    body is not a command — while a here-STRING (`cat <<< mpm`) is
-    REFUSED, because its TARGET is matched.
+    The host's COMMAND ANALYSIS treats a here-document's body as
+    DATA - the body's lines are not commands - but its RULE MATCHER
+    still sees the body TEXT.  MEASURED:
 
-    So the body is blanked before the command is split: a name inside
-    a here-document is data, and the newline that ends the body does
-    not separate two commands.
+        cat <<EOF / mpm / EOF                ALLOWED  (the body is not
+                                                      a command, so the
+                                                      exact rule `mpm`
+                                                      does not fire)
+        cat <<EOF / echo mpm / EOF           ALLOWED  ("mpm" at the end
+                                                      of a line is not
+                                                      the rule `* mpm *`,
+                                                      which needs a
+                                                      trailing space)
+        cat <<EOF / echo mpm --version / EOF REFUSED  (the rule matcher
+                                                      sees the body text)
+
+    So the body STAYS in the text the rules are matched against, and
+    its newlines are marked so the command analysis does not split the
+    command on them.  (The marker is not a space: a space would make
+    "mpm" at the end of a line look like the rule `* mpm *`.)
+
+    The TERMINATOR must start a line - leading TABS are stripped only
+    for `<<-` - and a here-document whose terminator is not found is a
+    construct the host cannot analyse at all ("heredoc"), so the flag
+    says so.
     """
-    masked = list(command)
+    marked = list(command)
     index = 0
     length = len(command)
     quote = None
+    unterminated = False
     while index < length:
         char = command[index]
         if quote is not None:
@@ -521,11 +546,12 @@ def _matcher_blank_heredocs(command: str) -> str:
             delimiter = command[start:look]
         newline = command.find("\n", look)
         if newline < 0:
+            unterminated = True
             index = look
             continue
         body = newline + 1
         cursor = body
-        end = length
+        end = None
         while cursor < length:
             line_end = command.find("\n", cursor)
             if line_end < 0:
@@ -533,15 +559,23 @@ def _matcher_blank_heredocs(command: str) -> str:
             probe = command[cursor:line_end]
             if strip_tabs:
                 probe = probe.lstrip("\t")
-            if probe.strip() == delimiter:
-                end = line_end
+            if probe == delimiter:
+                end = cursor
                 break
             cursor = line_end + 1
-        for position in range(body, end):
-            masked[position] = " "
+        if end is None:
+            unterminated = True
+            index = body
+            continue
+        # The newline that ENDS the command line is marked too: the
+        # body belongs to the command's text, and the command
+        # analysis does not split on it.
+        for position in range(newline, end):
+            if marked[position] == "\n":
+                marked[position] = "\x00"
         index = max(index + 1, body)
         continue
-    return "".join(masked)
+    return "".join(marked), unterminated
 
 
 def _matcher_segments(command: str):
@@ -573,7 +607,11 @@ def _matcher_segments(command: str):
     split, because the `;;` between its branches is a separator the
     host does not split on.
     """
-    command = _matcher_blank_heredocs(command)
+    command, unterminated = _matcher_mark_heredocs(command)
+    if unterminated:
+        # A here-document whose TERMINATOR is not found is a construct
+        # the host cannot analyse at all ("heredoc").
+        return [(command, _MATCHER_OPAQUE)]
     case_bodies, case_headers, opaque, without_cases = _matcher_extract_cases(
         command
     )
@@ -672,11 +710,32 @@ def _matcher_bodies(segments):
     A `for`/`select` header is a WORD LIST and is not matched — but
     the substitutions inside it ARE descended into.  A `while`/`until`
     CONDITION is a COMMAND LIST and IS matched.
+
+    It also tracks the ENCLOSING CONSTRUCT, because a CONTINUATION
+    keyword with nothing to continue is a construct the host cannot
+    analyse.  MEASURED: `do [[ mpm == x ]]`, `do echo hi`, `then echo
+    hi`, `else [[ mpm == x ]]`, `elif echo hi` and `fi echo hi` are all
+    REFUSED with "compound-command" — and `do [[ x == y ]]`, which
+    names nothing at all, is refused the same way, so the refusal is
+    about the construct and not about the name.
     """
     out = []
+    depth = 0
     for text, kind in segments:
         words = text.split()
         keyword = words[0] if words else ""
+        if keyword in _MATCHER_CONTINUATION_KEYWORDS:
+            # A continuation keyword with nothing to continue.
+            if depth == 0:
+                out.append((text, _MATCHER_OPAQUE))
+                continue
+        elif keyword in _MATCHER_CLOSING_KEYWORDS:
+            if depth == 0:
+                out.append((text, _MATCHER_OPAQUE))
+                continue
+            depth -= 1
+        elif keyword == "if":
+            depth += 1
         if keyword not in ("for", "while", "until", "select") or "do" not in words:
             out.append((text, kind))
             continue
@@ -858,6 +917,13 @@ def _matcher_mask_contexts(segment: str) -> str:
         masked[position] = " "
     return "".join(masked)
 
+
+# The keywords that CONTINUE a construct, and the ones that CLOSE it.
+# A continuation keyword with nothing to continue is a construct the
+# host cannot analyse - MEASURED: `do echo hi` and `then echo hi` are
+# REFUSED with "compound-command".
+_MATCHER_CONTINUATION_KEYWORDS = ("do", "elif", "else", "then")
+_MATCHER_CLOSING_KEYWORDS = ("done", "esac", "fi")
 
 # The words that may stand in front of a CONTEXT.  Each of them
 # introduces a COMMAND LIST or a command, so the host recognises a
@@ -1368,22 +1434,32 @@ class ReviewerIsolationTest(unittest.TestCase):
             "case [[ x == y ]] in z) echo hi;; esac",
             "case (( x )) in z) echo hi;; esac",
             "case [[ mpm == x ]]) echo hi;; esac",
-            # a `case` whose SUBJECT is a CONTEXT is a construct the
-            # host's scanner cannot analyse at all - and the form
-            # that names NO binary is refused the same way, so the
-            # refusal is about the construct
-            "case [[ mpm == x ]] in y) echo hi;; esac",
-            "case [[ x == y ]] in z) echo hi;; esac",
-            "case (( x )) in z) echo hi;; esac",
-            "case [[ mpm == x ]]) echo hi;; esac",
-            # a `case` whose SUBJECT is a CONTEXT is a construct the
-            # host's scanner cannot analyse at all - and the form
-            # that names NO binary is refused the same way, so the
-            # refusal is about the construct
-            "case [[ mpm == x ]] in y) echo hi;; esac",
-            "case [[ x == y ]] in z) echo hi;; esac",
-            "case (( x )) in z) echo hi;; esac",
-            "case [[ mpm == x ]]) echo hi;; esac",
+            # a here-document's BODY is DATA for the command analysis
+            # and still TEXT for the rule matcher, so a body that
+            # carries the word shape is refused
+            "cat <<EOF\necho mpm --version\nEOF",
+            "cat <<EOF\necho $(( mpm ))\nEOF",
+            "cat <<EOF\n\tmpm --version\nEOF",
+            "cat <<EOF\nmpm\t--version\nEOF",
+            "cat <<'EOF'\n\tmpm --version\nEOF",
+            "cat <<-EOF\n\tmpm --version\n\tEOF",
+            # a here-document whose TERMINATOR is not found - because
+            # it is indented, or because there is none - is a
+            # construct the host cannot analyse
+            "cat <<EOF\nmpm --version\n  EOF",
+            "cat <<-EOF\nmpm --version\n  EOF",
+            "cat <<EOF\nmpm --version",
+            # a CONTINUATION keyword with nothing to continue is a
+            # construct the host cannot analyse - and the form that
+            # names NO binary is refused the same way
+            "do [[ mpm == x ]]",
+            "do echo hi",
+            "do [[ x == y ]]",
+            "do",
+            "then echo hi",
+            "else [[ mpm == x ]]",
+            "elif echo hi",
+            "fi echo hi",
             # a CONTEXT in ARGUMENT position is ordinary text, and
             # the word shape matches it
             "echo $(( mpm ))",
@@ -1407,8 +1483,7 @@ class ReviewerIsolationTest(unittest.TestCase):
             "echo\tmpm",
             # the write route
             'mpm remember "probe"',
-            'go run ./cmd/mpm remember "probe"',
-        ]
+            'go run ./cmd/mpm remember "probe"',        ]
         for command in must_deny:
             self.assertTrue(
                 _matcher_denies(command, rules),
@@ -1477,40 +1552,15 @@ class ReviewerIsolationTest(unittest.TestCase):
             "case x in [[ y ]]) echo hi;; esac",
             "case $(( x )) in z) echo hi;; esac",
             "for i in [[ mpm == x ]]; do echo hi; break; done",
-            # a here-document's BODY is DATA, not a command
+            # a here-document's BODY is DATA for the command analysis
+            # - so the body is not a command - and the rule matcher
+            # still sees its TEXT
+            "cat <<EOF\nmpm\nEOF",
+            "cat <<EOF\necho mpm\nEOF",
             "cat <<EOF\nmpm --version\nEOF",
-            # a CONTEXT is a construct in more positions than the
-            # command position: the `else` branch of an `if`, a brace
-            # group, a `time` prefix, a `!` prefix
-            "if true; then echo a; else [[ mpm == x ]]; fi",
-            "if true; then echo a; else (( mpm )); fi",
-            "{ [[ mpm == x ]]; }",
-            "time [[ mpm == x ]]",
-            "! (( mpm ))",
-            # a `case` whose PATTERN list carries a context is fine,
-            # and so is a `$( ... )` substitution in the subject
-            "case x in y) echo hi;; esac",
-            "case x in [[ y ]]) echo hi;; esac",
-            "case $(( x )) in z) echo hi;; esac",
-            "for i in [[ mpm == x ]]; do echo hi; break; done",
-            # a here-document's BODY is DATA, not a command
-            "cat <<EOF\nmpm --version\nEOF",
-            # a CONTEXT is a construct in more positions than the
-            # command position: the `else` branch of an `if`, a brace
-            # group, a `time` prefix, a `!` prefix
-            "if true; then echo a; else [[ mpm == x ]]; fi",
-            "if true; then echo a; else (( mpm )); fi",
-            "{ [[ mpm == x ]]; }",
-            "time [[ mpm == x ]]",
-            "! (( mpm ))",
-            # a `case` whose PATTERN list carries a context is fine,
-            # and so is a `$( ... )` substitution in the subject
-            "case x in y) echo hi;; esac",
-            "case x in [[ y ]]) echo hi;; esac",
-            "case $(( x )) in z) echo hi;; esac",
-            "for i in [[ mpm == x ]]; do echo hi; break; done",
-            # a here-document's BODY is DATA, not a command
-            "cat <<EOF\nmpm --version\nEOF",
+            "cat <<EOF\nmpm --version\n\nEOF",
+            "cat <<'EOF'\nmpm --version\nEOF",
+            "cat <<-EOF\nmpm --version\nEOF",
             # the routes the residual list names, which stay OPEN
             "echo $(echo mp)m",
             "M=mpm; $M --version",
@@ -1537,8 +1587,7 @@ class ReviewerIsolationTest(unittest.TestCase):
             "echo a,mpm",
             # a command that mentions nothing at all
             "echo probe-alive",
-            "true",
-        ]
+            "true",        ]
         for command in must_allow:
             self.assertFalse(
                 _matcher_denies(command, rules),
