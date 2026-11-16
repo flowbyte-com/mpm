@@ -285,12 +285,13 @@ def _load_installer():
 # segment's text is not matched; `$( ... )`, BACKTICK and PROCESS
 # substitutions are descended into.
 #
-# ONE THING the host does that this model does NOT: the host's
-# scanner REFUSES a COMPOUND COMMAND it cannot analyse (`echo (mpm
-# --version)` is refused with "Portable shell scanner cannot analyze
-# command: compound-command", and so is `echo (hello)`). That refusal
-# is the scanner's own limit, not an MPM rule, so the model does not
-# reproduce it.
+# The host REFUSES a command its scanner cannot ANALYSE: a process
+# substitution (`echo <(mpm --version)>` -> "invalid-redirect", and so
+# is `echo <(echo hello)>`, which names nothing at all) and a compound
+# command (`echo (mpm --version)` -> "compound-command", and so is
+# `echo (hello)`). Such a command does not run, but the reason is the
+# scanner's own limit and not an MPM rule - so the model reproduces the
+# VERDICT and names the right reason.
 #
 # The model is a MODEL.  Every outcome in the corpus below was measured
 # against the installed definition before it was written here, and a
@@ -323,11 +324,28 @@ def _matcher_segments(command: str):
 
     The `&&` and `||` pairs are consumed as pairs, so a single `&`
     never splits one of them in half.
+
+    A shell LOOP is ONE construct, so the separators inside it do not
+    split it.  MEASURED: `for i in mpm; do $i --version; done` is
+    ALLOWED, and the loop's HEADER would match the word shape
+    `* mpm *` if the host matched it as a command — so the host does
+    not split the header from the body, and does not match the header.
     """
     segments, current, depth, quote = [], [], 0, None
     index = 0
+    loop = 0
+    word = ""
     while index < len(command):
         char = command[index]
+        if quote is None and (char.isspace() or char in ";|&()"):
+            # The keyword test, at a word boundary.
+            if word in ("for", "while", "until"):
+                loop += 1
+            elif word == "done" and loop > 0:
+                loop -= 1
+            word = ""
+        elif quote is None:
+            word += char
         if quote is not None:
             current.append(char)
             if char == quote:
@@ -350,8 +368,12 @@ def _matcher_segments(command: str):
             index += 2
             continue
         if depth == 0 and char in ";|\n":
-            segments.append("".join(current))
-            current = []
+            if loop == 0:
+                segments.append("".join(current))
+                current = []
+                index += 1
+                continue
+            current.append(char)
             index += 1
             continue
         if depth == 0 and char == "&":
@@ -362,68 +384,176 @@ def _matcher_segments(command: str):
         current.append(char)
         index += 1
     segments.append("".join(current))
-    return segments
+    return _matcher_bodies(segments)
 
 
-def _matcher_substitutions(segment: str):
+def _matcher_bodies(segments):
+    """The BODY of every shell loop among the segments.
+
+    A loop's header is not a command, so it is not matched; the body
+    is, and it may be a list of commands of its own.
+    """
+    out = []
+    for segment in segments:
+        words = segment.split()
+        if "do" not in words:
+            out.append(segment)
+            continue
+        cut = words.index("do")
+        body = " ".join(words[cut + 1 :])
+        out.extend(_matcher_segments(body) if body else [])
+    return out
+
+
+def _matcher_substitution_body(segment: str, index: int):
+    """The body of the substitution that starts at `index`, and the index after it."""
+    if segment[index] == "`":
+        end = segment.find("`", index + 1)
+        if end < 0:
+            return None, index + 1
+        return segment[index + 1 : end], end + 1
+    depth = 0
+    end = index + 1
+    while end < len(segment):
+        if segment[end] == "(":
+            depth += 1
+        elif segment[end] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        end += 1
+    return segment[index + 2 : end], end + 1
+
+
+def _matcher_substitutions(segment: str, depth: int = 0):
     """The text inside each substitution the host descends into.
 
     The host has a portable shell scanner, and it descends into
     `$( ... )`, into BACKTICK substitutions (`` `...` ``) and into
-    PROCESS substitutions (`<( ... )` and `>( ... )`), so the name
-    inside them is matched.
+    DOUBLE-QUOTED strings — a substitution inside `"..."` expands in a
+    POSIX shell, so the host looks inside it. It descends RECURSIVELY,
+    and it re-splits a substitution's contents on the same separator
+    set it uses for a command.
 
-    That was MEASURED, not assumed: `echo `mpm --version`` and
-    `echo <(mpm --version)>` are REFUSED by the host, and a model that
-    could not see them would UNDER-APPROXIMATE it — and a model that
-    under-approximates the host cannot argue that a command the
-    definition states is open really is open.
+    All of that was MEASURED, not assumed:
 
-    The scan respects QUOTES: a substitution inside a quoted string is
-    a literal, and the host's scanner does not descend into it.
+        echo `mpm --version`        refused  (the backtick form)
+        echo "$(mpm --version)"     refused  (double quotes expand)
+        echo "`mpm --version`"      refused  (double quotes expand)
+        echo 'echo `mpm --version`' allowed  (single quotes are literal)
+        echo $(mpm; echo hi)        refused  (the contents are re-split)
+        echo $(echo $(mpm))         refused  (the descent is recursive)
+
+    A model that could not see these would UNDER-APPROXIMATE the host,
+    and a model that under-approximates the host cannot argue that a
+    command the definition states is open really is open.
     """
+    if depth > 8:
+        return []
+    bodies = []
     index = 0
-    quote = None
-    while index < len(segment):
+    length = len(segment)
+    while index < length:
         char = segment[index]
-        if quote is not None:
-            if char == quote:
-                quote = None
+        if char == "'":
+            # A SINGLE-quoted string is LITERAL: nothing inside it
+            # expands, and the host does not descend into it.
+            end = segment.find("'", index + 1)
+            index = length if end < 0 else end + 1
+            continue
+        if char == '"':
+            # A DOUBLE-quoted string is not literal: a substitution
+            # inside it still expands, so its span is scanned for
+            # openers.
             index += 1
+            while index < length:
+                if segment[index] == "\\":
+                    index += 2
+                    continue
+                if segment[index] == '"':
+                    index += 1
+                    break
+                if segment.startswith("$(", index) or segment[index] == "`":
+                    body, after = _matcher_substitution_body(segment, index)
+                    if body is not None:
+                        bodies.append(body)
+                        bodies.extend(_matcher_substitutions(body, depth + 1))
+                        index = after
+                        continue
+                index += 1
             continue
-        if char in "\"'":
-            quote = char
+        if (
+            segment.startswith("$(", index)
+            or segment.startswith("<(", index)
+            or segment.startswith(">(", index)
+            or char == "`"
+        ):
+            body, after = _matcher_substitution_body(segment, index)
+            if body is not None:
+                bodies.append(body)
+                bodies.extend(_matcher_substitutions(body, depth + 1))
+                index = after
+                continue
             index += 1
-            continue
-        if segment.startswith("$(", index) or segment.startswith("<(", index) or segment.startswith(">(", index):
-            depth, end = 0, index + 1
-            while end < len(segment):
-                if segment[end] == "(":
-                    depth += 1
-                elif segment[end] == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                end += 1
-            yield segment[index + 2 : end]
-            index = end + 1
-            continue
-        if char == "`":
-            end = segment.find("`", index + 1)
-            if end < 0:
-                return
-            yield segment[index + 1 : end]
-            index = end + 1
             continue
         index += 1
+    return bodies
+
+
+def _matcher_unanalysable(segment: str) -> bool:
+    """Would the host REFUSE this segment because it cannot analyse it?
+
+    MEASURED: `echo <(mpm --version)>` and `echo <(echo hello)>` both
+    return "Portable shell scanner cannot analyze command:
+    invalid-redirect" — the second contains no MPM name at all — and
+    `echo (mpm --version)` and `echo (hello)` both return
+    "compound-command".
+
+    The host refuses to LOOK at such a command, so it does not run,
+    whatever the rules say. The model reproduces that verdict, and the
+    reason it gives is the scanner's limit rather than a rule match.
+
+    A `(` that follows a WORD is not a compound command — `f() { … }`
+    is a function definition — so only a `(` that starts a word counts.
+    """
+    index = 0
+    while index < len(segment):
+        if segment.startswith("<(", index) or segment.startswith(">(", index):
+            return True
+        if segment[index] == "(" and not segment.startswith("$(", index):
+            if index == 0 or segment[index - 1].isspace():
+                return True
+        index += 1
+    return False
+
+
+def _matcher_candidates(segment: str, depth: int = 0):
+    """Every text the host matches against the rules.
+
+    The segment itself, and the contents of every substitution inside
+    it — re-split on the separator set, because the host matches each
+    simple command of a substitution's contents, not the contents as
+    one blob.
+    """
+    yield segment
+    if depth > 8:
+        return
+    for body in _matcher_substitutions(segment, depth):
+        for part in _matcher_segments(body):
+            yield part
+            yield from _matcher_candidates(part, depth + 1)
 
 
 def _matcher_denies(command: str, rules) -> bool:
     """Would the host deny this command, given these (resource, effect)?"""
     for segment in _matcher_segments(command):
-        candidates = [segment]
-        candidates.extend(_matcher_substitutions(segment))
-        for candidate in candidates:
+        # A command the host's scanner cannot ANALYSE is refused
+        # outright — a process substitution (`invalid-redirect`) or a
+        # compound command (`compound-command`). It does not run, and
+        # the reason is the scanner's limit rather than a rule match.
+        if _matcher_unanalysable(segment):
+            return True
+        for candidate in _matcher_candidates(segment):
             # The host TRIMS each segment before matching it.  This
             # was MEASURED: `echo hi & systemctl` is refused, and the
             # only reason is that the trimmed segment is `systemctl`.
@@ -640,7 +770,14 @@ class ReviewerIsolationTest(unittest.TestCase):
             # the name inside a substitution the host descends into:
             # a backtick and a process substitution as well as `$( )`
             "echo `mpm --version`",
+            'echo "$(mpm --version)"',
+            'echo "`mpm --version`"',
+            "echo $(mpm; echo hi)",
+            "echo $(echo $(mpm))",
+            # a command the host cannot ANALYSE is refused outright
             "echo <(mpm --version)>",
+            "echo <(echo hello)>",
+            "echo (mpm --version)",
             "echo `echo mpm`",
             # the name delimited by a TAB, which the shell splits on
             "mpm\t--version",
@@ -673,6 +810,12 @@ class ReviewerIsolationTest(unittest.TestCase):
             # sees it, so the text is not the name
             "go run ./cmd/mp?",
             "go build -o /tmp/x ./cmd/mp?",
+            # a name GLUED to punctuation rather than delimited by
+            # whitespace
+            "${x:-mpm} --version",
+            "for i in mpm; do $i --version; done",
+            "echo ${x:-mpm}",
+            "echo a,mpm",
             # a command that mentions nothing at all
             "echo probe-alive",
             "true",

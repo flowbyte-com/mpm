@@ -749,7 +749,7 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   command that merely QUOTES such a path after a ">" is refused too.
   That cost is accepted deliberately: a stray file in a runtime root
   is a nuisance, and a corrupted live database is a disaster.
-- The shell's matcher sees TEXT, and seven routes are NOT caught. A
+- The shell's matcher sees TEXT, and eight routes are NOT caught. A
   name SPLIT by a substitution is not the name: `$(echo mp)m`
   assembles it and runs the binary. A name in a VARIABLE is not the
   name either: `M=mpm; $M --version` runs the binary. A SCRIPT FILE
@@ -766,7 +766,11 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   BUILD is not refused — there is nothing in it to refuse — but the
   binaries it produces are refused when they are RUN (`./mpm
   --version`), and `go run` over such a pattern refuses outright,
-  because the pattern matches more than one package. And the host
+  because the pattern matches more than one package. A name GLUED to
+  punctuation rather than delimited by whitespace is not caught
+  either: `${x:-mpm} --version` and `for i in mpm; do $i --version;
+  done` run the binary, because every rule is anchored on whitespace,
+  on a path separator or on the command position. And the host
   does not match a `cd` segment's TEXT, so the name can
   be parked in a directory argument and the binary run without it:
   `cd cmd/mpm && go run . --version` reaches the binary, and
