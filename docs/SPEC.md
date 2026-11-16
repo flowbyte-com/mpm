@@ -2672,8 +2672,7 @@ Everything that could vary between two exports is pinned:
 | field | value |
 |---|---|
 | **layout** | **flat** — every canonical path sits at the archive's top level, so `SKILL.md` is at the archive's top level and §5.3.1's rule 4 makes the archive root the package root |
-| **order** | the entrypoint first, then the other canonical paths sorted. The comparator is a **strict weak ordering** — irreflexive, asymmetric and transitive — because Go does **not** validate the ordering it is handed to `sort` |
-| **entry order** | `SKILL.md` first, then the other canonical paths **sorted** |
+| **order** | `SKILL.md` first, then the other canonical paths **sorted**. The comparator is a **strict weak ordering** — irreflexive, asymmetric and transitive — because Go does **not** validate the ordering it is handed to `sort` |
 | **timestamp** | every entry carries **1980-01-01 00:00:00 UTC** — the ZIP epoch, and the earliest instant a DOS timestamp can express |
 | **permissions** | `0644`; `0755` for a file the manifest marks executable |
 | **compression** | **`Store`** — no compression at all |
