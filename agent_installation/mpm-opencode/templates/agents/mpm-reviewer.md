@@ -816,6 +816,33 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   substitution - `$(` or `<(` - and a bare function definition -
   `f()`. Every one of those names no binary, and every one of them is
   refused.
+  The FIVE families below are refused the same way - for the
+  CONSTRUCT, not for any name in it:
+  - a `(` that FOLLOWS A WORD is a function definition's PARAMETER
+    LIST, and the host accepts it only when the list is EMPTY and a
+    brace-group body follows. The SPACED spelling - `echo (hello)`,
+    `f ()` - is refused as `compound-command`; the GLUED one - `f()`,
+    `a(b)`, `echo a(b)`, `x(y) z`, `1(b)` - is refused as
+    `dynamic-execution`. `f() { echo hi; }` and `f () { echo hi; }`
+    are ALLOWED, and the body of a definition IS analysed.
+  - a TRAILING `&&`, `||` or `|` demands a command that does not
+    exist, so `echo hi &&` is refused as `invalid-structure` - and so
+    is the same trailing operator after a closed construct. A trailing
+    `;` and a trailing `&` are ALLOWED.
+  - a COMPOUND COMMAND whose keyword never arrived - `for i in 1; echo
+    hi; done`, `while false do echo hi; done` - is refused as
+    `compound-command`.
+  - a CLOSING KEYWORD that closes nothing - `echo hi; esac`, exactly
+    as `echo hi; fi` and `echo hi; done` are - is refused as
+    `compound-command`.
+  - a `case` with NO SUBJECT - `case in) echo hi;; esac` - and a `;&`
+    or `;;&` BRANCH SEPARATOR - `case x in y) echo hi;;& echo bye;; esac`
+    - are refused as `compound-command`. And a `case` is recognised by
+    its KEYWORD `in`, so `case x in` is refused while `case x in esac`
+    - an empty pattern list closed by its own `esac` - is allowed.
+  A `)` that closes a `case` or a group - `case x in y) echo hi)`,
+  `{ echo hi )` - is refused as `compound-command`; a subshell that is
+  closed properly, `( echo hi )`, is allowed.
   And the host
   does not match a `cd` segment's TEXT, so the name can
   be parked in a directory argument and the binary run without it:
