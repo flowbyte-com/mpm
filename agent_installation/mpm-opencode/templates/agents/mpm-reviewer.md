@@ -797,6 +797,11 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   newline and sees two halves that each hold no name. It is not
   closable by a rule: the host replaces every backslash with a slash
   before it matches, so no pattern can name a backslash at all.
+  The host's scanner does not analyse an ARITHMETIC context, so
+  `(( <(mpm --version) ))` is allowed - but that is not valid
+  shell syntax (bash rejects it), so nothing is reached. A
+  process substitution inside a CONDITIONAL is analysed, and the
+  name inside it is caught.
   And the host
   does not match a `cd` segment's TEXT, so the name can
   be parked in a directory argument and the binary run without it:

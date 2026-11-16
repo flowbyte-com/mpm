@@ -184,16 +184,19 @@ The definition is **layered**, and each layer says what it closes:
   see it;
 - **denies the MPM binaries wherever they are NAMED** — `mpm`,
   `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`,
-  `mpm-update`, `mpm-lint`, and their installed paths — in **seven shapes**:
-  at the command position; as its own **word** (`env mpm …`, `xargs mpm …`,
-  `$(echo mpm)`); separated from its neighbours by a **tab**
-  (`mpm<TAB>--version`); as the **last segment of a path** (`go run ./cmd/mpm`,
-  `/home/v/.local/bin/mpm`); as the last segment of a path with a **trailing
-  slash** (`go run ./cmd/mpm/`); inside a **Go package pattern**
-  (`go run ./cmd/mpm/...`, `go run ./cmd/mpm/./...`); and inside a **quote**
-  (`"mpm" …`, `sh -c 'mpm …'`) or an **ANSI-C quoted** string
-  (`$'\x6dpm' …`, whose escapes the shell decodes before the matcher
-  sees the text).
+  `mpm-update`, `mpm-lint`, and their installed paths — in **seven forms
+  per binary**: at the command position; wherever the name stands as its own
+  **word** (`env mpm …`, `xargs mpm …`, `$(echo mpm)`); wherever it is
+  followed by a **tab** (`mpm<TAB>--version`); the **last segment of a
+  path** (`go run ./cmd/mpm`, `/home/v/.local/bin/mpm`); the last segment
+  of a path with a **trailing slash** (`go run ./cmd/mpm/`); inside a **Go
+  package pattern** (`go run ./cmd/mpm/...`, `go run ./cmd/mpm/./...`); and
+  the installed path (`/home/v/.local/bin/mpm`) — plus **three** forms
+  shared by every binary: a **tab before** the name (`echo<TAB>mpm`), the
+  **quoted** form (`"mpm" …`, `sh -c 'mpm …'`), because every name starts
+  with `mpm`, and the **ANSI-C quoting opener** (`$'\x6dpm' …`, whose
+  escapes the shell decodes before the matcher sees the text), because it
+  is about the quoting and not about the name.
   The installers (`install.sh`, `uninstall.sh`, `make install`/
   `uninstall`/`deploy`) and the service-control commands are denied as
   well, so the command line cannot reach the substrate either;

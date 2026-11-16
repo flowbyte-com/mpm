@@ -320,6 +320,16 @@ def _load_installer():
 # A `#` COMMENT is not text: the host strips it before it matches, so
 # `echo hi # mpm` is ALLOWED.
 #
+# A PROCESS SUBSTITUTION is a COMMAND: the scanner parses its content
+# and the names inside are matched. MEASURED: `echo <(mpm --version)`
+# is REFUSED and `echo <(echo hello)` is ALLOWED - but an ARITHMETIC
+# context is not analysed, so `(( <(mpm --version) ))` is ALLOWED.
+#
+# A HERE-STRING (`<<<`) is not a here-document: its target is a word,
+# so `cat <<< "hi there"` is ALLOWED. A here-document inside a loop
+# body or a `case` branch body is ALLOWED too: the body is data, and
+# the re-split must not scan it again.
+#
 # A SUBSHELL at the command position is ANALYSED, and the command
 # inside it is matched: `(echo hi)` is ALLOWED and `(mpm --version)`
 # is REFUSED - by a RULE, not by the scanner. A `(` that follows a
@@ -511,6 +521,10 @@ def _matcher_mark_heredocs(command: str):
     for `<<-` - and a here-document whose terminator is not found is a
     construct the host cannot analyse at all ("heredoc"), so the flag
     says so.
+
+    A here-STRING (`<<<`) is not a here-document at all: its target is
+    a word.  MEASURED: `cat <<< "hi there"` is ALLOWED, and `cat <<<
+    mpm` is refused by the WORD SHAPE.
     """
     marked = list(command)
     index = 0
@@ -528,9 +542,14 @@ def _matcher_mark_heredocs(command: str):
             quote = char
             index += 1
             continue
-        if not (
-            command.startswith("<<", index) and not command.startswith("<<<", index)
-        ):
+        if command.startswith("<<<", index):
+            # A here-STRING: its target is a WORD, not a here-document.
+            # MEASURED: `cat <<< "hi there"` is ALLOWED - and the form
+            # that names a binary (`cat <<< mpm`) is refused by the WORD
+            # SHAPE, not by the scanner.
+            index += 3
+            continue
+        if not command.startswith("<<", index):
             index += 1
             continue
         look = index + 2
@@ -584,7 +603,7 @@ def _matcher_mark_heredocs(command: str):
     return "".join(marked), unterminated
 
 
-def _matcher_segments(command: str):
+def _matcher_segments(command: str, marked: bool = False):
     """The simple commands of a command, each with its KIND.
 
     A KIND is either "command" — the text is matched against the
@@ -613,11 +632,19 @@ def _matcher_segments(command: str):
     split, because the `;;` between its branches is a separator the
     host does not split on.
     """
-    command, unterminated = _matcher_mark_heredocs(command)
-    if unterminated:
-        # A here-document whose TERMINATOR is not found is a construct
-        # the host cannot analyse at all ("heredoc").
-        return [(command, _MATCHER_OPAQUE)]
+    if not marked:
+        command, unterminated = _matcher_mark_heredocs(command)
+        if unterminated:
+            # A here-document whose TERMINATOR is not found is a
+            # construct the host cannot analyse at all ("heredoc").
+            return [(command, _MATCHER_OPAQUE)]
+    # `marked` says the text has ALREADY been marked: its here-document
+    # bodies are known, so the scan must not run again.  MEASURED: a
+    # here-document inside a loop body or a `case` branch body is
+    # ALLOWED - `for i in 1; do` and `cat <<EOF` and `hi` and `EOF` and
+    # `done` - and the body is RE-SPLIT, so a second scan over the
+    # marked text would find no newline to end the here-document and
+    # would declare it unterminated.
     case_bodies, case_headers, opaque, without_cases = _matcher_extract_cases(
         command
     )
@@ -627,7 +654,7 @@ def _matcher_segments(command: str):
     for subject in opaque:
         segments.append((subject, _MATCHER_OPAQUE))
     for body in case_bodies:
-        segments.extend(_matcher_segments(body))
+        segments.extend(_matcher_segments(body, marked=True))
     return _matcher_bodies(segments)
 
 
@@ -767,10 +794,10 @@ def _matcher_bodies(segments):
                 out.append((header, _MATCHER_HEADER))
             else:
                 # A COMMAND LIST: matched, command by command.
-                for part in _matcher_segments(header):
+                for part in _matcher_segments(header, marked=True):
                     out.append(part)
         if body:
-            for part in _matcher_segments(body):
+            for part in _matcher_segments(body, marked=True):
                 out.append(part)
     return out
 
@@ -814,6 +841,12 @@ def _matcher_substitutions(segment: str, depth: int = 0):
         echo $(mpm; echo hi)        refused  (the contents are re-split)
         echo $(echo $(mpm))         refused  (the descent is recursive)
 
+    A PROCESS SUBSTITUTION inside an ARITHMETIC context is not
+    descended into: the host does not analyse one.  MEASURED:
+    `(( <(mpm --version) ))` is ALLOWED, while `(( $(echo mpm
+    --version) ))` is REFUSED and `[[ -n <(mpm --version) ]]` is
+    REFUSED.
+
     A model that could not see these would UNDER-APPROXIMATE the host,
     and a model that under-approximates the host cannot argue that a
     command the definition states is open really is open.
@@ -823,6 +856,15 @@ def _matcher_substitutions(segment: str, depth: int = 0):
     bodies = []
     index = 0
     length = len(segment)
+    # The command-position ARITHMETIC context: the host does not
+    # analyse a process substitution inside one.  MEASURED:
+    # `(( <(mpm --version) ))` is ALLOWED, while `(( $(echo mpm
+    # --version) ))` is REFUSED - so the arithmetic context hides a
+    # PROCESS SUBSTITUTION and not a `$( ... )`.
+    arithmetic = None
+    found = _matcher_command_context(segment)
+    if found is not None and found[2] == "((":
+        arithmetic = (found[0], found[1])
     while index < length:
         char = segment[index]
         if char == "'":
@@ -862,6 +904,12 @@ def _matcher_substitutions(segment: str, depth: int = 0):
             or segment.startswith(">(", index)
             or char == "`"
         ):
+            if segment.startswith("<(", index) or segment.startswith(">(", index):
+                if arithmetic is not None and arithmetic[0] <= index < arithmetic[1]:
+                    # A process substitution inside an ARITHMETIC
+                    # context: the host does not analyse one.
+                    index += 2
+                    continue
             body, after = _matcher_substitution_body(segment, index)
             if body is not None:
                 bodies.append(body)
@@ -872,6 +920,41 @@ def _matcher_substitutions(segment: str, depth: int = 0):
             continue
         index += 1
     return bodies
+
+
+def _matcher_command_context(segment: str):
+    """The CONTEXT that IS the command: its span and its opener.
+
+    MEASURED: `[[ mpm == x ]]` and `(( mpm ))` are ALLOWED - the
+    operands of a command-position context are words, not commands -
+    while `echo [[ mpm == x ]]` is REFUSED, because in ARGUMENT
+    position the text is ordinary text.
+
+    Only KEYWORDS may stand between the start of the segment and the
+    context: the `if`, `elif`, `else`, `then`, `while`, `until` and
+    `do` keywords introduce a COMMAND LIST, and the host recognises a
+    context there.
+    """
+    text = segment.lstrip()
+    lead = len(segment) - len(text)
+    index = lead
+    opener = closer = None
+    while index < len(segment):
+        if segment.startswith("[[", index):
+            opener, closer = "[[", "]]"
+            break
+        if segment.startswith("((", index):
+            opener, closer = "((", "))"
+            break
+        index += 1
+    if opener is None:
+        return None
+    if not _matcher_keyword_prefix(segment[lead:index]):
+        return None
+    end = segment.find(closer, index + len(opener))
+    if end < 0:
+        return None
+    return index, end + len(closer), opener
 
 
 def _matcher_mask_contexts(segment: str) -> str:
@@ -900,34 +983,12 @@ def _matcher_mask_contexts(segment: str) -> str:
     spans are blanked with SPACES rather than removed, so a word
     boundary is never invented.
     """
-    text = segment.lstrip()
-    lead = len(segment) - len(text)
-    index = lead
-    opener = closer = None
-    while index < len(segment):
-        if segment.startswith("[[", index):
-            opener, closer = "[[", "]]"
-            break
-        if segment.startswith("((", index):
-            opener, closer = "((", "))"
-            break
-        index += 1
-    if opener is None:
+    found = _matcher_command_context(segment)
+    if found is None:
         return segment
-    # Only KEYWORDS may stand between the start of the segment and
-    # the context: the `if`, `elif`, `then`, `while`, `until` and
-    # `do` keywords introduce a COMMAND LIST, and the host
-    # recognises a context there.  MEASURED: `if [[ mpm == x ]]; then
-    # echo hi; fi` and `if (( mpm )); then echo hi; fi` are ALLOWED.
-    # Anything else means the context is in ARGUMENT position, where
-    # its text is ordinary text and IS matched.
-    if not _matcher_keyword_prefix(segment[lead:index]):
-        return segment
-    end = segment.find(closer, index + len(opener))
-    if end < 0:
-        return segment
+    index, end, _ = found
     masked = list(segment)
-    for position in range(index, end + len(closer)):
+    for position in range(index, end):
         masked[position] = " "
     return "".join(masked)
 
@@ -1046,6 +1107,11 @@ def _matcher_unanalysable(segment: str) -> bool:
     A command the host classifies as DYNAMIC EXECUTION is refused too:
     `alias NAME=value` returns "dynamic-execution".
 
+    A PROCESS SUBSTITUTION inside a CONTEXT is NOT such a command:
+    the host parses a context's operands as words and never looks for
+    the substitution, so `[[ -n <(echo hi) ]]`, `(( <(echo hi) ))` and
+    `echo [[ -n <(echo hi) ]]` are ALLOWED.
+
     The host refuses to LOOK at such a command, so it does not run,
     whatever the rules say. The model reproduces that verdict, and the
     reason it gives is the scanner's limit rather than a rule match.
@@ -1054,16 +1120,38 @@ def _matcher_unanalysable(segment: str) -> bool:
         return True
     if _matcher_broken_context(segment):
         return True
-    index = 0
-    while index < len(segment):
-        if segment.startswith("<(", index) or segment.startswith(">(", index):
+    # A `<(` is a PROCESS SUBSTITUTION, not a refusal by itself: the
+    # scanner parses its content as a command, so the names inside are
+    # matched.  MEASURED:
+    #
+    #     echo <(mpm --version)      REFUSED  (the name matcher)
+    #     echo <(echo hello)>         ALLOWED
+    #     cat <(echo hi)>             ALLOWED
+    #
+    # The invalid-redirect refusal is the EMPTY TARGET that follows
+    # it: `echo <(echo hello)>` has a `>` with no target, and that is
+    # refused with "invalid-redirect" - whether or not it names a
+    # binary.
+    #
+    # A process substitution right AFTER a command-position CONTEXT is
+    # a structure the host cannot analyse.  MEASURED:
+    # `[[ x == y ]] <(echo hi)` is REFUSED with "invalid-structure",
+    # while `[[ -n <(echo hi) ]] && echo hi` is ALLOWED.
+    found = _matcher_command_context(segment)
+    if found is not None:
+        index, end, _ = found
+        rest = segment[end:].lstrip()
+        if rest.startswith("<(") or rest.startswith(">("):
             return True
-        if segment[index] == "(":
+    masked = _matcher_mask_contexts(segment)
+    index = 0
+    while index < len(masked):
+        if masked[index] == "(":
             # The `(` of a `$( ... )` substitution is not a group.
-            if index > 0 and segment[index - 1] == "$":
+            if index > 0 and masked[index - 1] == "$":
                 index += 1
                 continue
-            if _matcher_follows_a_word(segment, index):
+            if _matcher_follows_a_word(masked, index):
                 return True
         index += 1
     return _matcher_empty_redirect(segment)
@@ -1211,7 +1299,8 @@ def _matcher_candidates(segment: str, kind: str = _MATCHER_COMMAND, depth: int =
         if inner:
             yield from _matcher_candidates(inner, _MATCHER_COMMAND, depth + 1)
     for body in _matcher_substitutions(segment, depth):
-        for part, part_kind in _matcher_segments(body):
+        # The body comes from text that has ALREADY been marked.
+        for part, part_kind in _matcher_segments(body, marked=True):
             yield from _matcher_candidates(part, part_kind, depth + 1)
 
 
@@ -1510,6 +1599,17 @@ class ReviewerIsolationTest(unittest.TestCase):
             "cat <<EOF\nmpm --version\n  EOF",
             "cat <<-EOF\nmpm --version\n  EOF",
             "cat <<EOF\nmpm --version",
+            # the name inside a process substitution is matched, in a
+            # conditional and in argument position alike
+            "[[ -n <(mpm --version) ]]",
+            "echo [[ -n <(mpm --version) ]]",
+            "echo <(mpm --version)",
+            # a process substitution after a command-position context
+            # is a structure the host cannot analyse
+            "[[ x == y ]] <(echo hi)",
+            # and the `>` that follows one has no target
+            "echo <(mpm --version)>",
+            "echo <(echo hello)>",
             # a CONTEXT the host cannot PARSE is unanalysable: a `;`
             # inside it, or a context that is never closed
             "[[ x; y ]]",
@@ -1519,6 +1619,13 @@ class ReviewerIsolationTest(unittest.TestCase):
             # construct the host cannot analyse - and the form that
             # names NO binary is refused the same way
             "do [[ mpm == x ]]",
+            # the DEPTH has to be RESTORED: a keyword after a
+            # construct that was closed continues nothing
+            "if true; then echo a; fi; do echo hi",
+            "if true; then echo a; fi; then echo hi",
+            "if true; then echo a; fi; fi",
+            "if true; then echo a; fi; done",
+            "while true; do echo a; done; do echo hi",
             "do echo hi",
             "do [[ x == y ]]",
             "do",
@@ -1621,6 +1728,27 @@ class ReviewerIsolationTest(unittest.TestCase):
             # a `#` COMMENT is not text the rules are matched against
             "echo hi # mpm",
             "echo hi # mpm --version",
+            # a PROCESS SUBSTITUTION is a command, and the names
+            # inside it are matched - but an ARITHMETIC context is not
+            # analysed, so a process substitution inside one is not
+            "[[ -n <(echo hi) ]]",
+            "(( <(echo hi) ))",
+            "echo [[ -n <(echo hi) ]]",
+            "echo <(echo hello)",
+            "echo hi <(echo hello)",
+            "cat <(echo hi)",
+            "if [[ -n <(echo hi) ]]; then echo hi; fi",
+            "[[ -n <(echo hi) ]] && echo hi",
+            # and an ARITHMETIC context hides it
+            "(( <(mpm --version) ))",
+            # a HERE-STRING's target is a WORD, not a here-document
+            "cat <<< \"hi there\"",
+            # a here-document inside a LOOP body or a `case` branch
+            # body is ALLOWED: the body is data for the command
+            # analysis, and it is not re-scanned
+            "for i in 1; do\ncat <<EOF\nhi\nEOF\ndone",
+            "while false; do\ncat <<EOF\nhi\nEOF\ndone",
+            "case x in y)\ncat <<EOF\nhi\nEOF\n;; esac",
             # a here-document's BODY is DATA for the command analysis
             # - so the body is not a command - and the rule matcher
             # still sees its TEXT
