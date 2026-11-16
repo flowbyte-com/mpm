@@ -69,21 +69,176 @@ func TestMemoryWriter_InterfaceHasFindPromotionByLineage(t *testing.T) {
 	}
 }
 
-// TestExportOutputFile_RoutesToFileNotStdout pins defect B: the JSON
-// encoder must point at outputTarget (the file when --output is set)
-// not os.Stdout. The pre-fix code had json.NewEncoder(os.Stdout) hard
-// at the JSON branch, which is the exact bug.
+// TestExportOutputFile_RoutesToFileNotStdout pins defect B: the export
+// document must go to the file when --output is set, and never to
+// standard output.
+//
+// The pre-fix code had json.NewEncoder(os.Stdout) hard at the JSON
+// branch, which is the exact bug: the output file was created and
+// truncated but nothing was ever written to it — a 0-byte file with the
+// stdout JSON next to it.
+//
+// P7 rewrote the export's output path: the document is now rendered in
+// full, in memory, and written through an ATOMIC writer (a temporary
+// name and a rename), so the output is never truncated before its
+// content is known to be complete. The defect's intent is unchanged, so
+// the pin is restated against the new shape.
+//
+// THE PIN IS ABOUT THE FUNCTION, NOT THE FILE. A whole-file grep would
+// be satisfied by a string in a comment, or in a function the export
+// does not use — so the assertion is made against `handleExport`'s own
+// body. The BEHAVIOURAL companion — an export with --output writes
+// NOTHING to standard output — lives in skill_package_export_cli_test.go,
+// and it is the load-bearing one: this pin catches the shape, that one
+// catches the effect.
 func TestExportOutputFile_RoutesToFileNotStdout(t *testing.T) {
-	src := readServiceSource(t, "maint_cmds.go")
-	// After patch: encoder uses outputTarget.
-	if !strings.Contains(src, "json.NewEncoder(outputTarget)") {
-		t.Fatalf("handleExport must use outputTarget for the JSON encoder (defect B)")
+	body := goFunctionBody(t, readServiceSource(t, "maint_cmds.go"), "handleExport")
+	// The document reaches the --output path through the atomic
+	// writer.
+	if !strings.Contains(body, "writeFileAtomically(o.output, document)") {
+		t.Fatalf("handleExport must route the document to --output through writeFileAtomically (defect B)")
+	}
+	// Standard output is written only when there is no output path.
+	if !strings.Contains(body, "os.Stdout.Write(document)") {
+		t.Fatalf("handleExport must write the document to standard output when no --output is given")
 	}
 	// Before patch: encoder hardcoded os.Stdout. The patch removes
 	// that line.
-	if strings.Contains(src, "json.NewEncoder(os.Stdout)") {
+	if strings.Contains(body, "json.NewEncoder(os.Stdout)") {
 		t.Fatalf("handleExport must NOT hardcode os.Stdout for JSON (defect B regression)")
 	}
+}
+
+// goFunctionBody returns the body of one top-level function in a Go
+// source file.
+//
+// It finds the function's opening brace and matches braces to find the
+// end, so the assertion is made against the function and not against
+// the file around it.
+//
+// The brace matching is done on the source with its STRINGS and
+// COMMENTS removed. A brace inside a string literal or a comment is not
+// a brace, and counting it would truncate the body at a place that has
+// nothing to do with the function's end — which would make the pin
+// pass or fail for the wrong reason.
+func goFunctionBody(t *testing.T, source, name string) string {
+	t.Helper()
+	start := strings.Index(source, "func "+name+"(")
+	if start < 0 {
+		t.Fatalf("the source has no function %s", name)
+	}
+	open := strings.Index(source[start:], "{")
+	if open < 0 {
+		t.Fatalf("the function %s has no body", name)
+	}
+	stripped := goSourceWithoutLiterals(source)
+	depth := 0
+	for i := start + open; i < len(stripped); i++ {
+		switch stripped[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return stripped[start+open : i+1]
+			}
+		}
+	}
+	t.Fatalf("the function %s has no closing brace", name)
+	return ""
+}
+
+// goSourceWithoutLiterals returns a Go source with its string literals
+// and comments blanked out, so that the braces inside them are not
+// counted.
+//
+// The blanks are SPACES, so every byte offset in the result is the
+// same as in the original — which matters, because the caller slices
+// the original with offsets found in the stripped copy.
+func goSourceWithoutLiterals(source string) string {
+	out := []byte(source)
+	// The state of the scanner: in code, in a line comment, in a
+	// double-quoted string, in a back-quoted string, or in a
+	// single-quoted rune.
+	const (
+		inCode = iota
+		inLineComment
+		inBlockComment
+		inString
+		inRawString
+		inRune
+	)
+	state := inCode
+	for i := 0; i < len(out); i++ {
+		c := out[i]
+		switch state {
+		case inCode:
+			switch {
+			case c == '/' && i+1 < len(out) && out[i+1] == '/':
+				state = inLineComment
+				out[i] = ' '
+				out[i+1] = ' '
+				i++
+			case c == '/' && i+1 < len(out) && out[i+1] == '*':
+				state = inBlockComment
+				out[i] = ' '
+				out[i+1] = ' '
+				i++
+			case c == '"':
+				state = inString
+				out[i] = ' '
+			case c == '`':
+				state = inRawString
+				out[i] = ' '
+			case c == '\'':
+				state = inRune
+				out[i] = ' '
+			}
+		case inLineComment:
+			if c == '\n' {
+				state = inCode
+				continue
+			}
+			out[i] = ' '
+		case inBlockComment:
+			if c == '*' && i+1 < len(out) && out[i+1] == '/' {
+				out[i] = ' '
+				out[i+1] = ' '
+				state = inCode
+				i++
+				continue
+			}
+			out[i] = ' '
+		case inString:
+			if c == '\\' && i+1 < len(out) {
+				out[i] = ' '
+				out[i+1] = ' '
+				i++
+				continue
+			}
+			if c == '"' {
+				state = inCode
+			}
+			out[i] = ' '
+		case inRawString:
+			if c == '`' {
+				state = inCode
+			}
+			out[i] = ' '
+		case inRune:
+			if c == '\\' && i+1 < len(out) {
+				out[i] = ' '
+				out[i+1] = ' '
+				i++
+				continue
+			}
+			if c == '\'' {
+				state = inCode
+			}
+			out[i] = ' '
+		}
+	}
+	return string(out)
 }
 
 // TestExportOutputFile_StatusGoesToStderr pins defect B: success

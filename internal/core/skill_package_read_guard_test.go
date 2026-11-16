@@ -738,9 +738,16 @@ func p6ReaderWriteProblems(sourceFile string, source []byte) ([]string, int) {
 // walks ALL of them: the reader is the two files together, and a guard
 // that covered only one of them would leave half of the reader
 // unguarded.
+//
+// The third file is the EXPORTER (P7). The exporter is a read path too -
+// it reads a package, verifies it and serialises it - and its contract is
+// that it never repairs, never mutates and never rescans. The guard
+// makes that structural: a write could not hide in the exporter and go
+// unseen.
 var p6ReaderSourceFiles = []string{
 	"skill_package_read.go",
 	"skill_package_read_errors.go",
+	"skill_package_export.go",
 }
 
 // TestP6TheReaderNeverWrites pins that the reader issues no write.
