@@ -624,6 +624,12 @@ func TestP7ExportRefusesAnUnsafeFileName(t *testing.T) {
 // identity cannot be a file name is NAMED, not silently dropped.
 //
 // The batch export reports it in the omissions, with its reason.
+//
+// The reason is `export_failed` and NOT `integrity_failure`: the
+// package VERIFIED — its bytes are consistent — and it is the
+// PUBLICATION that failed. Reporting it as an integrity failure would
+// be a false statement about the operator's stored bytes, and it would
+// send the operator looking for corruption that is not there.
 func TestP7ExportNamesAPackageItCannotPublish(t *testing.T) {
 	dm := p7DM(t)
 	// A skill NAME may contain a path separator: it is an identifier,
@@ -646,6 +652,140 @@ func TestP7ExportNamesAPackageItCannotPublish(t *testing.T) {
 	}
 	if omitted[0].Reason == "" {
 		t.Errorf("the omitted package carries no reason")
+	}
+	if omitted[0].Reason != "export_failed" {
+		t.Errorf("the omitted package's reason is %q, want %q: the package "+
+			"VERIFIED, so calling it an integrity failure is a false "+
+			"statement about bytes that are consistent",
+			omitted[0].Reason, "export_failed")
+	}
+	if omitted[0].Detail == "" {
+		t.Errorf("the omitted package carries no detail naming the cause")
+	}
+}
+
+// TestP7ExportNamesTheIdentityOfAPackageItCouldNotCarry pins that the
+// exporter's OWN failure record carries the package's identity.
+//
+// The omission record is what the operator reads. A record that says
+// "0 file(s), package_hash " is a record about a package the operator
+// has never heard of: the file count is false, and the hash is the
+// identifier that names the lost bytes.
+//
+// The identity is read on the SAME transaction the archives are read
+// from, so the record and the archives describe one snapshot.
+func TestP7ExportNamesTheIdentityOfAPackageItCouldNotCarry(t *testing.T) {
+	dm := p7DM(t)
+	imported := p7Import(t, dm, "damaged", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+		"scripts/run.sh":          []byte("#!/bin/sh\necho hi\n"),
+	})
+
+	// The package's identity, read straight from the store, is what the
+	// omission record must state.
+	var wantHash string
+	if err := dm.db.QueryRow(`SELECT package_hash FROM skill_packages WHERE skill_id = ?`,
+		imported.SkillID).Scan(&wantHash); err != nil {
+		t.Fatalf("read the package hash: %v", err)
+	}
+	if wantHash == "" {
+		t.Fatalf("the imported package carries no hash")
+	}
+
+	// Damage the package, so the export cannot carry it.
+	if _, err := dm.db.Exec(`UPDATE skill_package_blobs SET content = ? WHERE sha256 = (
+		SELECT f.sha256 FROM skill_package_files f WHERE f.skill_id = ? AND f.path = 'references/templates.md')`,
+		[]byte("a tampered body\n"), imported.SkillID); err != nil {
+		t.Fatalf("corrupt the blob: %v", err)
+	}
+
+	archives, omitted, err := dm.ExportSkillPackages(context.Background(), []string{imported.SkillID})
+	if err != nil {
+		t.Fatalf("export the packages: %v", err)
+	}
+	if len(archives) != 0 {
+		t.Errorf("the export produced %d archives, want none", len(archives))
+	}
+	if len(omitted) != 1 {
+		t.Fatalf("the export omitted %d packages, want 1", len(omitted))
+	}
+	if omitted[0].PackageHash != wantHash {
+		t.Errorf("the omitted package's hash is %q, want %q: the hash is the "+
+			"identifier that names the lost bytes",
+			omitted[0].PackageHash, wantHash)
+	}
+	// The package carries THREE files: the entrypoint the import
+	// writes, plus the two the fixture supplied. The count is the
+	// STORE's count, and it is the same count the scope reports.
+	if omitted[0].FileCount != 3 {
+		t.Errorf("the omitted package carries %d file(s), want 3", omitted[0].FileCount)
+	}
+}
+
+// TestP7TheArchiveOrderIsAStrictWeakOrdering pins the writer's
+// comparator.
+//
+// Go does NOT validate the ordering it is handed to `sort`, so the
+// contract — irreflexive, asymmetric, transitive — is the author's
+// responsibility. The earlier comparator returned true for
+// `less(SKILL.md, SKILL.md)`, which is a trap rather than an
+// observable defect (a manifest's paths are unique), and a trap in a
+// deterministic writer is worth closing.
+func TestP7TheArchiveOrderIsAStrictWeakOrdering(t *testing.T) {
+	entries := []packageExportEntry{
+		{Path: "SKILL.md", Content: []byte("entry\n")},
+		{Path: "SKILL.md", Content: []byte("entry\n")},
+		{Path: "references/a.md", Content: []byte("a\n")},
+		{Path: "references/b.md", Content: []byte("b\n")},
+	}
+
+	// The comparator the WRITER uses — the production function, not a
+	// copy of it. A test that checks its own copy of the logic proves
+	// nothing about the archive.
+	less := packageExportEntryLess
+
+	for _, e := range entries {
+		if less(e, e) {
+			t.Errorf("the comparator says %q precedes itself; it is not "+
+				"irreflexive, and Go does not validate the ordering it is given",
+				e.Path)
+		}
+	}
+	for _, a := range entries {
+		for _, b := range entries {
+			if less(a, b) && less(b, a) {
+				t.Errorf("the comparator says %q precedes %q AND the other "+
+					"way round; it is not asymmetric", a.Path, b.Path)
+			}
+		}
+	}
+
+	// And the archive it writes is still deterministic: the entrypoint
+	// first, then the other paths in order.
+	content, err := writePackageArchive([]packageExportEntry{
+		{Path: "references/b.md", Content: []byte("b\n")},
+		{Path: "SKILL.md", Content: []byte("entry\n")},
+		{Path: "references/a.md", Content: []byte("a\n")},
+	})
+	if err != nil {
+		t.Fatalf("write the archive: %v", err)
+	}
+	var paths []string
+	reader, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		t.Fatalf("read the archive: %v", err)
+	}
+	for _, f := range reader.File {
+		paths = append(paths, f.Name)
+	}
+	want := []string{"SKILL.md", "references/a.md", "references/b.md"}
+	if len(paths) != len(want) {
+		t.Fatalf("the archive holds %d entries (%v), want %d", len(paths), paths, len(want))
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Errorf("the archive's entry %d is %q, want %q", i, paths[i], want[i])
+		}
 	}
 }
 

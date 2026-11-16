@@ -101,6 +101,19 @@ const (
 	// `next_offset`.
 	PackageReadReasonLineTooLarge PackageReadReason = "line_too_large"
 
+	// PackageReadReasonUnpublishable — the package is intact, but it
+	// cannot be PUBLISHED under a safe file name.
+	//
+	// A skill's NAME is an identifier, and an identifier may contain a
+	// path separator: `a/b` is a legal skill name. The derived file
+	// name must be a single safe path component, and one that is not is
+	// refused.
+	//
+	// This reason is DISTINCT from `integrity_failure` on purpose: the
+	// package in this case VERIFIED, and its bytes are consistent. It
+	// is the publication that failed, not the content.
+	PackageReadReasonUnpublishable PackageReadReason = "unpublishable"
+
 	// PackageReadReasonDatabaseFailure — the substrate failed.
 	//
 	// It is the class for an unusable connection and an unexpected storage

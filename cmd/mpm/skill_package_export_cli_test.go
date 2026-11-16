@@ -543,6 +543,33 @@ func TestP7_CLIExportToStdoutIsRefusedWhenItCarriesAPackages(t *testing.T) {
 	}
 }
 
+// TestP7_CLITheStdoutRefusalNamesTheDirectoryAsASuffix pins that the
+// refusal names the archives' directory the way the export names it.
+//
+// The refusal used to print the literal suffix `.packages` where a
+// reader expects a directory name — so it read as if the archives went
+// to a directory called `.packages`, rather than to the document's
+// sibling directory with that suffix. The operator who follows the
+// message has to find the directory the export ACTUALLY wrote.
+func TestP7_CLITheStdoutRefusalNamesTheDirectoryAsASuffix(t *testing.T) {
+	p7CLIImportPackage(t, "cli-stdout-suffix")
+
+	var rc int
+	msg := captureUserError(t, func() int {
+		rc = handleExport([]string{"export", "--format", "json", "--collection", "skills"})
+		return rc
+	})
+	if rc == 0 {
+		t.Fatalf("a package-bearing export to standard output was accepted")
+	}
+	if !strings.Contains(msg, "suffix") {
+		t.Errorf("the refusal does not say the directory carries a suffix:\n%s", msg)
+	}
+	if !strings.Contains(msg, packageExportDirectorySuffix) {
+		t.Errorf("the refusal does not name the suffix %q:\n%s", packageExportDirectorySuffix, msg)
+	}
+}
+
 // TestP7_CLIExportToCSVIsRefusedWhenItCarriesAPackages pins that the CSV
 // format refuses a package-bearing export rather than claiming an
 // incomplete export is complete.

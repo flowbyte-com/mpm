@@ -75,7 +75,11 @@ type SkillPackageExportOmitted struct {
 	//   - `skill_row_not_exported` — the package is in the export's
 	//     scope, but its skill row is not among the exported rows;
 	//   - `database_failure` — the substrate failed;
-	//   - `export_failed` — anything else.
+	//   - `export_failed` — anything else, including a package that
+	//     VERIFIED but cannot be published under a safe file name.
+	//     That case is not an `integrity_failure`: the bytes are
+	//     consistent, and only the publication failed. The `detail`
+	//     names the cause.
 	Reason string `json:"reason,omitempty"`
 
 	// Detail is the human-readable explanation.
@@ -160,7 +164,19 @@ func (dm *DatabaseManager) SkillPackageExportScope(collection, since, until stri
 
 	// The skills collection is the only one whose export can lose a
 	// package.
+	//
+	// The TOTAL is counted on this path too. It is the number of
+	// packages in the STORE, whatever the export's filters chose, and a
+	// report that says "0 packages are in the store" when three are is
+	// a false statement about the store. The scope's own package list
+	// is empty here — an export of another collection selects no
+	// package — but the store still holds them.
 	if collection != "" && collection != "skills" {
+		total, err := dm.countSkillPackages()
+		if err != nil {
+			return nil, err
+		}
+		scope.Total = total
 		return scope, nil
 	}
 

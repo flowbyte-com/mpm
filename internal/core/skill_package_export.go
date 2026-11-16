@@ -169,6 +169,26 @@ type packageExportEntry struct {
 
 // ─── The writer ────────────────────────────────────────────────────────────
 
+// packageExportEntryLess orders two archive entries.
+//
+// It is a STRICT WEAK ORDERING: it is irreflexive (`less(x, x)` is
+// false), asymmetric and transitive. Go does NOT validate the ordering
+// it is handed to `sort`, so the contract is the author's
+// responsibility: the earlier comparator returned true for
+// `less(SKILL.md, SKILL.md)`, which broke it.
+//
+// The order it produces for DISTINCT paths is unchanged — the
+// entrypoint first, then the other paths in order — so the pinned
+// digests do not move.
+func packageExportEntryLess(a, b packageExportEntry) bool {
+	aIsEntrypoint := a.Path == packageEntrypointName
+	bIsEntrypoint := b.Path == packageEntrypointName
+	if aIsEntrypoint != bIsEntrypoint {
+		return aIsEntrypoint
+	}
+	return a.Path < b.Path
+}
+
 // writePackageArchive serialises the entries as a deterministic ZIP.
 //
 // The order is the contract: the entrypoint first, then the other
@@ -180,12 +200,19 @@ type packageExportEntry struct {
 func writePackageArchive(entries []packageExportEntry) ([]byte, error) {
 	ordered := make([]packageExportEntry, len(entries))
 	copy(ordered, entries)
+	//
+	// The comparator is a STRICT WEAK ORDERING: it is irreflexive
+	// (`less(x, x)` is false), asymmetric and transitive. The earlier
+	// form was not — it returned true for `less(SKILL.md, SKILL.md)` —
+	// and Go does NOT validate the ordering it is given, so the
+	// contract is a real one and the earlier form broke it. The order
+	// it produced for DISTINCT paths is unchanged, so the pinned
+	// digests do not move.
 	sort.SliceStable(ordered, func(i, j int) bool {
-		if ordered[i].Path == packageEntrypointName {
-			return true
-		}
-		if ordered[j].Path == packageEntrypointName {
-			return false
+		iIsEntrypoint := ordered[i].Path == packageEntrypointName
+		jIsEntrypoint := ordered[j].Path == packageEntrypointName
+		if iIsEntrypoint != jIsEntrypoint {
+			return iIsEntrypoint
 		}
 		return ordered[i].Path < ordered[j].Path
 	})
@@ -319,7 +346,7 @@ func (dm *DatabaseManager) exportSkillPackagesInTx(ctx context.Context, skillIDs
 			if err != nil {
 				// A package that cannot be exported is NAMED, never
 				// silently dropped. The reason travels with it.
-				omitted = append(omitted, omittedPackageFor(skillID, err))
+				omitted = append(omitted, omittedPackageForInTx(tx, skillID, err))
 				continue
 			}
 			archives = append(archives, archive)
@@ -439,7 +466,7 @@ func exportPackageInTx(ctx context.Context, tx *sql.Tx, skillID string) (*Packag
 
 	base, err := packageExportBaseName(report.Name, report.Version)
 	if err != nil {
-		return nil, packageReadErrorf(PackageReadReasonIntegrityFailure, "",
+		return nil, packageReadErrorf(PackageReadReasonUnpublishable, "",
 			"the package %s cannot be published under a safe file name: %v", skillID, err)
 	}
 
@@ -491,13 +518,24 @@ func describePackageFailures(failures []PackageVerificationFailure) string {
 	return strings.Join(parts, ", ")
 }
 
-// omittedPackageFor builds the omission record for a package that could
-// not be exported.
+// omittedPackageForInTx builds the omission record for a package that
+// could not be exported.
 //
 // The reason is carried, because "this package is missing" and "this
 // package is missing BECAUSE its blob is gone" are different facts and
 // only one of them is actionable.
-func omittedPackageFor(skillID string, err error) SkillPackageExportOmitted {
+//
+// The package's IDENTITY is carried too — its file count and its
+// package hash — because a record that says "0 file(s), package_hash "
+// tells the operator nothing they can act on: the hash is the
+// identifier that names the lost bytes, and the file count says how
+// much is missing. The exporter read both from the SAME snapshot the
+// archives were read from, so the record states the facts rather than
+// a default.
+//
+// A failure to read the identity is NOT a reason to drop the record:
+// the omission is still true, and the fields are then simply unknown.
+func omittedPackageForInTx(tx *sql.Tx, skillID string, err error) SkillPackageExportOmitted {
 	omitted := SkillPackageExportOmitted{
 		SkillID: skillID,
 		Reason:  packageExportOmissionReason(err),
@@ -509,7 +547,39 @@ func omittedPackageFor(skillID string, err error) SkillPackageExportOmitted {
 	if detail := packageExportOmissionDetail(err); detail != "" {
 		omitted.Detail = detail
 	}
+	if tx != nil {
+		if hash, files, ok := packageExportIdentityInTx(tx, skillID); ok {
+			omitted.PackageHash = hash
+			omitted.FileCount = files
+		}
+	}
 	return omitted
+}
+
+// packageExportIdentityInTx reads a package's hash and file count.
+//
+// It is a SEPARATE read from the export's own, and it runs on the SAME
+// transaction, so the omission record and the archives describe the
+// same snapshot.
+//
+// The hash is COALESCEd: a package row with a NULL hash is a package
+// whose manifest does not commit to a hash, and scanning NULL into a
+// string would panic.
+func packageExportIdentityInTx(tx *sql.Tx, skillID string) (string, int, bool) {
+	var (
+		hash  string
+		files int
+	)
+	err := tx.QueryRow(`
+		SELECT COALESCE(p.package_hash, ''),
+		       (SELECT COUNT(*) FROM skill_package_files f WHERE f.skill_id = p.skill_id)
+		FROM skill_packages p
+		WHERE p.skill_id = ?
+	`, skillID).Scan(&hash, &files)
+	if err != nil {
+		return "", 0, false
+	}
+	return hash, files, true
 }
 
 // packageExportOmissionReason classifies why a package was not
@@ -522,6 +592,12 @@ func packageExportOmissionReason(err error) string {
 		return "package_not_found"
 	case PackageReadReasonDatabaseFailure:
 		return "database_failure"
+	case PackageReadReasonUnpublishable:
+		// The package VERIFIED; the publication is what failed. It is
+		// not an integrity failure, and saying so would be a false
+		// statement about bytes that are consistent. The `detail`
+		// names the cause.
+		return "export_failed"
 	default:
 		return "export_failed"
 	}

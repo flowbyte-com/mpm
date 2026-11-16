@@ -133,6 +133,47 @@ func TestP4_T44_AnExportOfAnotherCollectionCarriesNoLoss(t *testing.T) {
 	}
 }
 
+// TestP4_T44_TheScopeCountsTheStoreWhateverTheCollection pins the
+// scope's TOTAL.
+//
+// The total is the number of packages in the STORE — every package,
+// whatever the export's filters chose. It is the denominator that makes
+// an omission count readable, so it has to be the store's count and not
+// the selected count.
+//
+// The early return for a non-skills collection used to skip the count,
+// so the scope reported `total: 0` for a store that held packages. A
+// report that says "0 packages are in the store" when three are is a
+// false statement about the store.
+func TestP4_T44_TheScopeCountsTheStoreWhateverTheCollection(t *testing.T) {
+	dm := p3DM(t)
+
+	p4ExportPackage(t, dm, "counted-one")
+	p4ExportPackage(t, dm, "counted-two")
+	p4ExportPackage(t, dm, "counted-three")
+
+	skills, err := dm.SkillPackageExportScope("skills", "", "")
+	if err != nil {
+		t.Fatalf("the skills export scope: %v", err)
+	}
+	if skills.Total != 3 {
+		t.Errorf("the skills scope reports %d package(s) in the store, want 3", skills.Total)
+	}
+
+	memories, err := dm.SkillPackageExportScope("memories", "", "")
+	if err != nil {
+		t.Fatalf("the memories export scope: %v", err)
+	}
+	if memories.Total != 3 {
+		t.Errorf("a memories export reports %d package(s) in the store, want 3: "+
+			"the total is the STORE's count, whatever the filters chose",
+			memories.Total)
+	}
+	if len(memories.Packages) != 0 {
+		t.Errorf("a memories export names %d packages, want 0", len(memories.Packages))
+	}
+}
+
 // TestP4_T44_TheMarkerIsAlwaysPresent pins the response's shape: the
 // marker exists even when nothing was omitted, so a consumer never has to
 // branch on whether the field is there.

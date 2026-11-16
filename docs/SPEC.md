@@ -2517,6 +2517,7 @@ The reader has its own **closed** vocabulary, mirroring the importer's. It is sh
 | `invalid_path` | the requested path is not a canonical package path |
 | `content_hash_mismatch` | the stored bytes are not the bytes that were recorded |
 | `integrity_failure` | the stored package is not internally consistent |
+| `unpublishable` | the package is intact, but it cannot be **published** under a safe file name — a skill's name is an identifier, and `a/b` is a legal one |
 | `invalid_bounds` | the read's bounds are not admissible |
 | `database_failure` | the substrate failed |
 | `binary_requires_raw` | the content cannot be carried as text without loss |
@@ -2642,10 +2643,12 @@ That is a change in the marker's **meaning**, so the marker is stated again here
 | field | meaning in P7 |
 |---|---|
 | `packages_omitted.count` | the number of packages that were **selected and not carried** — zero when the export carried every one of them |
-| `packages_omitted.packages[]` | each omitted package, **with its reason** (`integrity_failure`, `package_not_found`, `file_name_collision`, `skill_row_not_exported`, `database_failure`, `export_failed`) and a human-readable detail |
-| `packages_omitted.scope.total` | the number of packages in the store, whatever the export's filters selected |
+| `packages_omitted.packages[]` | each omitted package, **with its reason** (`integrity_failure`, `package_not_found`, `file_name_collision`, `skill_row_not_exported`, `database_failure`, `export_failed`) and a human-readable detail. Every entry also carries the package's **identity** — `file_count` and `package_hash` — because the hash is the identifier that names the lost bytes. Both are read on the SAME snapshot the archives are read from, and they are carried for the omissions the EXPORTER produced as well as the ones the SCOPE produced |
+| `packages_omitted.scope.total` | the number of packages in the store, whatever the export's filters selected. It is counted on **every** path, including an export of a collection that selects no package: a report that says "0 packages are in the store" when three are is a false statement about the store |
 | `packages_omitted.scope.selected` | the number of packages the export's filters chose — the denominator the omission count is measured against |
 | `packages_omitted.scope.carried` | the number of `.skill` archives the export actually produced |
+
+**The omission reason is a closed vocabulary, and it separates "the bytes are bad" from "the publication failed".** `integrity_failure` means the package did not verify — its bytes are inconsistent. A package that **verified** and could not be published under a safe file name is `export_failed`, not `integrity_failure`: its bytes are consistent, and only the publication failed. The `detail` names the cause in both cases.
 
 **A zero omission count is a positive statement only in the light of the scope.** Zero omitted out of twelve selected packages is a *complete* export; zero omitted out of zero selected packages says nothing about the packages that were never selected. That is why the scope is part of the marker.
 
@@ -2658,6 +2661,7 @@ Everything that could vary between two exports is pinned:
 | field | value |
 |---|---|
 | **layout** | **flat** — every canonical path sits at the archive's top level, so `SKILL.md` is at the archive's top level and §5.3.1's rule 4 makes the archive root the package root |
+| **order** | the entrypoint first, then the other canonical paths sorted. The comparator is a **strict weak ordering** — irreflexive, asymmetric and transitive — because Go does **not** validate the ordering it is handed to `sort` |
 | **entry order** | `SKILL.md` first, then the other canonical paths **sorted** |
 | **timestamp** | every entry carries **1980-01-01 00:00:00 UTC** — the ZIP epoch, and the earliest instant a DOS timestamp can express |
 | **permissions** | `0644`; `0755` for a file the manifest marks executable |

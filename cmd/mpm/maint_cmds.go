@@ -384,7 +384,8 @@ func handleExport(args []string) int {
 		case o.output == "":
 			return usererrorf(
 				"this export is about %d skill package(s), and their .skill archives cannot be carried to standard output. "+
-					"Re-run with --output <path>: the export writes the document to that path and the archives to the sibling directory %s.",
+					"Re-run with --output <path>: the export writes the document to that path and the archives to the sibling "+
+					"directory named after it, with the suffix %q.",
 				len(scope.Packages), packageExportDirectorySuffix)
 		case o.format == "csv":
 			return usererrorf(
