@@ -579,13 +579,21 @@ class ReviewerIsolationTest(unittest.TestCase):
             "/opt/mpm/bin/mpm --version",
             # the name inside a GO PACKAGE PATTERN, which puts
             # something after the name and so escaped the
-            # last-segment shapes
+            # last-segment shapes — in EVERY spelling of the pattern,
+            # not only the canonical one
             "go run ./cmd/mpm/...",
             "go run ./cmd/mpm/... --version",
             'go run ./cmd/mpm/... remember "probe"',
             "go list ./cmd/mpm/...",
             "go run ./cmd/mpm-mcp/...",
-            "go run ./cmd/mpm-lint/...", 
+            "go run ./cmd/mpm-lint/...",
+            "go run ./cmd/mpm/./...",
+            "go run ./cmd/mpm//...",
+            "go run ./cmd/mpm/././...",
+            "go run ./cmd/mpm/../...",
+            "go run ./cmd/mpm-mcp/./...",
+            "go run ./cmd/mpm-scheduler/./...",
+            'go run ./cmd/mpm/./... remember "probe"', 
             # the name delimited by a TAB, which the shell splits on
             "mpm\t--version",
             "env mpm\t--version",
@@ -757,7 +765,7 @@ class ReviewerIsolationTest(unittest.TestCase):
             for path_pattern in (
                 f"*/{binary} *",
                 f"*/{binary}/",
-                f"*/{binary}/...*",
+                f"*/{binary}/*...*",
             ):
                 self.assertIn(
                     path_pattern,

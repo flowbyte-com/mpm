@@ -323,7 +323,9 @@ permissions:
   #   5. the name as the last segment of a path with a TRAILING SLASH
   #      — `go run ./cmd/mpm/` — the rule is `*/mpm/`;
   #   6. the name inside a GO PACKAGE PATTERN — `go run ./cmd/mpm/...`,
-  #      `go list ./cmd/mpm/...` — the rule is `*/mpm/...*`;
+  #      `go list ./cmd/mpm/...`, and the OTHER spellings of the same
+  #      pattern (`go run ./cmd/mpm/./...`, `go run ./cmd/mpm//...`) —
+  #      the rule is `*/mpm/*...*`;
   #   7. the name inside a QUOTE — `"mpm" --version`,
   #      `'mpm' --version` and `sh -c 'mpm --version'` — the rules
   #      are `*"mpm*` and `*'mpm*`.
@@ -341,9 +343,18 @@ permissions:
   # something after the name — `./cmd/mpm/...` — so the LAST-SEGMENT
   # shapes did not match it, and the write route was open through it:
   # MEASURED, `go run ./cmd/mpm/... --version` ran the CLI and
-  # `go run ./cmd/mpm/... remember "..."` WROTE A MEMORY. The rule
-  # `*/mpm/...*` closes the package pattern, and with it
-  # `go list ./cmd/mpm/...` is refused too.
+  # `go run ./cmd/mpm/... remember "..."` WROTE A MEMORY.
+  #
+  # The rule is `*/mpm/*...*` and NOT `*/mpm/...*`, and the difference
+  # is the whole point. The narrower rule fires only when the three
+  # dots follow the name IMMEDIATELY, and Go accepts other spellings
+  # of the same pattern: MEASURED, `go run ./cmd/mpm/./... --version`,
+  # `go run ./cmd/mpm//... --version` and `go run ./cmd/mpm/././...
+  # --version` all RAN the CLI, and `go run ./cmd/mpm/./... remember
+  # "..."` WROTE A MEMORY. The family rule fires whenever the name is
+  # a path segment, then a slash, then anything, then the pattern —
+  # so every spelling is closed, and `go list ./cmd/mpm/...` and
+  # `go run ./cmd/mpm/...` with it.
   #
   # Shapes 4, 5 and 6 cost READ denials, and they are paid
   # deliberately: `ls /path/to/mpm` and `ls cmd/mpm` are refused,
@@ -454,7 +465,7 @@ permissions:
     resource: "*/mpm/"
     effect: deny
   - action: shell
-    resource: "*/mpm/...*"
+    resource: "*/mpm/*...*"
     effect: deny
   - action: shell
     resource: "*/mpm-mcp *"
@@ -463,7 +474,7 @@ permissions:
     resource: "*/mpm-mcp/"
     effect: deny
   - action: shell
-    resource: "*/mpm-mcp/...*"
+    resource: "*/mpm-mcp/*...*"
     effect: deny
   - action: shell
     resource: "*/mpm-scheduler *"
@@ -472,7 +483,7 @@ permissions:
     resource: "*/mpm-scheduler/"
     effect: deny
   - action: shell
-    resource: "*/mpm-scheduler/...*"
+    resource: "*/mpm-scheduler/*...*"
     effect: deny
   - action: shell
     resource: "*/mpm-critic *"
@@ -481,7 +492,7 @@ permissions:
     resource: "*/mpm-critic/"
     effect: deny
   - action: shell
-    resource: "*/mpm-critic/...*"
+    resource: "*/mpm-critic/*...*"
     effect: deny
   - action: shell
     resource: "*/mpm-telemetry *"
@@ -490,7 +501,7 @@ permissions:
     resource: "*/mpm-telemetry/"
     effect: deny
   - action: shell
-    resource: "*/mpm-telemetry/...*"
+    resource: "*/mpm-telemetry/*...*"
     effect: deny
   - action: shell
     resource: "*/mpm-update *"
@@ -499,7 +510,7 @@ permissions:
     resource: "*/mpm-update/"
     effect: deny
   - action: shell
-    resource: "*/mpm-update/...*"
+    resource: "*/mpm-update/*...*"
     effect: deny
   - action: shell
     resource: "*/mpm-lint *"
@@ -508,7 +519,7 @@ permissions:
     resource: "*/mpm-lint/"
     effect: deny
   - action: shell
-    resource: "*/mpm-lint/...*"
+    resource: "*/mpm-lint/*...*"
     effect: deny
   - action: shell
     resource: "*\"mpm*"
@@ -705,9 +716,10 @@ tool list, or refused when you attempt them:
   mpm ...`, `$(echo mpm)`), separated by a TAB (`mpm<TAB>--version`),
   as the LAST SEGMENT OF A PATH (`go run ./cmd/mpm`, `go run
   ./cmd/mpm/`, `/home/v/.local/bin/mpm`), inside a GO PACKAGE PATTERN
-  (`go run ./cmd/mpm/...`), and inside a QUOTE (`"mpm" ...`,
-  `sh -c 'mpm ...'`). So is `install.sh`, `uninstall.sh`, the make
-  install target, and the service-control commands.
+  (`go run ./cmd/mpm/...`, `go run ./cmd/mpm/./...`), and inside a
+  QUOTE (`"mpm" ...`, `sh -c 'mpm ...'`). So is `install.sh`,
+  `uninstall.sh`, the make install target, and the service-control
+  commands.
 - `grep` and `glob` are NOT path-restricted by the permission layer -
   their resources are the pattern and the glob, not a path. Point them
   at the working tree you were given, and at nothing else.
@@ -736,7 +748,7 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   command that merely QUOTES such a path after a ">" is refused too.
   That cost is accepted deliberately: a stray file in a runtime root
   is a nuisance, and a corrupted live database is a disaster.
-- The shell's matcher sees TEXT, and five routes are NOT caught. A
+- The shell's matcher sees TEXT, and six routes are NOT caught. A
   name SPLIT by a substitution is not the name: `$(echo mp)m`
   assembles it and runs the binary. A name in a VARIABLE is not the
   name either: `M=mpm; $M --version` runs the binary. A SCRIPT FILE
@@ -744,7 +756,17 @@ FIVE things are NOT closed, and you must not rely on them being closed:
   all. A SHELL GLOB expands to the name before the matcher ever sees
   it: `go run ./cmd/mp?` runs the binary, and `go build -o /tmp/x
   ./cmd/mp?` produces a runnable binary under a name no rule can see.
-  And the host does not match a `cd` segment's TEXT, so the name can
+  A BRACE is expanded the same way: `go run ./cmd/mpm{,.mcp}` runs
+  the binary, and the matcher never sees the name, because the shell
+  expands braces before it does.
+  A pattern that names a DIRECTORY of packages does not name the
+  binary at all: `go build ./cmd/...` compiles every MPM binary into
+  the current directory, and the text holds no name to match. The
+  BUILD is not refused — there is nothing in it to refuse — but the
+  binaries it produces are refused when they are RUN (`./mpm
+  --version`), and `go run` over such a pattern refuses outright,
+  because the pattern matches more than one package. And the host
+  does not match a `cd` segment's TEXT, so the name can
   be parked in a directory argument and the binary run without it:
   `cd cmd/mpm && go run . --version` reaches the binary, and
   `cd cmd/mpm && go build -o /tmp/x .` builds it under a name no
