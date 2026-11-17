@@ -224,7 +224,7 @@ The same probe against the hardened script: **refused**, and nothing ran.
 | write into `/sandbox/findings` | **succeeds** | the findings have to go somewhere, and that somewhere is the reviewer's own tree |
 | `go version`, `python3 -V`, `git --version`, `cc --version` | **succeed** | the toolchain is bound read-only so a review can still run the tests — from wherever the **host** keeps it, not only from `/usr` |
 | the Go module cache | **absent** | a build needing an uncached dependency fails; that is the disclosed cost, not a hole |
-| read `/proc/self/mountinfo` | **succeeds** | it discloses the **host path of every mount the namespace was given**, and therefore the operator's username and home path. Those paths are **not bound**, so nothing there can be read through them: it is metadata about the host, not access to it. Residual risk 11 states it; the alternative — giving up the descriptor binding, or the base's location — would cost more than the disclosure is worth |
+| read `/proc/self/mountinfo` | **succeeds** | it discloses the **source path of every mount the namespace was given** — and, because the base is on the operator's filesystem, that path includes the operator's account name and home. Those paths are **not bound**, so nothing there can be read through them: it is metadata about the host, not access to it. Residual risk 11 states it precisely; the alternative — giving up the descriptor binding, or the base's location — would cost more than the disclosure is worth |
 
 ### 5.4 What the independent reviewer attacked, and what closed it
 
@@ -444,16 +444,21 @@ Numbered, and each one is a real thing a reader could get wrong.
     and the model contributes nothing to it, but it is a grant of "the operator's
     own compiler", not a narrowing of the sandbox.
 11. **The operator's username and home path are disclosed as METADATA.** The
-    namespace's own mount table records the host path of every mount it was
-    given, so a reviewer that reads `/proc/self/mountinfo` learns the base's
-    path under the operator's home — and therefore the operator's account
-    name. The paths it names are **not bound**, so nothing there can be read
-    through them; this is a disclosure about the host, not access to it.
-    It is disclosed rather than engineered away because closing it means
-    giving up either the descriptor binding (the property that stops a
-    symlink swap from changing what is mounted) or the base's location on
-    the operator's filesystem (a weaker base). The **clone's** disclosure of
-    the same fact — the origin remote — **is** closed.
+    namespace's own mount table records the **source path of every mount** it was
+    given, and the source path is the path **relative to the filesystem the base
+    lives on**. The plugin's base is under the operator's own cache directory, on
+    the operator's **root filesystem** — so the table reads
+    `/home/<user>/.cache/mpm-opencode/review-sandbox/…`, which discloses the
+    account name and the home path. (On a **tmpfs** base the same table reads only
+    the path *within that tmpfs* — no host path at all — which is why the
+    disclosure is a property of where the base lives, not of the sandbox.) The
+    paths the table names are **not bound**, so nothing there can be read through
+    them: this is a disclosure about the host, not access to it. It is disclosed
+    rather than engineered away because closing it means either giving up the
+    descriptor binding (the property that stops a symlink swap from changing what
+    is mounted) or moving the base onto a filesystem whose root is not the host's
+    root (a weaker base, and a workflow the operator has to learn). The
+    **clone's** disclosure of the same fact — the origin remote — **is** closed.
 12. **The disposable copy carries the full history.** A secret that was
     committed and later deleted or rotated is still readable in the copy
     through `git log -p`. The history is the review material, so it is kept;
