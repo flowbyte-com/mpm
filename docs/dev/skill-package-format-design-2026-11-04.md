@@ -2771,8 +2771,8 @@ by reverting the fix and confirming that the test fails:
 
 | control | core tests that fail |
 |---|---|
-| revert the content guard (`web_db.go` + `memory.go`) | **13** — note that this control reverts the whole store file, so it reverts the standalone schema installation too, and three of the thirteen are the standalone-store tests rather than content-guard tests |
-| revert the metadata guard call (`db.go`) | **8** (plus **2** CLI/MCP surface tests) |
+| revert the content guard (`web_db.go` + `memory.go`) | **14** — note that this control reverts the whole store file, so it reverts the standalone schema installation too, and three of the fourteen are the standalone-store tests rather than content-guard tests |
+| revert the metadata guard call (`db.go`) | **10** (plus **2** CLI/MCP surface tests) |
 | remove the standalone store's package tables | **3** |
 | restore the unconditional handle routing | **1** |
 | restore the Go-map metadata comparison | **1** |
