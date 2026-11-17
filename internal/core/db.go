@@ -2982,10 +2982,11 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// The slice is applied here, alongside ReferenceTables and WorkTables,
 	// and outside the attachShared loops. The invariant is pinned by
 	// TestSkillPackageTablesAreLocalOnly.
-	for _, sqlQuery := range SkillPackageTables {
-		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
-			return fmt.Errorf("failed to execute skill package schema: %w\nSQL: %s", err, sqlQuery)
-		}
+	if err := ApplySkillPackageTables(func(sqlQuery string) error {
+		_, err := dm.ExecTracked(sqlQuery, 5)
+		return err
+	}); err != nil {
+		return err
 	}
 
 	for _, sqlQuery := range ReferenceIndexes {
@@ -4824,32 +4825,88 @@ func (dm *DatabaseManager) UpdateMemoryMetadata(id string, patchJSON string) err
 		return fmt.Errorf("UpdateMemoryMetadata: invalid JSON patch: %s", patchJSON)
 	}
 
-	tx, err := dm.db.Begin()
+	// The patch runs inside the substrate's OWN retrying transaction
+	// (WithTx), not a bare `db.Begin()`.
+	//
+	// The reason is the package metadata guard. The guard is a READ that
+	// runs before the UPDATE, and a read is what establishes a
+	// transaction's snapshot. A DEFERRED transaction whose first
+	// statement is a read cannot later be promoted to a write if another
+	// connection committed in between: SQLite refuses the promotion
+	// (SQLITE_BUSY_SNAPSHOT) and the statement fails with "database is
+	// locked". A transaction whose FIRST statement is the write never
+	// takes that path.
+	//
+	// WithTx solves it at the level that can solve it: it RESTARTS the
+	// whole transaction on a snapshot conflict, which takes a fresh
+	// snapshot and runs the patch again. The patch is idempotent — it
+	// merges a patch into one row's metadata — so a replay is safe.
+	//
+	// The guard's read, the UPDATE and the explanation of a zero-row
+	// outcome therefore all share ONE snapshot, which is what makes the
+	// refusal atomic with the write.
+	err := dm.WithTx(func(node DBNode) error {
+		return updateMemoryMetadataTx(node, id, patchJSON)
+	})
 	if err != nil {
-		return fmt.Errorf("UpdateMemoryMetadata: begin: %w", err)
+		return fmt.Errorf("UpdateMemoryMetadata: %w", err)
 	}
-	defer tx.Rollback()
-
-	if err := updateMemoryMetadataTx(tx, id, patchJSON); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return nil
 }
 
 // updateMemoryMetadataTx is the transactional body of UpdateMemoryMetadata.
 // It runs the metadata UPDATE, the FTS DELETE, and the FTS INSERT against the
 // supplied transaction. Exposed as a helper so callers that already own a
 // transaction (e.g., ChallengeMemory) can join it without opening a second one.
-func updateMemoryMetadataTx(tx *sql.Tx, id string, patchJSON string) error {
+func updateMemoryMetadataTx(tx DBNode, id string, patchJSON string) error {
+	// ── The package metadata guard ──────────────────────────────────────
+	//
+	// A packaged skill's projection carries two metadata keys that are
+	// part of the package's identity, integrity and versioning contract:
+	// `version` (which the package verification compares with the package
+	// row's version and the version the skill id names) and
+	// `content_hash` (the projection's own content hash, which is the same
+	// value the manifest records as `projection_sha256`).
+	//
+	// This path merges an arbitrary JSON patch into the metadata column,
+	// so without the guard it could rewrite either of them — producing
+	// exactly the contradictory integrity state the package contract
+	// forbids, through a path that has no authority over the package.
+	//
+	// The guard is NARROW: it refuses only a patch that would CHANGE one
+	// of those two keys, and only for a row that owns a package. Every
+	// other key on every row stays exactly as patchable as it was.
+	//
+	// The guard runs inside the transaction that carries the UPDATE. That
+	// is what makes the refusal atomic with the write: the check and the
+	// write share ONE snapshot, so a package row that appears after the
+	// check cannot be seen by the write either — SQLite refuses to
+	// promote a stale snapshot to a write — and the write cannot land on
+	// a state the check did not see.
+	//
+	// The assertion below is fail closed: if the node is not backed by a
+	// transaction, the statements would run on the POOL, the guard's read
+	// and the UPDATE would see different snapshots, and the refusal would
+	// not be atomic with the write. So the patch refuses to run at all.
+	if tx.Tx() == nil {
+		return fmt.Errorf("UpdateMemoryMetadata: the metadata patch must run inside a transaction")
+	}
+
+	// It runs inside this transaction, before the UPDATE, so the refusal
+	// is FAIL CLOSED: not the metadata, not the timestamp, not the FTS
+	// index.
+	if err := guardPackageMetadataPatch(tx, id, patchJSON); err != nil {
+		return err
+	}
+
 	// json_patch(NULL, '{}') returns NULL in SQLite, so COALESCE to {} is required.
 	// This ensures a NULL metadata field doesn't cause the patch to fail.
-	result, err := tx.Exec(`
+	result, err := tx.ExecTracked(`
 		UPDATE memories
 		SET metadata = json_patch(COALESCE(metadata, '{}'), ?),
 			last_accessed_at = CAST(strftime('%s','now') AS INTEGER), runtime_seconds_since_access = 0, runtime_last_accrued_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE id = ? AND deleted_at IS NULL
-	`, patchJSON, id)
+	`, 5, patchJSON, id)
 	if err != nil {
 		return fmt.Errorf("UpdateMemoryMetadata: %w", err)
 	}
@@ -4867,21 +4924,21 @@ func updateMemoryMetadataTx(tx *sql.Tx, id string, patchJSON string) error {
 	// FTS tables may not exist in all environments (e.g. test temp DBs
 	// built without FTS5). The sync is best-effort — primary metadata update
 	// always succeeds regardless of FTS state.
-	if _, err := tx.Exec(`SELECT 1 FROM memories_fts LIMIT 1`); err == nil {
+	if _, err := tx.ExecTracked(`SELECT 1 FROM memories_fts LIMIT 1`, 5); err == nil {
 		// FTS table exists — sync the updated row
-		if _, err := tx.Exec(`
+		if _, err := tx.ExecTracked(`
 			DELETE FROM memories_fts WHERE rowid = (
 				SELECT rowid FROM memories WHERE id = ?
 			)
-		`, id); err != nil {
+		`, 5, id); err != nil {
 			// Log but don't fail — primary update already succeeded
 			slog.Warn("UpdateMemoryMetadata: fts delete failed (non-fatal)", "error", err.Error())
 		}
-		if _, err := tx.Exec(`
+		if _, err := tx.ExecTracked(`
 			INSERT INTO memories_fts(rowid, content, collection, session_id, tags)
 			SELECT rowid, content, collection, COALESCE(session_id,''), COALESCE(tags,'[]')
 			FROM memories WHERE id = ? AND deleted_at IS NULL
-		`, id); err != nil {
+		`, 5, id); err != nil {
 			slog.Warn("UpdateMemoryMetadata: fts insert failed (non-fatal)", "error", err.Error())
 		}
 	}

@@ -57,6 +57,17 @@ func p3CLIWorkspaceDB(t *testing.T, ws string) *sql.DB {
 // package manifest row and the file row.
 func p3CLISeedPackage(t *testing.T, db *sql.DB, skillID string) {
 	t.Helper()
+	p3CLISeedPackageNamed(t, db, skillID, "p3-packaged")
+}
+
+// p3CLISeedPackageNamed is p3CLISeedPackage for a named skill.
+//
+// The name is the package's own name, and it has to match the skill's:
+// the package row's name and the skill id's name are the package's
+// identity, and a mismatch is exactly the kind of contradiction the
+// verification refuses to accept.
+func p3CLISeedPackageNamed(t *testing.T, db *sql.DB, skillID string, name string) {
+	t.Helper()
 
 	blobBytes := []byte("the package entrypoint bytes")
 	sum := sha256.Sum256(blobBytes)
@@ -70,8 +81,8 @@ func p3CLISeedPackage(t *testing.T, db *sql.DB, skillID string) {
 	if _, err := db.Exec(`
 		INSERT INTO skill_packages (skill_id, name, version, version_source, entrypoint,
 			entrypoint_sha256, manifest, package_hash)
-		VALUES (?, 'p3-packaged', '1.0.0', 'declared', 'SKILL.md', ?, ?, ?)
-	`, skillID, blobSHA, `{"format":"mpm-skill-package/1"}`, blobSHA); err != nil {
+		VALUES (?, ?, '1.0.0', 'declared', 'SKILL.md', ?, ?, ?)
+	`, skillID, name, blobSHA, `{"format":"mpm-skill-package/1"}`, blobSHA); err != nil {
 		t.Fatalf("insert package: %v", err)
 	}
 	if _, err := db.Exec(`

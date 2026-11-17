@@ -343,6 +343,31 @@ func (s *MemoryStore) InitSQLite() error {
 		}
 	}
 
+	// Skill Package storage — LOCAL-ONLY, exactly as DatabaseManager's
+	// schema-initialisation path applies it (db.go, alongside
+	// ReferenceTables and WorkTables and outside the attachShared loops).
+	//
+	// This slice is deliberately NOT part of BaseTables: attachShared
+	// rewrites every `CREATE TABLE` in BaseTables to `shared.<name>`, so a
+	// package table declared there would be created in EVERY shared
+	// database. A standalone store has no shared database, but it still has
+	// a LOCAL schema, and the local schema is incomplete without these
+	// three tables.
+	//
+	// The omission was invisible until the package-immutability guard
+	// reached this path: the guard's condition names `skill_packages` in
+	// its own WHERE clause, so an ordinary update against a store whose
+	// schema predates the package tables failed with "no such table:
+	// skill_packages" — the guard broke an ordinary write rather than
+	// protecting one. The managed path has always created them; this
+	// brings the standalone path to parity.
+	if err := ApplySkillPackageTables(func(sqlQuery string) error {
+		_, err := s.DB.Exec(sqlQuery)
+		return err
+	}); err != nil {
+		return err
+	}
+
 	// Migration: add new columns to existing databases using safe addColumnIfNotExists
 	for _, m := range SafeMigrations {
 		if err := s.addColumnIfNotExists(m[0], m[1], m[2]); err != nil {
@@ -3477,6 +3502,58 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 		}
 	}
 
+	// ── The package guard (R1, on this path) ─────────────────────────────
+	//
+	// This is the same single-document IN-PLACE replacement the legacy
+	// force path performs, reached by a different door: it replaces
+	// `memories.content` — and the whole metadata column — under the
+	// same id. For a skill that owns a package that would give one id two
+	// documents: `read` would return the new body while `read_file`
+	// returned the old bytes, `projection_sha256` would stop describing
+	// `memories.content`, and the package row, the file rows and the blobs
+	// would all still describe the previous document.
+	//
+	// So the refusal is the SAME one the legacy force path raises, with
+	// the SAME classification (`package_immutable`), and it is FAIL
+	// CLOSED: not the content, not the metadata, not the embedding, not
+	// the content hash, not the timestamps, and not the cluster
+	// re-assignment below.
+	//
+	// The check and the write are ONE atomic statement: the guard's
+	// condition is folded into the UPDATE's own WHERE clause below, so a
+	// package row that appears between the check and the write cannot let
+	// the overwrite through.
+	// The guard's read has to work on whichever handle the store has —
+	// and it has to be the SAME handle the write uses.
+	//
+	// A store backed by a DatabaseManager can have `DM` set and `DB` nil:
+	// InitSQLite returns early in that case, and the pre-change code
+	// executed its UPDATE through `s.execTracked`, which routes to the
+	// MANAGER's pool. Reading `s.DB` unconditionally would dereference
+	// a nil handle on exactly that path.
+	//
+	// The ORDER matters as much as the choice: `s.execTracked` prefers
+	// the MANAGER's pool over the store's own handle, so the guard's
+	// read must prefer it too. A store that carried both handles
+	// pointing at DIFFERENT databases would otherwise have its write
+	// land in one database and its package check read the other — and an
+	// ordinary row in the write's database could be refused because a
+	// DIFFERENT database holds a package with the same id.
+	var guardQuery packageQuery
+	switch {
+	case s.DM != nil:
+		guardQuery = s.DM.QueryTracked
+	case s.DB != nil:
+		guardQuery = s.DB.Query
+	default:
+		return fmt.Errorf("memory store: no database handle")
+	}
+	if pkg, err := lookupSkillPackageWith(guardQuery, id); err != nil {
+		return err
+	} else if pkg != nil {
+		return packageImmutableErrorFor(id, pkg)
+	}
+
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
 	embedding, embedErr := EmbedText(content)
@@ -3491,6 +3568,7 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 
 	var execErr error
+	var res sql.Result
 	if embedding != nil {
 		embeddingJSON, _ := json.Marshal(embedding)
 		// Record the generating model alongside the vector. A dimension
@@ -3498,23 +3576,45 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 		// share a dimension while producing incomparable spaces — so the
 		// fingerprint must name the model, not just measure the vector.
 		fp := CurrentEmbeddingFingerprint()
-		_, execErr = s.execTracked(`UPDATE memories
-			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
-			    embedding_source = ?, embedding_dimension = ?, embedding_model = ?,
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?`, 5,
+		res, execErr = s.execTracked(guardedUpdateMemoryStoreWithEmbeddingSQL, 5,
 			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash,
-			"provider", len(embedding), fp.Model, id)
+			"provider", len(embedding), fp.Model, id, id)
 	} else {
 		// Embedding not regenerated — preserve the existing column.
-		_, execErr = s.execTracked(`UPDATE memories
-			SET content = ?, tags = ?, metadata = ?, content_hash = ?,
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?`, 5,
-			content, string(tagsJSON), string(metadataJSON), contentHash, id)
+		res, execErr = s.execTracked(guardedUpdateMemoryStoreWithoutEmbeddingSQL, 5,
+			content, string(tagsJSON), string(metadataJSON), contentHash, id, id)
 	}
 	if execErr != nil {
 		return execErr
+	}
+
+	// A zero-row update is either the refusal — a package row appeared
+	// between the guard and the write — or the pre-existing no-op for an
+	// id that matches no row. The refusal is distinguished from the
+	// no-op, and the no-op keeps its existing behaviour: this path has
+	// never reported a missing id as an error.
+	//
+	// The explanation is ONE consistent read: the row's existence and
+	// the package's ownership are read together, so it cannot see a
+	// state the write could not have seen. And because a package row can
+	// only disappear with its memories row (ON DELETE CASCADE), a row
+	// that is present with no package is not a state the write could
+	// have been excluded by — so it is reported rather than papered
+	// over.
+	if affected, aerr := res.RowsAffected(); aerr == nil && affected == 0 {
+		explanation, err := explainGuardedUpdate(guardQuery, id)
+		if err != nil {
+			return err
+		}
+		switch explanation.Outcome {
+		case guardedOutcomePackageImmutable:
+			return packageImmutableErrorFor(id, explanation.Package)
+		case guardedOutcomeUnexplained:
+			return fmt.Errorf("memory store: the guarded update wrote no row for %s, but the row exists and owns no package", id)
+		}
+		// guardedOutcomeNotFound: the pre-existing no-op for an id that
+		// matches no row. This path has never reported a missing id as
+		// an error, and it still does not.
 	}
 
 	// Re-assign to nearest cluster after embedding change. Best-effort
@@ -3522,7 +3622,22 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 	// assignments). Skipped when embedding is nil — there's nothing new
 	// to cluster on.
 	if embedding != nil {
-		if _, assignErr := AssignToCluster(s.DB.DB, id, embedding, ""); assignErr != nil {
+		// The cluster re-assignment runs on the same handle the write
+		// used. `s.DB.DB` would dereference a nil handle on the
+		// DM-backed / DB-nil shape, which is a shape the write path
+		// supports and the pre-change code reached.
+		var assignErr error
+		switch {
+		case s.DB != nil:
+			_, assignErr = AssignToCluster(s.DB.DB, id, embedding, "")
+		case s.DM != nil:
+			// `s.DM` is the CoreDB interface; the node-aware form
+			// needs the concrete manager, so it is asserted here.
+			if dm, ok := s.DM.(*DatabaseManager); ok {
+				_, assignErr = AssignToClusterNode(dm, dm, id, embedding, "")
+			}
+		}
+		if assignErr != nil {
 			slog.Warn("MemoryStore.UpdateMemory: IVF re-assignment failed (memory still searchable via brute-force)",
 				"memory_id", id, "error", assignErr.Error())
 		}
