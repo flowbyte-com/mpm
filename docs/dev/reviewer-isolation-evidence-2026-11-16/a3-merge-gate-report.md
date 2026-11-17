@@ -36,7 +36,7 @@ Every blocking class in the gate's convergence rule is empty:
 | | |
 |---|---|
 | **PR #247 head (the reviewed code)** | `b4c6f118a9db2de73794ff742d31558370d9ed58` — 39 files, +9193 / −12 |
-| **PR #247 head (the final head, carrying this report)** | `2c32e430352006b0b1753a685ee56a0d561c91fc` — 43 files, +10136 / −12. The four extra files are this report, the delta review, the final verdict corpus and the integration transcript; the production code is byte-identical to the row above |
+| **PR #247 head (carrying this report)** | the branch head — read it with `git ls-remote github refs/heads/feat/reviewer-sandbox-isolation`. It adds only documentation (this report, the delta review, the final verdict corpus, the integration transcript): the **production code is byte-identical to the row above**, and its CI run is recorded in PR #247's body |
 | **current `main` (authoritative, from `git ls-remote`)** | `1da6777c68112e589fc8a52af387621073bb71fe` |
 | **base** | `main` — `1da6777c68112e589fc8a52af387621073bb71fe` |
 | **mergeability** | `mergeable: true`, `mergeable_state: clean` |
@@ -333,14 +333,10 @@ two test files and this directory's evidence.
 
 ### 5.3 The final head's CI
 
-The final head `2c32e430` — which carries this report — has its own CI run:
-
-| run | head | result |
-|---|---|---|
-| `44117836571` | `2c32e430` | **success** — *Build + core tests*, *Full test suite*, *Release gate* |
-
-The PR's mergeability at that head is `mergeable: true`,
-`mergeable_state: clean`.
+The head that carries this report has its own CI run — **all three jobs green**, and
+the PR's mergeability at that head is `mergeable: true`,
+`mergeable_state: clean`. Its run id and SHA are recorded in **PR #247's body**, so
+that this report does not have to name a SHA its own commit would change.
 
 ---
 
