@@ -471,6 +471,36 @@ func (dm *DatabaseManager) GetTopicTopMemories(topicID string, limit int) ([]Mem
 //     is preserved as-is (NOT overwritten with the literal string
 //     "null") so a previously-stored embedding survives.
 func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]interface{}, metadata map[string]interface{}) error {
+	// ── The package guard (R1, on this path) ─────────────────────────────
+	//
+	// This is the same single-document IN-PLACE replacement the legacy
+	// force path performs, reached by a different door: it replaces
+	// `memories.content` — and the whole metadata column — under the
+	// same id. For a skill that owns a package that would give one id two
+	// documents: `read` would return the new body while `read_file`
+	// returned the old bytes, `projection_sha256` would stop describing
+	// `memories.content`, and the package row, the file rows and the blobs
+	// would all still describe the previous document.
+	//
+	// So the refusal is the SAME one the legacy force path raises, with
+	// the SAME classification (`package_immutable`), and it is FAIL
+	// CLOSED: not the content, not the metadata, not the embedding, not
+	// the content hash, not the timestamps.
+	//
+	// The check and the write are ONE atomic statement: the guard's
+	// condition is folded into the UPDATE's own WHERE clause below, so a
+	// package row that appears between the check and the write cannot let
+	// the overwrite through.
+	db := dm.SQLDB()
+	if db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	if pkg, err := lookupSkillPackageWith(db.Query, id); err != nil {
+		return err
+	} else if pkg != nil {
+		return packageImmutableErrorFor(id, pkg)
+	}
+
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
 	embedding, embedErr := EmbedText(content)
@@ -492,19 +522,11 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 	var err error
 	if embedding != nil {
 		embeddingJSON, _ := json.Marshal(embedding)
-		res, err = dm.ExecTracked(`
-			UPDATE memories
-			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?
-		`, 5, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
+		res, err = dm.ExecTracked(guardedUpdateMemoryWithEmbeddingSQL, 5,
+			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id, id)
 	} else {
-		res, err = dm.ExecTracked(`
-			UPDATE memories
-			SET content = ?, tags = ?, metadata = ?, content_hash = ?,
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?
-		`, 5, content, string(tagsJSON), string(metadataJSON), contentHash, id)
+		res, err = dm.ExecTracked(guardedUpdateMemoryWithoutEmbeddingSQL, 5,
+			content, string(tagsJSON), string(metadataJSON), contentHash, id, id)
 	}
 	if err != nil {
 		return err
@@ -512,7 +534,26 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 	if affected, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("update memory rows-affected: %w", err)
 	} else if affected == 0 {
-		return fmt.Errorf("update memory: no row with id %s (not found, deleted, or expired)", id)
+		// Nothing was updated. Either the row is gone, or a package row
+		// appeared between the guard and the write — in which case the
+		// guard fires and nothing was written. There is no third
+		// outcome.
+		//
+		// The explanation is ONE consistent read: the row's existence
+		// and the package's ownership are read together, so it cannot
+		// see a state the write could not have seen.
+		explanation, err := explainGuardedUpdate(db.Query, id)
+		if err != nil {
+			return err
+		}
+		switch explanation.Outcome {
+		case guardedOutcomePackageImmutable:
+			return packageImmutableErrorFor(id, explanation.Package)
+		case guardedOutcomeNotFound:
+			return fmt.Errorf("update memory: no row with id %s (not found, deleted, or expired)", id)
+		default:
+			return fmt.Errorf("update memory: the guarded update wrote no row for %s, but the row exists and owns no package", id)
+		}
 	}
 	return nil
 }

@@ -240,6 +240,15 @@ func ClassifyError(err error) (ToolOutcomeClass, string) {
 	if errors.Is(err, ErrPackageImmutable) {
 		return OutcomeClassConflict, "package_immutable"
 	}
+	// The package-METADATA refusal. It is the same shape as the refusal
+	// above — a state conflict, not a substrate fault and not a malformed
+	// call — but it names a different mutation: the caller tried to
+	// change a metadata key the package owns (its version or its content
+	// hash) rather than to replace the document. It has its OWN code so
+	// the two refusals are countable apart.
+	if errors.Is(err, ErrPackageMetadataImmutable) {
+		return OutcomeClassConflict, "package_metadata_immutable"
+	}
 	// Lifecycle-event ingest rejections (mpm-event/0.1). A rejected
 	// envelope is DELIBERATE POLICY ENFORCEMENT, not a substrate fault:
 	// the envelope violated the contract, so the store refuses it and

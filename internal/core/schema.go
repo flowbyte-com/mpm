@@ -4,7 +4,10 @@
 
 package internal
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // BaseTables contains the core table creation statements.
 // These are always created on database initialization.
@@ -1183,6 +1186,31 @@ var WorkTables = []string{
 // exporter exists for these tables yet — the import/export paths are later
 // stages of the approved Skill Packages design (PR #222, §10). The tables
 // are created empty and stay empty until then.
+// ApplySkillPackageTables installs the local-only Skill Package tables
+// through the given executor.
+//
+// BOTH schema paths call it — the managed one (DatabaseManager.InitSchema)
+// and the standalone one (MemoryStore.InitSQLite) — so the two cannot
+// drift apart again.
+//
+// They DID drift. The standalone path applied BaseTables,
+// ReferenceTables, ReferenceIndexes, CommonIndexes and WorkTables, and not
+// this slice; the omission was invisible until the package-immutability
+// guard reached that path, because the guard's own WHERE clause names
+// `skill_packages` — so an ORDINARY update against a standalone store
+// failed with "no such table: skill_packages". The guard broke a write it
+// was never meant to touch.
+//
+// One shared installer is the fix that cannot drift.
+func ApplySkillPackageTables(exec func(query string) error) error {
+	for _, stmt := range SkillPackageTables {
+		if err := exec(stmt); err != nil {
+			return fmt.Errorf("failed to execute skill package schema: %w\nSQL: %s", err, stmt)
+		}
+	}
+	return nil
+}
+
 var SkillPackageTables = []string{
 	// skill_package_blobs — content-addressed storage. One row per distinct
 	// byte sequence. sha256 is the primary key, so the same bytes are
