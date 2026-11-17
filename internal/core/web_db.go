@@ -498,7 +498,7 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 	if pkg, err := lookupSkillPackageWith(db.Query, id); err != nil {
 		return err
 	} else if pkg != nil {
-		return &PackageImmutableError{SkillID: id, Name: pkg.name, Version: pkg.version}
+		return packageImmutableErrorFor(id, pkg)
 	}
 
 	tagsJSON, _ := json.Marshal(tags)
@@ -522,21 +522,11 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 	var err error
 	if embedding != nil {
 		embeddingJSON, _ := json.Marshal(embedding)
-		res, err = dm.ExecTracked(`
-			UPDATE memories
-			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?
-			  AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)
-		`, 5, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id, id)
+		res, err = dm.ExecTracked(guardedUpdateMemoryWithEmbeddingSQL, 5,
+			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id, id)
 	} else {
-		res, err = dm.ExecTracked(`
-			UPDATE memories
-			SET content = ?, tags = ?, metadata = ?, content_hash = ?,
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?
-			  AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)
-		`, 5, content, string(tagsJSON), string(metadataJSON), contentHash, id, id)
+		res, err = dm.ExecTracked(guardedUpdateMemoryWithoutEmbeddingSQL, 5,
+			content, string(tagsJSON), string(metadataJSON), contentHash, id, id)
 	}
 	if err != nil {
 		return err
@@ -548,12 +538,22 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 		// appeared between the guard and the write — in which case the
 		// guard fires and nothing was written. There is no third
 		// outcome.
-		if pkg, err := lookupSkillPackageWith(db.Query, id); err != nil {
+		//
+		// The explanation is ONE consistent read: the row's existence
+		// and the package's ownership are read together, so it cannot
+		// see a state the write could not have seen.
+		explanation, err := explainGuardedUpdate(db.Query, id)
+		if err != nil {
 			return err
-		} else if pkg != nil {
-			return &PackageImmutableError{SkillID: id, Name: pkg.name, Version: pkg.version}
 		}
-		return fmt.Errorf("update memory: no row with id %s (not found, deleted, or expired)", id)
+		switch explanation.Outcome {
+		case guardedOutcomePackageImmutable:
+			return packageImmutableErrorFor(id, explanation.Package)
+		case guardedOutcomeNotFound:
+			return fmt.Errorf("update memory: no row with id %s (not found, deleted, or expired)", id)
+		default:
+			return fmt.Errorf("update memory: the guarded update wrote no row for %s, but the row exists and owns no package", id)
+		}
 	}
 	return nil
 }

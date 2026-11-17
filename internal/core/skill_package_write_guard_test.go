@@ -120,18 +120,20 @@ func p3SetEmbedding(t *testing.T, db *sql.DB, id string) {
 }
 
 // p3PackageMetadata reads the package-relevant metadata keys of a row.
+//
+// It reads them with SQLite's own `json_extract` rather than by decoding
+// the document in Go: a document can be valid JSON that a Go map cannot
+// represent (a number outside float64's range), and a Go-side read of
+// the whole document would lose every key to that one value.
 func p3PackageMetadata(t *testing.T, db *sql.DB, id string) (version, contentHash string) {
 	t.Helper()
-	var raw string
-	if err := db.QueryRow(`SELECT COALESCE(metadata, '{}') FROM memories WHERE id = ?`, id).Scan(&raw); err != nil {
+	if err := db.QueryRow(`
+		SELECT COALESCE(json_extract(metadata, '$.version'), ''),
+		       COALESCE(json_extract(metadata, '$.content_hash'), '')
+		FROM memories WHERE id = ?
+	`, id).Scan(&version, &contentHash); err != nil {
 		t.Fatalf("read the metadata of %s: %v", id, err)
 	}
-	var meta map[string]any
-	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
-		t.Fatalf("parse the metadata of %s: %v", id, err)
-	}
-	version, _ = meta["version"].(string)
-	contentHash, _ = meta["content_hash"].(string)
 	return version, contentHash
 }
 
@@ -347,9 +349,10 @@ func TestUpdateMemoryStillWorksForAnOrdinaryMemory(t *testing.T) {
 // defence directly.
 //
 // The guard has two parts: a check, and the SAME condition folded into the
-// UPDATE the check guards. This test runs that UPDATE against a packaged
-// skill and pins that it changes NOTHING — so even if the check were
-// removed, or ran against a stale snapshot, the write could not land.
+// UPDATE the check guards. This test runs THAT UPDATE — the production
+// statement, not a copy of it — against a packaged skill and pins that it
+// changes NOTHING — so even if the check were removed, or ran against a
+// stale snapshot, the write could not land.
 //
 // This is what closes the time-of-check/time-of-use window: the refusal is
 // not a property of the check's timing.
@@ -359,13 +362,8 @@ func TestUpdateMemoryGuardIsInTheWriteStatement(t *testing.T) {
 
 	before := p3ReadRowState(t, dm.SQLDB(), fixture.skillID)
 
-	res, err := dm.SQLDB().Exec(`
-		UPDATE memories
-		SET content = ?, tags = ?, metadata = ?, content_hash = ?,
-		    updated_at = CAST(strftime('%s','now') AS INTEGER)
-		WHERE id = ?
-		  AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)
-	`, "an OVERWRITTEN body", `["skill"]`, `{}`, "deadbeef", fixture.skillID, fixture.skillID)
+	res, err := dm.SQLDB().Exec(guardedUpdateMemoryWithoutEmbeddingSQL,
+		"an OVERWRITTEN body", `["skill"]`, `{}`, "deadbeef", fixture.skillID, fixture.skillID)
 	if err != nil {
 		t.Fatalf("the guarded UPDATE: %v", err)
 	}

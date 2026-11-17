@@ -54,6 +54,22 @@
 // transaction, before the UPDATE, so nothing is written — not the metadata,
 // not the timestamp, not the FTS index.
 //
+// THE COMPARISON IS SQLITE'S, NOT GO'S
+// ------------------------------------
+// The guard compares the protected key's value BEFORE the patch with its
+// value AFTER the patch, and both values are computed by SQLite itself:
+// the "after" value by the very same `json_patch` the UPDATE applies, and
+// both values extracted with SQLite's own `json_type` / `json_extract`.
+//
+// Doing the comparison in SQL rather than in Go is not a style choice. A
+// Go-side comparison has to decode the metadata document into a Go map,
+// and a document can be VALID JSON that a Go map cannot represent — a
+// number outside float64's range, for instance. The decode then fails for
+// the WHOLE document, the guard sees an empty map on both sides, and a
+// real change to `version` sails through unnoticed. The SQLite-side
+// comparison has no such blind spot: it reads the one key it cares about
+// and nothing else.
+//
 // THE VOCABULARY
 // --------------
 // The refusal has its OWN code, `package_metadata_immutable`, distinct from
@@ -66,8 +82,8 @@
 package internal
 
 import (
+	"bytes"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -81,7 +97,7 @@ import (
 // own bounded code so they are countable apart.
 var ErrPackageMetadataImmutable = errors.New("package_metadata_immutable")
 
-// PackageProtectedMetadataKeys are the metadata keys that are part of a
+// packageProtectedMetadataKeys are the metadata keys that are part of a
 // packaged skill's identity, integrity and versioning contract.
 //
 // The list is closed and short on purpose. A broad prohibition would
@@ -99,7 +115,11 @@ var ErrPackageMetadataImmutable = errors.New("package_metadata_immutable")
 // reads it, and the substrate's own save path owns it. `author`,
 // `promoted_at` and `decay_floor_days` are attribution and retention
 // policy, not the package's identity.
-var PackageProtectedMetadataKeys = []string{"version", "content_hash"}
+//
+// The slice is unexported on purpose. An exported slice is mutable state
+// that any package in the tree could rewrite, and a guard whose protected
+// key list is writable by its neighbours is not a guard.
+var packageProtectedMetadataKeys = []string{"version", "content_hash"}
 
 // PackageMetadataImmutableError is the typed refusal returned when a
 // legacy metadata patch would change a protected key of a packaged skill.
@@ -134,10 +154,11 @@ func (e *PackageMetadataImmutableError) Unwrap() error { return ErrPackageMetada
 // guardPackageMetadataPatch refuses a metadata patch that would change a
 // protected key of a packaged skill.
 //
-// It runs INSIDE the caller's transaction, so the check and the write it
-// guards share one snapshot: a package row that appears between the check
-// and the UPDATE cannot let a protected key through, because the UPDATE's
-// own WHERE clause re-tests the package's ownership.
+// It runs INSIDE the caller's transaction, before the UPDATE, so the check
+// and the write it guards share ONE snapshot. A package row that appears
+// after the check cannot be seen by the write either — SQLite refuses to
+// promote a stale snapshot to a write — so the write cannot land on a
+// state the check did not see. The refusal is therefore fail closed.
 //
 // A row with no package row is returned immediately — there is nothing to
 // guard, and the legacy behaviour is preserved exactly.
@@ -165,6 +186,63 @@ func guardPackageMetadataPatch(tx *sql.Tx, id string, patchJSON string) error {
 	}
 }
 
+// packageMetadataValue is one protected key's value in a metadata
+// document, as SQLite reports it.
+type packageMetadataValue struct {
+	// Type is SQLite's `json_type` for the value: "text", "integer",
+	// "real", "true", "false", "null", "array" or "object" — or SQL
+	// NULL when the path does not exist in the document at all.
+	//
+	// It is what distinguishes an ABSENT key from a key whose value is
+	// JSON null: both extract to SQL NULL, and only the type tells
+	// them apart.
+	Type sql.NullString
+
+	// Value is the value itself, extracted by SQLite.
+	Value any
+}
+
+// equal reports whether two extracted values are the same value.
+//
+// The comparison is type-aware: SQLite's `json_extract` returns an
+// integer for an integer and a text value for a text value, and "1" is
+// not 1. The type is compared first, so a patch that swaps a text version
+// for a number is a change even when the two render alike.
+func (v packageMetadataValue) equal(other packageMetadataValue) bool {
+	if v.Type.Valid != other.Type.Valid {
+		return false
+	}
+	if v.Type.Valid && v.Type.String != other.Type.String {
+		return false
+	}
+	return packageMetadataScalarEqual(v.Value, other.Value)
+}
+
+// packageMetadataScalarEqual compares two extracted JSON scalars.
+func packageMetadataScalarEqual(a, b any) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	switch av := a.(type) {
+	case int64:
+		bv, ok := b.(int64)
+		return ok && av == bv
+	case float64:
+		bv, ok := b.(float64)
+		return ok && av == bv
+	case string:
+		bv, ok := b.(string)
+		return ok && av == bv
+	case bool:
+		bv, ok := b.(bool)
+		return ok && av == bv
+	case []byte:
+		bv, ok := b.([]byte)
+		return ok && bytes.Equal(av, bv)
+	}
+	return reflect.DeepEqual(a, b)
+}
+
 // protectedPackageMetadataChange reports whether the patch would change
 // one of the protected keys, and which one.
 //
@@ -178,36 +256,52 @@ func guardPackageMetadataPatch(tx *sql.Tx, id string, patchJSON string) error {
 // object (an array, a scalar) destroys every protected key the row carried,
 // so that counts as a change too — and is reported the same way.
 func protectedPackageMetadataChange(tx *sql.Tx, id string, patchJSON string) (string, bool, error) {
-	var before, after sql.NullString
-	err := tx.QueryRow(`
-		SELECT COALESCE(metadata, '{}'), json_patch(COALESCE(metadata, '{}'), ?)
-		FROM memories WHERE id = ?
-	`, patchJSON, id).Scan(&before, &after)
-	if errors.Is(err, sql.ErrNoRows) {
-		// No row: the UPDATE will report it. Nothing to guard.
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("evaluate the metadata patch against the package contract: %w", err)
-	}
-
-	var b, a map[string]any
-	if err := json.Unmarshal([]byte(before.String), &b); err != nil {
-		b = nil
-	}
-	if err := json.Unmarshal([]byte(after.String), &a); err != nil {
-		// The patch replaced the document with a non-object. Every
-		// protected key it carried is gone.
-		a = nil
-	}
-
-	for _, key := range PackageProtectedMetadataKeys {
-		bv, bok := b[key]
-		av, aok := a[key]
-		if bok == aok && reflect.DeepEqual(bv, av) {
-			continue
+	for _, key := range packageProtectedMetadataKeys {
+		before, after, err := packageMetadataKeyValues(tx, id, patchJSON, key)
+		if err != nil {
+			return "", false, err
 		}
-		return key, true, nil
+		if !before.equal(after) {
+			return key, true, nil
+		}
 	}
 	return "", false, nil
+}
+
+// packageMetadataKeyValues reads one metadata key's value before and
+// after the patch, in ONE statement.
+//
+// Both values come from the same statement, so they come from the same
+// snapshot: the "before" is the row's current document and the "after" is
+// that same document with the patch applied, exactly as the UPDATE will
+// compute it.
+//
+// The key's JSON path is BOUND as a parameter, not interpolated, so the
+// statement is a constant and the path cannot escape it.
+func packageMetadataKeyValues(tx *sql.Tx, id, patchJSON, key string) (packageMetadataValue, packageMetadataValue, error) {
+	path := "$." + key
+	var before, after packageMetadataValue
+	err := tx.QueryRow(`
+		SELECT
+			json_type(doc, ?),
+			json_extract(doc, ?),
+			json_type(json_patch(doc, ?), ?),
+			json_extract(json_patch(doc, ?), ?)
+		FROM (
+			SELECT COALESCE(metadata, '{}') AS doc
+			FROM memories
+			WHERE id = ?
+		)
+	`, path, path, patchJSON, path, patchJSON, path, id).Scan(
+		&before.Type, &before.Value, &after.Type, &after.Value,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		// No row: the UPDATE will report it. Nothing to guard.
+		return before, after, nil
+	}
+	if err != nil {
+		return before, after, fmt.Errorf(
+			"evaluate the metadata patch against the package contract: %w", err)
+	}
+	return before, after, nil
 }

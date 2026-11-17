@@ -343,6 +343,30 @@ func (s *MemoryStore) InitSQLite() error {
 		}
 	}
 
+	// Skill Package storage — LOCAL-ONLY, exactly as DatabaseManager's
+	// schema-initialisation path applies it (db.go, alongside
+	// ReferenceTables and WorkTables and outside the attachShared loops).
+	//
+	// This slice is deliberately NOT part of BaseTables: attachShared
+	// rewrites every `CREATE TABLE` in BaseTables to `shared.<name>`, so a
+	// package table declared there would be created in EVERY shared
+	// database. A standalone store has no shared database, but it still has
+	// a LOCAL schema, and the local schema is incomplete without these
+	// three tables.
+	//
+	// The omission was invisible until the package-immutability guard
+	// reached this path: the guard's condition names `skill_packages` in
+	// its own WHERE clause, so an ordinary update against a store whose
+	// schema predates the package tables failed with "no such table:
+	// skill_packages" — the guard broke an ordinary write rather than
+	// protecting one. The managed path has always created them; this
+	// brings the standalone path to parity.
+	for _, sql := range SkillPackageTables {
+		if _, err := s.DB.Exec(sql); err != nil {
+			return fmt.Errorf("failed to create skill package table: %w", err)
+		}
+	}
+
 	// Migration: add new columns to existing databases using safe addColumnIfNotExists
 	for _, m := range SafeMigrations {
 		if err := s.addColumnIfNotExists(m[0], m[1], m[2]); err != nil {
@@ -3498,10 +3522,26 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 	// condition is folded into the UPDATE's own WHERE clause below, so a
 	// package row that appears between the check and the write cannot let
 	// the overwrite through.
-	if pkg, err := lookupSkillPackageWith(s.DB.Query, id); err != nil {
+	// The guard's read has to work on whichever handle the store has.
+	// A store backed by a DatabaseManager can have `DM` set and `DB` nil
+	// — InitSQLite returns early in that case, and the pre-change code
+	// executed its UPDATE through `s.execTracked`, which routes to the
+	// MANAGER's pool. Reading `s.DB` unconditionally would dereference
+	// a nil handle on exactly that path, so the read follows the same
+	// routing the write does.
+	var guardQuery packageQuery
+	switch {
+	case s.DB != nil:
+		guardQuery = s.DB.Query
+	case s.DM != nil:
+		guardQuery = s.DM.QueryTracked
+	default:
+		return fmt.Errorf("memory store: no database handle")
+	}
+	if pkg, err := lookupSkillPackageWith(guardQuery, id); err != nil {
 		return err
 	} else if pkg != nil {
-		return &PackageImmutableError{SkillID: id, Name: pkg.name, Version: pkg.version}
+		return packageImmutableErrorFor(id, pkg)
 	}
 
 	tagsJSON, _ := json.Marshal(tags)
@@ -3526,21 +3566,12 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 		// share a dimension while producing incomparable spaces — so the
 		// fingerprint must name the model, not just measure the vector.
 		fp := CurrentEmbeddingFingerprint()
-		res, execErr = s.execTracked(`UPDATE memories
-			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
-			    embedding_source = ?, embedding_dimension = ?, embedding_model = ?,
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?
-			  AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)`, 5,
+		res, execErr = s.execTracked(guardedUpdateMemoryStoreWithEmbeddingSQL, 5,
 			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash,
 			"provider", len(embedding), fp.Model, id, id)
 	} else {
 		// Embedding not regenerated — preserve the existing column.
-		res, execErr = s.execTracked(`UPDATE memories
-			SET content = ?, tags = ?, metadata = ?, content_hash = ?,
-			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?
-			  AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)`, 5,
+		res, execErr = s.execTracked(guardedUpdateMemoryStoreWithoutEmbeddingSQL, 5,
 			content, string(tagsJSON), string(metadataJSON), contentHash, id, id)
 	}
 	if execErr != nil {
@@ -3552,12 +3583,28 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 	// id that matches no row. The refusal is distinguished from the
 	// no-op, and the no-op keeps its existing behaviour: this path has
 	// never reported a missing id as an error.
+	//
+	// The explanation is ONE consistent read: the row's existence and
+	// the package's ownership are read together, so it cannot see a
+	// state the write could not have seen. And because a package row can
+	// only disappear with its memories row (ON DELETE CASCADE), a row
+	// that is present with no package is not a state the write could
+	// have been excluded by — so it is reported rather than papered
+	// over.
 	if affected, aerr := res.RowsAffected(); aerr == nil && affected == 0 {
-		if pkg, err := lookupSkillPackageWith(s.DB.Query, id); err != nil {
+		explanation, err := explainGuardedUpdate(guardQuery, id)
+		if err != nil {
 			return err
-		} else if pkg != nil {
-			return &PackageImmutableError{SkillID: id, Name: pkg.name, Version: pkg.version}
 		}
+		switch explanation.Outcome {
+		case guardedOutcomePackageImmutable:
+			return packageImmutableErrorFor(id, explanation.Package)
+		case guardedOutcomeUnexplained:
+			return fmt.Errorf("memory store: the guarded update wrote no row for %s, but the row exists and owns no package", id)
+		}
+		// guardedOutcomeNotFound: the pre-existing no-op for an id that
+		// matches no row. This path has never reported a missing id as
+		// an error, and it still does not.
 	}
 
 	// Re-assign to nearest cluster after embedding change. Best-effort
