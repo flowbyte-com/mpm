@@ -152,18 +152,133 @@ class ReviewerBwrapTest(unittest.TestCase):
         degrade to reading code.
         """
         args = sandbox.bwrap_args(self.tree, self.fds)
-        for root in sandbox.toolchain_roots():
-            index = args.index(str(root))
+        for index, root in enumerate(self.tree.get("toolchain_roots", [])):
+            fd = self.fds[f"toolchain:{index}"]
+            position = args.index(str(root))
             self.assertEqual(
-                args[index - 1],
-                "--ro-bind",
-                f"the toolchain bind for {root} is not read-only",
+                args[position - 2],
+                "--ro-bind-fd",
+                f"the toolchain bind for {root} is not a read-only descriptor bind",
+            )
+            self.assertEqual(
+                args[position - 1],
+                str(fd),
+                f"the toolchain bind for {root} does not carry its descriptor",
             )
             self.assertIn(
                 f"{root}/bin",
-                sandbox.sandbox_path(),
+                sandbox.sandbox_path(self.tree.get("toolchain_roots")),
                 f"the sandbox's PATH does not reach the toolchain at {root}",
             )
+
+    def test_a_discovered_root_outside_usr_is_bound_by_descriptor(self) -> None:
+        """The POSITIVE case: a real root outside /usr is bound by fd.
+
+        On a conventional host the discovery finds nothing (the Go
+        toolchain lives under /usr, which the static runtime list already
+        binds), so the descriptor-bind branch would otherwise never be
+        exercised.  Here the discovery is pointed at a disposable root,
+        and the bind is checked against the descriptor that names it.
+        """
+        synthetic = self.base / "toolchain"
+        (synthetic / "bin").mkdir(parents=True)
+        original = sandbox.toolchain_roots
+        sandbox.toolchain_roots = lambda: [synthetic]
+        try:
+            tree = sandbox.build_tree(self.base / "tree", None)
+            fds = sandbox.open_tree(tree)
+        finally:
+            sandbox.toolchain_roots = original
+        self.addCleanup(sandbox.close_tree, fds)
+
+        args = sandbox.bwrap_args(tree, fds)
+        position = args.index(str(synthetic))
+        self.assertEqual(
+            args[position - 2],
+            "--ro-bind-fd",
+            "a discovered root outside /usr is not bound by descriptor",
+        )
+        self.assertEqual(
+            args[position - 1],
+            str(fds["toolchain:0"]),
+            "the bind does not carry the descriptor that names the root",
+        )
+        self.assertEqual(
+            os.fstat(fds["toolchain:0"]).st_ino,
+            os.stat(synthetic).st_ino,
+            "the descriptor does not name the discovered root",
+        )
+        self.assertIn(
+            f"{synthetic}/bin",
+            sandbox.sandbox_path(tree.get("toolchain_roots")),
+            "the sandbox's PATH does not reach the discovered root",
+        )
+
+    def test_a_toolchain_root_is_bound_by_descriptor_not_by_path(self) -> None:
+        """A discovered root is bound the way the reviewer's own tree is.
+
+        A path-based bind leaves a window between the check and the
+        mount, in which the root can be swapped for another target.  The
+        reviewer's tree does not have that window, and neither does the
+        toolchain.
+        """
+        args = sandbox.bwrap_args(self.tree, self.fds)
+        for root in self.tree.get("toolchain_roots", []):
+            self.assertNotIn(
+                "--ro-bind",
+                args[max(0, args.index(str(root)) - 2) : args.index(str(root))],
+                f"the toolchain root {root} is bound by path",
+            )
+
+    def test_the_home_is_protected_whole(self) -> None:
+        """The HOME is a protected root — not only its sensitive parts.
+
+        A DISCOVERED toolchain root is a directory the reviewer can
+        READ.  If the home itself, or any part of it, could be a
+        discovered root, the namespace would carry the operator's
+        credentials with it.
+
+        The base is judged more leniently on purpose (the plugin puts it
+        inside the home), so this rule lives with the DISCOVERY, not
+        with the base.
+        """
+        home = sandbox.operator_home()
+        if home is None:
+            self.skipTest("the passwd database yielded no home")
+        self.assertTrue(
+            sandbox._is_protected_path(home),
+            "the operator's home itself is not protected",
+        )
+        self.assertTrue(
+            sandbox._is_protected_path(home / "sdk"),
+            "a directory inside the operator's home is not protected",
+        )
+        self.assertTrue(
+            sandbox._is_protected_path(home.parent),
+            "an ancestor of the operator's home is not protected",
+        )
+        self.assertTrue(
+            sandbox._is_protected_path(Path("/")),
+            "the filesystem root is not protected",
+        )
+
+    def test_the_toolchain_root_derivation_strips_only_a_bin(self) -> None:
+        """A PATH entry cannot collapse onto something larger than itself.
+
+        The defect this closes: the derivation stripped one directory
+        level unconditionally, so a PATH entry whose `bin` directory is
+        a direct child of the home — `~/bin` — yielded the HOME itself
+        as the discovered root.
+        """
+        self.assertEqual(
+            sandbox._toolchain_root_for(Path("/opt/toolchain/bin/go")),
+            Path("/opt/toolchain"),
+        )
+        self.assertEqual(
+            sandbox._toolchain_root_for(Path("/opt/toolchain/go")),
+            Path("/opt/toolchain"),
+            "a program that is not under a `bin` directory lost a level",
+        )
 
     def test_a_toolchain_root_inside_a_protected_root_is_refused(self) -> None:
         """A hostile PATH must not point the sandbox at the operator's keys.
@@ -335,6 +450,64 @@ class ReviewerBwrapLiveTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("OK", result.stdout)
+
+
+@unittest.skipUnless(_bwrap_usable(), "bubblewrap cannot build a namespace here")
+class ReviewerHomeBindTest(unittest.TestCase):
+    """A PATH entry under the HOME must not make the home a bind root.
+
+    THE DEFECT THIS PINS
+    --------------------
+    The toolchain discovery derived a root by stripping one directory
+    level from the program's path, so a PATH entry whose `bin` directory
+    is a direct child of the home — `~/bin` — yielded the HOME ITSELF.
+    The home was then bound READ-ONLY into the namespace, and a
+    reviewer could read the operator's credentials with a plain `cat`.
+
+    The reproduction runs inside a private mount namespace that carries
+    its OWN /home (a tmpfs), so nothing outside it is touched and the
+    operator's own home is never read, written or bound.
+    """
+
+    def test_a_home_relative_toolchain_root_is_refused(self) -> None:
+        script = "\n".join(
+            [
+                "mount -t tmpfs tmpfs /home 2>/dev/null || exit 9",
+                "mkdir -p /home/gate4/bin /home/gate4/.ssh",
+                'echo SECRET > /home/gate4/secret.txt',
+                'echo KEY > /home/gate4/.ssh/id_rsa',
+                "printf '#!/bin/sh\\nexit 0\\n' > /home/gate4/bin/go",
+                "chmod 755 /home/gate4/bin/go",
+                (
+                    "HOME=/home/gate4 PATH=/home/gate4/bin:/usr/bin:/bin GOROOT= "
+                    f"python3 -c \"import sys; sys.path.insert(0, {str(SCRIPT.parent)!r}); "
+                    "import reviewer_bwrap as rb; print('ROOTS:'); "
+                    "[print(r) for r in rb.toolchain_roots()]\""
+                ),
+            ]
+        )
+        try:
+            result = subprocess.run(
+                ["unshare", "-rm", "bash", "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("unprivileged user namespaces are not available here")
+        if result.returncode == 9:
+            self.skipTest("a private /home could not be mounted here")
+        output = result.stdout + result.stderr
+        self.assertNotIn(
+            "/home/gate4\n",
+            output,
+            f"the home was discovered as a toolchain root: {output}",
+        )
+        self.assertIn(
+            "ROOTS:",
+            output,
+            f"the discovery did not answer: {output}",
+        )
 
 
 if __name__ == "__main__":

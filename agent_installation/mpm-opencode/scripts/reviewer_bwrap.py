@@ -44,6 +44,10 @@ WHAT IT DOES
 THE NAMESPACE
 -------------
   * the runtime is bound READ-ONLY (/usr, and the merged-usr symlinks);
+  * the host's TOOLCHAIN, discovered on the host's own PATH, is bound
+    READ-ONLY BY DESCRIPTOR as well — unless it is protected, and the
+    protection covers the whole home, so no toolchain under the
+    operator's home is ever bound;
   * `/etc` is a SYNTHETIC directory: a passwd and a group file that
     name the sandbox's own identity, and a copy of the host's
     `alternatives` symlinks.  The host's own `/etc` — and with it the
@@ -128,8 +132,20 @@ RUNTIME_DIRS = (
 # So the script discovers the toolchain on the HOST and binds it
 # READ-ONLY.  This is a HOST-SIDE decision: the script runs before the
 # namespace exists, on the host's own PATH, and the model contributes
-# nothing to it.  A discovered root is refused if it resolves inside a
-# protected root, exactly like the base.
+# nothing to it.
+#
+# A discovered root is refused when it resolves inside a protected root
+# — and the rule here is STRICTER than the base's: the HOME is protected
+# WHOLE, so no root under the home is ever bound, and no ancestor of the
+# home is either.  A discovered root is a directory the reviewer can
+# READ, so a root that carried the operator's credentials with it would
+# defeat the boundary the whole sandbox exists to establish.  (The base
+# is judged more leniently on purpose: the plugin puts it inside the
+# home, and it is the reviewer's OWN tree.)
+#
+# The root is also bound BY DESCRIPTOR, like the reviewer's own tree, so
+# a root swapped for a symlink between the check and the mount cannot
+# change what is mounted.
 TOOLCHAIN_PROGRAMS = ("go",)
 
 # The paths the namespace mounts FRESH.  A bind under one of them is
@@ -316,12 +332,12 @@ def _is_within(child: Path, parent: Path) -> bool:
     return True
 
 
-def _assert_no_symlink(path: Path) -> None:
-    """Refuse a path any component of which is a symlink.
+def _symlink_component(path: Path) -> Path | None:
+    """The first component of `path` that is a symlink, if there is one.
 
     The check walks the path from the root, so it catches a symlinked
     ANCESTOR and not only a symlinked leaf.  A symlink in the path is
-    how a base gets swapped between the check and the mount.
+    how a target gets swapped between the check and the mount.
     """
     current = Path(path.anchor or "/")
     for part in path.parts[1:] if path.is_absolute() else path.parts:
@@ -330,13 +346,26 @@ def _assert_no_symlink(path: Path) -> None:
             info = os.lstat(current)
         except FileNotFoundError:
             continue
-        except OSError as exc:
-            raise refuse(f"refusing to sandbox {path}: cannot inspect {current}: {exc}")
+        except OSError:
+            return current
         if stat.S_ISLNK(info.st_mode):
-            raise refuse(
-                f"refusing to sandbox {path}: {current} is a symlink, and a "
-                "symlinked base can be swapped for another target"
-            )
+            return current
+    return None
+
+
+def _assert_no_symlink(path: Path) -> None:
+    """Refuse a path any component of which is a symlink.
+
+    The check walks the path from the root, so it catches a symlinked
+    ANCESTOR and not only a symlinked leaf.  A symlink in the path is
+    how a base gets swapped between the check and the mount.
+    """
+    offender = _symlink_component(path)
+    if offender is not None:
+        raise refuse(
+            f"refusing to sandbox {path}: {offender} is a symlink, and a "
+            "symlinked base can be swapped for another target"
+        )
 
 
 def resolve_base(base: Path, extra_protected: list[Path] | None = None) -> Path:
@@ -682,6 +711,11 @@ def build_tree(base: Path, source: Path | None) -> dict:
         "workspace": base / "workspace",
         "findings": base / "findings",
         "etc": base / "etc",
+        # The host's toolchain, discovered ONCE.  The bind and the
+        # PATH must agree on the same list, so the list is computed
+        # here and read from here — never computed twice and hoped to
+        # match.
+        "toolchain_roots": toolchain_roots(),
     }
 
 
@@ -695,6 +729,11 @@ def open_tree(tree: dict) -> dict:
 
     The descriptor names the INODE, so a path that is swapped for a
     symlink after this point cannot change what is mounted.
+
+    The host's DISCOVERED toolchain is opened the same way: a
+    path-based bind of a toolchain root would leave a window between
+    the check and the mount, and the reviewer's own tree does not have
+    that window.
     """
     fds: dict[str, int] = {}
     try:
@@ -707,6 +746,11 @@ def open_tree(tree: dict) -> dict:
             tree["etc"],
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
         )
+        for index, root in enumerate(tree.get("toolchain_roots", [])):
+            fds[f"toolchain:{index}"] = os.open(
+                root,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
     except OSError as exc:
         for fd in fds.values():
             os.close(fd)
@@ -728,10 +772,35 @@ def _is_protected_path(path: Path) -> bool:
     The same question the base is asked, asked of the toolchain roots
     the sandbox discovers: a hostile PATH must not be able to point the
     sandbox at the operator's keys.
+
+    The HOME is protected WHOLE here, and not only in its sensitive
+    parts.  That is DELIBERATELY stricter than the base's rule, and
+    the difference is the point:
+
+      * the BASE may live inside a harmless part of the home, because
+        the plugin puts it there (`~/.cache/mpm-opencode/review-sandbox`)
+        and a guard that refused every base inside the home would refuse
+        the one the plugin actually uses;
+      * a DISCOVERED ROOT is a directory the reviewer can READ.  A root
+        inside the home carries the home's credentials with it, so no
+        root under the home may be bound at all.
+
+    An ANCESTOR of the home is refused for the same reason: binding
+    `/home` would carry every account's home with it.  The root itself
+    is refused because a bind of `/` would carry the whole filesystem.
+
+    (The defect this closes: a PATH entry whose `bin` directory is a
+    direct child of the home — `~/bin` — made the DISCOVERY derive the
+    home ITSELF as the root, because the derivation stripped one
+    directory level.  The home was then bound READ-ONLY into the
+    namespace, and a reviewer could read the operator's credentials with
+    a plain `cat`.  Measured, reproduced and closed.)
     """
     try:
         resolved = Path(os.path.realpath(path))
     except OSError:
+        return True
+    if resolved == Path("/"):
         return True
     for root in protected_roots():
         try:
@@ -740,7 +809,41 @@ def _is_protected_path(path: Path) -> bool:
             root_resolved = root
         if resolved == root_resolved or _is_within(resolved, root_resolved):
             return True
+    # The homes themselves, and everything under them, and everything
+    # above them.
+    for root in home_roots():
+        try:
+            root_resolved = Path(os.path.realpath(root))
+        except OSError:
+            root_resolved = root
+        if resolved == root_resolved:
+            return True
+        if _is_within(resolved, root_resolved):
+            return True
+        if _is_within(root_resolved, resolved):
+            return True
+    # EVERY account's home, not only the operator's.  Another account's
+    # home is not the operator's data, but it is the same class of
+    # disclosure: a PATH entry that named it would carry that account's
+    # credentials into the namespace with it.  A host that keeps a
+    # toolchain in a home directory loses that toolchain to the
+    # reviewer, which is a limitation rather than a hole.
+    if _is_within(resolved, Path("/home")):
+        return True
     return False
+
+
+def _toolchain_root_for(program: Path) -> Path:
+    """The root that HOLDS a tool: `<root>/bin/<program>` -> `<root>`.
+
+    Only a directory that is literally named `bin` is stripped.  A
+    program that does not live in a `bin` directory keeps its own
+    directory, so a PATH entry can never collapse onto something larger
+    than the directory that actually holds the tool — the defect that
+    made a home-relative `~/bin` entry yield the HOME itself.
+    """
+    parent = program.parent
+    return parent.parent if parent.name == "bin" else parent
 
 
 def toolchain_roots() -> list[Path]:
@@ -774,8 +877,7 @@ def toolchain_roots() -> list[Path]:
                 resolved = Path(os.path.realpath(candidate))
             except OSError:
                 continue
-            # `<root>/bin/<program>`  ->  `<root>`
-            candidates.append(resolved.parent.parent)
+            candidates.append(_toolchain_root_for(resolved))
 
     for root in candidates:
         try:
@@ -784,11 +886,18 @@ def toolchain_roots() -> list[Path]:
             continue
         if not resolved.is_dir() or not (resolved / "bin").is_dir():
             continue
+        if resolved == Path("/"):
+            continue  # the root would carry the whole filesystem
         if any(_is_within(resolved, Path(base)) for base in RUNTIME_DIRS):
             continue  # the static runtime list already binds it
         if any(_is_within(resolved, Path(fresh)) for fresh in FRESH_MOUNT_PATHS):
             continue  # the namespace mounts these fresh: a bind there is masked
         if _is_protected_path(resolved):
+            continue
+        if _symlink_component(resolved) is not None:
+            # Belt and braces: the root was already resolved with
+            # `realpath`, so in the steady state this cannot fire.  What
+            # actually closes the window is the DESCRIPTOR bind below.
             continue
         key = str(resolved)
         if key in seen:
@@ -798,15 +907,17 @@ def toolchain_roots() -> list[Path]:
     return roots
 
 
-def sandbox_path() -> str:
+def sandbox_path(roots: list[Path] | None = None) -> str:
     """The PATH inside the namespace.
 
     The static entries first, then the discovered toolchain's own `bin`
     directory: a host whose Go lives elsewhere still gets a `go` the
     reviewer can run.
     """
+    if roots is None:
+        roots = toolchain_roots()
     entries = ["/usr/local/go/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-    for root in toolchain_roots():
+    for root in roots:
         entries.insert(0, f"{root}/bin")
     return ":".join(entries)
 
@@ -822,10 +933,15 @@ def bwrap_args(tree: dict, fds: dict | None = None) -> list:
     for path in RUNTIME_DIRS:
         if os.path.exists(path):
             args += ["--ro-bind", path, path]
-    # The host's toolchain, wherever the host keeps it: READ-ONLY, and
-    # only when it is not already covered by the static list.
-    for root in toolchain_roots():
-        args += ["--ro-bind", str(root), str(root)]
+    # The host's toolchain, wherever the host keeps it: READ-ONLY, bound
+    # BY DESCRIPTOR (so a root swapped for a symlink after the check
+    # cannot change what is mounted), and only when it is not already
+    # covered by the static list.
+    for index, root in enumerate(tree.get("toolchain_roots", [])):
+        fd = fds.get(f"toolchain:{index}") if fds is not None else None
+        if fd is None:
+            continue
+        args += ["--ro-bind-fd", str(fd), str(root)]
     for link, target in MERGED_SYMLINKS.items():
         if os.path.islink(link):
             args += ["--symlink", target, link]
@@ -858,7 +974,7 @@ def bwrap_args(tree: dict, fds: dict | None = None) -> list:
         "--setenv", "GOMODCACHE", f"{PREFIX}/tmp/gomodcache",
         "--setenv", "GOPROXY", "off",
         "--setenv", "GOFLAGS", "-mod=mod",
-        "--setenv", "PATH", sandbox_path(),
+        "--setenv", "PATH", sandbox_path(tree.get("toolchain_roots")),
         "--setenv", "TERM", "dumb",
         "--setenv", "LANG", "C.UTF-8",
     ]
@@ -1085,9 +1201,22 @@ def main(argv: list | None = None) -> int:
     run_parser = sub.add_parser("run", help="run a command inside the sandbox")
     run_parser.add_argument("argv", nargs=argparse.REMAINDER)
     sub.add_parser("probe", help="the disposable sentinel experiment")
+    roots_parser = sub.add_parser(
+        "roots",
+        help="print the toolchain roots the discovery would bind, and nothing else",
+    )
     args = parser.parse_args(argv)
 
     protected = [Path(p) for p in args.protect]
+
+    # The discovery answer comes FIRST and touches nothing: it creates
+    # no directory and reads no tree, so it can be asked about a host
+    # without changing it.
+    if args.command == "roots":
+        print("ROOTS:")
+        for root in toolchain_roots():
+            print(root)
+        return 0
 
     try:
         base = (

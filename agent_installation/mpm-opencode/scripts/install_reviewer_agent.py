@@ -12,8 +12,10 @@ an explicit instruction not to touch it.
 
 The fix is the PERMISSION layer: the reviewer agent definition denies
 every action by default and re-opens exactly one — the host-controlled
-sandboxed execution tool. A denied tool is removed from the reviewer's
-tool list entirely. The definition is only an isolation if it is
+sandboxed execution tool. A denied tool is REFUSED by the host on every
+call; the plugin still registers the MPM tools for every agent, so the
+reviewer may see them listed and may not call them. The definition is
+only an isolation if it is
 actually INSTALLED, which is what this script does.
 
 THIS INSTALL FAILS CLOSED
