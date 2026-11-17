@@ -38,15 +38,20 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // p3RowState is the complete mutable state of one memories row.
+//
+// Every text column is a sql.NullString, not a plain string: a COALESCE
+// to the empty string would collapse SQL NULL and "" into one value, and
+// a refusal that turned a NULL column into an empty one would then be
+// invisible to the comparison.
 type p3RowState struct {
-	Content            string
-	Tags               string
-	Metadata           string
-	Embedding          string
-	ContentHash        string
-	EmbeddingSource    string
+	Content            sql.NullString
+	Tags               sql.NullString
+	Metadata           sql.NullString
+	Embedding          sql.NullString
+	ContentHash        sql.NullString
+	EmbeddingSource    sql.NullString
 	EmbeddingDimension sql.NullInt64
-	EmbeddingModel     string
+	EmbeddingModel     sql.NullString
 	UpdatedAt          sql.NullInt64
 	DeletedAt          sql.NullInt64
 }
@@ -56,10 +61,9 @@ func p3ReadRowState(t *testing.T, db *sql.DB, id string) p3RowState {
 	t.Helper()
 	var s p3RowState
 	err := db.QueryRow(`
-		SELECT COALESCE(content, ''), COALESCE(tags, ''), COALESCE(metadata, ''),
-		       COALESCE(embedding, ''), COALESCE(content_hash, ''),
-		       COALESCE(embedding_source, ''), embedding_dimension,
-		       COALESCE(embedding_model, ''), updated_at, deleted_at
+		SELECT content, tags, metadata, embedding, content_hash,
+		       embedding_source, embedding_dimension, embedding_model,
+		       updated_at, deleted_at
 		FROM memories WHERE id = ?
 	`, id).Scan(&s.Content, &s.Tags, &s.Metadata, &s.Embedding, &s.ContentHash,
 		&s.EmbeddingSource, &s.EmbeddingDimension, &s.EmbeddingModel, &s.UpdatedAt, &s.DeletedAt)
@@ -73,28 +77,28 @@ func p3ReadRowState(t *testing.T, db *sql.DB, id string) p3RowState {
 func p3AssertRowStateUnchanged(t *testing.T, before, after p3RowState) {
 	t.Helper()
 	if before.Content != after.Content {
-		t.Errorf("the content changed:\n  before: %q\n  after:  %q", before.Content, after.Content)
+		t.Errorf("the content changed:\n  before: %q\n  after:  %q", before.Content.String, after.Content.String)
 	}
 	if before.Tags != after.Tags {
-		t.Errorf("the tags changed:\n  before: %s\n  after:  %s", before.Tags, after.Tags)
+		t.Errorf("the tags changed:\n  before: %s\n  after:  %s", before.Tags.String, after.Tags.String)
 	}
 	if before.Metadata != after.Metadata {
-		t.Errorf("the metadata changed:\n  before: %s\n  after:  %s", before.Metadata, after.Metadata)
+		t.Errorf("the metadata changed:\n  before: %s\n  after:  %s", before.Metadata.String, after.Metadata.String)
 	}
 	if before.Embedding != after.Embedding {
-		t.Errorf("the embedding changed:\n  before: %s\n  after:  %s", before.Embedding, after.Embedding)
+		t.Errorf("the embedding changed:\n  before: %s\n  after:  %s", before.Embedding.String, after.Embedding.String)
 	}
 	if before.ContentHash != after.ContentHash {
-		t.Errorf("the content hash changed:\n  before: %s\n  after:  %s", before.ContentHash, after.ContentHash)
+		t.Errorf("the content hash changed:\n  before: %s\n  after:  %s", before.ContentHash.String, after.ContentHash.String)
 	}
 	if before.EmbeddingSource != after.EmbeddingSource {
-		t.Errorf("the embedding source changed: %q -> %q", before.EmbeddingSource, after.EmbeddingSource)
+		t.Errorf("the embedding source changed: %q -> %q", before.EmbeddingSource.String, after.EmbeddingSource.String)
 	}
 	if before.EmbeddingDimension != after.EmbeddingDimension {
 		t.Errorf("the embedding dimension changed: %v -> %v", before.EmbeddingDimension, after.EmbeddingDimension)
 	}
 	if before.EmbeddingModel != after.EmbeddingModel {
-		t.Errorf("the embedding model changed: %q -> %q", before.EmbeddingModel, after.EmbeddingModel)
+		t.Errorf("the embedding model changed: %q -> %q", before.EmbeddingModel.String, after.EmbeddingModel.String)
 	}
 	if before.UpdatedAt != after.UpdatedAt {
 		t.Errorf("the timestamp changed: %v -> %v", before.UpdatedAt, after.UpdatedAt)

@@ -4474,16 +4474,20 @@ The guard is transactionally safe: the check and the write share one transaction
 
 ##### The refusal covers every single-document write path, not just the force path
 
-The refusal above guards `mpm save-skill --force` / `mpm skill add --force` / `mpm_skills save` with `force: true`. It also guards the two **public** single-document write paths, which perform the same in-place replacement under the same id and are reachable by any consumer holding a `CoreDB`:
+The refusal above guards `mpm save-skill --force` / `mpm skill add --force` / `mpm_skills save` with `force: true`. It also guards the two **public** single-document write paths, which perform the same in-place replacement under the same id.
 
-| path | what it replaces |
-|---|---|
-| `MemoryStore.UpdateMemory` | `memories.content`, the whole metadata column, the embedding and its provenance, the content hash and the timestamp |
-| `DatabaseManager.UpdateMemory` | the same set — it is a `CoreDB` interface method, so it is reachable by the MCP substrate wiring, the `mpm call` internals and any downstream implementation of the interface |
+| path | what it replaces | how it is reached |
+|---|---|---|
+| `DatabaseManager.UpdateMemory` | `memories.content`, the tags, the whole metadata column, the embedding, the content hash and the timestamp | it is a **`CoreDB` interface method**, so it is reachable by the MCP substrate wiring, the `mpm call` internals and any downstream implementation of the interface |
+| `MemoryStore.UpdateMemory` | the same set — plus the embedding's provenance columns (`embedding_source`, `embedding_dimension`, `embedding_model`), which the manager's path does **not** write | it is the `MemoryStore` method; it is **not** a `CoreDB` method, and its signature differs from the manager's (`tags []string` rather than `tags map[string]interface{}`) |
 
-Both raise the **same** refusal, with the same `package_immutable` classification, and both are fail closed: nothing is written — not the content, not the metadata, not the embedding, not the content hash, not the timestamps. The guard's condition is folded into each `UPDATE`'s own `WHERE` clause, exactly as in the force path, so the check and the write are one atomic statement.
+Both raise the **same** refusal, with the same `package_immutable` classification, and both are fail closed: nothing is written — not the content, not the tags, not the metadata, not the embedding, not the content hash, not the timestamps. The guard's condition is folded into each `UPDATE`'s own `WHERE` clause, exactly as in the force path, so the check and the write are one atomic statement.
+
+The embedding-provenance asymmetry between the two paths is **pre-existing** — the two are independent implementations — and is recorded here so that it is not mistaken for part of this contract. Both paths preserve the existing embedding when no replacement is available (a provider error, or an absent provider).
 
 A skill with **no** package row is unaffected on every one of these paths: an ordinary skill and an ordinary memory are still updated in place, exactly as before.
+
+**The guard reads the same database the write writes.** A `MemoryStore` can carry a `DatabaseManager` and its own handle, and `s.execTracked` prefers the manager's pool. The guard's read follows the same preference, so a store that carried both handles pointed at *different* databases could never have its write land in one database while its package check read the other.
 
 **The local schema carries the package tables on every path.** The guard's condition names `skill_packages` in its own `WHERE` clause, so a schema without that table would make the guard's statement itself fail — breaking an *ordinary* write rather than protecting one. Both the managed path (`DatabaseManager.InitSchema`) and the standalone path (`MemoryStore.InitSQLite`) therefore install the same **local-only** package-table slice (`SkillPackageTables`), and neither installs it in the shared database.
 
@@ -4500,16 +4504,22 @@ So the legacy metadata patch path — `mpm_memory`'s `patch` action, `mpm patch-
 
 The refusal is **fail closed**: the guard runs inside the patch's own transaction, before the `UPDATE`, so not the metadata, not the timestamp and not the FTS index move.
 
+The guard's row read mirrors the `UPDATE`'s own predicate (`deleted_at IS NULL`), so a **soft-deleted** row is not guarded: the `UPDATE` does not touch it, and the patch keeps its pre-guard behaviour — the refusal is "memory not found or deleted", not a metadata conflict.
+
 **Its atomicity is the transaction's, not the `WHERE` clause's.** The two refusals are atomic with their writes by *different* mechanisms, and the difference is part of the contract:
 
 - the **content** path folds the guard's condition into the `UPDATE`'s own `WHERE` clause (`AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)`), so the check and the write are **one atomic statement**;
 - the **metadata** path shares **one transaction** with the `UPDATE`, so the check and the write see **one snapshot**. A package row that appears after the check cannot be seen by the write either: SQLite refuses to promote a stale snapshot to a write (`SQLITE_BUSY_SNAPSHOT`), so the write cannot land on a state the check did not see.
 
+The metadata path's transaction is the substrate's own **retrying** transaction (`DatabaseManager.WithTx`), not a bare `BEGIN DEFERRED`. The reason is the guard itself: the guard is a read, and a read is what establishes a transaction's snapshot, so a deferred transaction whose first statement is a read cannot later be promoted to a write if another connection committed in between. `WithTx` **restarts the whole transaction** on a snapshot conflict, which takes a fresh snapshot and replays the patch — and the patch is idempotent, so the replay is safe.
+
 The guard is deliberately **narrow**, and the narrowness is part of the contract:
 
 - it applies **only** to a row that owns a package row. An ordinary memory and an ordinary (unpackaged) skill keep every metadata key they always had;
 - it applies **only** to the two keys above. A patch that touches any other key — `status`, `note`, `confidence`, anything — lands exactly as it always did;
-- it applies **only** when the patch would actually **change** the key. A patch that names a protected key with the value it already holds leaves the row identical and is permitted. A blanket prohibition on the key's mere presence would refuse writes that change nothing, which is a broader prohibition than the contract requires.
+- it applies **only** when the patch would actually **change** the key. A patch that names a protected key with the value it already holds leaves **the protected key** identical and is permitted — the patch's *other* keys land exactly as they always did. A blanket prohibition on the key's mere presence would refuse writes that change nothing, which is a broader prohibition than the contract requires.
+
+A protected key that holds something other than a **string** — a number, an object, an array — is a **malformed** row: the contract's comparison cannot be made precisely on it (two distinct JSON numbers can be the same float64, and an object compares as its serialised text). A malformed row is refused **outright** — every patch on it is refused — because the alternative is to reason about a value the contract does not describe.
 
 `is_latest` is deliberately **not** protected: it is the substrate's own semver bookkeeping across a skill's versions, no package verification check reads it, and the substrate's own save path owns it. `author`, `promoted_at` and `decay_floor_days` are attribution and retention policy, not the package's identity.
 

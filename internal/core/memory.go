@@ -3522,19 +3522,28 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 	// condition is folded into the UPDATE's own WHERE clause below, so a
 	// package row that appears between the check and the write cannot let
 	// the overwrite through.
-	// The guard's read has to work on whichever handle the store has.
-	// A store backed by a DatabaseManager can have `DM` set and `DB` nil
-	// — InitSQLite returns early in that case, and the pre-change code
+	// The guard's read has to work on whichever handle the store has —
+	// and it has to be the SAME handle the write uses.
+	//
+	// A store backed by a DatabaseManager can have `DM` set and `DB` nil:
+	// InitSQLite returns early in that case, and the pre-change code
 	// executed its UPDATE through `s.execTracked`, which routes to the
 	// MANAGER's pool. Reading `s.DB` unconditionally would dereference
-	// a nil handle on exactly that path, so the read follows the same
-	// routing the write does.
+	// a nil handle on exactly that path.
+	//
+	// The ORDER matters as much as the choice: `s.execTracked` prefers
+	// the MANAGER's pool over the store's own handle, so the guard's
+	// read must prefer it too. A store that carried both handles
+	// pointing at DIFFERENT databases would otherwise have its write
+	// land in one database and its package check read the other — and an
+	// ordinary row in the write's database could be refused because a
+	// DIFFERENT database holds a package with the same id.
 	var guardQuery packageQuery
 	switch {
-	case s.DB != nil:
-		guardQuery = s.DB.Query
 	case s.DM != nil:
 		guardQuery = s.DM.QueryTracked
+	case s.DB != nil:
+		guardQuery = s.DB.Query
 	default:
 		return fmt.Errorf("memory store: no database handle")
 	}
@@ -3612,7 +3621,22 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 	// assignments). Skipped when embedding is nil — there's nothing new
 	// to cluster on.
 	if embedding != nil {
-		if _, assignErr := AssignToCluster(s.DB.DB, id, embedding, ""); assignErr != nil {
+		// The cluster re-assignment runs on the same handle the write
+		// used. `s.DB.DB` would dereference a nil handle on the
+		// DM-backed / DB-nil shape, which is a shape the write path
+		// supports and the pre-change code reached.
+		var assignErr error
+		switch {
+		case s.DB != nil:
+			_, assignErr = AssignToCluster(s.DB.DB, id, embedding, "")
+		case s.DM != nil:
+			// `s.DM` is the CoreDB interface; the node-aware form
+			// needs the concrete manager, so it is asserted here.
+			if dm, ok := s.DM.(*DatabaseManager); ok {
+				_, assignErr = AssignToClusterNode(dm, dm, id, embedding, "")
+			}
+		}
+		if assignErr != nil {
 			slog.Warn("MemoryStore.UpdateMemory: IVF re-assignment failed (memory still searchable via brute-force)",
 				"memory_id", id, "error", assignErr.Error())
 		}

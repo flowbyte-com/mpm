@@ -70,6 +70,20 @@
 // comparison has no such blind spot: it reads the one key it cares about
 // and nothing else.
 //
+// THE TYPE IS PART OF THE VALUE
+// -----------------------------
+// The comparison reads the key's TYPE as well as its value, because
+// SQLite's `json_extract` returns SQL NULL for two different states —
+// an ABSENT path and a path whose value is JSON null — and because a
+// text "1" and a number 1 are different values that render alike.
+//
+// A protected key whose stored value is neither absent nor a STRING is a
+// MALFORMED row: the contract's own comparison cannot be made precisely
+// on it (two distinct JSON numbers can be the same float64, and an object
+// compares as its serialised text). A malformed row is refused outright
+// — every patch on it is refused — because the alternative is to reason
+// about a value the contract does not describe.
+//
 // THE VOCABULARY
 // --------------
 // The refusal has its OWN code, `package_metadata_immutable`, distinct from
@@ -82,7 +96,6 @@
 package internal
 
 import (
-	"bytes"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -151,19 +164,40 @@ func (e *PackageMetadataImmutableError) Error() string {
 // recognises the refusal through any number of wrapping layers.
 func (e *PackageMetadataImmutableError) Unwrap() error { return ErrPackageMetadataImmutable }
 
+// The guard runs against the substrate's OWN executor abstraction, DBNode.
+//
+// DBNode is the shape every transaction in this substrate is reached
+// through — `DatabaseManager.WithTx` hands one out, and `txNode` is the
+// transaction-backed implementation of it. Using it here means the guard
+// is written against the substrate's transaction discipline rather than
+// against a private abstraction of its own.
+//
+// The guard MUST run inside the transaction that carries the patch's
+// UPDATE. That is what makes the refusal atomic with the write: the check
+// and the write share ONE snapshot, so a package row that appears after
+// the check cannot be seen by the write either — SQLite refuses to
+// promote a stale snapshot to a write — and the write cannot land on a
+// state the check did not see.
+//
+// The statements therefore run on the TRANSACTION, never on the pool:
+// there is no pool path here to lose a write on, which is why this is a
+// transaction primitive and not a pool-write primitive.
+
 // guardPackageMetadataPatch refuses a metadata patch that would change a
 // protected key of a packaged skill.
 //
-// It runs INSIDE the caller's transaction, before the UPDATE, so the check
-// and the write it guards share ONE snapshot. A package row that appears
-// after the check cannot be seen by the write either — SQLite refuses to
-// promote a stale snapshot to a write — so the write cannot land on a
-// state the check did not see. The refusal is therefore fail closed.
+// It runs INSIDE the caller's transaction, before the UPDATE, so the
+// refusal is FAIL CLOSED: not the metadata, not the timestamp, not the FTS
+// index.
 //
 // A row with no package row is returned immediately — there is nothing to
-// guard, and the legacy behaviour is preserved exactly.
-func guardPackageMetadataPatch(tx *sql.Tx, id string, patchJSON string) error {
-	pkg, err := lookupSkillPackageWith(tx.Query, id)
+// guard, and the legacy behaviour is preserved exactly. So is a row the
+// patch's own UPDATE would not touch: the UPDATE excludes tombstoned rows,
+// so the guard's row read excludes them too, and a patch against a
+// soft-deleted row keeps its pre-guard behaviour (the UPDATE reports the
+// row as not found).
+func guardPackageMetadataPatch(tx DBNode, id string, patchJSON string) error {
+	pkg, err := lookupSkillPackageWith(tx.QueryTracked, id)
 	if err != nil {
 		return err
 	}
@@ -202,6 +236,19 @@ type packageMetadataValue struct {
 	Value any
 }
 
+// absent reports whether the key is not in the document at all.
+func (v packageMetadataValue) absent() bool { return !v.Type.Valid }
+
+// malformed reports whether the key holds a value the contract does not
+// describe: present, and not a string.
+//
+// A protected key is a version string or a hex digest. Anything else is a
+// corrupt row, and the guard refuses it outright rather than reason about
+// a value it cannot compare precisely.
+func (v packageMetadataValue) malformed() bool {
+	return v.Type.Valid && v.Type.String != "text"
+}
+
 // equal reports whether two extracted values are the same value.
 //
 // The comparison is type-aware: SQLite's `json_extract` returns an
@@ -238,9 +285,22 @@ func packageMetadataScalarEqual(a, b any) bool {
 		return ok && av == bv
 	case []byte:
 		bv, ok := b.([]byte)
-		return ok && bytes.Equal(av, bv)
+		return ok && bytesEqual(av, bv)
 	}
 	return reflect.DeepEqual(a, b)
+}
+
+// bytesEqual compares two byte slices.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // protectedPackageMetadataChange reports whether the patch would change
@@ -255,11 +315,17 @@ func packageMetadataScalarEqual(a, b any) bool {
 // A patch that replaces the metadata document with something that is not an
 // object (an array, a scalar) destroys every protected key the row carried,
 // so that counts as a change too — and is reported the same way.
-func protectedPackageMetadataChange(tx *sql.Tx, id string, patchJSON string) (string, bool, error) {
+func protectedPackageMetadataChange(tx DBNode, id string, patchJSON string) (string, bool, error) {
 	for _, key := range packageProtectedMetadataKeys {
 		before, after, err := packageMetadataKeyValues(tx, id, patchJSON, key)
 		if err != nil {
 			return "", false, err
+		}
+		if before.malformed() {
+			// A corrupt protected key: the contract's comparison
+			// cannot be made precisely on it, so the row is refused
+			// outright.
+			return key, true, nil
 		}
 		if !before.equal(after) {
 			return key, true, nil
@@ -276,12 +342,16 @@ func protectedPackageMetadataChange(tx *sql.Tx, id string, patchJSON string) (st
 // that same document with the patch applied, exactly as the UPDATE will
 // compute it.
 //
+// The row read mirrors the UPDATE's own predicate (`deleted_at IS NULL`),
+// so a tombstoned row is not guarded: the UPDATE will not touch it, and
+// the patch keeps its pre-guard behaviour.
+//
 // The key's JSON path is BOUND as a parameter, not interpolated, so the
 // statement is a constant and the path cannot escape it.
-func packageMetadataKeyValues(tx *sql.Tx, id, patchJSON, key string) (packageMetadataValue, packageMetadataValue, error) {
+func packageMetadataKeyValues(tx DBNode, id, patchJSON, key string) (packageMetadataValue, packageMetadataValue, error) {
 	path := "$." + key
 	var before, after packageMetadataValue
-	err := tx.QueryRow(`
+	err := tx.QueryRowTracked(`
 		SELECT
 			json_type(doc, ?),
 			json_extract(doc, ?),
@@ -290,13 +360,13 @@ func packageMetadataKeyValues(tx *sql.Tx, id, patchJSON, key string) (packageMet
 		FROM (
 			SELECT COALESCE(metadata, '{}') AS doc
 			FROM memories
-			WHERE id = ?
+			WHERE id = ? AND deleted_at IS NULL
 		)
 	`, path, path, patchJSON, path, patchJSON, path, id).Scan(
 		&before.Type, &before.Value, &after.Type, &after.Value,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		// No row: the UPDATE will report it. Nothing to guard.
+		// No live row: the UPDATE will not touch it. Nothing to guard.
 		return before, after, nil
 	}
 	if err != nil {

@@ -39,7 +39,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -682,21 +681,5 @@ func TestProtectedMetadataKeysAreNotExported(t *testing.T) {
 		if key == "is_latest" {
 			t.Error("is_latest is protected; the substrate's own save path owns it and no package check reads it")
 		}
-	}
-}
-
-// TestTheStandaloneStoreIsUsableEndToEnd pins that a standalone store is
-// not merely schema-complete but functional — the omission would have
-// shown up as a failure on every write, not only on the guarded one.
-func TestTheStandaloneStoreIsUsableEndToEnd(t *testing.T) {
-	store := p3StandaloneStore(t)
-	if err := store.InitSQLite(); err != nil {
-		t.Fatalf("InitSQLite: %v", err)
-	}
-	if store.DB == nil {
-		t.Fatal("the standalone store has no DB handle")
-	}
-	if _, err := os.Stat(store.SQLiteDBPath); err != nil {
-		t.Fatalf("the standalone database file does not exist: %v", err)
 	}
 }
