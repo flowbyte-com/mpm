@@ -397,10 +397,13 @@ Numbered, and each one is a real thing a reader could get wrong.
    removes all three at once — which is why the contract test pins the
    separator's presence and the refusal's behaviour rather than the
    implementation.
-10. **The namespace's `/usr` is read-only but present.** A binary in `/usr` is
-    executable inside the sandbox. That is deliberate (the reviewer must run
-    the tests) and it is a capability: the reviewer can execute the host's
-    toolchain, but only over the sandbox's own tree, with no network.
+10. **The namespace's runtime is read-only but present.** A binary in `/usr` — or in
+    the host's toolchain, wherever the host keeps it — is executable inside the
+    sandbox. That is deliberate (the reviewer must run the tests) and it is a
+    capability: the reviewer can execute the host's toolchain, but only over the
+    sandbox's own tree, with no network. The toolchain's discovery is **host-side**
+    and the model contributes nothing to it, but it is a grant of "the operator's
+    own compiler", not a narrowing of the sandbox.
 11. **The operator's username and home path are disclosed as METADATA.** The
     namespace's own mount table records the host path of every mount it was
     given, so a reviewer that reads `/proc/self/mountinfo` learns the base's
