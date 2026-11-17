@@ -219,24 +219,59 @@ def operator_home() -> Path | None:
         return None
 
 
+def env_home() -> Path | None:
+    """`$HOME`, if it is set.
+
+    Consulted as an ADDITION to the passwd home, never as a replacement
+    for it: an attacker who sets `HOME=/tmp/attacker` therefore ADDS
+    protected roots and removes none.
+    """
+    value = os.environ.get("HOME")
+    return Path(value) if value else None
+
+
+def home_roots() -> list[Path]:
+    """The homes THEMSELVES.
+
+    A sandbox base may not BE the operator's home — the home holds
+    everything — but it may live inside a part of it that is not
+    sensitive.  The plugin puts the sandbox in the operator's own cache
+    directory, and a guard that refused every base inside the home
+    would refuse the one the plugin actually uses: the tool would then
+    never run at all, which is a failure dressed as a safeguard.
+
+    What is protected inside the home is the SENSITIVE part of it —
+    the credentials, the keys, the private configuration and the
+    substrate's own runtime root — and those are what
+    `protected_roots` lists.
+    """
+    roots: list[Path] = []
+    for home in (operator_home(), env_home()):
+        if home is not None:
+            roots.append(home)
+    return roots
+
+
 def protected_roots(extra: list[Path] | None = None) -> list[Path]:
-    """Every directory a sandbox base must never resolve inside."""
+    """Every directory a sandbox base must never resolve inside.
+
+    The list is built from the PASSWD DATABASE.  `$HOME` is
+    agent-influenceable: an environment variable that decides what is
+    protected is not a security authority, because the agent can set
+    it.  The passwd entry cannot be set by the agent, so it is the
+    authority here.
+    """
     roots: list[Path] = []
 
-    home = operator_home()
-    if home is not None:
-        roots.append(home)
+    for home in (operator_home(), env_home()):
+        if home is None:
+            continue
         for name in PROTECTED_HOME_SUBDIRS:
             roots.append(home / name)
         # A checkout is usually under the home, but it does not have to
         # be: protect the conventional source roots too.
         for name in ("src", "projects", "code", "work", "dev"):
             roots.append(home / name)
-
-    # `$HOME` as well — as an ADDITION, never as a replacement.
-    env_home = os.environ.get("HOME")
-    if env_home:
-        roots.append(Path(env_home))
 
     roots.extend(Path(p) for p in PROTECTED_SYSTEM_DIRS)
     if extra:
@@ -307,6 +342,20 @@ def resolve_base(base: Path, extra_protected: list[Path] | None = None) -> Path:
             raise refuse(f"refusing to sandbox {resolved}: it is a protected directory")
         if _is_within(resolved, root_resolved):
             raise refuse(f"refusing to sandbox {resolved}: it is inside {root_resolved}")
+
+    # The homes THEMSELVES: a base may not BE the home.  It may live
+    # inside a part of it that is not sensitive — the plugin's own
+    # default base is under the operator's cache directory, and refusing
+    # it would make the tool permanently unusable.
+    for root in home_roots():
+        try:
+            root_resolved = Path(os.path.realpath(root))
+        except OSError:
+            root_resolved = root
+        if resolved == root_resolved:
+            raise refuse(
+                f"refusing to sandbox {resolved}: it is the operator's home"
+            )
 
     for marker in LIVE_MARKERS:
         if marker in resolved.parts:

@@ -93,6 +93,7 @@ def _load(path: Path, name: str):
 
 
 installer = _load(INSTALLER, "install_reviewer_agent")
+sandbox_module = _load(SANDBOX_SCRIPT, "reviewer_bwrap")
 
 
 def registry_tools() -> set[str]:
@@ -440,6 +441,29 @@ class ReviewerPluginWiringTest(unittest.TestCase):
                 f"the tool has an unsandboxed mode named {forbidden}",
             )
 
+    def test_the_default_base_is_one_the_sandbox_accepts(self) -> None:
+        """The plugin's default base must pass the sandbox's own guard.
+
+        The plugin resolves the base under the operator's own cache
+        directory — which is inside the operator's home.  The sandbox
+        refuses a base that is inside a protected root, and the home
+        holds the credentials and the live runtime root, so the two
+        must agree: a base the plugin chooses must be a base the
+        sandbox will actually run in.  A disagreement would make the
+        tool permanently refuse, which reads as a safeguard and is
+        the opposite.
+        """
+        source = PLUGIN_SANDBOX.read_text(encoding="utf-8")
+        self.assertIn('".cache"', source)
+        self.assertIn('"mpm-opencode"', source)
+        self.assertIn('"review-sandbox"', source)
+
+        home = sandbox_module.operator_home()
+        self.assertIsNotNone(home)
+        base = home / ".cache" / "mpm-opencode" / "review-sandbox"
+        resolved = sandbox_module.resolve_base(base)
+        self.assertEqual(resolved, base)
+
     def test_the_install_flow_stages_the_sandbox(self) -> None:
         """The staged runtime package carries the sandbox script."""
         text = INSTALL_SH.read_text(encoding="utf-8")
@@ -529,15 +553,42 @@ class ReviewerSandboxScriptTest(unittest.TestCase):
         self.assertIsNotNone(home, "the passwd database yielded no home")
         roots = self.sandbox.protected_roots()
         self.assertIn(
-            home,
-            roots,
-            "the operator's home is not in the protected set",
-        )
-        self.assertIn(
             home / ".mpm",
             roots,
             "the live runtime root is not in the protected set",
         )
+        self.assertIn(
+            home / ".ssh",
+            roots,
+            "the credentials are not in the protected set",
+        )
+        self.assertIn(
+            home / ".config",
+            roots,
+            "the private configuration is not in the protected set",
+        )
+
+    def test_the_plugin_default_base_is_accepted(self) -> None:
+        """The base the plugin actually uses must not be refused.
+
+        The plugin puts the sandbox in the operator's own cache
+        directory, which is inside the operator's home.  A guard that
+        refused every base inside the home would refuse the one the
+        tool uses, and the tool would then never run at all — a
+        failure dressed as a safeguard.
+        """
+        home = self.sandbox.operator_home()
+        self.assertIsNotNone(home)
+        base = home / ".cache" / "mpm-opencode" / "review-sandbox"
+        resolved = self.sandbox.resolve_base(base)
+        self.assertTrue(str(resolved).startswith(str(home)))
+
+    def test_the_home_itself_is_refused(self) -> None:
+        """The base may not BE the operator's home."""
+        home = self.sandbox.operator_home()
+        self.assertIsNotNone(home)
+        with self.assertRaises(self.sandbox.SandboxRefused):
+            self.sandbox.resolve_base(home)
 
     def test_a_forged_home_does_not_remove_the_protection(self) -> None:
         """Setting `HOME` to somewhere else must not UNPROTECT the home.
@@ -555,7 +606,16 @@ class ReviewerSandboxScriptTest(unittest.TestCase):
         os.environ["HOME"] = str(forged)
         try:
             roots = self.sandbox.protected_roots()
-            self.assertIn(real_home, roots)
+            self.assertIn(
+                real_home / ".mpm",
+                roots,
+                "forging HOME removed the live runtime root from the protected set",
+            )
+            self.assertIn(
+                real_home / ".ssh",
+                roots,
+                "forging HOME removed the credentials from the protected set",
+            )
             with self.assertRaises(self.sandbox.SandboxRefused):
                 self.sandbox.resolve_base(real_home / ".mpm")
         finally:
