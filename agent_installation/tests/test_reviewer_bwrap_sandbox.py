@@ -119,11 +119,13 @@ class ReviewerBwrapTest(unittest.TestCase):
         self.assertNotIn("--bind", args)
 
     def test_the_environment_is_cleared_and_then_set(self) -> None:
-        """`--clearenv` comes BEFORE the `--setenv` flags.
+        """`--clearenv` is emitted before the `--setenv` flags.
 
-        bubblewrap processes its arguments in order, so clearing after
-        setting would erase the very variables the sandbox exists to
-        isolate — and the reviewer would inherit the operator's
+        bubblewrap CLEARS the environment first and then applies the
+        `--setenv` variables, whatever order the two appear in — so the
+        order here is not what makes it work, it is what makes it READ
+        correctly.  What matters is that the environment IS cleared:
+        without it the reviewer would inherit the operator's
         environment, API keys included.
         """
         args = sandbox.bwrap_args(self.tree, self.fds)
@@ -139,6 +141,45 @@ class ReviewerBwrapTest(unittest.TestCase):
             ("MPM_WORKSPACE", f"{sandbox.PREFIX}/workspace"),
         ):
             self.assertIn(value, args, f"{key} is not the disposable one")
+
+    def test_the_host_toolchain_is_bound_read_only(self) -> None:
+        """The toolchain is bound READ-ONLY, from wherever the host keeps it.
+
+        The static runtime list is the SYSTEM's toolchain, which lives
+        under /usr on a conventional install.  A host that keeps it
+        elsewhere — a CI runner's hosted tool cache — would otherwise
+        give the reviewer no compiler, and the review would quietly
+        degrade to reading code.
+        """
+        args = sandbox.bwrap_args(self.tree, self.fds)
+        for root in sandbox.toolchain_roots():
+            index = args.index(str(root))
+            self.assertEqual(
+                args[index - 1],
+                "--ro-bind",
+                f"the toolchain bind for {root} is not read-only",
+            )
+            self.assertIn(
+                f"{root}/bin",
+                sandbox.sandbox_path(),
+                f"the sandbox's PATH does not reach the toolchain at {root}",
+            )
+
+    def test_a_toolchain_root_inside_a_protected_root_is_refused(self) -> None:
+        """A hostile PATH must not point the sandbox at the operator's keys.
+
+        The discovery is host-side, but the HOST's PATH is not a
+        security authority either: a root that resolves inside a
+        protected directory is not bound.
+        """
+        home = sandbox.operator_home()
+        if home is None:
+            self.skipTest("the passwd database yielded no home")
+        hostile = home / ".ssh" / "toolchain"
+        self.assertTrue(
+            sandbox._is_protected_path(hostile),
+            "a path inside the operator's credentials is not protected",
+        )
 
     def test_the_network_and_the_privileges_are_dropped(self) -> None:
         """No network, no shared namespaces, no surviving parent."""

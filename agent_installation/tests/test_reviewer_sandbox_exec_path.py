@@ -371,10 +371,19 @@ class ReviewerExecutionPathTest(unittest.TestCase):
         self.assertIn("/sandbox/workspace", result["stdout"])
 
     def test_the_toolchain_is_present(self) -> None:
-        """A review can still run the tests."""
-        result = self.invocation.run(["/usr/local/go/bin/go", "version"])
-        if result["code"] != 0 and "not found" in result["stderr"]:
-            self.skipTest("the Go toolchain is not installed on this host")
+        """A review can still run the tests.
+
+        The toolchain is bound READ-ONLY from wherever the HOST keeps
+        it — `/usr` on a conventional install, a hosted tool cache on a
+        CI runner — and the sandbox's PATH points at it.  A host with
+        no Go toolchain has nothing to bind, so the assertion is
+        SKIPPED there rather than failed: the property under test is
+        "the toolchain the host has is runnable inside", not "every
+        host has one".
+        """
+        if shutil.which("go") is None:
+            self.skipTest("this host has no Go toolchain to bind")
+        result = self.invocation.run(["/bin/sh", "-c", "go version"])
         self.assertEqual(result["code"], 0, result["stderr"])
         self.assertIn("go version", result["stdout"])
 

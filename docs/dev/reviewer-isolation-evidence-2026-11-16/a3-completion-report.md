@@ -107,6 +107,7 @@ mount namespace. Inside it:
 | thing | state inside the namespace | why it matters |
 |---|---|---|
 | `/usr`, `/usr/local` | bound **read-only** | a writable runtime is not confinement |
+| the host's **toolchain**, wherever the host keeps it | bound **read-only**, and the sandbox's `PATH` points at it | the static list is the *system's* toolchain; a host that keeps its toolchain elsewhere — a CI runner's hosted tool cache — would otherwise give the reviewer no compiler, and the review would quietly degrade to reading code. The discovery is **host-side** (the script reads the host's own `PATH`, before the namespace exists), and a root that resolves inside a protected root, or under a path the namespace mounts fresh, is **not** bound |
 | `/sandbox/repo` | the **disposable copy** of the repository under review, read-write | the operator's checkout is never the writable tree |
 | `/sandbox/home`, `/sandbox/tmp`, `/sandbox/workspace`, `/sandbox/findings` | the reviewer's own scratch, read-write | `HOME`, `TMPDIR` and `MPM_WORKSPACE` point inside |
 | `/etc` | **synthetic**: a passwd and a group file naming `reviewer`, and a copy of the host's `alternatives` symlinks | the operator's account database, the trust store at `/etc/ssl` and the private keys under `/etc/ssl/private` are **not readable** |
@@ -209,7 +210,7 @@ The same probe against the hardened script: **refused**, and nothing ran.
 |---|---|---|
 | `cat /sandbox/repo/README.md` | **succeeds** | the reviewer's job is to read the code under review; the copy is disposable and the operator's checkout is not the writable tree |
 | write into `/sandbox/findings` | **succeeds** | the findings have to go somewhere, and that somewhere is the reviewer's own tree |
-| `go version`, `python3 -V`, `git --version`, `cc --version` | **succeed** | the toolchain is bound read-only so a review can still run the tests |
+| `go version`, `python3 -V`, `git --version`, `cc --version` | **succeed** | the toolchain is bound read-only so a review can still run the tests — from wherever the **host** keeps it, not only from `/usr` |
 | the Go module cache | **absent** | a build needing an uncached dependency fails; that is the disclosed cost, not a hole |
 | read `/proc/self/mountinfo` | **succeeds** | it discloses the **host path of every mount the namespace was given**, and therefore the operator's username and home path. Those paths are **not bound**, so nothing there can be read through them: it is metadata about the host, not access to it. Residual risk 11 states it; the alternative — giving up the descriptor binding, or the base's location — would cost more than the disclosure is worth |
 
@@ -274,24 +275,38 @@ The branch head is pushed to `github` and CI is run on it by the
 every pull request, whatever its base).
 
 **What CI caught, and what it was.** The first run of the implementation
-head **failed**, in two jobs, and the failure was real and worth stating:
-the canonical runtime payload manifest (`scripts/runtime_payloads.json`)
-— the declaration the updater and the shell staging both read — did not
-list the two new files, `dist/sandbox-exec.js` and
-`scripts/reviewer_bwrap.py`. The staged package therefore carried an
-entrypoint with an **unresolved import** (`dist/index.v2.js ->
-./sandbox-exec.js`): the plugin the installer would have shipped **loads
-nothing**, silently. The manifest, the adapter's own
-`OPENCODE_RUNTIME_MANIFEST`, the shell-side manifest constant and the Go
-fixture that stages a package were all brought into agreement, and the
-fixture now **emits** `dist/sandbox-exec.js` and **imports** it from the
-entrypoint, so the shape that failed in CI is the shape the fixture
-reproduces.
+head **failed**, in two jobs, and both failures were real:
 
-> A green local suite did not catch it, because the local tree had a
-> built `dist/` and the fixture did not model the new import. A gate that
-> only tests what is already true is decoration; this one now tests the
-> shape that broke.
+1. **The staged package carried an unresolved import.** The canonical
+   runtime payload manifest (`scripts/runtime_payloads.json`) — the
+   declaration the updater and the shell staging both read — did not list
+   the two new files, `dist/sandbox-exec.js` and
+   `scripts/reviewer_bwrap.py`. The staged package therefore carried an
+   entrypoint with an **unresolved import** (`dist/index.v2.js ->
+   ./sandbox-exec.js`): the plugin the installer would have shipped
+   **loads nothing**, silently. The manifest, the adapter's own
+   `OPENCODE_RUNTIME_MANIFEST`, the shell-side manifest constant and the
+   Go fixture that stages a package were all brought into agreement, and
+   the fixture now **emits** `dist/sandbox-exec.js` and **imports** it
+   from the entrypoint, so the shape that failed in CI is the shape the
+   fixture reproduces.
+2. **The sandbox's runtime binding was too narrow.** The execution-path
+   test asserted that the Go toolchain is runnable inside the namespace,
+   and it hard-coded `/usr/local/go/bin/go`. On a CI runner the toolchain
+   lives in the runner's hosted tool cache, which the sandbox did not
+   bind — so the assertion failed with `execvp /usr/local/go/bin/go: No
+   such file or directory`. The finding was not the test: it was the
+   **sandbox**, which gave the reviewer no compiler on any host whose
+   toolchain is not under `/usr`. The toolchain is now **discovered on
+   the host** and bound read-only, and the test asserts the property that
+   is actually guaranteed — *the toolchain the host has is runnable
+   inside* — skipping only on a host that has none.
+
+> A green local suite did not catch either one. The local tree had a
+> built `dist/` and a toolchain under `/usr/local`; the fixtures did not
+> model the new import, and the test baked in the operator's own layout.
+> A gate that only tests what is already true is decoration; both of
+> these now test the shapes that broke.
 
 | head | what it carries | the run |
 |---|---|---|

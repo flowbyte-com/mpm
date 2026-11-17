@@ -117,6 +117,29 @@ RUNTIME_DIRS = (
     "/usr/local",
 )
 
+# The toolchain a review may need, DISCOVERED on the host.
+#
+# `RUNTIME_DIRS` above is the SYSTEM's toolchain, which on a
+# conventional install lives under /usr.  A host that keeps its
+# toolchain elsewhere — a CI runner's hosted tool cache, for instance
+# — would otherwise give the reviewer no compiler at all, and the
+# review would quietly degrade to reading code and guessing.
+#
+# So the script discovers the toolchain on the HOST and binds it
+# READ-ONLY.  This is a HOST-SIDE decision: the script runs before the
+# namespace exists, on the host's own PATH, and the model contributes
+# nothing to it.  A discovered root is refused if it resolves inside a
+# protected root, exactly like the base.
+TOOLCHAIN_PROGRAMS = ("go",)
+
+# The paths the namespace mounts FRESH.  A bind under one of them is
+# either masked by the fresh mount (the private `/tmp`) or cannot be
+# resolved at all (the source would be looked up inside the fresh
+# mount).  So a toolchain under one of them is not bound: the reviewer
+# simply has no compiler there, which is a limitation rather than a
+# failure.
+FRESH_MOUNT_PATHS = ("/tmp", "/proc", "/dev", "/sys")
+
 # The merged-usr symlinks a modern Ubuntu uses.
 MERGED_SYMLINKS = {
     "/bin": "usr/bin",
@@ -699,6 +722,95 @@ def close_tree(fds: dict) -> None:
             pass
 
 
+def _is_protected_path(path: Path) -> bool:
+    """Is this path inside a protected root?
+
+    The same question the base is asked, asked of the toolchain roots
+    the sandbox discovers: a hostile PATH must not be able to point the
+    sandbox at the operator's keys.
+    """
+    try:
+        resolved = Path(os.path.realpath(path))
+    except OSError:
+        return True
+    for root in protected_roots():
+        try:
+            root_resolved = Path(os.path.realpath(root))
+        except OSError:
+            root_resolved = root
+        if resolved == root_resolved or _is_within(resolved, root_resolved):
+            return True
+    return False
+
+
+def toolchain_roots() -> list[Path]:
+    """The host's toolchain roots, discovered on the HOST's PATH.
+
+    A root qualifies when it holds a `bin` directory with the tool in
+    it — the binding is what makes the tool runnable inside the
+    namespace.  A root the static runtime list already covers is not
+    returned: binding it twice is noise, and the static bind is
+    already there.
+
+    The discovery is HOST-SIDE.  The model contributes nothing to it:
+    the script reads the host's own environment, before the namespace
+    exists, and binds what it finds READ-ONLY.
+    """
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    candidates: list[Path] = []
+    goroot = os.environ.get("GOROOT")
+    if goroot:
+        candidates.append(Path(goroot))
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        for program in TOOLCHAIN_PROGRAMS:
+            candidate = Path(directory) / program
+            try:
+                if not candidate.is_file() or not os.access(candidate, os.X_OK):
+                    continue
+                resolved = Path(os.path.realpath(candidate))
+            except OSError:
+                continue
+            # `<root>/bin/<program>`  ->  `<root>`
+            candidates.append(resolved.parent.parent)
+
+    for root in candidates:
+        try:
+            resolved = Path(os.path.realpath(root))
+        except OSError:
+            continue
+        if not resolved.is_dir() or not (resolved / "bin").is_dir():
+            continue
+        if any(_is_within(resolved, Path(base)) for base in RUNTIME_DIRS):
+            continue  # the static runtime list already binds it
+        if any(_is_within(resolved, Path(fresh)) for fresh in FRESH_MOUNT_PATHS):
+            continue  # the namespace mounts these fresh: a bind there is masked
+        if _is_protected_path(resolved):
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots
+
+
+def sandbox_path() -> str:
+    """The PATH inside the namespace.
+
+    The static entries first, then the discovered toolchain's own `bin`
+    directory: a host whose Go lives elsewhere still gets a `go` the
+    reviewer can run.
+    """
+    entries = ["/usr/local/go/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    for root in toolchain_roots():
+        entries.insert(0, f"{root}/bin")
+    return ":".join(entries)
+
+
 def bwrap_args(tree: dict, fds: dict | None = None) -> list:
     """The bwrap argument list: a minimal, writable-only-where-needed root.
 
@@ -710,6 +822,10 @@ def bwrap_args(tree: dict, fds: dict | None = None) -> list:
     for path in RUNTIME_DIRS:
         if os.path.exists(path):
             args += ["--ro-bind", path, path]
+    # The host's toolchain, wherever the host keeps it: READ-ONLY, and
+    # only when it is not already covered by the static list.
+    for root in toolchain_roots():
+        args += ["--ro-bind", str(root), str(root)]
     for link, target in MERGED_SYMLINKS.items():
         if os.path.islink(link):
             args += ["--symlink", target, link]
@@ -742,7 +858,7 @@ def bwrap_args(tree: dict, fds: dict | None = None) -> list:
         "--setenv", "GOMODCACHE", f"{PREFIX}/tmp/gomodcache",
         "--setenv", "GOPROXY", "off",
         "--setenv", "GOFLAGS", "-mod=mod",
-        "--setenv", "PATH", "/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin",
+        "--setenv", "PATH", sandbox_path(),
         "--setenv", "TERM", "dumb",
         "--setenv", "LANG", "C.UTF-8",
     ]
