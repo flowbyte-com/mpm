@@ -3477,6 +3477,33 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 		}
 	}
 
+	// ── The package guard (R1, on this path) ─────────────────────────────
+	//
+	// This is the same single-document IN-PLACE replacement the legacy
+	// force path performs, reached by a different door: it replaces
+	// `memories.content` — and the whole metadata column — under the
+	// same id. For a skill that owns a package that would give one id two
+	// documents: `read` would return the new body while `read_file`
+	// returned the old bytes, `projection_sha256` would stop describing
+	// `memories.content`, and the package row, the file rows and the blobs
+	// would all still describe the previous document.
+	//
+	// So the refusal is the SAME one the legacy force path raises, with
+	// the SAME classification (`package_immutable`), and it is FAIL
+	// CLOSED: not the content, not the metadata, not the embedding, not
+	// the content hash, not the timestamps, and not the cluster
+	// re-assignment below.
+	//
+	// The check and the write are ONE atomic statement: the guard's
+	// condition is folded into the UPDATE's own WHERE clause below, so a
+	// package row that appears between the check and the write cannot let
+	// the overwrite through.
+	if pkg, err := lookupSkillPackageWith(s.DB.Query, id); err != nil {
+		return err
+	} else if pkg != nil {
+		return &PackageImmutableError{SkillID: id, Name: pkg.name, Version: pkg.version}
+	}
+
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
 	embedding, embedErr := EmbedText(content)
@@ -3491,6 +3518,7 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 
 	var execErr error
+	var res sql.Result
 	if embedding != nil {
 		embeddingJSON, _ := json.Marshal(embedding)
 		// Record the generating model alongside the vector. A dimension
@@ -3498,23 +3526,38 @@ func (s *MemoryStore) UpdateMemory(id string, content string, tags []string, met
 		// share a dimension while producing incomparable spaces — so the
 		// fingerprint must name the model, not just measure the vector.
 		fp := CurrentEmbeddingFingerprint()
-		_, execErr = s.execTracked(`UPDATE memories
+		res, execErr = s.execTracked(`UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
 			    embedding_source = ?, embedding_dimension = ?, embedding_model = ?,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?`, 5,
+			WHERE id = ?
+			  AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)`, 5,
 			content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash,
-			"provider", len(embedding), fp.Model, id)
+			"provider", len(embedding), fp.Model, id, id)
 	} else {
 		// Embedding not regenerated — preserve the existing column.
-		_, execErr = s.execTracked(`UPDATE memories
+		res, execErr = s.execTracked(`UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, content_hash = ?,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
-			WHERE id = ?`, 5,
-			content, string(tagsJSON), string(metadataJSON), contentHash, id)
+			WHERE id = ?
+			  AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)`, 5,
+			content, string(tagsJSON), string(metadataJSON), contentHash, id, id)
 	}
 	if execErr != nil {
 		return execErr
+	}
+
+	// A zero-row update is either the refusal — a package row appeared
+	// between the guard and the write — or the pre-existing no-op for an
+	// id that matches no row. The refusal is distinguished from the
+	// no-op, and the no-op keeps its existing behaviour: this path has
+	// never reported a missing id as an error.
+	if affected, aerr := res.RowsAffected(); aerr == nil && affected == 0 {
+		if pkg, err := lookupSkillPackageWith(s.DB.Query, id); err != nil {
+			return err
+		} else if pkg != nil {
+			return &PackageImmutableError{SkillID: id, Name: pkg.name, Version: pkg.version}
+		}
 	}
 
 	// Re-assign to nearest cluster after embedding change. Best-effort

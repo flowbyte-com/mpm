@@ -4842,6 +4842,31 @@ func (dm *DatabaseManager) UpdateMemoryMetadata(id string, patchJSON string) err
 // supplied transaction. Exposed as a helper so callers that already own a
 // transaction (e.g., ChallengeMemory) can join it without opening a second one.
 func updateMemoryMetadataTx(tx *sql.Tx, id string, patchJSON string) error {
+	// ── The package metadata guard ──────────────────────────────────────
+	//
+	// A packaged skill's projection carries two metadata keys that are
+	// part of the package's identity, integrity and versioning contract:
+	// `version` (which the package verification compares with the package
+	// row's version and the version the skill id names) and
+	// `content_hash` (the projection's own content hash, which is the same
+	// value the manifest records as `projection_sha256`).
+	//
+	// This path merges an arbitrary JSON patch into the metadata column,
+	// so without the guard it could rewrite either of them — producing
+	// exactly the contradictory integrity state the package contract
+	// forbids, through a path that has no authority over the package.
+	//
+	// The guard is NARROW: it refuses only a patch that would CHANGE one
+	// of those two keys, and only for a row that owns a package. Every
+	// other key on every row stays exactly as patchable as it was.
+	//
+	// It runs inside this transaction, before the UPDATE, so the refusal
+	// is FAIL CLOSED: not the metadata, not the timestamp, not the FTS
+	// index.
+	if err := guardPackageMetadataPatch(tx, id, patchJSON); err != nil {
+		return err
+	}
+
 	// json_patch(NULL, '{}') returns NULL in SQLite, so COALESCE to {} is required.
 	// This ensures a NULL metadata field doesn't cause the patch to fail.
 	result, err := tx.Exec(`

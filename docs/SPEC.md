@@ -4472,6 +4472,42 @@ A skill with **no** package row is unaffected. `force=true` still overwrites an 
 
 The guard is transactionally safe: the check and the write share one transaction, and the `UPDATE` carries the guard's condition in its own `WHERE` clause, so the check and the write are one atomic statement even against a stale snapshot. There is no time-of-check/time-of-use window — a package row cannot appear between the check and the write.
 
+##### The refusal covers every single-document write path, not just the force path
+
+The refusal above guards `mpm save-skill --force` / `mpm skill add --force` / `mpm_skills save` with `force: true`. It also guards the two **public** single-document write paths, which perform the same in-place replacement under the same id and are reachable by any consumer holding a `CoreDB`:
+
+| path | what it replaces |
+|---|---|
+| `MemoryStore.UpdateMemory` | `memories.content`, the whole metadata column, the embedding and its provenance, the content hash and the timestamp |
+| `DatabaseManager.UpdateMemory` | the same set — it is a `CoreDB` interface method, so it is reachable by the MCP substrate wiring, the `mpm call` internals and any downstream implementation of the interface |
+
+Both raise the **same** refusal, with the same `package_immutable` classification, and both are fail closed: nothing is written — not the content, not the metadata, not the embedding, not the content hash, not the timestamps. The guard's condition is folded into each `UPDATE`'s own `WHERE` clause, exactly as in the force path, so the check and the write are one atomic statement.
+
+A skill with **no** package row is unaffected on every one of these paths: an ordinary skill and an ordinary memory are still updated in place, exactly as before.
+
+##### The package's metadata contract — `package_metadata_immutable`
+
+A packaged skill's projection row carries two metadata keys that are not decoration. They are the row's claims about the package, and they are part of its **identity**, **integrity** and **versioning** contract:
+
+| key | what it claims | who reads it |
+|---|---|---|
+| `version` | the package's effective version | the verification's `version_identity` check compares it with the package row's version and with the version the skill id names; the name→latest resolution reads it from the metadata |
+| `content_hash` | the projection's own content hash — the same SHA-256 the manifest records as `projection_sha256` | the skill read surfaces it for the dedup and drift checks |
+
+So the legacy metadata patch path — `mpm_memory`'s `patch` action, `mpm patch-memory`, and the epistemology handlers — may not change either of them on a packaged skill. It raises a refusal with its **own** code, `package_metadata_immutable`, classified as a conflict like `package_immutable` and countable apart from it.
+
+The refusal is **fail closed**: the guard runs inside the patch's own transaction, before the `UPDATE`, so not the metadata, not the timestamp and not the FTS index move.
+
+The guard is deliberately **narrow**, and the narrowness is part of the contract:
+
+- it applies **only** to a row that owns a package row. An ordinary memory and an ordinary (unpackaged) skill keep every metadata key they always had;
+- it applies **only** to the two keys above. A patch that touches any other key — `status`, `note`, `confidence`, anything — lands exactly as it always did;
+- it applies **only** when the patch would actually **change** the key. A patch that names a protected key with the value it already holds leaves the row identical and is permitted. A blanket prohibition on the key's mere presence would refuse writes that change nothing, which is a broader prohibition than the contract requires.
+
+`is_latest` is deliberately **not** protected: it is the substrate's own semver bookkeeping across a skill's versions, no package verification check reads it, and the substrate's own save path owns it. `author`, `promoted_at` and `decay_floor_days` are attribution and retention policy, not the package's identity.
+
+The comparison is made against the **patched** metadata, computed by SQLite itself with the same `json_patch` the `UPDATE` applies — so the guard reasons about the result the write will actually produce, with the engine's own merge semantics. A patch that replaces the metadata document with a non-object destroys every protected key the row carried, and is refused the same way.
+
 ##### Retention — skills are exempt from age-based pruning
 
 **The age-based prune (`mpm prune --older-than <n>d`) never removes a skill.** The exclusion is a `collection` filter on the delete statement itself (`SkillsExclusionClause`), so it protects **every** skill — packaged or not, in every version.

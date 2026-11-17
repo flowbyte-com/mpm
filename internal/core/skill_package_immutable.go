@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 )
@@ -61,6 +62,14 @@ type skillPackageIdentity struct {
 	version string
 }
 
+// packageQuery is the narrow read surface the package lookup needs.
+//
+// It is a FUNCTION rather than an interface so that every caller can supply
+// the read path it already has: a DBNode's QueryTracked, a transaction's
+// Query, or a bare *sql.DB's Query. The guard is shared by several write
+// paths, and each of them has a different handle.
+type packageQuery func(query string, args ...any) (*sql.Rows, error)
+
 // lookupSkillPackage reports whether a package row exists for the skill
 // id, and returns the package's name and version when it does.
 //
@@ -74,7 +83,22 @@ type skillPackageIdentity struct {
 // a soft-deleted (tombstoned) packaged skill still owns its package row,
 // and the refusal applies to it too.
 func lookupSkillPackage(node DBNode, skillID string) (*skillPackageIdentity, error) {
-	rows, err := node.QueryTracked(`
+	return lookupSkillPackageWith(node.QueryTracked, skillID)
+}
+
+// lookupSkillPackageWith is the transport-agnostic form of
+// lookupSkillPackage.
+//
+// It exists because the package guard is not only the legacy force path's:
+// it also guards the public single-document write paths (UpdateMemory) and
+// the legacy metadata patch path. Each of those holds a different handle —
+// a manager, a transaction, a bare pool — so the lookup takes the read
+// function rather than requiring one particular interface.
+//
+// The semantics are exactly lookupSkillPackage's: the same query, the same
+// "no package row" answer, and the same refusal for a tombstoned skill.
+func lookupSkillPackageWith(query packageQuery, skillID string) (*skillPackageIdentity, error) {
+	rows, err := query(`
 		SELECT name, version FROM skill_packages WHERE skill_id = ?
 	`, skillID)
 	if err != nil {

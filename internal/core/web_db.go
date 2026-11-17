@@ -471,6 +471,36 @@ func (dm *DatabaseManager) GetTopicTopMemories(topicID string, limit int) ([]Mem
 //     is preserved as-is (NOT overwritten with the literal string
 //     "null") so a previously-stored embedding survives.
 func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]interface{}, metadata map[string]interface{}) error {
+	// ── The package guard (R1, on this path) ─────────────────────────────
+	//
+	// This is the same single-document IN-PLACE replacement the legacy
+	// force path performs, reached by a different door: it replaces
+	// `memories.content` — and the whole metadata column — under the
+	// same id. For a skill that owns a package that would give one id two
+	// documents: `read` would return the new body while `read_file`
+	// returned the old bytes, `projection_sha256` would stop describing
+	// `memories.content`, and the package row, the file rows and the blobs
+	// would all still describe the previous document.
+	//
+	// So the refusal is the SAME one the legacy force path raises, with
+	// the SAME classification (`package_immutable`), and it is FAIL
+	// CLOSED: not the content, not the metadata, not the embedding, not
+	// the content hash, not the timestamps.
+	//
+	// The check and the write are ONE atomic statement: the guard's
+	// condition is folded into the UPDATE's own WHERE clause below, so a
+	// package row that appears between the check and the write cannot let
+	// the overwrite through.
+	db := dm.SQLDB()
+	if db == nil {
+		return fmt.Errorf("db not initialized")
+	}
+	if pkg, err := lookupSkillPackageWith(db.Query, id); err != nil {
+		return err
+	} else if pkg != nil {
+		return &PackageImmutableError{SkillID: id, Name: pkg.name, Version: pkg.version}
+	}
+
 	tagsJSON, _ := json.Marshal(tags)
 	metadataJSON, _ := json.Marshal(metadata)
 	embedding, embedErr := EmbedText(content)
@@ -497,14 +527,16 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 			SET content = ?, tags = ?, metadata = ?, embedding = ?, content_hash = ?,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ?
-		`, 5, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id)
+			  AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)
+		`, 5, content, string(tagsJSON), string(metadataJSON), string(embeddingJSON), contentHash, id, id)
 	} else {
 		res, err = dm.ExecTracked(`
 			UPDATE memories
 			SET content = ?, tags = ?, metadata = ?, content_hash = ?,
 			    updated_at = CAST(strftime('%s','now') AS INTEGER)
 			WHERE id = ?
-		`, 5, content, string(tagsJSON), string(metadataJSON), contentHash, id)
+			  AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)
+		`, 5, content, string(tagsJSON), string(metadataJSON), contentHash, id, id)
 	}
 	if err != nil {
 		return err
@@ -512,6 +544,15 @@ func (dm *DatabaseManager) UpdateMemory(id, content string, tags map[string]inte
 	if affected, err := res.RowsAffected(); err != nil {
 		return fmt.Errorf("update memory rows-affected: %w", err)
 	} else if affected == 0 {
+		// Nothing was updated. Either the row is gone, or a package row
+		// appeared between the guard and the write — in which case the
+		// guard fires and nothing was written. There is no third
+		// outcome.
+		if pkg, err := lookupSkillPackageWith(db.Query, id); err != nil {
+			return err
+		} else if pkg != nil {
+			return &PackageImmutableError{SkillID: id, Name: pkg.name, Version: pkg.version}
+		}
 		return fmt.Errorf("update memory: no row with id %s (not found, deleted, or expired)", id)
 	}
 	return nil
