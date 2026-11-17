@@ -522,12 +522,14 @@ STAGE_LIBRARY="${SCRIPT_DIR}/../scripts/stage_runtime_package.sh"
 OPENCODE_RUNTIME_MANIFEST=(
     server.js
     dist/index.v2.js
+    dist/sandbox-exec.js
     dist/wake-context.js
     dist/event-envelope.js
     dist/event-mapper.js
     dist/event-subscriber.js
     dist/workspace.js
     dist/resolve-mpm-binary.js
+    scripts/reviewer_bwrap.py
     package.json
 )
 
@@ -699,34 +701,46 @@ refresh_agents_md() {
 # Step 5: install the ISOLATED REVIEWER agent definition
 # --------------------------------------------------------------------------
 #
-# The reviewer's isolation from the production MPM substrate is enforced
-# by PERMISSION RULES in its agent definition, and those rules only
-# exist if the definition is INSTALLED. A definition that lives only in
-# the repository is not an isolation: a fresh install would have no
-# reviewer definition at all, and the isolation would be a document
-# rather than a mechanism.
+# The reviewer's isolation from the production substrate is enforced by
+# PERMISSION RULES in its agent definition, and those rules only exist
+# if the definition is INSTALLED. A definition that lives only in the
+# repository is not an isolation: a fresh install would have no reviewer
+# definition at all, and the isolation would be a document rather than a
+# mechanism.
 #
 # So the definition is installed here, from the canonical template, and
 # refreshed on every install. `--force` is used deliberately: the
 # installed copy is MPM-OWNED state, and a stale copy is exactly the
 # hazard (a weaker isolation in force than the one the repository
 # defines). The guard test
-# agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py
-# fails when the installed copy differs from the template.
+# agent_installation/tests/test_reviewer_isolation.py fails when the
+# installed copy differs from the template, and the installer itself
+# refuses to install a definition that does not satisfy the isolation
+# policy.
+#
+# THIS STEP FAILS CLOSED.  A deployment step that fails open is worse
+# than one that fails: it converts an error into a SILENT DOWNGRADE of
+# the guarantee — a reviewer that then runs with the parent's tool
+# surface, believing it is confined.  So a missing installer, a failed
+# install, or a failed VERIFICATION stops the install.
 
 install_reviewer_agent() {
     local installer="$SCRIPT_DIR/scripts/install_reviewer_agent.py"
     local target="$OPENCODE_CONFIG_DIR/agents/mpm-reviewer.md"
     if [ ! -f "$installer" ]; then
-        warn "reviewer agent installer missing at $installer; skipping"
-        return 0
+        err "reviewer agent installer missing at $installer"
+        err "  the reviewer's isolation would not be installed at all"
+        return 1
     fi
     if ! python3 "$installer" --target "$OPENCODE_CONFIG_DIR/agents" --force \
             >>"$INSTALL_LOG" 2>&1; then
-        warn "reviewer agent installation failed (see $INSTALL_LOG); continuing"
-        return 0
+        err "reviewer agent installation FAILED (see $INSTALL_LOG)"
+        err "  refusing to continue: an install that cannot install the"
+        err "  reviewer definition leaves a review subagent with the"
+        err "  parent's tool surface, believing it is confined"
+        return 1
     fi
-    log "isolated reviewer agent installed at $target"
+    log "isolated reviewer agent installed and verified at $target"
 }
 
 # --------------------------------------------------------------------------
@@ -835,7 +849,12 @@ case "$MODE" in
             exit 1
         fi
         refresh_agents_md
-        install_reviewer_agent
+        if ! install_reviewer_agent; then
+            err "install aborted: the isolated reviewer agent was not installed."
+            err "  Continuing would leave a review subagent with the parent's"
+            err "  tool surface, believing it is confined."
+            exit 1
+        fi
         cleanup_legacy_generated
         log "done"
         # State what was actually checked, and what was not. An install

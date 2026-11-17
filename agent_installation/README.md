@@ -148,196 +148,93 @@ The adapter directory's own README is the host-specific deep dive. See
 
 ## The isolated reviewer agent
 
-A **review** subagent runs in a child session with the parent's tool
-surface. On 2026-11-15 a review subagent wrote a memory into the
-operator's **live** MPM database through the `mpm_memory` tool, against an
+A review subagent runs in a child session with the parent's tool surface.
+On 2026-11-15 a review subagent wrote a memory into the operator's
+**live** MPM database through the `mpm_memory` tool, against an
 explicit instruction not to touch it.
 
-A written instruction was not enough, and could not have been: the tool
-was still **registered** for the reviewer, so "do not call it" was the
-only thing standing between a review note and a write into the operator's
-substrate.
+The isolation is **capability removal**, and it has three parts.
 
-The fix is the **permission layer**, and it is per-agent, so normal MPM
-operation is untouched. The canonical definition is
-[`mpm-opencode/templates/agents/mpm-reviewer.md`](./mpm-opencode/templates/agents/mpm-reviewer.md):
+**1. The tool catalogue is DEFAULT-DENY.**
+[`tests/../mpm-opencode/templates/agents/mpm-reviewer.md`](./mpm-opencode/templates/agents/mpm-reviewer.md)
+denies `action: "*"` for `resource: "*"`, and re-opens exactly **one**
+action: `sandbox_exec`. An omitted permission rule is not a closure, and
+a default deny makes the omission safe — a capability the host adds
+later is closed on arrival.
 
-```bash
-python3 agent_installation/mpm-opencode/scripts/install_reviewer_agent.py
-```
+**2. The one route out is HOST-CONTROLLED and always sandboxed.**
+`sandbox_exec` is registered by the installed plugin
+(`mpm-opencode/src/sandbox-exec.ts`). It runs the command inside a
+**bubblewrap mount namespace** built by
+`mpm-opencode/scripts/reviewer_bwrap.py`: the runtime is bound read-only,
+the reviewer's disposable tree is bound read-write at `/sandbox`, and
+**every other path is not bound at all** — so it does not exist inside.
+`/etc` is a **synthetic** directory (the trust store, the private keys
+and the operator's account database are not readable), `/tmp` is a
+private tmpfs, the network is unshared, the environment is cleared
+before the disposable variables are set, every capability is dropped and
+a nested user namespace is refused.
 
-It installs into `~/.config/opencode/agents/mpm-reviewer.md`. OpenCode
-watches its configuration directory and reloads agents after a save, so
-the definition is live without a restart; `/reload` forces it if the host
-has not noticed yet.
+The host controls the sandbox's base, the repository copy and the
+protected set. The model supplies the command and nothing else: it
+arrives as a **JSON array on stdin**, so it never reaches a command-line
+parser, and the namespace's own `--` separator stops it reaching
+bubblewrap's parser either.
 
-**The canonical install does this for you.** `mpm-opencode/install.sh`
-and `make install` both install the definition, so a fresh installation
-never leaves a review subagent with the parent's tool surface. The
-installed copy is MPM-owned state: it is refreshed from the template on
-every install, and the guard test below fails when it has drifted.
+There is **no unsandboxed fallback**: if bubblewrap is missing or the
+namespace cannot be built, the command does not run and the model gets
+the refusal. There is also **no privileged mode** — the tool does not
+know whether it is being used by the reviewer or by the operator, and
+it does not need to, because it is always confined.
 
-The definition is **layered**, and each layer says what it closes:
+The alternative — rewriting the command in the host's shell hook and
+identifying the reviewer by a session identifier — was measured and
+**rejected**: the hook's event carries no session identifier, and the
+environment's `OPENCODE_SESSION_ID` is agent-influenceable. A security
+authority the agent can influence is not an authority.
 
-- **denies every MPM tool by name**, so a denied tool is removed from the
-  reviewer's tool list entirely — the reviewer cannot call it and cannot
-  see it;
-- **denies the MPM binaries wherever they are NAMED** — `mpm`,
-  `mpm-mcp`, `mpm-scheduler`, `mpm-critic`, `mpm-telemetry`,
-  `mpm-update`, `mpm-lint`, and their installed paths — in **seven forms
-  per binary**: at the command position; wherever the name stands as its own
-  **word** (`env mpm …`, `xargs mpm …`, `$(echo mpm)`); wherever it is
-  followed by a **tab** (`mpm<TAB>--version`); the **last segment of a
-  path** (`go run ./cmd/mpm`, `/home/v/.local/bin/mpm`); the last segment
-  of a path with a **trailing slash** (`go run ./cmd/mpm/`); inside a **Go
-  package pattern** (`go run ./cmd/mpm/...`, `go run ./cmd/mpm/./...`); and
-  the installed path (`/home/v/.local/bin/mpm`) — plus **three** forms
-  shared by every binary: a **tab before** the name (`echo<TAB>mpm`), the
-  **quoted** form (`"mpm" …`, `sh -c 'mpm …'`), because every name starts
-  with `mpm`, and the **ANSI-C quoting opener** (`$'\x6dpm' …`, whose
-  escapes the shell decodes before the matcher sees the text), because it
-  is about the quoting and not about the name.
-  The installers (`install.sh`, `uninstall.sh`, `make install`/
-  `uninstall`/`deploy`) and the service-control commands are denied as
-  well, so the command line cannot reach the substrate either;
-- **denies the `read` tool** a live MPM workspace, and closes the
-  `external_directory` boundary of a runtime root;
-- **denies `edit`** (a reviewer cannot change what it reviews),
-  **`subagent`** (a reviewer cannot launch an agent that lacks the
-  isolation), **`question`** and Code Mode (**`execute`**, the bridge
-  to every tool the host publishes);
-- requires findings to be recorded in a **filesystem scratchpad**, not in
-  the substrate, and makes the **disposable sandbox**
-  (`mpm-opencode/scripts/reviewer_sandbox.py`) the DEFAULT environment
-  for every command.
+**3. The install FAILS CLOSED.**
+`mpm-opencode/scripts/install_reviewer_agent.py` parses the canonical
+template, checks its **policy** (the default deny, the one allowed
+action, every host-side capability, and every MPM tool the registry
+publishes), and **refuses** a definition that does not satisfy it. It
+writes the copy atomically with mode `0600`, reads it **back**, compares
+it byte-for-byte with the template, checks its policy again, and exits
+**non-zero** if any of that fails. `install.sh` treats a failed reviewer
+install as **fatal**, because a deployment step that fails open converts
+an error into a **silent downgrade** of the guarantee.
 
-**What this does not close.** The shell runs with the host user's
-authority, and a permission rule is a pattern match on a command string:
-the layer is a **barrier, not a jail**. `grep` and `glob` are not
-path-restricted (their resources are the pattern and the glob), so the
-reviewer's own scope — the working tree it was given — is what keeps
-them off a runtime root.
+**The host-side capabilities that are closed, and why.** The shell is
+closed **entirely** — it is a host process with the host user's
+authority, and no rule on a command string makes it a boundary. The
+file tools (`read`, `write`, `edit`, `patch`, `grep`, `glob`, `list`)
+are closed because they run in the host's process, outside any
+namespace; files are reached **through** the sandbox instead. Code Mode
+(`execute`) is closed, and with it the browser family: the browser can
+open a `file://` URL and move server-local bytes, and no permission rule
+confines it. The network tools (`webfetch`, `websearch`) are closed
+because they reach the network from outside the namespace. The MPM
+tools are closed by name, and the list is **machine-checked against
+the registry** — `internal/core/tools/registry_list.go` is the
+authoritative list, and
+[`tests/test_reviewer_isolation.py`](./tests/test_reviewer_isolation.py)
+fails if a tool is added to the registry without a matching deny rule,
+or if a stale rule survives for a tool the registry no longer publishes.
 
-**The three layers, and what each one actually guarantees.**
+**What it does NOT cover.** The operator's own session is trusted. The
+built-in `explore` and `general` subagents are **not** confined: the
+boundary covers the configured reviewer environment only. A common
+sandbox policy for other delegated agents is a future decision. The Go
+module cache is not bound by default, so a build needing a dependency
+the sandbox has not cached fails.
 
-1. **The permission layer** — the MPM tools are removed from the
-   reviewer's catalogue and the binaries are refused wherever they are
-   named. This is a **pattern match on a command string**: it is
-   *advisory* for the shell, and it is *enforced* for the tool
-   catalogue, which is a capability, not a string.
-2. **The environment sandbox** (`reviewer_sandbox.py`) — inside it,
-   `HOME`, `TMPDIR` and `MPM_WORKSPACE` point at scratch directories,
-   so a route the rules do not name still cannot write into the
-   operator's runtime root. This is a **resolution rule**, not a
-   boundary: the process still sees the operator's files.
-3. **The namespace sandbox** (`reviewer_bwrap.py`) — bubblewrap builds
-   a mount namespace, so a path that is **not bound does not exist
-   inside**. This is a **boundary**: the kernel refuses the access, and
-   there is no pattern to get wrong. The runtime is bound read-only,
-   the reviewer's disposable tree is bound read-write at `/sandbox`,
-   `/tmp` is a private tmpfs, the network is unshared, the
-   environment is cleared, and every capability is dropped.
-
-Layer three is **in the tree and proved, but not wired in yet** — a
-review still runs outside it. **Until it is wired in, the shell
-protection is best-effort**, and the residual list below is the honest
-statement of what is left open. The measured evidence for layer three
-is in `tests/test_reviewer_bwrap_sandbox.py`: a disposable sentinel
-tree, the live runtime root and the operator's home are all
-**invisible** from inside the namespace; the disposable tree is
-writable; and there is **no network**.
-
-The wiring has two parts, and both are measured:
-
-* the host **executes what the shell hook hands it**. OpenCode reads
-  the command *after* the `create.before` hook has run, so a plugin can
-  rewrite every shell command into a namespace invocation — measured
-  live, with a marker prefix that the shell actually ran;
-* the hook's event carries the command, the working directory, the
-  shell, the timeout and the environment — and **no session
-  identifier** — so a plugin cannot yet tell a reviewer's command from
-  the operator's. The environment does carry `OPENCODE_SESSION_ID`, so
-  the correlation is possible; it is not implemented.
-
-Five residuals were **measured**, by probing the installed definition: the
-**browser family is not governed by the permission layer** (a deny
-on the browser action, the wildcard, the per-tool names and `tool.use`
-all leave the browser tools in the reviewer's catalog and invocable);
-the **capability loader** is not gated by any permission action
-(eighteen candidate action names and the V1-style `tools:` frontmatter
-all leave it callable), so the rule was removed and the definition says
-a reviewer must not load one; the shell's **redirection targets are not
-intercepted** — so the write route into a runtime root is closed by a
-path substring, which also refuses a command that merely *quotes* such a
-path; the shell's matcher sees **text**, and **ten** routes are not
-caught: a name **split by a substitution or by a quote** (`$(echo mp)m` and `mp""m` assemble it and run the binary), a name held in a **variable**
-(`M=mpm; $M --version`), a **script file**, a name **expanded by a
-shell glob** (`go run ./cmd/mp?`), a name **expanded by a brace**
-(`go run ./cmd/mpm{,.mcp}`), a name **glued to punctuation** rather
-than delimited by whitespace (`${x:-mpm} --version`, `for i in mpm; do
-$i --version; done`), a name hidden behind a **backslash escape**
-(`m\pm --version` is the binary, because the shell removes the
-backslash before it parses the command word), a pattern that names a
-**DIRECTORY of
-packages** (`go build ./cmd/...` — the text holds no name to match, so
-the build is not refused, but the binaries it produces are refused when
-they are RUN), and the host's refusal to
-match a **`cd`** segment's text (`cd cmd/mpm && go run . --version`)
-are not caught; and the
-permission layer reads the **content of a file write** too, so a
-document that merely mentions the name is refused. The first two are
-stated in the definition's own prose; the third is accepted
-deliberately, because a corrupted live database is worse than a
-findings report that cannot quote a path literally; and the fourth and
-fifth are why the **sandbox is the default**: inside it, the substrate
-resolves its workspace to a scratch directory, so a command that got
-through writes to the sandbox.
-
-**The false-denial cost, measured and published.** A fixed sample of
-**sixteen** ordinary commands was run under the installed definition; the
-sample and every outcome are published in `docs/SPEC.md` §6.4, so a
-reader can re-run it rather than believe it. **Six** of the sixteen were
-refused. **Two** are correct refusals — the bare name as a word
-(`echo mpm`, `echo mpm --version`). **Four** are false denials:
-`ls <path ending in the name>`, `git -C <path>` and `make -C <path>`
-(the price of the path shape, which is what closes `go run ./cmd/mpm`,
-`go run ./cmd/mpm/...` and `go build -o /tmp/x ./cmd/mpm`; the spelling
-that works is a path **inside** the directory, `ls <path>/docs` — the
-`cd` form, `cd <path> && git log --oneline -1`, also works but is
-**not recommended**, because it is the same mechanism as an open route:
-the host does not match a `cd` segment's text),
-and the **quoted** form `grep -rn "mpm_memory" .` (the quoted shape is
-this definition's own rule, and it is load-bearing — with it removed,
-the quoted invocations RAN the binary; the workaround is to write the
-pattern unquoted). **No command that mentions nothing at all was
-refused.**
-
-The deny list is **machine-checked against the registry**:
-`internal/core/tools/registry_list.go` is the authoritative list of every
-MPM tool, and
-[`tests/test_reviewer_isolation_denies_every_mpm_tool.py`](./tests/test_reviewer_isolation_denies_every_mpm_tool.py)
-fails if a tool is added to the registry without a matching deny rule.
-The registry parse is itself checked, so a name the parse cannot
-capture fails the test rather than passing it. The binary deny list is
-checked against the **Makefile's own** binary variables, so a new MPM
-binary cannot be built without the list being extended. The isolation
-therefore cannot quietly erode as the tool surface grows.
-
-**The guard also models the host's SCANNER, and the model is measured
-against the host.** The host refuses a command it cannot parse, and
-the reason it gives depends on the construct that holds the defect - a
-trailing `&&` is `invalid-structure` inside a brace group and
-`compound-command` inside a compound command's body. The guard's model
-is therefore a **parser**, not a list of spellings, and it is the
-**single enforcer** for the structural class, so the model cannot be
-internally inconsistent about what a structural defect is. Its
-**class-level table** carries a **reason per form** - one reason per
-family could not express a construct-dependent reason - so a family
-the model stops catching shows up as a **failing reason** rather than
-as a missing row. The definition's own **family list is checked
-against the model**, so the prose a reviewer reads cannot drift away
-from the code. Every one of these checks is a claim that is CHECKED,
-and the counts are published in `docs/SPEC.md` §6.4.
+**The evidence.** The namespace's contract is pinned by
+[`tests/test_reviewer_bwrap_sandbox.py`](./tests/test_reviewer_bwrap_sandbox.py);
+the route closure and the install's fail-closed behaviour by
+[`tests/test_reviewer_isolation.py`](./tests/test_reviewer_isolation.py);
+and the reviewer's **actual execution path** — driven through the exact
+invocation the plugin makes, against disposable sentinels — by
+[`tests/test_reviewer_sandbox_exec_path.py`](./tests/test_reviewer_sandbox_exec_path.py).
 
 ## Installation
 

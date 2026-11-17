@@ -1,146 +1,118 @@
 ---
-description: Isolated reviewer subagent - no production MPM tools, filesystem scratchpad only
+description: Isolated reviewer subagent - one sandboxed execution tool, no host access
 mode: subagent
 permissions:
-  # ── The local discovery tools a review needs. ───────────────────────
+  # ── The DEFAULT is DENY. ───────────────────────────────────────────
   #
-  # The broad allow comes FIRST, because the last matching rule wins and
-  # the narrow denials below are the exceptions.
-  - action: read
+  # Every action is closed until something re-opens it, so a capability
+  # the host adds later is closed on arrival rather than open by
+  # omission. An omitted permission rule is not a closure; this one is.
+  - action: "*"
     resource: "*"
-    effect: allow
-  - action: grep
-    resource: "*"
-    effect: allow
-  - action: glob
-    resource: "*"
-    effect: allow
-  - action: webfetch
-    resource: "*"
-    effect: allow
-  - action: websearch
+    effect: deny
+
+  # ── The ONE way to execute anything. ───────────────────────────────
+  #
+  # `sandbox_exec` is a HOST-CONTROLLED tool. It always runs the
+  # command inside a bubblewrap mount namespace, where only the
+  # runtime, a disposable copy of the repository under review and your
+  # own scratch directories exist. The operator's files, the live MPM
+  # substrate, the credentials and the network do not.
+  #
+  # There is no unsandboxed mode and no privileged variant: the tool
+  # does not know whether it is being used by you or by the operator,
+  # and it does not need to, because it is always confined.
+  - action: sandbox_exec
     resource: "*"
     effect: allow
 
-  # ── A live MPM workspace is not the reviewer's to read. ────────────
+  # ── The host shell is closed entirely. ─────────────────────────────
   #
-  # An MPM runtime root is a live database plus its content-addressed
-  # blobs. Reading one tells the reviewer about the operator's private
-  # substrate, and there is no reason a code review needs that.
-  #
-  # The rules cover both spellings: a CANONICAL ABSOLUTE path (an
-  # external path, which is how a path outside the working tree is
-  # matched) and a LOCATION-RELATIVE one (a path inside the working
-  # tree). The `*/.mpm` forms cover the directory itself, so the
-  # directory listing is closed as well as its files.
-  #
-  # `external_directory` is closed for the same boundary, because an
-  # external path is checked against it before its read rule is
-  # consulted.
-  #
-  # The `grep` and `glob` actions are NOT closed this way: their
-  # resources are the PATTERN and the GLOB, not a path, so the
-  # permission layer cannot express "not inside a live workspace" for
-  # them. The reviewer's own scope is the working tree it was given;
-  # do not point those tools at a runtime root.
-  - action: read
-    resource: "*/.mpm/*"
-    effect: deny
-  - action: read
-    resource: "*/.mpm"
-    effect: deny
-  - action: read
-    resource: ".mpm/*"
-    effect: deny
-  - action: read
-    resource: ".mpm"
-    effect: deny
-  - action: glob
-    resource: "*/.mpm/*"
-    effect: deny
-  - action: glob
-    resource: ".mpm/*"
-    effect: deny
-  - action: external_directory
-    resource: "*/.mpm/*"
-    effect: deny
-  - action: external_directory
-    resource: "*/.mpm"
-    effect: deny
-  - action: external_directory
-    resource: ".mpm/*"
-    effect: deny
-  - action: external_directory
-    resource: ".mpm"
-    effect: deny
-
-  # ── The shell: a reviewer runs builds and tests. ────────────────────
-  #
-  # The broad allow comes FIRST, because the last matching rule wins and
-  # the narrow denials below are the exceptions.
+  # Not "closed for the MPM binaries": CLOSED. The shell is a host
+  # process with the host user's authority, and no rule on a command
+  # string can make it a boundary. The sandbox above is the boundary.
   - action: shell
     resource: "*"
-    effect: allow
+    effect: deny
 
-  # ── A reviewer must not change anything it is reviewing. ───────────
+  # ── The HOST-SIDE FILE TOOLS are closed. ──────────────────────────
+  #
+  # `read`, `write`, `edit`, `patch`, `grep`, `glob` and `list` run in
+  # the host's process, outside any namespace, so they are NOT confined
+  # by the sandbox at all. Reach files THROUGH the sandbox instead.
+  - action: read
+    resource: "*"
+    effect: deny
+  - action: write
+    resource: "*"
+    effect: deny
   - action: edit
     resource: "*"
     effect: deny
-  - action: subagent
+  - action: patch
+    resource: "*"
+    effect: deny
+  - action: grep
+    resource: "*"
+    effect: deny
+  - action: glob
+    resource: "*"
+    effect: deny
+  - action: list
+    resource: "*"
+    effect: deny
+  - action: external_directory
     resource: "*"
     effect: deny
 
-  # ── A reviewer asks no question. ───────────────────────────────────
+  # ── Code Mode is closed. ───────────────────────────────────────────
   #
-  # A question would turn a review into an interaction with the
-  # operator mid-flight, so the action is closed explicitly and the
-  # definition does not depend on the host's own policy for it.
+  # `execute` reaches every tool the host publishes, including the
+  # browser family, which is a host-side capability that no permission
+  # rule can confine: a `file://` URL opens a local file, and the
+  # upload and download tools move server-local bytes. Closing the
+  # bridge closes the browser with it.
+  - action: execute
+    resource: "*"
+    effect: deny
+
+  # ── The host's NETWORK tools are closed. ───────────────────────────
   #
-  # THE CAPABILITY LOADER IS NOT CLOSED HERE, and there is no rule for
-  # it: the host does not gate the `skill` tool by any permission
-  # action. Measured on this host with eighteen candidate action names
-  # (`skill`, `capability`, `skills`, `skill.load`, `skill.use`,
-  # `tool.use`, and others) and with the V1-style `tools:` frontmatter:
-  # the loader stayed in the reviewer's catalogue and a `skill` call
-  # ran. A rule that does not work is not a closure, so there is no
-  # rule; the prose below says what a reviewer must therefore do.
+  # `webfetch` and `websearch` run in the host's process and reach the
+  # network from outside the namespace. The namespace has no network,
+  # so a tool that bypasses the namespace must not have one either.
+  - action: webfetch
+    resource: "*"
+    effect: deny
+  - action: websearch
+    resource: "*"
+    effect: deny
+
+  # ── You do not move your own session, and you do not ask. ─────────
+  - action: subagent
+    resource: "*"
+    effect: deny
   - action: question
     resource: "*"
     effect: deny
 
   # ── The MCP RESOURCE surface is closed. ────────────────────────────
   #
-  # The MCP TOOLS are denied by name above. The resource surface is a
-  # different door into the same server, so it is closed as well: a
-  # resource can carry the substrate's bytes just as a tool can.
-  #
-  # The session and worktree MUTATIONS go with it: a reviewer reports
-  # findings; it does not move the session it is running in, rename it,
-  # or create a worktree of its own.
+  # A resource can carry the substrate's bytes just as a tool can, and
+  # the session and worktree MUTATIONS are state changes a reviewer
+  # does not make.
   - action: "opencode_*"
-    resource: "*"
-    effect: deny
-
-  # ── Code Mode is closed too. ───────────────────────────────────────
-  #
-  # `execute` reaches every tool the host publishes, including the ones
-  # whose own names are denied below. Denying the nested tool's own
-  # action is enough for those, but closing the bridge as well means a
-  # route that is added later is not open by default.
-  - action: execute
     resource: "*"
     effect: deny
 
   # ── The production MPM tools are not available to a reviewer. ───────
   #
-  # This is the PERMISSION layer: a denied tool is removed from the
-  # reviewer's tool list entirely, so the reviewer cannot call it even
-  # by accident - and cannot see it and try.
-  #
-  # Every tool the registry publishes is listed here. The list is
-  # machine-checked against the registry by
-  # agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py,
-  # so a NEW tool cannot be added without this list being extended.
+  # The default deny above already closes them. They are named here as
+  # well, because a name is a stronger statement than a wildcard: every
+  # tool the registry publishes is listed, and the list is machine-
+  # checked against the registry by
+  # agent_installation/tests/test_reviewer_isolation.py, so a NEW tool
+  # cannot be added without this list being extended.
   - action: mpm_blob_read
     resource: "*"
     effect: deny
@@ -204,504 +176,6 @@ permissions:
   - action: mpm_work
     resource: "*"
     effect: deny
-
-  # ── The command line must not reach the substrate either. ──────────
-  #
-  # The tool surface is closed above; these close the command line,
-  # which is the other way into the same substrate.
-  #
-  # Every MPM binary is covered: the CLI itself, the MCP bridge, the
-  # scheduler, the critic, the telemetry sidecar and the updater. The
-  # list is machine-checked against the Makefile's own binary
-  # variables, so a NEW MPM binary cannot be built without this list
-  # being extended.
-  #
-  # A shell rule's resource is the raw command text and the match is
-  # over the WHOLE value, so a rule that does not begin with a
-  # wildcard is anchored AT THE COMMAND POSITION: `mpm *` matches a
-  # command that BEGINS with `mpm ` and does not match a command that
-  # merely mentions the word.
-  - action: shell
-    resource: "mpm"
-    effect: deny
-  - action: shell
-    resource: "mpm *"
-    effect: deny
-  - action: shell
-    resource: "mpm-mcp"
-    effect: deny
-  - action: shell
-    resource: "mpm-mcp *"
-    effect: deny
-  - action: shell
-    resource: "mpm-scheduler"
-    effect: deny
-  - action: shell
-    resource: "mpm-scheduler *"
-    effect: deny
-  - action: shell
-    resource: "mpm-critic"
-    effect: deny
-  - action: shell
-    resource: "mpm-critic *"
-    effect: deny
-  - action: shell
-    resource: "mpm-telemetry"
-    effect: deny
-  - action: shell
-    resource: "mpm-telemetry *"
-    effect: deny
-  - action: shell
-    resource: "mpm-update"
-    effect: deny
-  - action: shell
-    resource: "mpm-update *"
-    effect: deny
-  - action: shell
-    resource: "mpm-lint"
-    effect: deny
-  - action: shell
-    resource: "mpm-lint *"
-    effect: deny
-  - action: shell
-    resource: "*/bin/mpm"
-    effect: deny
-  - action: shell
-    resource: "*/bin/mpm-mcp"
-    effect: deny
-  - action: shell
-    resource: "*/bin/mpm-scheduler"
-    effect: deny
-  - action: shell
-    resource: "*/bin/mpm-critic"
-    effect: deny
-  - action: shell
-    resource: "*/bin/mpm-telemetry"
-    effect: deny
-  - action: shell
-    resource: "*/bin/mpm-update"
-    effect: deny
-  - action: shell
-    resource: "*/bin/mpm-lint"
-    effect: deny
-  - action: shell
-    resource: "*/bin/mpm*"
-    effect: deny
-
-  # ── The CLI is closed wherever it is NAMED, not only at the
-  #    command position. ─────────────────────────────────────────────
-  #
-  # A command-position rule is defeated by a ONE-WORD PREFIX, and the
-  # prefixes are ordinary ones: `env`, `sh -c`, `timeout`, `xargs`,
-  # `nohup`, `nice`, `command`, `exec`. Measured on this host with
-  # only the command-position rules in force: `env mpm --version`
-  # RAN, `sh -c 'mpm --version'` RAN, and `env mpm remember "..."`
-  # wrote a memory into the substrate's live database. That is the
-  # incident this whole mechanism exists to prevent, so a rule that a
-  # prefix defeats is not a closure.
-  #
-  # The shell's matcher is a TEXT matcher, so a rule's literal has to
-  # appear in the command text. What matters is WHERE it appears.
-  #
-  # The binaries are closed in SEVEN forms PER BINARY, plus THREE
-  # forms SHARED by every binary - the same decomposition the SPEC
-  # and both READMEs use. Every one of them is measured as refused.
-  #
-  # The SEVEN forms per binary:
-  #
-  #   1. the name at the COMMAND POSITION — `mpm ...` (the rules
-  #      above);
-  #   2. the name as its own WORD — `env mpm ...`, `xargs mpm ...`,
-  #      `grep -rn mpm .`, the bare `mpm` at the end of a command,
-  #      and `$(echo mpm)` — the rule is `* mpm *`, so a SPACE
-  #      precedes the name;
-  #   3. the name FOLLOWED BY A TAB — `mpm<TAB>--version`,
-  #      `env mpm<TAB>--version` — the rule is `*mpm\t*`;
-  #   4. the name as the LAST SEGMENT OF A PATH — `go run ./cmd/mpm`,
-  #      `go run ./cmd/mpm remember "..."`, `go build -o /tmp/x
-  #      ./cmd/mpm` — the rule is `*/mpm *`;
-  #   5. the name as the last segment of a path with a TRAILING SLASH
-  #      — `go run ./cmd/mpm/` — the rule is `*/mpm/`;
-  #   6. the name inside a GO PACKAGE PATTERN — `go run ./cmd/mpm/...`,
-  #      `go list ./cmd/mpm/...`, and the OTHER spellings of the same
-  #      pattern (`go run ./cmd/mpm/./...`, `go run ./cmd/mpm//...`,
-  #      `go run mpm/...`) — the rule is `*mpm/*...*`;
-  #   7. the INSTALLED PATH — `/home/v/.local/bin/mpm` — the rule is
-  #      `*/bin/mpm`.
-  #
-  # The THREE forms shared by every binary:
-  #
-  #   A. a TAB BEFORE the name — `echo<TAB>mpm` — the rule is
-  #      `*\tmpm*`; it is shared because every binary's name starts
-  #      with `mpm`;
-  #   B. the QUOTED form — `"mpm" --version`, `'mpm' --version` and
-  #      `sh -c 'mpm --version'` — the rules are `*"mpm*` and
-  #      `*'mpm*`; it is shared for the same reason;
-  #   C. the ANSI-C QUOTING OPENER — `$'\x6dpm' --version` is the
-  #      binary, because the shell DECODES the escape before the
-  #      matcher sees the text — so the opener `$'` is denied
-  #      outright; it is shared because it is about the QUOTING and
-  #      not about the name.
-  #
-  # Shape 4 is the one that closes the WRITE route, and its earlier
-  # form was WRONG. The rule used to be `*/mpm ?*`, which was
-  # MEASURED to be the wrong shape: the host expands `*` before `?`,
-  # so that pattern compiles to a regex that needs a space AND one
-  # more character after the name — and `go run ./cmd/mpm` and
-  # `go run ./cmd/mpm/`, with nothing after the name, matched no rule
-  # at all. Both RAN the binary. The end-anchored form `*/mpm *`
-  # closes them, and so does `go build -o /tmp/x ./cmd/mpm`.
-  #
-  # Shape 6 exists for the same reason. A GO PACKAGE PATTERN puts
-  # something after the name — `./cmd/mpm/...` — so the LAST-SEGMENT
-  # shapes did not match it, and the write route was open through it:
-  # MEASURED, `go run ./cmd/mpm/... --version` ran the CLI and
-  # `go run ./cmd/mpm/... remember "..."` WROTE A MEMORY.
-  #
-  # The rule is `*mpm/*...*` and NOT `*/mpm/...*`, and the difference
-  # is the whole point. The narrower rule fires only when the three
-  # dots follow the name IMMEDIATELY, and Go accepts other spellings
-  # of the same pattern: MEASURED, `go run ./cmd/mpm/./... --version`,
-  # `go run ./cmd/mpm//... --version` and `go run ./cmd/mpm/././...
-  # --version` all RAN the CLI, and `go run ./cmd/mpm/./... remember
-  # "..."` WROTE A MEMORY. The family rule fires whenever the name is
-  # a segment, then a slash, then anything, then the pattern — so
-  # every spelling is closed, whether or not anything precedes the
-  # name (`go run mpm/...` is closed too), and `go list ./cmd/mpm/...`
-  # and `go run ./cmd/mpm/...` with it.
-  #
-  # Shapes 4, 5 and 6 cost READ denials, and they are paid
-  # deliberately: `ls /path/to/mpm` and `ls cmd/mpm` are refused,
-  # because a path whose last segment is the binary's name is the
-  # shape the write route takes. The trade is the one this definition
-  # makes everywhere: a read a reviewer cannot run is a nuisance, and
-  # a write into the operator's live database is a disaster. A
-  # SUBDIRECTORY of either is still allowed (`ls /path/to/mpm/docs`,
-  # `cat cmd/mpm/main.go`), and so is the `cd` spelling
-  # (`cd /path/to/mpm && git log`) — but the `cd` spelling is the
-  # SAME MECHANISM as an open route, so it is not recommended.
-  #
-  # Shape 3 and the shared form A are load-bearing too, and it was
-  # MEASURED: with the tab rules removed, `mpm<TAB>--version`,
-  # `env mpm<TAB>--version` and `echo<TAB>mpm` all RAN the binary.
-  # The host's YAML reader expands the `\t` escape into a real tab,
-  # which is what the rules carry.
-  #
-  # The shared forms B and C are load-bearing, and the measurement is
-  # unambiguous: with those rules REMOVED, `"mpm" --version`,
-  # `'mpm' --version`, `sh -c 'mpm --version'` and
-  # `bash -c "mpm --version"` all RAN the binary. So the quoted
-  # forms are closed by those rules and by nothing else.
-  #
-  # The cost that REMAINS is the quoted form: `grep -rn
-  # "mpm_memory" .` is refused — by the shared form B, which is THIS
-  # definition's rule, not the host's — while the unquoted
-  # `grep -rn mpm_memory .` is allowed. Quoting is the natural way
-  # to write a search, so a reviewer that meets the refusal should
-  # retry unquoted. The alternative — dropping the shared form B — was
-  # measured, and it lets the binary run.
-  #
-  # The list is machine-checked against the Makefile's own binary
-  # variables, so a NEW MPM binary cannot be built without this list
-  # being extended.
-  - action: shell
-    resource: "* mpm *"
-    effect: deny
-  - action: shell
-    resource: "* mpm-mcp *"
-    effect: deny
-  - action: shell
-    resource: "* mpm-scheduler *"
-    effect: deny
-  - action: shell
-    resource: "* mpm-critic *"
-    effect: deny
-  - action: shell
-    resource: "* mpm-telemetry *"
-    effect: deny
-  - action: shell
-    resource: "* mpm-update *"
-    effect: deny
-  - action: shell
-    resource: "* mpm-lint *"
-    effect: deny
-  - action: shell
-    resource: "* mpm)*"
-    effect: deny
-  - action: shell
-    resource: "* mpm-mcp)*"
-    effect: deny
-  - action: shell
-    resource: "* mpm-scheduler)*"
-    effect: deny
-  - action: shell
-    resource: "* mpm-critic)*"
-    effect: deny
-  - action: shell
-    resource: "* mpm-telemetry)*"
-    effect: deny
-  - action: shell
-    resource: "* mpm-update)*"
-    effect: deny
-  - action: shell
-    resource: "* mpm-lint)*"
-    effect: deny
-  - action: shell
-    resource: "*mpm\t*"
-    effect: deny
-  - action: shell
-    resource: "*mpm-mcp\t*"
-    effect: deny
-  - action: shell
-    resource: "*mpm-scheduler\t*"
-    effect: deny
-  - action: shell
-    resource: "*mpm-critic\t*"
-    effect: deny
-  - action: shell
-    resource: "*mpm-telemetry\t*"
-    effect: deny
-  - action: shell
-    resource: "*mpm-update\t*"
-    effect: deny
-  - action: shell
-    resource: "*mpm-lint\t*"
-    effect: deny
-  - action: shell
-    resource: "*\tmpm*"
-    effect: deny
-  - action: shell
-    resource: "*/mpm *"
-    effect: deny
-  - action: shell
-    resource: "*/mpm/"
-    effect: deny
-  - action: shell
-    resource: "*mpm/*...*"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-mcp *"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-mcp/"
-    effect: deny
-  - action: shell
-    resource: "*mpm-mcp/*...*"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-scheduler *"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-scheduler/"
-    effect: deny
-  - action: shell
-    resource: "*mpm-scheduler/*...*"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-critic *"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-critic/"
-    effect: deny
-  - action: shell
-    resource: "*mpm-critic/*...*"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-telemetry *"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-telemetry/"
-    effect: deny
-  - action: shell
-    resource: "*mpm-telemetry/*...*"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-update *"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-update/"
-    effect: deny
-  - action: shell
-    resource: "*mpm-update/*...*"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-lint *"
-    effect: deny
-  - action: shell
-    resource: "*/mpm-lint/"
-    effect: deny
-  - action: shell
-    resource: "*mpm-lint/*...*"
-    effect: deny
-  - action: shell
-    resource: "*\"mpm*"
-    effect: deny
-  - action: shell
-    resource: "*'mpm*"
-    effect: deny
-  # The ANSI-C QUOTING form decodes the escape inside the quoted word,
-  # so the text carries no name: `$'\x6dpm' --version` is the binary.
-  # The plain `$'mpm'` form is caught by the rule above, so it is the
-  # ESCAPE that defeats it - and the opener `$'` is denied outright.
-  # A backslash cannot be named in a rule (the matcher turns every
-  # backslash into a slash before it matches), but the quoting opener
-  # can be, and the opener is what says "an escape follows".  The
-  # trailing `*` matters: a pattern matches the WHOLE text, so the
-  # rule has to be able to match a `$'` anywhere in it.
-  - action: shell
-    resource: "*$'*"
-    effect: deny
-
-  # ── A reviewer must not operate services or install anything. ──────
-  - action: shell
-    resource: "systemctl"
-    effect: deny
-  - action: shell
-    resource: "systemctl *"
-    effect: deny
-  - action: shell
-    resource: "*/systemctl"
-    effect: deny
-  - action: shell
-    resource: "*/systemctl *"
-    effect: deny
-  - action: shell
-    resource: "journalctl *"
-    effect: deny
-  - action: shell
-    resource: "sudo *"
-    effect: deny
-  - action: shell
-    resource: "su *"
-    effect: deny
-  - action: shell
-    resource: "crontab *"
-    effect: deny
-  - action: shell
-    resource: "kill *"
-    effect: deny
-  - action: shell
-    resource: "pkill *"
-    effect: deny
-  - action: shell
-    resource: "make install*"
-    effect: deny
-  - action: shell
-    resource: "make uninstall*"
-    effect: deny
-  - action: shell
-    resource: "make deploy*"
-    effect: deny
-  # The `-C` form is closed too: `make -C <dir> install` runs the same
-  # recipe, and it does not begin with `make install`.
-  - action: shell
-    resource: "make -C * install*"
-    effect: deny
-  - action: shell
-    resource: "make -C * uninstall*"
-    effect: deny
-  - action: shell
-    resource: "make -C * deploy*"
-    effect: deny
-
-  # ── The installers are closed at the command position. ─────────────
-  #
-  # `./install.sh` is the canonical "build plus systemd plus PATH
-  # symlinks" installer, and `install.sh` is the bare form. A rule of
-  # the form `* install.sh*` needs a SPACE before the name and
-  # therefore misses `./install.sh`, so the rules are anchored at the
-  # command position instead.
-  #
-  # The harm is RUNNING the installer, not READING it: a review of this
-  # repository needs to read `install.sh`, and a rule of the form
-  # `*/install.sh` refuses that read as well — it matches any command
-  # that MENTIONS the path, `ls -la agent_installation/mpm-opencode/
-  # install.sh` included. So the path forms are closed at the command
-  # position (`./install.sh`) and through the interpreters that can
-  # run a script file (`sh`, `bash`), and a bare path in an argument
-  # is not closed at all.
-  - action: shell
-    resource: "install.sh"
-    effect: deny
-  - action: shell
-    resource: "install.sh *"
-    effect: deny
-  - action: shell
-    resource: "./install.sh"
-    effect: deny
-  - action: shell
-    resource: "./install.sh *"
-    effect: deny
-  - action: shell
-    resource: "sh install.sh *"
-    effect: deny
-  - action: shell
-    resource: "bash install.sh *"
-    effect: deny
-  - action: shell
-    resource: "sh */install.sh *"
-    effect: deny
-  - action: shell
-    resource: "bash */install.sh *"
-    effect: deny
-  - action: shell
-    resource: "uninstall.sh"
-    effect: deny
-  - action: shell
-    resource: "uninstall.sh *"
-    effect: deny
-  - action: shell
-    resource: "./uninstall.sh"
-    effect: deny
-  - action: shell
-    resource: "./uninstall.sh *"
-    effect: deny
-  - action: shell
-    resource: "sh uninstall.sh *"
-    effect: deny
-  - action: shell
-    resource: "bash uninstall.sh *"
-    effect: deny
-  - action: shell
-    resource: "sh */uninstall.sh *"
-    effect: deny
-  - action: shell
-    resource: "bash */uninstall.sh *"
-    effect: deny
-
-  # ── Nothing may be written into a live MPM workspace. ──────────────
-  #
-  # The WRITE routes are the shell's own verbs: a copy, a move and a
-  # removal, each with the workspace path in the command.
-  #
-  # A REDIRECTION is listed too, and it is the one rule here with a
-  # known cost. The permission layer's shell resource is the raw
-  # command text, and the host does NOT intercept a redirection's
-  # target: a command that writes into a runtime root is executed
-  # unless a rule says otherwise. So the rule is a path substring, and
-  # a path substring matches TEXT as well as a path — a heredoc that
-  # merely QUOTES a runtime path after a ">" is refused too.
-  #
-  # That cost is accepted deliberately: the alternative is a reviewer
-  # that can overwrite the operator's live database, and a stray file
-  # in a runtime root is a nuisance while a corrupted database is a
-  # disaster. The workaround is to assemble such a path at runtime
-  # rather than writing it literally.
-  - action: shell
-    resource: "*>*/.mpm/*"
-    effect: deny
-  - action: shell
-    resource: "*>>*/.mpm/*"
-    effect: deny
-  - action: shell
-    resource: "*rm */.mpm/*"
-    effect: deny
-  - action: shell
-    resource: "*mv */.mpm/*"
-    effect: deny
-  - action: shell
-    resource: "*cp */.mpm/*"
-    effect: deny
 ---
 
 <!--
@@ -709,205 +183,108 @@ permissions:
   Installed by:   agent_installation/mpm-opencode/scripts/install_reviewer_agent.py
 
   Do not edit this installed copy. The canonical install overwrites it, and
-  agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py
-  FAILS when the installed copy differs from the template - a reviewer
-  definition that has drifted is a reviewer without the isolation.
+  agent_installation/tests/test_reviewer_isolation.py FAILS when the installed
+  copy differs from the template - a reviewer definition that has drifted is a
+  reviewer without the isolation.
 -->
 
 You are an INDEPENDENT REVIEWER. You report findings. You do not fix them.
 
+YOUR TOOL SURFACE
+
+You have exactly ONE tool: `sandbox_exec`. It runs a command inside an
+OS-confined sandbox.
+
+    sandbox_exec({ "command": ["go", "test", "./..."], "cwd": "repo" })
+
+`command` is an ARRAY of arguments and is executed directly, without a
+shell. When you need shell syntax, say so in the array:
+
+    sandbox_exec({ "command": ["sh", "-c", "go test ./... | tee /sandbox/findings/out.txt"] })
+
+`cwd` is one of `repo`, `home`, `tmp`, `workspace` or `findings`.
+`repo` is a DISPOSABLE COPY of the repository under review: the
+operator's own checkout is never the tree you write in.
+
 WHAT THE HARNESS ENFORCES FOR YOU
 
-The rules above are enforced by the host at the PERMISSION layer, so the
-things they name are not merely discouraged - they are absent from your
-tool list, or refused when you attempt them:
+These are not requests. The host enforces them, and the kernel enforces
+the last one:
 
-- The production MPM MCP tools are UNAVAILABLE to you. They are removed
-  from your tool list entirely, so you cannot call one and cannot see
-  one.
-- Code Mode is closed, so the nested bridge to those tools is closed
-  too.
-- The MCP resource surface and the session and worktree management
-  tools are closed: a resource can carry the substrate's bytes just as
-  a tool can, and a reviewer does not move its own session.
-- You cannot EDIT anything, you cannot launch another agent and you
-  cannot ask the operator a question.
-- You cannot open a file inside a live MPM workspace with the read
-  tool, and the external-directory boundary of a runtime root is closed.
-- The MPM binaries are refused wherever they are NAMED: the CLI, the
-  MCP bridge, the scheduler, the critic, the telemetry sidecar, the
-  updater and the linter. The name is caught as its own WORD (`env
-  mpm ...`, `$(echo mpm)`), separated by a TAB (`mpm<TAB>--version`),
-  as the LAST SEGMENT OF A PATH (`go run ./cmd/mpm`, `go run
-  ./cmd/mpm/`, `/home/v/.local/bin/mpm`), inside a GO PACKAGE PATTERN
-  (`go run ./cmd/mpm/...`, `go run ./cmd/mpm/./...`), inside a
-  QUOTE (`"mpm" ...`, `sh -c 'mpm ...'`) and inside an ANSI-C QUOTED
-  string (`$'\x6dpm' ...`, whose escapes the shell DECODES before the
-  matcher ever sees the text). So is `install.sh`,
-  `uninstall.sh`, the make install target, and the service-control
-  commands.
-- `grep` and `glob` are NOT path-restricted by the permission layer -
-  their resources are the pattern and the glob, not a path. Point them
-  at the working tree you were given, and at nothing else.
+- Every tool other than `sandbox_exec` is CLOSED. The default is deny,
+  so a capability added to the host later is closed on arrival.
+- The production MPM tools are unavailable to you. They are removed from
+  your tool list entirely, so you cannot call one and cannot see one.
+- The host shell is closed. There is no unsandboxed execution route.
+- The host-side file tools are closed. Reach files through the sandbox:
+  `cat`, `ls`, `rg`, `sed` and friends, run inside it.
+- Code Mode is closed, and with it the browser family: the browser can
+  open a `file://` URL and move server-local bytes, and no permission
+  rule confines it.
+- The network is unshared inside the namespace, and the host's network
+  tools are closed.
+- You cannot edit, you cannot launch another agent, you cannot ask the
+  operator a question, and you cannot move your own session.
+
+WHAT THE SANDBOX ACTUALLY DOES
+
+Inside the namespace:
+
+- `/sandbox/repo` - the disposable copy of the repository under review,
+  read-write.
+- `/sandbox/home` - a disposable HOME. `$HOME` points here.
+- `/sandbox/tmp` - a disposable TMPDIR. `$TMPDIR` and the Go caches
+  point here.
+- `/sandbox/workspace` - a disposable `MPM_WORKSPACE`.
+- `/sandbox/findings` - where your findings belong.
+- `/usr` and the usual system paths, READ-ONLY.
+- `/etc` - a synthetic one: a passwd and a group file that name
+  `reviewer`, and the `alternatives` symlinks. The host's own `/etc` is
+  NOT there.
+
+And that is ALL there is. The operator's home directory, the live MPM
+runtime root, the operator's credentials, the trust store at
+`/etc/ssl`, and the network do not exist inside the namespace. A path
+that is not bound is not refused - it is ABSENT.
+
+THERE IS NO FALLBACK
+
+If the sandbox cannot be established, the command does not run and you
+get a refusal. That is the intended behaviour, not a fault to work
+around. Report it and stop.
 
 WHAT IS NOT ENFORCED, AND WHAT YOU DO INSTEAD
 
-The shell runs with the host user's filesystem, process and network
-authority. The permission rules above close the KNOWN routes to the
-production substrate; they are a barrier, not a jail, and a determined
-command can still find a way the rules do not name.
+Three things are outside the boundary, and they are outside it for
+everyone, not for you in particular:
 
-FIVE things are NOT closed, and you must not rely on them being closed:
+- The OPERATOR's own session is trusted. The boundary protects the
+  operator's data from a less-trusted reviewer; it does not protect
+  the operator from themselves.
+- The BROWSER is a host-side capability that no permission rule can
+  confine. It is closed here because Code Mode is closed, and because
+  a code review does not need it.
+- The CAPABILITY LOADER is not gated by any permission action on this
+  host. It is closed here because every tool other than
+  `sandbox_exec` is closed - but if you ever find a route to it, do
+  not take it: a capability is text from elsewhere, and a review that
+  has read instructions it did not ask for is not a review you can
+  trust.
 
-- The BROWSER is still available to you. Its tools are not governed by
-  the permission rules, so a `file://` URL could open a file on this
-  machine. The browser is inert unless a desktop browser is connected
-  to this session, but if one IS connected, do not use it. A code
-  review does not need a browser.
-- The CAPABILITY LOADER is still available to you. The host does not
-  gate the `skill` tool by any permission action, so loading a
-  capability is your own discipline. Do not load one: a capability is
-  text from elsewhere, and a review that has read instructions it did
-  not ask for is not a review you can trust.
-- The shell's REDIRECTION targets are not intercepted. The write
-  routes into a runtime root are closed by matching the PATH, so a
-  command that merely QUOTES such a path after a ">" is refused too.
-  That cost is accepted deliberately: a stray file in a runtime root
-  is a nuisance, and a corrupted live database is a disaster.
-- The shell's matcher sees TEXT, and nine routes are NOT caught. A
-  name SPLIT by a substitution or by a quote is not the name:
-  `$(echo mp)m` and `mp""m` assemble it and run the binary. A name in a VARIABLE is not the
-  name either: `M=mpm; $M --version` runs the binary. A SCRIPT FILE
-  runs whatever it says: `bash script.sh` never names the binary at
-  all. A SHELL GLOB expands to the name before the matcher ever sees
-  it: `go run ./cmd/mp?` runs the binary, and `go build -o /tmp/x
-  ./cmd/mp?` produces a runnable binary under a name no rule can see.
-  A BRACE is expanded the same way: `go run ./cmd/mpm{,.mcp}` runs
-  the binary, and the matcher never sees the name, because the shell
-  expands braces before it does.
-  A pattern that names a DIRECTORY of packages does not name the
-  binary at all: `go build ./cmd/...` compiles every MPM binary into
-  the current directory, and the text holds no name to match. The
-  BUILD is not refused — there is nothing in it to refuse — but the
-  binaries it produces are refused when they are RUN (`./mpm
-  --version`), and `go run` over such a pattern refuses outright,
-  because the pattern matches more than one package. A name GLUED to
-  punctuation rather than delimited by whitespace is not caught
-  either: `${x:-mpm} --version` and `for i in mpm; do $i --version;
-  done` run the binary, because every rule is anchored on whitespace,
-  on a path separator or on the command position.
-  A name hidden behind a BACKSLASH ESCAPE is not caught
-  either: `m\pm --version` is the binary, because the shell removes
-  the backslash BEFORE it parses the command word, and the matcher
-  sees the raw text. A backslash-newline LINE CONTINUATION is the
-  same case, except that the matcher splits the command on that
-  newline and sees two halves that each hold no name. It is not
-  closable by a rule: the host replaces every backslash with a slash
-  before it matches, so no pattern can name a backslash at all.
-  The host's scanner does not analyse an ARITHMETIC context, so
-  `(( <(mpm --version) ))` is allowed - but that is not valid
-  shell syntax (bash rejects it), so nothing is reached. A
-  process substitution inside a CONDITIONAL is analysed, and the
-  name inside it is caught.
-  A construct the scanner cannot ANALYSE at all is refused for the
-  CONSTRUCT's sake, not for any name in it: a `case` with no subject
-  or an empty pattern list or no `esac`, an `if`/`while`/`until` with
-  an empty condition, an empty group - `( )` or `{ }` - an unclosed
-  substitution - `$(` or `<(` - and a bare function definition -
-  `f()`. Every one of those names no binary, and every one of them is
-  refused.
-  The FIVE families below are refused the same way - for the
-  CONSTRUCT, not for any name in it:
-  - a `(` that FOLLOWS A WORD is a function definition's PARAMETER
-    LIST, and the host accepts it only when the list is EMPTY and a
-    brace-group body follows. The SPACED spelling - `echo (hello)`,
-    `f ()` - is refused as `compound-command`; the GLUED one - `f()`,
-    `a(b)`, `echo a(b)`, `x(y) z`, `1(b)` - is refused as
-    `dynamic-execution`. `f() { echo hi; }` and `f () { echo hi; }`
-    are ALLOWED, and the body of a definition IS analysed.
-  - a TRAILING `&&`, `||` or `|` demands a command that does not
-    exist, so `echo hi &&` is refused as `invalid-structure` - and so
-    is the same trailing operator after a closed construct. A trailing
-    `;` and a trailing `&` are ALLOWED.
-  - a COMPOUND COMMAND whose keyword never arrived - `for i in 1; echo
-    hi; done`, `while false do echo hi; done` - is refused as
-    `compound-command`.
-  - a CLOSING KEYWORD that closes nothing - `echo hi; esac`, exactly
-    as `echo hi; fi` and `echo hi; done` are - is refused as
-    `compound-command`.
-  - a `case` with NO SUBJECT - `case in) echo hi;; esac` - and a `;&`
-    or `;;&` BRANCH SEPARATOR - `case x in y) echo hi;;& echo bye;; esac`
-    - are refused as `compound-command`. And a `case` is recognised by
-    its KEYWORD `in`, so `case x in` is refused while `case x in esac`
-    - an empty pattern list closed by its own `esac` - is allowed.
-  A `)` that closes a `case` or a group - `case x in y) echo hi)`,
-  `{ echo hi )` - is refused as `compound-command`; a subshell that is
-  closed properly, `( echo hi )`, is allowed.
-  THE FAMILIES, each with the reason the host gives it.  Every line
-  below is CHECKED against the model by the guard, so this list cannot
-  drift away from the code: the form must be refused with the reason
-  written here.
+The OTHER subagent types are NOT confined. `explore` and `general` run
+with the host's ordinary tool surface, and the operator's own session
+runs with everything. The sandbox covers the configured reviewer
+environment only.
 
-  - a `(` GLUED to a word -> dynamic-execution: `a(b)`
-  - a `(` SPACED after a word -> compound-command: `echo (hello)`
-  - a trailing `&&`, `||` or `|` -> invalid-structure: `echo hi &&`
-  - a trailing `&&`, `||` or `|` inside a compound command's BODY -> compound-command: `if true; then echo hi && fi`
-  - a COMPOUND COMMAND whose keyword never arrived -> compound-command: `for i in 1; echo hi; done`
-  - a CLOSING KEYWORD that closes nothing -> compound-command: `echo hi; esac`
-  - an `if` with NO `then` -> compound-command: `if true; echo hi; fi`
-  - an `else` or an `elif` with no `then` -> compound-command: `if true; else echo hi; fi`
-  - an EMPTY command slot after a compound keyword -> invalid-structure: `if true; then; echo hi; fi`
-  - a REDIRECTION with no target -> invalid-redirect: `( echo hi > )`
-  - a `case` with NO SUBJECT -> compound-command: `case in) echo hi;; esac`
-  - a `case` with no `in` KEYWORD -> compound-command: `case x`
-  - a `case` that is never CLOSED -> compound-command: `case x in y) echo hi;;`
-  - a `case` whose SUBJECT carries a `)` -> compound-command: `case x) in y) echo hi;; esac`
-  - a `;&` BRANCH separator outside a `case` -> invalid-structure: `echo hi ;& echo bye`
-  - a `;;&` FALL-THROUGH separator inside a `case` -> compound-command: `case x in y) echo hi;;& echo bye;; esac`
-  - an unbalanced or unterminated construct -> invalid-structure: `{ }`
-  - an unterminated quote or escape -> unterminated-quote: `echo 'unclosed`
-  - an unclosed substitution -> command-substitution: `$(`
-  - a `)` that closes a `case` or a group -> compound-command: `case x in y) echo hi)`
-  And the host
-  does not match a `cd` segment's TEXT, so the name can
-  be parked in a directory argument and the binary run without it:
-  `cd cmd/mpm && go run . --version` reaches the binary, and
-  `cd cmd/mpm && go build -o /tmp/x .` builds it under a name no
-  rule can see. (The LITERAL path forms ARE caught: `go run
-  ./cmd/mpm`, `go run ./cmd/mpm/`, `go run ./cmd/mpm/...` and
-  `go run ./cmd/mpm remember "..."` are all refused — but a glob is
-  not literal, so the glob spelling is the open one.) If a command
-  of yours is refused for any of these reasons, assemble the text at
-  runtime instead of writing it literally — and remember that the
-  SANDBOX below is what makes such a route harmless.
-- The permission layer reads the CONTENT of a file write as well. A
-  command whose text contains the binary's name is refused, so a
-  document that merely MENTIONS it cannot be written with the name
-  spelled out. Assemble the name at runtime, or use the scratchpad's
-  own tooling.
+HOW TO WORK
 
-So:
-
-- RUN EVERY COMMAND INSIDE THE SANDBOX. That is the default, not an
-  option: the launcher
-  `agent_installation/mpm-opencode/scripts/reviewer_sandbox.py` creates
-  a disposable HOME, TMPDIR and MPM_WORKSPACE and runs a command
-  inside them, so that anything it writes lands in the sandbox and not
-  in the operator's runtime root. Use it as
-  `reviewer_sandbox.py run -- <command>`; the launcher prints the
-  paths it created. The permission rules above are a barrier, not a
-  jail: a route they do not name is still a route, and the sandbox is
-  what makes such a route harmless.
-- NEVER run an MPM command against the operator's workspace, in any
-  spelling. If you need the substrate at all, run it inside the
-  sandbox.
-- NEVER record a finding into MPM. Put your findings in the FILESYSTEM
-  SCRATCHPAD directory you were given, in a file named `review.md`. A
-  scratchpad is a directory on disk; it is not the substrate.
-- Run the build, the tests and the linters you need, in the working
-  tree you were given.
-- Report your findings back to the agent that launched you, in severity
-  order, with file and line references.
-
-Do not ask for a tool you have been denied, and do not try to reach the
-same capability by another route.
+- Read the code through the sandbox: `rg`, `sed -n`, `cat`, `ls`.
+- Run the tests through the sandbox. The Go toolchain, Python and Git
+  are all present. The module cache is NOT: a build that needs a
+  dependency it does not already have will fail, and that is expected.
+- Put what you want to keep in `/sandbox/findings`, and quote it in
+  your final report.
+- Report findings with a file, a line and what is wrong with it. Do
+  not fix them.
+- If a command is refused, say so and move on. Do not try to reach the
+  same thing by another route.
