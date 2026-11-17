@@ -123,6 +123,18 @@ database**, not from `$HOME` — an environment variable cannot decide what is
 protected. (`$HOME` is consulted as an *addition*, so forging it adds a
 protected root and removes none.)
 
+**What is protected inside the home**, and what is not, is a deliberate
+split. The **sensitive** part of the operator's home is protected: `.mpm`,
+`.config`, `.local`, `.ssh`, `.aws`, `.gnupg`, the credential files, and the
+conventional source roots (`~/src`, `~/projects`, …). The home itself is
+refused *as* a base — it holds everything — but a base inside a
+**non-sensitive** part of it is accepted, because the base is bound as a
+directory: it exposes its own contents, not its parent's. That distinction
+is load-bearing rather than cosmetic: the plugin's own default base lives
+under `~/.cache`, and a guard that refused every base inside the home
+would refuse **the one the tool uses** — `sandbox_exec` would then refuse
+every command, forever, with a message that reads like a safeguard.
+
 ### 3.3 The install — enforced by the installer, failing closed
 
 `install_reviewer_agent.py` parses the canonical template, checks its **policy**
