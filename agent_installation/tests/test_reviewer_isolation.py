@@ -188,6 +188,25 @@ class ReviewerDefinitionTest(unittest.TestCase):
         """
         self.assertIn(("*", "deny"), self.grouped["execute"])
 
+    def test_the_browser_is_closed_by_name(self) -> None:
+        """The browser is a host-side capability, and it is named.
+
+        The default deny covers it, but a named deny is a stronger
+        statement: the browser can open a `file://` URL and move
+        server-local bytes, so it would reach the operator's
+        filesystem from outside the namespace.
+        """
+        self.assertIn(("*", "deny"), self.grouped.get("browser", []))
+
+    def test_the_capability_loader_is_closed_by_name(self) -> None:
+        """The `skill` action loads a capability into the session.
+
+        The host does not gate it for the built-in agents, so a rule
+        that names it is the strongest statement this definition can
+        make.
+        """
+        self.assertIn(("*", "deny"), self.grouped.get("skill", []))
+
     def test_the_network_tools_are_closed(self) -> None:
         """`webfetch` and `websearch` reach the network outside the sandbox."""
         for action in ("webfetch", "websearch"):

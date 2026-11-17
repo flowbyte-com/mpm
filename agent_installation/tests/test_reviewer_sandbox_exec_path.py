@@ -448,6 +448,17 @@ class ReviewerRouteClosureTest(unittest.TestCase):
         for action in ("read", "write", "edit", "patch", "grep", "glob", "list"):
             self.assertIn(("*", "deny"), self.grouped.get(action, []))
 
+    def test_the_browser_and_the_capability_loader_are_closed(self) -> None:
+        """Two host-side capabilities that the sandbox cannot reach.
+
+        The browser opens a `file://` URL and moves server-local bytes;
+        the capability loader loads text from elsewhere into the
+        session. Neither runs inside the namespace, so neither is
+        covered by the sandbox.
+        """
+        for action in ("browser", "skill"):
+            self.assertIn(("*", "deny"), self.grouped.get(action, []))
+
 
 class PluginInvocationAgreementTest(unittest.TestCase):
     """The test's invocation IS the plugin's invocation."""

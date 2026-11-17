@@ -77,6 +77,8 @@ REQUIRED_DENIED = (
     "list",
     "external_directory",
     "execute",
+    "browser",
+    "skill",
     "webfetch",
     "websearch",
     "subagent",

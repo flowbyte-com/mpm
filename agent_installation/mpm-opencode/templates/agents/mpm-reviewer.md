@@ -76,6 +76,31 @@ permissions:
     resource: "*"
     effect: deny
 
+  # ── The BROWSER is closed BY NAME. ─────────────────────────────────
+  #
+  # The host's action vocabulary includes `browser`, and the default
+  # deny above already covers it — but a named deny is a stronger
+  # statement than a wildcard, and this one is load-bearing: the
+  # browser can open a `file://` URL and can move server-local bytes,
+  # so it would reach the operator's filesystem from OUTSIDE the
+  # namespace the sandbox establishes. Measured on this host: the
+  # built-in `build` agent carries `('browser', '*', 'deny')`.
+  - action: browser
+    resource: "*"
+    effect: deny
+
+  # ── The CAPABILITY LOADER is closed BY NAME. ───────────────────────
+  #
+  # The `skill` action loads a capability into the session. The host
+  # does not gate it for the built-in agents — it is closed for the
+  # `build` agent with `('skill', 'browser', 'deny')` — so a rule that
+  # names it is the strongest statement this definition can make: a
+  # capability is text from elsewhere, and a review that has read
+  # instructions it did not ask for is not a review you can trust.
+  - action: skill
+    resource: "*"
+    effect: deny
+
   # ── The host's NETWORK tools are closed. ───────────────────────────
   #
   # `webfetch` and `websearch` run in the host's process and reach the
@@ -220,7 +245,10 @@ the last one:
   `cat`, `ls`, `rg`, `sed` and friends, run inside it.
 - Code Mode is closed, and with it the browser family: the browser can
   open a `file://` URL and move server-local bytes, and no permission
-  rule confines it.
+  rule confines it. The `browser` action is closed BY NAME as well.
+- The capability loader is closed BY NAME (`skill`): a capability is
+  text from elsewhere, and a review that has read instructions it did
+  not ask for is not a review you can trust.
 - The network is unshared inside the namespace, and the host's network
   tools are closed.
 - You cannot edit, you cannot launch another agent, you cannot ask the
