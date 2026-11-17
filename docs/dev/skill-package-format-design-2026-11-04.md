@@ -2571,7 +2571,7 @@ the accepted foundation and the other four dispositions are untouched.
 ## 17. Reconciliation with the shipped implementation
 
 **Reconciled 2026-11-17, against `main` @ `712064c3` and the follow-up that
-closes issue #248.**
+closes issue #248 — merged as `d9772d8f` (PR #252).**
 
 This section is the authoritative statement of where the design in this
 document and the implementation in `main` agree, and where they do not. It is
