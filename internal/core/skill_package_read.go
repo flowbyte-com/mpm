@@ -530,9 +530,11 @@ type PackageHashOrigins struct {
 	// `unavailable` when it could not be.
 	ProjectionSHA256 PackageHashOrigin `json:"projection_sha256"`
 
-	// BodySHA256 is the origin of `body_sha256`. It is always
-	// `recomputed`: the body is derived from the projection during the
-	// retrieval, and the hash is of the bytes the response carries.
+	// BodySHA256 is the origin of `body_sha256`. It is `recomputed`
+	// when the body was determined — the hash is of the exact bytes the
+	// response carries — and `unavailable` when no body could be
+	// determined at all, which is the case a document whose frontmatter
+	// does not parse presents.
 	BodySHA256 PackageHashOrigin `json:"body_sha256"`
 }
 
@@ -890,8 +892,15 @@ func (dm *DatabaseManager) PackageVerify(ctx context.Context, sel PackageSelecto
 //
 // It is also the STANDALONE form of the provenance: the `read` action
 // uses ReadSkillWithPackageProvenance instead, because the action must
-// return the skill and the provenance from ONE snapshot. Both go through
-// skillPackageProvenanceInTx, so the two cannot disagree.
+// return the skill and the provenance from ONE snapshot. Both build the
+// object through skillPackageProvenanceInTx, so the two agree about the
+// package's recorded provenance — but they do NOT read the same
+// projection. The accessor reads the projection deliberately WITHOUT the
+// shred predicate, because a soft-shredded skill's package row still
+// describes a projection; the combined read reads it WITH that
+// predicate, because it returns the skill as well. So for a
+// soft-shredded packaged skill the accessor still reports a
+// provenance, and the combined read refuses the skill outright.
 func (dm *DatabaseManager) SkillPackageProvenance(ctx context.Context, skillID string) (*SkillPackageProvenance, error) {
 	if strings.TrimSpace(skillID) == "" {
 		return nil, packageReadErrorf(PackageReadReasonSelectorInvalid, "",
@@ -1205,6 +1214,13 @@ func skillPackageProvenanceInTx(ctx context.Context, tx *sql.Tx, skillID, projec
 	// recorded projection hash disagrees with the projection being
 	// returned is a positive claim of corruption, and the read fails
 	// closed on it.
+	//
+	// The package's IDENTITY is judged first, and by the same rule the
+	// reader's other paths use: a manifest that validates and whose
+	// identity disagrees with its package row is corruption too, and
+	// the read fails closed on it before it reaches the projection.
+	// The identity check is its own block, below, because it is a claim
+	// about the PACKAGE rather than about the projection.
 	var manifestJSON string
 	if err := tx.QueryRowContext(ctx, packageManifestQuery, skillID).Scan(&manifestJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1221,6 +1237,42 @@ func skillPackageProvenanceInTx(ctx context.Context, tx *sql.Tx, skillID, projec
 	if err := manifest.Validate(); err != nil {
 		return provenance, nil
 	}
+
+	// ── The package's IDENTITY: the row's `package_hash` against the
+	// manifest's own. ──
+	//
+	// Two records describe one package's identity: the package ROW
+	// carries a `package_hash`, and the manifest carries another. They
+	// must agree, and the manifest's claim must describe the manifest's
+	// own content — otherwise the manifest is carrying a hash that does
+	// not describe it, which is a false claim about the package.
+	//
+	// The rule is the manifest module's OWN, not this file's:
+	// `VerifyPackageHash` re-derives the canonical hash of the stored
+	// manifest and compares it with the hash the manifest claims, and
+	// the reader then compares that recomputed hash with the row's.
+	// This is the SAME comparison the reader's other paths already make
+	// — `loadPackageContext` refuses the same disagreement — so the two
+	// paths cannot disagree about which package this is.
+	//
+	// The TOLERANT cases are the two above and only the two: a
+	// manifest that does not parse, and a manifest that does not
+	// validate, are the damage `verify` reports, and the read still
+	// returns the body. A manifest that DOES validate and whose
+	// identity disagrees is a positive claim of corruption, and the
+	// read fails closed on it — the same rule `loadPackageContext`
+	// applies to the same disagreement.
+	recomputed, err := VerifyPackageHash([]byte(manifestJSON))
+	if err != nil {
+		return nil, packageReadErrorWrap(PackageReadReasonIntegrityFailure, "", err,
+			"the stored manifest of %s does not describe its own content", skillID)
+	}
+	if recomputed != packageHash {
+		return nil, packageReadErrorf(PackageReadReasonIntegrityFailure, "",
+			"the stored manifest of %s hashes to %s, not to the recorded %s",
+			skillID, recomputed, packageHash)
+	}
+
 	if projection == "" {
 		// There is no projection to validate the recorded hash
 		// against, so no recorded hash is reported as validated.

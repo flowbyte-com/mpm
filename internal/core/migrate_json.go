@@ -235,6 +235,79 @@ func (dm *DatabaseManager) IngestFromJsonFile(sourcePath, importBatch string, dr
 		return nil, fmt.Errorf("read %s: %w", sourcePath, err)
 	}
 
+	// ── A document that carries PACKAGE ARCHIVES is refused. ──────────
+	//
+	// P7's skills export writes one `.skill` archive per packaged
+	// skill, beside the document, and names them in the document's
+	// `package_archives` index. This importer reads the document's
+	// `memories` array — the PROJECTED skill rows — and nothing else.
+	//
+	// So importing such a document would write the projected rows and
+	// SILENTLY DROP every package's reference files, scripts and
+	// assets. Those bytes exist nowhere else, which is exactly the loss
+	// R11 exists to make loud.
+	//
+	// The refusal is the fail-closed choice, and it is deferred
+	// deliberately: a COMPLETE import path — the document's archives
+	// imported as packages — belongs with the package import surface,
+	// not with the memory migration. Until it exists, the consumer says
+	// so instead of quietly losing the packages.
+	//
+	// TWO numbers decide it, not one.
+	//
+	// `package_archives.count` is the number of archives the export
+	// PRODUCED. `packages_omitted.count` is the number of packages it
+	// could NOT carry. Reading only the first is a fail-open: an export
+	// whose every package failed verification writes
+	// `package_archives.count = 0` and `packages_omitted.count = 1`,
+	// and a guard that reads the first number imports that document
+	// normally — the projected rows land and the packages' content is
+	// left behind. The document's own statement of what it dropped is
+	// therefore read as well, and a document that dropped anything is
+	// package-bearing.
+	//
+	// A MALFORMED shape is refused too. A count that cannot be read, a
+	// negative count, and a count that disagrees with the list it
+	// accompanies all leave the number of packages UNKNOWN — and an
+	// unknown number is not zero. Treating a malformed index as "no
+	// packages" would be a fail-open in a fail-closed design.
+	packageFacts := jsonPackageArchiveFactsOf([]byte(content))
+	switch {
+	case packageFacts.Malformed:
+		return nil, fmt.Errorf(
+			"%s carries a MALFORMED package index (%s), so the number of skill packages it carries cannot be read; "+
+				"this importer reads only the document's projected rows, so importing it would risk silently dropping "+
+				"every package's reference files, scripts and assets. Import the .skill archives themselves, or export a "+
+				"document that carries a readable package index",
+			sourcePath, packageFacts.Reason)
+	case packageFacts.Omitted > 0:
+		// The message says what the document DROPPED, and it says
+		// where the packages' BYTES are — which is nowhere in the
+		// document. The archive index names the directory that holds
+		// the CARRIED packages' archives; the dropped packages never
+		// had one, so pointing at that directory for their bytes
+		// would be a lie. A document with no index at all dropped
+		// every package it was about.
+		where := "the document carries no package-archive index, so none of them were written beside it"
+		if packageFacts.IndexPresent {
+			where = fmt.Sprintf(
+				"they have no .skill archive of their own - %q holds the archives of the packages that WERE carried, and %d of them dropped package(s) have none",
+				packageFacts.Directory, packageFacts.Omitted)
+		}
+		return nil, fmt.Errorf(
+			"%s DROPPED %d skill package(s): the document's own package-omission marker names them. "+
+				"This importer reads only the document's projected rows, so importing it would silently drop every "+
+				"dropped package's reference files, scripts and assets (%s). "+
+				"Import the .skill archives themselves, or export a document that carries every package",
+			sourcePath, packageFacts.Omitted, where)
+	case packageFacts.Archives > 0:
+		return nil, fmt.Errorf(
+			"%s carries %d skill package archive(s) in %q; this importer reads only the document's projected rows, "+
+				"so importing it would silently drop every package's reference files, scripts and assets. "+
+				"Import the .skill archives themselves, or export a document that carries no package",
+			sourcePath, packageFacts.Archives, packageFacts.Directory)
+	}
+
 	facts, perEntryErrors, err := ParseJsonFactsWithReport(content, sourcePath)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", sourcePath, err)

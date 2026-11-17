@@ -735,7 +735,7 @@ func p6ReaderWriteProblems(sourceFile string, source []byte) ([]string, int) {
 }
 
 // p6ReaderSourceFiles are the files the reader consists of. The guard
-// walks ALL of them: the reader is the three files together, and a guard
+// walks ALL of them: the reader is the four files together, and a guard
 // that covered only one of them would leave half of the reader
 // unguarded.
 //
@@ -744,10 +744,17 @@ func p6ReaderWriteProblems(sourceFile string, source []byte) ([]string, int) {
 // from ONE snapshot, and the skill's own SELECTs are therefore part of
 // the read path the guard covers. Without it, a write could hide in the
 // skill loader and the guard would never see it.
+//
+// The fourth file is the EXPORTER (P7). The exporter is a read path too -
+// it reads a package, verifies it and serialises it - and its contract is
+// that it never repairs, never mutates and never rescans. The guard
+// makes that structural: a write could not hide in the exporter and go
+// unseen.
 var p6ReaderSourceFiles = []string{
 	"skill_package_read.go",
 	"skill_package_read_errors.go",
 	"skill_document.go",
+	"skill_package_export.go",
 }
 
 // TestP6TheReaderNeverWrites pins that the reader issues no write.

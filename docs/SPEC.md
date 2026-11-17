@@ -70,6 +70,7 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.10 [Skill Package Import (P4 — directory import and the export loss marker)](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker)
    - 6.11 [Skill Package Archive Import (P5 — the `.skill` ZIP adapter)](#611-skill-package-archive-import-p5--the-skill-zip-adapter)
    - 6.12 [Skill Package Retrieval (P6 — the read-only retrieval and verification API)](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api)
+   - 6.13 [Skill Package Export (P7 — the deterministic `.skill` writer and the complete skills export)](#613-skill-package-export-p7--the-deterministic-skill-writer-and-the-complete-skills-export)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -281,7 +282,7 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 
 Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures can be evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
 
-**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). A package can now be imported from a directory and stored atomically; the **internal** read API is specified in [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api), while the agent-facing read surface, the full package export and the package CLI/MCP surfaces are still later stages, and a skill saved the ordinary way is unaffected.
+**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The **archive importer** is specified in [§6.11](#611-skill-package-archive-import-p5--the-skill-zip-adapter). A package can now be imported from a directory and stored atomically; the **internal** read API is specified in [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api); the **deterministic `.skill` export** and the **complete skills export** are specified in [§6.13](#613-skill-package-export-p7--the-deterministic-skill-writer-and-the-complete-skills-export), so a package's bytes can now leave the substrate as a deterministic archive and re-enter as the same package. The **agent-facing read surface** and the **package CLI/MCP surfaces** are still later stages, and a skill saved the ordinary way is unaffected.
 
 #### Evidence
 
@@ -2171,12 +2172,15 @@ The JSON document's shape is now an **object**, not a bare array:
         "file_count": 3,
         "package_hash": "…"
       }
-    ]
+    ],
+    "scope": { "total": 12, "selected": 9, "carried": 8 }
   }
 }
 ```
 
-`packages_omitted` is **always present**. A count of zero is a positive statement — this export carried every package it could — and it keeps the response's type stable, so a consumer never has to branch on whether the field exists. The marker's scope mirrors the export's own filters exactly, so it names precisely the packages whose skill rows **were** exported and whose content was **not**.
+`packages_omitted` is **always present**. It keeps the response's type stable, so a consumer never has to branch on whether the field exists. The marker's scope mirrors the export's own filters exactly, so it names precisely the packages that were **in the export's scope and whose content was not carried** — which is not quite the same set as "the packages whose skill rows were exported": a package can be in scope and still have no exported skill row, and the export names it too, with the reason `skill_row_not_exported`. The reason field says which.
+
+**The marker's meaning changed with P7, and this section states the current one.** The count is the number of packages that were **selected and not carried** — the packages whose content this export could not carry. It is **not** the number of packages the export carried, and it is **not** the number of packages in the store. A count of zero is a positive statement only against a **known denominator**, which is why the marker carries a `scope` (`total`, `selected`, `carried`): "zero omitted out of twelve selected" is a complete export, while "zero omitted out of zero selected" says nothing about the packages that were never selected. The P7 section (§6.13) states the same rule from the export side.
 
 The CSV format is unchanged; the marker is a notice on standard error.
 
@@ -2188,15 +2192,15 @@ The shape change is a **breaking change to a CLI output contract**, so it is giv
 
 **`--format json-array` is the deprecated legacy shape** — a bare JSON array, the shape the export had before the marker existed. It is kept for **one release**, for consumers that cannot yet read the object.
 
-**The legacy shape is REFUSED whenever a package's content would be omitted.** A bare array has nowhere to put the loss marker, so emitting one while content is being dropped would drop those bytes **silently** — the exact failure R11 exists to prevent, and the legacy shape would reintroduce it for precisely the consumers that have not migrated. So the legacy format is available only when there is **nothing to lose**: an export of any collection other than `skills`, or a skills export in which no package exists. When a package would be omitted, the legacy format is refused with an error that **names the affected packages** and points at `--format json`. The deprecation is announced on standard error, so the document on standard output stays parseable.
+**The legacy shape is REFUSED whenever the export is PACKAGE-BEARING.** A bare array has nowhere to put the loss marker, so emitting one while content is being dropped would drop those bytes **silently** — the exact failure R11 exists to prevent, and the legacy shape would reintroduce it for precisely the consumers that have not migrated. So the legacy format is available only when there is **nothing to lose**: an export of any collection other than `skills`, or a skills export in which **no package is in scope**. The refusal is on the export being package-bearing, not on whether a package would actually be omitted: a package in scope is a package whose `.skill` archive and index entry the bare array cannot carry, whether or not the export managed to produce them. (This supersedes the P4-era condition, which refused only when content was actually dropped — that condition was correct when the export carried no archives at all, and is too weak now that the archives exist. §6.13 states the rule from the export side.) The deprecation is announced on standard error, so the document on standard output stays parseable.
 
-**The `memories` key's coupling with `mpm migrate --from` is pinned by a test.** `mpm migrate --from <export.json>` reads a `memories` array, so the export's top-level key name is a real coupling between the export writer and the migrate parser — it was incidental, and a regression test now feeds the document the export actually emits to the substrate's own JSON parser and asserts the rows come back. An export file therefore remains a valid input for `mpm migrate --from`.
+**The `memories` key's coupling with `mpm migrate --from` is pinned by a test.** `mpm migrate --from <export.json>` reads a `memories` array, so the export's top-level key name is a real coupling between the export writer and the migrate parser — it was incidental, and a regression test now feeds the document the export actually emits to the substrate's own JSON parser and asserts the rows come back. An export file therefore remains a valid input for `mpm migrate --from` — **when it carries no package**. A document that carries package archives is refused, and so is a document that **dropped** a package (§6.13): the migration reads the projected rows only, and importing either would silently lose the packages' content.
 
 **The marker's stream is a recorded deviation.** The design (§6.3, T44) says the marker appears *"in the response and on standard output"*. The implementation puts the CLI notice on **standard error** (`usererror.Notice`), which is the repository convention and keeps stdout parseable — a notice on stdout would corrupt a stdout-mode JSON document. The marker is still **in the response** (the response carries it structurally), so R11's substantive requirement is met. This is a deviation from the design's literal wording and is recorded here for the design owner's confirmation.
 
 > **PROPOSAL, not an approved design change.** The compatibility policy above — the deprecated `json-array` format, the refusal when content would be omitted, and the one-release window — is a **proposal** put forward in response to the independent review of this PR. It requires **operator acceptance** before it becomes the design's contract. The structured object as the default satisfies R11 either way; what the proposal adds is the migration path for consumers of the old shape.
 
-> **A pre-existing limitation, recorded and not changed here.** `mpm export --since` / `--until` compare the INTEGER `created_at` column against a TEXT date literal, and SQLite never compares an INTEGER as greater-or-equal to a TEXT value — so **any** `--since` value matches no rows and the export is empty. This is a **pre-existing** defect in `GetMemoriesForExport` (identical at the commit before this stage), it is **not** introduced by P4, and it is **not** fixed here: the fix changes shared read-path semantics that other consumers depend on, and it belongs in its own change with its own tests. The loss marker mirrors the export's filters exactly, so the two remain consistent with each other; the consequence is that an empty export reports a count of zero.
+> **A pre-existing limitation, recorded and not changed here.** `mpm export --since` / `--until` compare the INTEGER `created_at` column against a TEXT date literal, and SQLite never compares an INTEGER against a TEXT value in the way the comparison intends — so **any** `--since` value matches no rows (the export is empty) and **any** `--until` value matches **every** row (the filter does nothing). This is a **pre-existing** defect in `GetMemoriesForExport` (identical at the commit before this stage), it is **not** introduced by P4 or by P7, and it is **not** fixed here: the fix changes shared read-path semantics that other consumers depend on, and it belongs in its own change with its own tests. Both the loss marker (P4) and the package scope (P7) mirror the export's filters **exactly** — the same comparison, against the same column — so the two surfaces cannot disagree about which packages this export covers, and no package is dropped relative to the selected rows. The consequence is that a date-filtered export is empty, with a notice on standard error.
 
 #### Provisional operator decisions — not approvals
 
@@ -2588,17 +2592,23 @@ The `read` action still returns the entrypoint **projection's** body only. No su
 
 **`projection_sha256` is obtained from the manifest and validated.** It is not a hash this reader invents: the recorded value lives in the stored manifest, so the accessor reads the manifest, parses it, and applies the manifest module's **own** rules to it (`PackageManifest.Validate()` — the same primitive the importer used to accept the manifest, and the same one the reader's other paths use). It then compares the recorded value with the hash of the projection it is actually returning. A manifest that does not parse, or that does not validate, leaves no recorded value that could be validated: the read still returns the body — that is what `verify` is for — and the provenance reports the projection hash as **`unavailable`** (`hash_origins.projection_sha256 == "unavailable"`), not as an empty string that reads like a hash. A manifest that **does** validate and whose recorded projection hash **disagrees** with the projection the store holds is a positive claim of corruption, and the read **fails closed** on it with `integrity_failure`.
 
+**The package's IDENTITY is checked first, and by the rule the reader's other paths already use.** Two records describe one package's identity: the package **row** carries a `package_hash`, and the manifest carries another. They must agree, and the manifest's claim must describe the manifest's **own** content — `package_hash` is the hash of the manifest's canonical form, so a manifest edited in place no longer describes itself. The reader re-derives that hash with the manifest module's **own** primitive (`VerifyPackageHash` — the same one `loadPackageContext` uses, and the same one the reader's `verify` reports as `manifest_package_hash`) and compares it with the row's.
+
+The two tolerant cases above are the two tolerant cases for the identity too: a manifest that does not parse, and a manifest that does not validate, never reach this check, because a manifest the module would not accept carries no identity to check. A manifest that **does** validate and whose identity disagrees — with its own content, or with its row — is a positive claim of corruption, and the read **fails closed** on it with `integrity_failure`.
+
+**This closes a gap the accessor had.** It used to discard the manifest's claimed `package_hash` and report the row's unchecked, so a manifest substituted from another package would have returned that other package's validated projection hash beside the first package's own `package_hash`, with nothing in the response saying which of the two recorded values was unchecked. `verify` caught it (`manifest_package_hash`); `read` did not. The accessor's tolerance list below is shorter by one entry because of it.
+
 **`body_sha256` closes the gap the P6 spec named.** P6 stated that no hash in the response covered the body: a caller that hashed the returned `body` and compared it with `entrypoint_sha256` mismatched for **every** package, and could not reconstruct the document the hash covered. `body_sha256` is the hash of exactly the bytes the caller receives, so the caller can now check the one thing it is actually holding.
 
 **The `scanned` boolean and the `scan_status` object are both kept.** `scanned` is the compatibility shape — a single boolean that says whether every scanner that applies ran and passed. `scan_status` is the **detail**: which scanner ran, per scanner (`{"secret": true, "poison": true}`). They always agree for an entrypoint, because `SKILL.md` is text and a binary asset's disclosed poison skip cannot arise for it; the disclosed-skip case is visible in the `files` listing. `scan_status` is an **additive extension** of §8.2.1's six-field object, and §8.2.1's own prose asks the object to carry *"the entrypoint's hash and its scan status"* — so it is recorded here, in the design of record, and the discrepancy with §8.5's `scanned`-as-object is reconciled by naming the two shapes: `scanned` is the **summary**, `scan_status` is the **detail**.
 
 **The version override is read from the package row's own version provenance** (`declared_version`, `version`, `version_source`), which is the same record the manifest's `version_override` carries, because the importer writes both from the same plan.
 
-**What the accessor does NOT check, and where it is checked.** The accessor's entrypoint hash is the **package row's** `entrypoint_sha256`, and the accessor does **not** apply the comparison `loadPackageContext` applies — the one that refuses when the manifest and the row disagree about the entrypoint's hash. The two paths therefore differ **deliberately, and not silently**: the accessor is a hot-path retrieval that reports the recorded provenance, while the read paths and `verify` are where a disagreement is judged (`verify`'s `entrypoint_hash` and `manifest_identity` checks both report it). A caller that needs the package *proved* calls `verify`; a caller that needs the *recorded* provenance calls `read`. The row-wins decision of record applies to the version provenance; it is **not** a claim that the row is right about the entrypoint's hash.
+**What the accessor does NOT check, and where it is checked.** The accessor's entrypoint hash is the **package row's** `entrypoint_sha256`, and the accessor does **not** apply the comparison `loadPackageContext` applies — the one that refuses when the manifest and the row disagree about the entrypoint's hash. (The comparison about the package's **identity** it does apply, and applies it the same way — see above.) The two paths therefore differ **deliberately, and not silently**: the accessor is a hot-path retrieval that reports the recorded provenance, while the read paths and `verify` are where a disagreement is judged (`verify`'s `entrypoint_hash` and `manifest_identity` checks both report it). A caller that needs the package *proved* calls `verify`; a caller that needs the *recorded* provenance calls `read`. The row-wins decision of record applies to the version provenance; it is **not** a claim that the row is right about the entrypoint's hash.
 
-**`file_count` is the number of file ROWS the store holds.** The accessor counts `skill_package_files`, because the count is of the store's **rows**, not of the manifest's file list. So on a package whose rows do not match its manifest, `file_count` is the store's count and the manifest's is different: a deleted row lowers it **silently**, with no failure and no disagreement. The accessor's tolerance list is therefore **namely**: the recorded **entrypoint path**, the recorded **entrypoint hash**, the recorded **package hash**, the recorded **file count**, the recorded **version provenance**, and the entrypoint file row's **scan status** — none of them checked against the manifest. The scan status is the one worth naming, because it is the field R6 exists for: `files` and `read_file` **refuse** a package whose row and manifest disagree about a file's scan status, while `read` reports the row's status unchecked. That is not an escalation — a row flipped to "scanned" cannot grant more trust than the manifest's own entry already implies, and the conservative direction is reported faithfully. `files` and `read_file` refuse such a package and `verify` reports it; `read` reports what is stored.
+**`file_count` is the number of file ROWS the store holds.** The accessor counts `skill_package_files`, because the count is of the store's **rows**, not of the manifest's file list. So on a package whose rows do not match its manifest, `file_count` is the store's count and the manifest's is different: a deleted row lowers it **silently**, with no failure and no disagreement. The accessor's tolerance list is therefore **namely**: the recorded **entrypoint path**, the recorded **entrypoint hash**, the recorded **file count**, the recorded **version provenance**, and the entrypoint file row's **scan status** — none of them checked against the manifest. The recorded **package hash** is **not** on that list any more: it is checked, and a disagreement about it fails the read closed. The scan status is the one worth naming, because it is the field R6 exists for: `files` and `read_file` **refuse** a package whose row and manifest disagree about a file's scan status, while `read` reports the row's status unchecked. That is not an escalation — a row flipped to "scanned" cannot grant more trust than the manifest's own entry already implies, and the conservative direction is reported faithfully. `files` and `read_file` refuse such a package and `verify` reports it; `read` reports what is stored.
 
-**The one hash the accessor DOES check against the manifest is the projection's** — because it now reports it, and a recorded value that does not describe the bytes beside it would be a false claim. The asymmetry is deliberate and is stated rather than glossed: the accessor reports the **projection** hash it has validated, and reports the **entrypoint** hash the row claims.
+**The hashes the accessor DOES check against the manifest are the projection's and the package's own identity** — because it now reports them, and a recorded value that does not describe the bytes beside it would be a false claim. The asymmetry is deliberate and is stated rather than glossed: the accessor reports the **projection** hash it has validated, and reports the **entrypoint** hash the row claims. The package's identity is **established** rather than merely reported: it is checked against the manifest, and the package row's recorded `package_hash` is reported beside the three hashes — without an origin of its own, because it is not one of them. A package whose identity cannot be established is refused rather than described.
 
 **The failure envelope is wider than it was, deliberately.** A substrate failure while determining whether the skill is a package now fails the `read`. That is the fail-closed direction: the reader cannot know whether the skill is a package, so it cannot know whether the provenance is mandatory, and returning a body without it would break R6. An ordinary skill is unaffected in the normal case — its lookup is one indexed `SELECT` that returns no rows.
 
@@ -2610,19 +2620,19 @@ P6 disclosed that the `read` action's body and its provenance came from **two** 
 
 **The invariant, stated exactly:** *a successful read of a packaged skill cannot return its body without its package provenance because a concurrent deletion occurred between queries.* The result is always either a consistent skill/provenance pair or the appropriate not-found response.
 
-The snapshot is **not** a full-package integrity scan. No blob is read and no package byte is hashed: the read loads the skill's projection and the package's metadata, and hashes only the **one** projection document the response is about.
+The snapshot is **not** a full-package integrity scan. No blob is read and no package **file** byte is hashed: the read loads the skill's projection and the package's metadata, and hashes the **one** projection document the response is about, plus the stored **manifest**'s canonical form — a metadata document the read already holds, and the one the package's identity is computed from.
 
-**What it cost, measured.** The P6 hot path was a skill read plus **one** statement. The combined read is a transaction plus three statements and a manifest parse. Every number below is produced by a benchmark in `internal/core/skill_package_provenance_followup_test.go`, so it can be re-measured rather than believed:
+**What it cost, measured.** The P6 hot path was a skill read plus **one** statement. The combined read is a transaction plus three statements, a manifest parse, and the package's **identity** check. Every number below is produced by a benchmark in `internal/core/skill_package_provenance_followup_test.go`, so it can be re-measured rather than believed:
 
 | shape | benchmark | ns/op (median) | observed range |
 |---|---|---|---|
-| P6 hot path (skill read + one statement) | `BenchmarkP6FollowupReadSkillOldShape` | 93,215 | 72,902 – 116,488 |
-| **combined read (one snapshot)** | `BenchmarkP6FollowupReadSkillWithProvenance` | **130,657** | 101,181 – 151,664 |
-| the accessor called separately (each call opens its own snapshot) | `BenchmarkP6FollowupReadSkillTwoStatements` | 174,475 | 144,354 – 254,607 |
+| P6 hot path (skill read + one statement) | `BenchmarkP6FollowupReadSkillOldShape` | 78,501 | 74,503 – 84,841 |
+| **combined read (one snapshot)** | `BenchmarkP6FollowupReadSkillWithProvenance` | **141,623** | 137,342 – 143,497 |
+| the accessor called separately (each call opens its own snapshot) | `BenchmarkP6FollowupReadSkillTwoStatements` | 207,185 | 183,850 – 226,728 |
 
-On this host the overhead is **+37.4 µs (+40%)** over the P6 hot path and **−43.8 µs (−25%)** against calling the accessor separately.
+**The identity check is the largest single cost in the read, and it is the price of the contract.** The same benchmarks, measured in the **same session on the same host** against the head **without** the identity check, give 79,293 / 114,805 / 148,288 ns/op — so the check adds **+26.8 µs** to the combined read (114,805 → 141,623), which matches its own component measurement of 29 µs below. The overhead over the P6 hot path is therefore **+63.1 µs (+80%)** with the check and **+35.5 µs (+45%)** without it; against calling the accessor separately it is **−65.6 µs (−32%)** with the check and **−33.5 µs (−23%)** without it. The accessor pays the same check — it is the same code path — which is why the third row moves by as much as the second.
 
-**The absolute figures MOVE, and the table says so.** Three measurement sessions on the same machine gave the overhead as +31 µs (+37%), +55 µs (+57%) and +37 µs (+40%) — the host's load moves the read by tens of percent, because the read is a transaction with three statements in it. So the claim is the **order of magnitude and the sign**, not the figure: the combined read costs **tens of microseconds more** than the P6 shape, and **less** than calling the accessor separately, which opens a snapshot of its own. A reader who re-measures on a loaded machine will get a different number; that is why the range is quoted beside every figure.
+**The absolute figures MOVE, and the table says so.** Measurement sessions on the same machine gave the overhead (before the identity check) as +31 µs (+37%), +55 µs (+57%) and +37 µs (+40%) — the host's load moves the read by tens of percent, because the read is a transaction with three statements in it. So the claim is the **order of magnitude and the sign**, not the figure: the combined read costs **tens of microseconds more** than the P6 shape, and **less** than calling the accessor separately, which opens a snapshot of its own. A reader who re-measures on a loaded machine will get a different number; that is why the range is quoted beside every figure. The identity check moves the read by a **fixed** amount, because it is a fixed piece of work: a manifest parse, a canonical round trip and a SHA-256.
 
 **The third row is labelled for what it measures.** It is *not* "two independent reads": the accessor opens its **own** snapshot now — it has to, because it reads the manifest — so the shape it measures is a skill read on the pool plus an accessor call that takes a transaction of its own. That is the cost of the pre-follow-up arrangement *as it stands today*, not a hypothetical one.
 
@@ -2630,16 +2640,17 @@ The components are the **reproducible** part, because each is a small, self-cont
 
 | component | benchmark | ns/op (median) |
 |---|---|---|
-| the read snapshot itself (BEGIN, ROLLBACK, connection checkout) | `BenchmarkP6FollowupComponentTransaction` | 3,354 |
-| the manifest `SELECT` **inside** a snapshot — which INCLUDES the snapshot's own cost, so this row already contains the row above | `BenchmarkP6FollowupComponentManifestSelectInSnapshot` | 4,656 |
-| the manifest parse | `BenchmarkP6FollowupComponentManifestParse` | 5,352 |
-| the manifest **validation** | `BenchmarkP6FollowupComponentManifestValidate` | 378 |
+| the read snapshot itself (BEGIN, ROLLBACK, connection checkout) | `BenchmarkP6FollowupComponentTransaction` | 3,508 |
+| the manifest `SELECT` **inside** a snapshot — which INCLUDES the snapshot's own cost, so this row already contains the row above | `BenchmarkP6FollowupComponentManifestSelectInSnapshot` | 17,888 |
+| the manifest parse | `BenchmarkP6FollowupComponentManifestParse` | 5,662 |
+| the manifest **validation** | `BenchmarkP6FollowupComponentManifestValidate` | 330 |
+| the package's **identity** — the manifest parsed again, its canonical form re-derived, and the SHA-256 of that form compared with the hash the manifest claims | `BenchmarkP6FollowupComponentPackageIdentity` | **29,039** |
 
 **The rows overlap, and the table says so.** The in-snapshot `SELECT` benchmark takes the snapshot around the statement, so it already pays the transaction's cost — the two rows are not additive. And the combined read issues its manifest `SELECT` **inside** the snapshot, never on the pool, so the pool variant (`BenchmarkP6FollowupComponentManifestSelect`, 6,547 ns here) is **not** part of the combined read's cost at all; it is quoted only as a comparison, and its ordering against the in-snapshot variant is **within the noise on this host** — two measurement sessions put them in opposite orders. The claim is the **order of magnitude** of each piece, not their ranking.
 
-So the validation is **free** (0.4 µs against a 131 µs read), and the measured components account for about **10 µs** of the overhead; the remainder is the per-statement cost the transaction adds and the read's own variance. The read is **not** an unconditional integrity scan: no blob is read and no package byte is hashed.
+So the validation is **free** (0.3 µs against a 142 µs read), and the **identity** check is the one that is not: 29 µs, a fifth of the read, is what it costs to establish that the manifest and the package row describe one package. The measured components account for about **56 µs** of the overhead; the remainder is the per-statement cost the transaction adds and the read's own variance. The read is still **not** an unconditional integrity scan: no blob is read and no package **file** byte is hashed — the manifest's canonical form is a metadata document the read already holds.
 
-**Measurement host and protocol.** The figures above were measured on the development host (Linux x86-64, 12 CPUs, Go 1.27.3, SQLite in WAL mode, the package's own disposable workspace) with `go test -bench 'BenchmarkP6Followup' -benchtime=5000x -count=7`, on an otherwise idle machine. Absolute numbers are host- and load-specific; the benchmarks are in the repository so a reader can re-measure them on their own host.
+**Measurement host and protocol.** The figures above were measured on the development host (Linux x86-64, 12 CPUs, Go 1.27.3, SQLite in WAL mode, the package's own disposable workspace) with `go test -bench 'BenchmarkP6Followup' -benchtime=5000x -count=7`, on an otherwise idle machine. The identity-check figures were measured on **2026-11-16**, against the corrected head and against the head without the check **in the same session, on the same host**, so the two columns are comparable. Absolute numbers are host- and load-specific; the benchmarks are in the repository so a reader can re-measure them on their own host.
 
 **The skill-document loader was extracted so the guard covers it.** The combined read needs the skill-loading logic to run inside a caller's transaction, so it moved from `skill_db.go` into `skill_document.go`, written against the smallest read surface that both `*sql.DB` and `*sql.Tx` satisfy. That file is now part of the reader's **guarded set**: the write-guard walks it, so a write could not hide in the skill loader and go unseen. The loader is **one** implementation — `ReadSkill` and the combined read share it, so they cannot drift.
 
@@ -2657,6 +2668,7 @@ The reader has its own **closed** vocabulary, mirroring the importer's. It is sh
 | `invalid_path` | the requested path is not a canonical package path |
 | `content_hash_mismatch` | the stored bytes are not the bytes that were recorded |
 | `integrity_failure` | the stored package is not internally consistent |
+| `unpublishable` | the package — or the ordinary skill — is intact, but it cannot be **published** under a safe file name. A skill's name is an identifier, and `a/b` is a legal one |
 | `invalid_bounds` | the read's bounds are not admissible |
 | `database_failure` | the substrate failed |
 | `binary_requires_raw` | the content cannot be carried as text without loss |
@@ -2688,7 +2700,7 @@ Corruption is **never** reported as a missing file, and there is no fallback to 
 
 Because the row's `version` and `version_source` columns are `NOT NULL` (§6.8), the version provenance **always exists** for a packaged skill, and the accessor therefore always emits the object — including when the stored manifest does not parse. The accessor does not test the values for emptiness: a packaged skill with no version provenance would be a row that contradicts its own schema, and `verify` — not the provenance — is where such a contradiction is judged. That is a change from the first commit, where the override was recovered from the manifest and was therefore absent when the manifest was unreadable; it is disclosed here because it changes the `read` response's shape for a damaged package.
 
-**The provenance accessor is tolerant where the rest of the reader is strict.** `read` must keep returning the entrypoint's projection even when the package's manifest is broken — that is what `verify` is for. What the accessor never does is claim a scan that was not recorded: a missing entrypoint file row reports **no** scan.
+**The provenance accessor is tolerant where the rest of the reader is strict.** `read` must keep returning the entrypoint's projection even when the package's manifest is broken — that is what `verify` is for. The tolerance has a boundary, and the boundary is the package's **identity**: a manifest that does not parse and a manifest that does not validate are both tolerated, but a manifest that validates and carries a contradictory identity is refused with `integrity_failure`, because a package whose identity cannot be established is not a package the reader can describe. What the accessor never does is claim a scan that was not recorded: a missing entrypoint file row reports **no** scan.
 
 **The wire shape is P8's.** The internal response types carry no JSON tags, deliberately. The design pins the `files` and `read_file` wire shapes (§8.5), but it also requires that a binary payload's JSON encoding be **explicit and lossless** — and `encoding/json`'s default handling of a `[]byte` is base64, which would silently decide that question for every file, text ones included. The reader therefore stays transport-agnostic and names the encoding explicitly in its `Encoding` field; P8 writes the mapper against §8.5 and honours that field. The one exception is the file record itself, which is P2's `PackageManifestFile` — already carrying §5.5's own tags, so P8's mapper for it is empty.
 
@@ -2766,6 +2778,168 @@ That is **twenty-two routes**. The **seventeen controls** — the legitimate rea
 **No change to the shared model-configuration project.**
 
 **No new table and no schema change.** The reader reads the three package tables §6.8 specifies — `skill_packages`, `skill_package_files` and `skill_package_blobs` — plus `memories`, which `verify` reads to check the projection's hash and its version. It touches nothing else.
+
+### 6.13 Skill Package Export (P7 — the deterministic `.skill` writer and the complete skills export)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The **archive importer** is specified in [§6.11](#611-skill-package-archive-import-p5--the-skill-zip-adapter). The **reader** is specified in [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api). **Stage P7** adds the **writer**: the deterministic `.skill` export, and the complete skills export that carries every package it selects.
+
+The format, the export contract and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5.4, §5.5, §5.6, §6.3, §10 and §13. **This section describes stage P7.**
+
+#### What P7 changes
+
+Before P7 the skills export carried the **projected skill row only**, and the loss marker named every package whose content had been dropped. P7 makes the export **complete**: the packages' bytes are exported, and the marker names only what could **not** be carried.
+
+That is a change in the marker's **meaning**, so the marker is stated again here:
+
+| field | meaning in P7 |
+|---|---|
+| `packages_omitted.count` | the number of packages that were **selected and not carried** — zero when the export carried every one of them |
+| `packages_omitted.packages[]` | each omitted package, **with its reason** (`integrity_failure`, `package_not_found`, `file_name_collision`, `skill_row_not_exported`, `database_failure`, `export_failed`) and a human-readable detail. Every entry also carries the package's **identity** — `file_count` and `package_hash` — because the hash is the identifier that names the lost bytes. Both are read on the SAME snapshot the archives are read from, and they are carried for the omissions the EXPORTER produced as well as the ones the SCOPE produced |
+| `packages_omitted.scope.total` | the number of packages in the store, whatever the export's filters selected. It is counted on **every** path, including an export of a collection that selects no package: a report that says "0 packages are in the store" when three are is a false statement about the store |
+| `packages_omitted.scope.selected` | the number of packages the export's filters chose — the denominator the omission count is measured against |
+| `packages_omitted.scope.carried` | the number of `.skill` archives the export actually produced |
+
+**The omission reason is a closed vocabulary, and it separates "the bytes are bad" from "the publication failed".** The six reasons are:
+
+| reason | meaning |
+|---|---|
+| `integrity_failure` | the package did not verify — its bytes are inconsistent |
+| `package_not_found` | the package row is gone |
+| `file_name_collision` | another package in the same export derives the same published file name |
+| `skill_row_not_exported` | the package is in the export's scope, but its skill row is not among the exported rows |
+| `database_failure` | the substrate failed |
+| `export_failed` | the **catch-all**: any other cause. A package that **verified** and could not be published under a safe file name is one of them — it is not an `integrity_failure`, because its bytes are consistent and only the publication failed |
+
+The `detail` field names the cause in every case, so a consumer that needs to know WHICH failure occurred reads it rather than the reason.
+
+**A zero omission count is a positive statement only in the light of the scope.** Zero omitted out of twelve selected packages is a *complete* export; zero omitted out of zero selected packages says nothing about the packages that were never selected. That is why the scope is part of the marker.
+
+#### The deterministic writer
+
+A `.skill` archive is the **transport** for a package: the bytes a package is moved in. Two exports of the same package must therefore produce the **same bytes**, or the transport has no identity of its own and an operator cannot tell a faithful copy from a tampered one.
+
+Everything that could vary between two exports is pinned:
+
+| field | value |
+|---|---|
+| **layout** | **flat** — every canonical path sits at the archive's top level, so `SKILL.md` is at the archive's top level and §5.3.1's rule 4 makes the archive root the package root |
+| **order** | `SKILL.md` first, then the other canonical paths **sorted**. The comparator is a **strict weak ordering** — irreflexive, asymmetric and transitive — because Go does **not** validate the ordering it is handed to `sort` |
+| **timestamp** | every entry carries **1980-01-01 00:00:00 UTC** — the ZIP epoch, and the earliest instant a DOS timestamp can express |
+| **permissions** | `0644`; `0755` for a file the manifest marks executable |
+| **compression** | **`Store`** — no compression at all |
+| **header fields** | no extra field of the **caller's** own, no comment, no archive comment — Go's `archive/zip` writer appends its own Info-ZIP extended-timestamp field (`0x5455`) to every entry, and that field's value is the pinned epoch, so it is part of the deterministic shape |
+| **content** | the **original** package bytes, never the derived projection |
+
+**The compression choice is load-bearing, and it is measured rather than assumed.** Go's DEFLATE output is **not stable across Go releases**: the same bytes compressed by Go **1.26.6** and by Go **1.27.3** produce archives of **different sizes and different digests**. (The exact sizes and digests depend on the fixture, so neither is quoted here — the **digests differing** is the claim.) A deflate archive's identity would therefore depend on the **toolchain** that produced it, which defeats the purpose of a deterministic transport. `Store` makes the archive's bytes a function of the package's bytes and the pinned header fields alone, so the same package exports to the same bytes on **every** Go release. The cost is size: an archive is the sum of its files rather than a compressed fraction of it.
+
+That claim is **pinned as a constant**, not as a comparison: `TestP7ExportArchiveBytesAreIdenticalAcrossGoReleases` asserts the archive's SHA-256 against a literal. A test that compared two exports of the same package would pass on **both** Go releases — and would not have caught the toolchain dependence the `Store` decision avoids. A constant catches both, because the constant is measured on one toolchain and CI runs the other.
+
+#### Verify before export, in one snapshot
+
+The exporter **verifies** a package before it serialises it, reusing **P6's own verification** (`verifyPackageInTx`) and the **P1/P2 manifest primitives**. A missing blob, a corrupted hash, a mismatched file size, an invalid manifest, or a projection that contradicts the manifest **refuses the export**. There is no "export what is there" mode: an archive is a claim that these are the package's bytes, and a damaged package cannot make that claim.
+
+The verification and the serialisation read the **same snapshot**. A verify-then-export sequence across two snapshots would permit the content to change between the verification and the serialisation — which is exactly the window the verification exists to close.
+
+The exporter never **repairs**, never **mutates** and never **rescans**. It reads the rows the importer wrote and serialises them.
+
+#### The round trip
+
+`stored package → deterministic .skill → P5 import → identical package_hash and file hashes`
+
+The property holds because the manifest's per-file fields — path, sha256, size, content type, role, executable and the scan statuses — are all **re-derived identically** by the importer from the same bytes. The `executable` flag comes from the file's **extension** (the import's own allow-list), not from the archive's mode bits, so the mode bits are documentation rather than identity.
+
+The round trip is pinned across: a version-declaring package; a **versionless** package (whose effective version is `1.0.0-unversioned`); the **original** `SKILL.md` versus the derived projection; markdown references; scripts; binary assets; **shared content-addressed blobs**; empty supporting files; and packages built from **differently ordered** sources — which must export to the same bytes.
+
+#### The legacy single-document skill
+
+An ordinary skill — one with no package — can be exported as a **one-file** `.skill` archive: a single `SKILL.md` entry holding the skill's own bytes. The archive is a valid package for the P5 importer, which is what makes an ordinary skill movable by the same transport a package uses.
+
+**This is an internal interface, not a surface.** `ExportSkillDocument` is part of the export interface P8 calls; `mpm export` does not use it yet, and the batch export carries **packages**, not ordinary skills. The claim it makes is deliberately narrow, and it is **refused** rather than approximated whenever the narrow claim does not hold:
+
+- a **packaged** skill is **refused**. The skill's row holds the **projection** of its package — the original plus, for a package that declares no version, one inserted `version:` line — and the package's other files (references, scripts, assets) live in their own rows and blobs. A one-file archive built from the row would carry the projection rather than the original bytes and would omit every other file, so the package would come back a **different** package, or no package at all. That is the silent loss §6.3 exists to prevent, so the exporter refuses and names the way out: export the package.
+
+**The transport adaptation is named, not glossed.** The archive carries the skill's **original** document — the bytes the skill's row holds, which for an ordinary skill **are** the original document. On the way back in, the importer derives a projection from it, and because a document that declares a version projects to itself, the round trip is byte-exact.
+
+There is **no versionless case** in this transport. The substrate **refuses** to store a skill whose document declares no version (§5.2's frontmatter rule, enforced at the door by `SaveSkill`), so every skill in the store declares a version, the one-file archive always carries one, and the exporter never has to insert a line. The `1.0.0-unversioned` effective version belongs to the **package** path, where the importer inserts it into the projection it stores; it is not something the one-file export invents. The exporter changes no document and writes nothing to the database.
+
+#### The complete skills export
+
+The operator accepted the design's **sibling-directory** approach. A batch skills export writes:
+
+- the **export document** — the same JSON document the export has always written, with the `memories` array, the `packages_omitted` marker and the new `package_archives` index;
+- a **sibling directory** named for that export — `<output-path>.packages` — holding one `<name>-<version>.skill` archive per packaged skill.
+
+The `package_archives` index is **machine-readable**: it names the directory, and for each archive its file name, the skill id, the package hash, the archive's own SHA-256 and its size. An operator can therefore check every archive without re-deriving what it should contain.
+
+**The file name is derived from the package's canonical identity, and the derivation is checked as a FILE NAME.** A skill name is an **identifier**, and an identifier may contain a path separator — `a/b` is a legal skill name, and `a/b-1.0.0.skill` is a path, not a file name. So the derived name is refused when it is not a single safe path component: no path separator, not `.` or `..`, no leading dot, no control character.
+
+**The derivation is not injective, so a collision is possible.** The skill `a` at version `1.0.0-b-2.0.0` and the skill `a-1.0.0-b` at version `2.0.0` both derive `a-1.0.0-b-2.0.0.skill`. Two archives with one name cannot both be published — the second would overwrite the first — so the **first** archive in the canonical skill-id order keeps the name, and every other one is **named as an omission** with the reason `file_name_collision`. An export never silently overwrites an archive.
+
+#### The destination policy
+
+A package-bearing export needs a destination that can carry the archives **and** the index that names them.
+
+| destination | package-bearing export | package-free export |
+|---|---|---|
+| `--output <path>` | the document and the sibling directory | the document alone |
+| **standard output** | **refused** — before anything is emitted | unchanged |
+| **`--format csv`** | **refused** | unchanged |
+| **`--format json-array`** (deprecated) | **refused** | unchanged |
+
+The refusals happen **before anything is written**, so a refused export has written nothing at all — not a truncated document, not a half-published directory. Standard output cannot carry the archives; neither can CSV or the deprecated bare array, and an export that dropped the archives silently would be the exact loss R11 exists to prevent.
+
+**The deprecated `json-array` policy is preserved, not widened.** The bare array is still available for every export that has nothing to lose, and it is refused for the one that does. The compatibility shim is safe in the same shape it had before P7: a consumer that cannot yet read the structured object keeps working for every complete export, and is given a clear error — not silent data loss — for the one that is not.
+
+#### The migration consumer fails closed
+
+`mpm migrate --from` reads the document's **`memories` array** — the projected rows — and nothing else. Importing a package-bearing document would therefore write the projected rows and **silently drop** every package's reference files, scripts and assets. Those bytes exist nowhere else.
+
+So the consumer **refuses**, with a diagnostic that says what is missing and where it is. The complete import path — the document's archives imported as packages — belongs with the package import surface (**P8**), not with the memory migration, so it is **deferred deliberately** rather than half-built.
+
+**TWO numbers decide the refusal, not one.** The document carries two independent statements about its packages, and the consumer reads both:
+
+| key | says |
+|---|---|
+| `package_archives.count` | the archives the export **produced** |
+| `packages_omitted.count` | the packages the export could **not** carry |
+
+Reading only the first is a **fail-open**: an export whose every package failed verification writes `package_archives.count = 0` and `packages_omitted.count = 1`, and a guard that reads the first number imports that document normally — the projected rows land and the package's content is left behind. That is the loss the refusal exists to prevent, and it is reachable from this export's own output. So a document that **dropped** anything is package-bearing, whether or not it also carries an index.
+
+**A MALFORMED shape is refused too.** A count that cannot be read, a negative count, and a count that disagrees with the list it accompanies (`package_archives.count` against `package_archives.archives`, `packages_omitted.count` against `packages_omitted.packages`) all leave the number of packages **unknown** — and an unknown number is not zero. A string count, a fractional count, a missing count, a null count, and an index that is not an object at all are all refused, with a diagnostic that says the index is malformed. The safe reading of an unreadable index is the one that refuses; treating it as "no packages" would be a fail-open in a fail-closed design.
+
+**The SCOPE's arithmetic is checked too.** The document carries a third and fourth number, inside the marker's `scope`: `selected` is how many packages the export was about, and `carried` is how many it actually carried. Those and the counts above are one identity — `selected == carried + omitted`, and `carried` is the same number as the archive index's `count`. A document that breaks either identity is contradicting **itself** about how many packages it holds, and is refused. The quiet case is the one that matters: a document that says *"five packages were selected, none were carried and none were omitted"* names no loss at all, and a guard that reads only the counts would import it — leaving five packages' content behind without a word. A document with **no** scope is a pre-P7 document; there is nothing to check its numbers against, so it is imported normally.
+
+A document that carries **both** counts at zero — a complete export of a workspace with no packages — is imported normally.
+
+#### The filesystem safety
+
+Archives and export metadata are written through **private staging paths**:
+
+- The staging directory is created with a **random** name **beside** the output, so the publication is a same-filesystem rename and a predictable name cannot be pre-created as a symlink. It is removed on every failure path.
+- Nothing is published until every archive has been written **and** its digest re-read from the staged file and checked.
+- The document is written to a temporary name and **renamed** over the output, so the output is never truncated before its content is known to be complete.
+- A **symlink** is never followed: the output path and the sibling directory are inspected **without** following links, and a symlink in either place is refused.
+- An existing sibling directory that holds files is **refused**. An export never silently overwrites an archive.
+- Every **published** archive's digest is verified by reading it **back** from the published location.
+- The **document** is published with the mode `0644` on **both** paths, and the mode is set **explicitly**, so it does not depend on the caller's umask. The package-free path and the package-bearing path use the **same** writer, and the writer sets the mode before the rename: a temporary file is `0600`, because that is what a temporary file is, and a rename publishes that mode. (Before P7 the package-free path published `0666 & ~umask`, which is `0600` under umask `077` and `0644` under umask `022` — so the mode it published depended on the operator's umask.) The **archives** stay private (`0600`, inside a `0700` directory): the document is a shareable artefact, and the packages' contents are not.
+
+**The publication is NOT one atomic operation, and the design does not pretend otherwise.** The directory is published by a rename and the document by a second rename. The **order** makes the intermediate state harmless: the **directory is published first** and the **document second**, so a document is never published pointing at archives that are not there — a lie the consumer could not detect. The reverse — a directory with no document — points at nothing, and the recovery is to remove the directory and run the export again.
+
+**The recovery path is tested, not assumed.** An interruption between the two renames leaves a directory of archives and no document. The test asserts that the archives the interruption left behind are **intact and importable** — the interruption damaged nothing — that the next export **refuses** to run into that directory and says how to recover, and that removing the directory and running the export again succeeds.
+
+**A partial publication is reported honestly.** Every failure that happens *after* the directory rename says so: the error names the published directory, says it holds this export's archives, and says to remove it and run the export again. An error that said only "the export failed" would leave the operator with a directory they did not know was there.
+
+#### What P7 does **not** add
+
+**No `mpm skill export` command and no new `mpm_skills` MCP actions.** Those belong to **P8**. P7 extends the existing `mpm export` command, because complete skills export is explicitly part of the P7 contract, and it exposes an **internal export interface** — `ExportSkillPackage` (one package), `ExportSkillPackages` (a set, for the batch export) and `ExportSkillDocument` (an ordinary skill, as a one-file archive) — that P8's CLI and MCP surfaces call directly. None of the three is reachable from a command yet: `mpm export` uses the first two, and the third is P8's.
+
+**No new multi-package ZIP format.** One archive carries one package. The batch export's archives are separate files beside the document, named by the document's index.
+
+**No P9 lifecycle management, no agent-executable package content and no HAL integration.** A stored script is stored and flagged, never run.
+
+**No change to the database schema, and no write to the database at all.** The exporter reads the three package tables §6.8 specifies, plus `memories`. It writes nothing.
+
+**No change to the importer.** The `.skill` archive the writer produces is accepted by the existing P5 importer **by construction** — the flat layout is what §5.3.1's root rule expects — and no importer change was needed to make it so.
 
 ---
 

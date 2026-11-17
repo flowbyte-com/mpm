@@ -43,6 +43,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ─── Fixtures ──────────────────────────────────────────────────────────────
@@ -118,6 +119,48 @@ func p6fuImport(tb testing.TB, dm *DatabaseManager, name, version string, files 
 func p6fuDigest(content []byte) string {
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:])
+}
+
+// p6fuRewriteManifest rewrites a package's stored manifest through the
+// manifest module's OWN primitives, and keeps the package row's
+// `package_hash` in step with it.
+//
+// The manifest carries the package's identity: `package_hash` is the
+// hash of the manifest's canonical content, so a manifest edited in
+// place no longer describes itself. Rewriting it through `StoredJSON`
+// re-derives that hash, and the row is written with it, so the fixture
+// describes a package that is INTACT — which is what a test that wants
+// to isolate ONE defect needs.
+//
+// A fixture that edits the manifest with `json_set` and leaves the row
+// alone produces a package that contradicts ITSELF, which the reader
+// refuses — correctly, and for a reason that has nothing to do with the
+// defect under test.
+func p6fuRewriteManifest(t *testing.T, dm *DatabaseManager, skillID string, mutate func(*PackageManifest)) {
+	t.Helper()
+	var stored string
+	if err := dm.db.QueryRow(`SELECT manifest FROM skill_packages WHERE skill_id = ?`,
+		skillID).Scan(&stored); err != nil {
+		t.Fatalf("read the stored manifest: %v", err)
+	}
+	manifest, _, err := ParsePackageManifest([]byte(stored))
+	if err != nil {
+		t.Fatalf("parse the stored manifest: %v", err)
+	}
+	mutate(manifest)
+	rewritten, err := manifest.StoredJSON()
+	if err != nil {
+		t.Fatalf("re-store the manifest: %v", err)
+	}
+	identity, err := manifest.ComputePackageHash()
+	if err != nil {
+		t.Fatalf("recompute the package hash: %v", err)
+	}
+	if _, err := dm.db.Exec(
+		`UPDATE skill_packages SET manifest = ?, package_hash = ? WHERE skill_id = ?`,
+		rewritten, identity, skillID); err != nil {
+		t.Fatalf("rewrite the stored manifest: %v", err)
+	}
 }
 
 // p6fuManifestOf reads a package's stored manifest.
@@ -351,6 +394,208 @@ func TestP6FollowupProvenanceRefusesAProjectionThatContradictsTheManifest(t *tes
 	}
 }
 
+// TestP6FollowupProvenanceToleratesAManifestThatDoesNotValidate pins the
+// SECOND tolerant branch.
+//
+// A stored manifest has two ways of being unusable, and they are
+// different failures with different fixes: it can fail to PARSE, and it
+// can fail to VALIDATE. The first is covered by
+// TestP6FollowupProvenanceReportsAnUnreadableManifestAsUnavailable; this
+// one is the second.
+//
+// A manifest that parses but does not validate is still a manifest the
+// module would NOT have accepted, so the read tolerates it exactly as it
+// tolerates an unparsable one: the body comes back, and the recorded
+// projection hash is reported as unavailable rather than as an empty
+// string that reads like a hash.
+//
+// The fixture names one path twice, which `PackageManifest.Validate()`
+// refuses ("appears more than once"). The manifest is re-stored through
+// the module's OWN primitives, so the package's IDENTITY stays in step
+// with it: this fixture is about a manifest that does not validate, not
+// about one that contradicts its row.
+func TestP6FollowupProvenanceToleratesAManifestThatDoesNotValidate(t *testing.T) {
+	dm := p3DM(t)
+	imported := p6ImportPackage(t, dm, "invalidmanifest", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	p6fuRewriteManifest(t, dm, imported.SkillID, func(m *PackageManifest) {
+		if len(m.Files) < 2 {
+			t.Fatalf("the fixture needs at least two files; it has %d", len(m.Files))
+		}
+		// One path, twice: `Validate()` refuses it.
+		m.Files[len(m.Files)-1].Path = m.Files[0].Path
+	})
+
+	// The fixture must really be a manifest that PARSES and does not
+	// VALIDATE — otherwise the test would prove nothing.
+	var stored string
+	if err := dm.db.QueryRow(`SELECT manifest FROM skill_packages WHERE skill_id = ?`,
+		imported.SkillID).Scan(&stored); err != nil {
+		t.Fatalf("read the stored manifest: %v", err)
+	}
+	parsed, _, err := ParsePackageManifest([]byte(stored))
+	if err != nil {
+		t.Fatalf("the stored manifest does not parse: %v", err)
+	}
+	if err := parsed.Validate(); err == nil {
+		t.Fatalf("the stored manifest validates; the fixture did not make it invalid")
+	}
+
+	skill, provenance, err := dm.ReadSkillWithPackageProvenance(context.Background(), imported.SkillID, "")
+	if err != nil {
+		t.Fatalf("the read of a package with an invalid manifest failed: %v", err)
+	}
+	if skill == nil || skill.Body == "" {
+		t.Fatalf("the read returned no body")
+	}
+	if provenance == nil {
+		t.Fatalf("a packaged skill's read carries no provenance")
+	}
+	if provenance.ProjectionSHA256 != "" {
+		t.Errorf("the projection hash is %q, want it to be absent", provenance.ProjectionSHA256)
+	}
+	if provenance.HashOrigins.ProjectionSHA256 != PackageHashOriginUnavailable {
+		t.Errorf("the projection hash's origin is %q, want %q",
+			provenance.HashOrigins.ProjectionSHA256, PackageHashOriginUnavailable)
+	}
+	// The body's hash is still recomputed: the body IS known.
+	if provenance.BodySHA256 != p6fuDigest([]byte(skill.Body)) {
+		t.Errorf("the body hash is %s, want %s", provenance.BodySHA256, p6fuDigest([]byte(skill.Body)))
+	}
+	if provenance.HashOrigins.BodySHA256 != PackageHashOriginRecomputed {
+		t.Errorf("the body hash's origin is %q, want %q",
+			provenance.HashOrigins.BodySHA256, PackageHashOriginRecomputed)
+	}
+}
+
+// TestP6FollowupProvenanceRefusesAManifestWhosePackageHashDoesNotDescribeIt
+// pins the FIRST half of the identity rule.
+//
+// The manifest's `package_hash` is the hash of the manifest's own
+// canonical content. A manifest whose recorded hash does not describe it
+// is carrying a false claim about the package it names — and the reader
+// refuses it, rather than reporting the package's identity as though it
+// were sound.
+//
+// The corruption here is the manifest's OWN key, and the manifest's
+// content is untouched, so it still parses and still validates: it is a
+// VALID manifest carrying contradictory integrity information, which is
+// exactly the case that must fail closed.
+func TestP6FollowupProvenanceRefusesAManifestWhosePackageHashDoesNotDescribeIt(t *testing.T) {
+	dm := p3DM(t)
+	imported := p6ImportPackage(t, dm, "badidentity", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	if _, err := dm.db.Exec(
+		`UPDATE skill_packages SET manifest = json_set(manifest, '$.package_hash', ?) WHERE skill_id = ?`,
+		strings.Repeat("0", 64), imported.SkillID); err != nil {
+		t.Fatalf("corrupt the manifest's package_hash: %v", err)
+	}
+
+	_, _, err := dm.ReadSkillWithPackageProvenance(context.Background(), imported.SkillID, "")
+	if err == nil {
+		t.Fatalf("the read of a manifest that does not describe itself succeeded")
+	}
+	if reason := p6ReadReason(err); reason != PackageReadReasonIntegrityFailure {
+		t.Errorf("the refusal's reason is %q, want %q", reason, PackageReadReasonIntegrityFailure)
+	}
+}
+
+// TestP6FollowupProvenanceRefusesAPackageRowWhoseHashContradictsItsManifest
+// pins the SECOND half of the identity rule.
+//
+// The package row records a `package_hash`, and the manifest records
+// another. They describe the same package, so they must agree. When they
+// do not, the store is describing two different packages in one row —
+// and the reader refuses it, rather than reporting the row's hash beside
+// a manifest that says something else.
+//
+// This is the disagreement `verify` reports as `manifest_package_hash`,
+// and the one the reader's other paths already refuse
+// (`loadPackageContext`); the provenance accessor now refuses it too, so
+// the two paths cannot disagree about which package this is.
+func TestP6FollowupProvenanceRefusesAPackageRowWhoseHashContradictsItsManifest(t *testing.T) {
+	dm := p3DM(t)
+	imported := p6ImportPackage(t, dm, "rowidentity", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	if _, err := dm.db.Exec(`UPDATE skill_packages SET package_hash = ? WHERE skill_id = ?`,
+		strings.Repeat("1", 64), imported.SkillID); err != nil {
+		t.Fatalf("corrupt the package row's package_hash: %v", err)
+	}
+
+	_, _, err := dm.ReadSkillWithPackageProvenance(context.Background(), imported.SkillID, "")
+	if err == nil {
+		t.Fatalf("the read of a package whose row contradicts its manifest succeeded")
+	}
+	if reason := p6ReadReason(err); reason != PackageReadReasonIntegrityFailure {
+		t.Errorf("the refusal's reason is %q, want %q", reason, PackageReadReasonIntegrityFailure)
+	}
+}
+
+// TestP6FollowupProvenanceRefusesAManifestThatDescribesAnotherPackage pins
+// the identity rule against the SUBSTITUTION.
+//
+// A manifest that describes a DIFFERENT package — one that is entirely
+// coherent and entirely valid — can be written into another package's
+// row, together with the projection it describes. That manifest describes
+// ITSELF, so its own hash is sound; and its recorded projection hash
+// describes the projection the store holds, so the projection comparison
+// is satisfied too. The row's own `package_hash` is the only thing left
+// that disagrees — and the identity check is what catches it.
+//
+// The fixture substitutes BOTH halves on purpose. A fixture that
+// substituted only the manifest would be caught by the PROJECTION
+// comparison, and would therefore not pin the identity rule at all: the
+// read would fail closed for the wrong reason, and it would keep failing
+// closed with the identity check deleted. With both halves substituted,
+// the read reaches the identity check and only the identity check.
+func TestP6FollowupProvenanceRefusesAManifestThatDescribesAnotherPackage(t *testing.T) {
+	dm := p3DM(t)
+	first := p6ImportPackage(t, dm, "identityone", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the first body\n"),
+	})
+	second := p6ImportPackage(t, dm, "identitytwo", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the second body\n"),
+	})
+
+	// The second package's manifest, written into the first package's
+	// row, and the second package's projection, written into the first
+	// package's skill row — so that the substituted manifest's
+	// recorded projection hash describes the projection the store holds.
+	// The package row's own `package_hash` is left alone: it still names
+	// the FIRST package, and that is the disagreement.
+	var manifest, projection string
+	if err := dm.db.QueryRow(`SELECT manifest FROM skill_packages WHERE skill_id = ?`,
+		second.SkillID).Scan(&manifest); err != nil {
+		t.Fatalf("read the other package's manifest: %v", err)
+	}
+	if err := dm.db.QueryRow(`SELECT content FROM memories WHERE id = ?`,
+		second.SkillID).Scan(&projection); err != nil {
+		t.Fatalf("read the other package's projection: %v", err)
+	}
+	if _, err := dm.db.Exec(`UPDATE skill_packages SET manifest = ? WHERE skill_id = ?`,
+		manifest, first.SkillID); err != nil {
+		t.Fatalf("substitute the manifest: %v", err)
+	}
+	if _, err := dm.db.Exec(`UPDATE memories SET content = ? WHERE id = ?`,
+		projection, first.SkillID); err != nil {
+		t.Fatalf("substitute the projection: %v", err)
+	}
+
+	_, _, err := dm.ReadSkillWithPackageProvenance(context.Background(), first.SkillID, "")
+	if err == nil {
+		t.Fatalf("the read of a package whose manifest describes another package succeeded")
+	}
+	if reason := p6ReadReason(err); reason != PackageReadReasonIntegrityFailure {
+		t.Errorf("the refusal's reason is %q, want %q", reason, PackageReadReasonIntegrityFailure)
+	}
+}
+
 // ─── A2: one snapshot ──────────────────────────────────────────────────────
 
 // TestP6FollowupTheReadIsOneSnapshot pins the invariant DETERMINISTICALLY,
@@ -545,33 +790,67 @@ func p6fuCapturePackage(t *testing.T, dm *DatabaseManager, skillID string) p6fuP
 	return snap
 }
 
-// delete removes the skill row — and, by the foreign key, the package
-// row with it.
-// cycle removes the packaged skill and puts it back, ATOMICALLY.
+// p6fuDeletionWindow is how long the deleter dwells inside its
+// COMMITTED window — the interval during which the packaged skill and
+// its package row are genuinely ABSENT, and a reader on another
+// connection can see that they are.
 //
-// The removal and the restoration happen in ONE transaction, so the
-// pair appears and disappears TOGETHER — which is what the foreign
-// key's cascade does on a real deletion. Restoring the two rows in
-// separate statements would create an intermediate state the substrate
-// cannot produce: a skill row WITHOUT its package row. That state is
-// what the reader must never observe, and manufacturing it here would
-// test the fixture rather than the code.
+// It is a window rather than an instant because the reader has to land
+// inside it: the reader works through the packages in a tight loop, and
+// it meets the gone state only if a read of the package being cycled
+// falls between the removal's commit and the restoration's commit.
 //
-// The two statements inside the transaction are separated in time by
-// the transaction's own work, so the reader still meets the "gone"
-// state and the "present" state at the boundaries — which is the
-// interleaving this test is for.
+// It is short enough that the test does not spend its life waiting.
+const p6fuDeletionWindow = 2 * time.Millisecond
+
+// cycle removes the packaged skill — and, by the foreign key's cascade,
+// its package row with it — COMMITS that removal, dwells while the pair
+// is genuinely absent, and then puts the pair back.
+//
+// The removal and the restoration are SEPARATE transactions, and the
+// removal is COMMITTED, because that is what makes the state
+// observable at all. An uncommitted transaction is invisible to a
+// reader on another connection: the pair would be present before it and
+// present after it, and there would be no instant at which the package
+// row was absent. A fixture that removed and restored the pair inside
+// ONE transaction therefore CANNOT observe the failure this test is
+// for — and an earlier version of this fixture did exactly that, which
+// is why it could not fail.
+//
+// The committed window is the substrate's own deletion shape: the skill
+// row and its package row go together, and a reader that meets that
+// window must answer "not found" — never a body without its provenance.
+// The RESTORATION is one transaction, so the pair comes back together
+// and the reader never meets a skill without a package row.
 func (s p6fuPackageSnapshot) cycle(dm *DatabaseManager) error {
+	// 1. Remove the skill row. The foreign key cascades the package row
+	//    away with it — the shape every deletion path in the substrate
+	//    produces.
 	tx, err := dm.db.Begin()
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-
 	if _, err := tx.Exec(`DELETE FROM memories WHERE id = ?`, s.skillID); err != nil {
+		tx.Rollback()
 		return err
 	}
-	if _, err := tx.Exec(`
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// 2. Dwell inside the committed window. The pair is ABSENT here,
+	//    and a reader on another connection can see that.
+	time.Sleep(p6fuDeletionWindow)
+
+	// 3. Put the pair back, in ONE transaction, so it comes back
+	//    together.
+	restore, err := dm.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer restore.Rollback()
+
+	if _, err := restore.Exec(`
 		INSERT INTO memories (id, collection, content, tags, metadata, is_global,
 		                      is_prime_directive, weight, created_at)
 		VALUES (?, ?, CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), ?, ?, ?, ?)`,
@@ -579,7 +858,7 @@ func (s p6fuPackageSnapshot) cycle(dm *DatabaseManager) error {
 		s.skillGlobal, s.skillPrime, s.skillWeight, s.skillCreatedAt); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`
+	if _, err := restore.Exec(`
 		INSERT INTO skill_packages (skill_id, name, version, declared_version, version_source,
 		                            format, entrypoint, entrypoint_sha256, manifest, package_hash,
 		                            source_sha256, is_global, created_at, updated_at)
@@ -589,7 +868,7 @@ func (s p6fuPackageSnapshot) cycle(dm *DatabaseManager) error {
 		s.pkgSourceSHA, s.pkgGlobal, s.pkgCreatedAt, s.pkgUpdatedAt); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return restore.Commit()
 }
 
 // TestP6FollowupAConcurrentDeletionNeverReturnsABodyWithoutItsProvenance
@@ -605,19 +884,30 @@ func (s p6fuPackageSnapshot) cycle(dm *DatabaseManager) error {
 // A body WITHOUT its provenance is never an acceptable answer, because
 // the provenance is mandatory for a packaged skill.
 //
-// THE DETERMINISTIC GUARD IS ELSEWHERE. This test exercises the REAL
-// path — the exported read, taking its own snapshot — so it is a
-// probabilistic detector by nature: it can only catch a regression when
-// a deletion happens to land in the window between the reader's two
-// reads. The DETERMINISTIC guard is
-// `TestP6FollowupTheReadIsOneSnapshot`, which drives the exported read
-// through the snapshot seam and asserts both that the seam was used —
-// so the exported read really took ONE snapshot — and that the result is
-// a consistent pair.
+// THE INTERLEAVING IS CHOSEN, NOT RACED FOR. The deleter COMMITS its
+// removal and dwells inside the committed window, so the state the
+// reader has to survive — the pair genuinely absent — is a state the
+// reader can actually meet.
 //
-// This test is the supplementary real-path check, and its iteration
-// count is set so that a regression is caught with high probability
-// rather than by luck.
+// This matters, because an earlier version of this fixture removed and
+// restored the pair inside ONE transaction, which is INVISIBLE to a
+// reader on another connection: the pair was present before the
+// transaction and present after it, and there was no instant at which
+// the package row was absent. That fixture could not observe the
+// failure it was named after, and its doc comment claimed it detected
+// regressions "with high probability rather than by luck". The
+// probability was zero. The fixture below commits the removal, so the
+// window is real.
+//
+// The DETERMINISTIC guard is `TestP6FollowupTheReadIsOneSnapshot`,
+// which drives the exported read through the snapshot seam and asserts
+// both that the seam was used — so the exported read really took ONE
+// snapshot — and that the result is a consistent pair.
+//
+// What this test adds is the real-path check: it proves that the
+// exported read, running against a store that is really losing and
+// regaining packages underneath it, never hands back a body without the
+// provenance that describes it.
 func TestP6FollowupAConcurrentDeletionNeverReturnsABodyWithoutItsProvenance(t *testing.T) {
 	dm := p3DM(t)
 
@@ -636,16 +926,30 @@ func TestP6FollowupAConcurrentDeletionNeverReturnsABodyWithoutItsProvenance(t *t
 		snapshots = append(snapshots, p6fuCapturePackage(t, dm, id))
 	}
 
-	var wg sync.WaitGroup
-	stop := make(chan struct{})
+	var (
+		wg       sync.WaitGroup
+		stop     = make(chan struct{})
+		stopOnce sync.Once
+		cycleErr error
+	)
+	stopDeleter := func() {
+		stopOnce.Do(func() {
+			close(stop)
+			wg.Wait()
+		})
+	}
+	// The deleter must be stopped before the workspace is torn down, on
+	// every path — including a failure that ends the test early.
+	t.Cleanup(stopDeleter)
 
-	// The deleter: remove each packaged skill and put it back, in a
-	// TIGHT loop with no sleep, and ATOMICALLY — the pair appears and
-	// disappears together, which is what the foreign key's cascade
-	// does on a real deletion. The pause the earlier version of this
-	// fixture had meant the package was gone for a tiny fraction of the
-	// reader's reads, so the race was almost never hit — which is why
-	// this fixture now restores the rows it removes.
+	// The deleter: remove each packaged skill, COMMIT the removal, dwell
+	// inside the committed window, and put the pair back — over and
+	// over. The committed window is what makes the gone state
+	// observable: the pair is genuinely absent for the dwell's duration,
+	// and a reader on another connection sees that.
+	//
+	// A failure here is the FIXTURE's failure, not the reader's, so it
+	// is reported rather than ignored.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -656,7 +960,10 @@ func TestP6FollowupAConcurrentDeletionNeverReturnsABodyWithoutItsProvenance(t *t
 					return
 				default:
 				}
-				_ = snapshots[i].cycle(dm)
+				if err := snapshots[i].cycle(dm); err != nil {
+					cycleErr = err
+					return
+				}
 			}
 		}
 	}()
@@ -670,6 +977,7 @@ func TestP6FollowupAConcurrentDeletionNeverReturnsABodyWithoutItsProvenance(t *t
 				// read. Any other error is a failure.
 				if !strings.Contains(err.Error(), "not found") {
 					t.Errorf("the read failed with %v, want the not-found answer", err)
+					continue
 				}
 				notFound++
 				continue
@@ -684,11 +992,22 @@ func TestP6FollowupAConcurrentDeletionNeverReturnsABodyWithoutItsProvenance(t *t
 			pairs++
 		}
 	}
-	close(stop)
-	wg.Wait()
+	stopDeleter()
 
+	if cycleErr != nil {
+		t.Fatalf("the deleter failed: %v", cycleErr)
+	}
+	// The test is only meaningful if BOTH answers were observed. A
+	// reader that never met the gone state would prove nothing about
+	// the window; a reader that never met the present state would prove
+	// nothing about the pair. Neither is a skip: each one means the
+	// fixture did not do its job, and a test that cannot fail is a
+	// test that proves nothing.
 	if pairs == 0 {
-		t.Skip("every read met the not-found answer; the race did not interleave")
+		t.Fatalf("every read met the not-found answer; the fixture never put a package back")
+	}
+	if notFound == 0 {
+		t.Fatalf("no read met the not-found answer; the fixture's committed window was never observed, so this test proved nothing")
 	}
 	t.Logf("%d reads returned a consistent pair, %d returned the not-found answer", pairs, notFound)
 }
@@ -883,6 +1202,37 @@ func BenchmarkP6FollowupComponentManifestValidate(b *testing.B) {
 	}
 }
 
+// BenchmarkP6FollowupComponentPackageIdentity measures the package's
+// IDENTITY check.
+//
+// It is what the reader's identity check adds to every read of a
+// packaged skill: `VerifyPackageHash` parses the manifest, re-derives
+// the canonical hash of its content, and refuses a manifest whose
+// claimed hash does not describe it. The result is compared with the
+// package row's own `package_hash` — a string comparison, and not worth
+// measuring on its own.
+func BenchmarkP6FollowupComponentPackageIdentity(b *testing.B) {
+	p6fuWorkspace(b)
+	dm := p6fuDM(b)
+	imported := p6fuImport(b, dm, "bench", "1.0.0", map[string][]byte{
+		"references/templates.md": []byte("the reference body\n"),
+	})
+
+	var manifestJSON string
+	if err := dm.db.QueryRow(packageManifestQuery, imported.SkillID).
+		Scan(&manifestJSON); err != nil {
+		b.Fatalf("read the manifest: %v", err)
+	}
+	payload := []byte(manifestJSON)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := VerifyPackageHash(payload); err != nil {
+			b.Fatalf("verify the package hash: %v", err)
+		}
+	}
+}
+
 // TestP6FollowupTheAccessorReportsAnUnknownBodyAsUnavailable pins the
 // difference between an EMPTY body and an UNKNOWN one.
 //
@@ -916,11 +1266,9 @@ func TestP6FollowupTheAccessorReportsAnUnknownBodyAsUnavailable(t *testing.T) {
 		corrupted, imported.SkillID); err != nil {
 		t.Fatalf("corrupt the stored projection: %v", err)
 	}
-	if _, err := dm.db.Exec(
-		`UPDATE skill_packages SET manifest = json_set(manifest, '$.projection_sha256', ?) WHERE skill_id = ?`,
-		p6fuDigest([]byte(corrupted)), imported.SkillID); err != nil {
-		t.Fatalf("update the manifest's recorded projection hash: %v", err)
-	}
+	p6fuRewriteManifest(t, dm, imported.SkillID, func(m *PackageManifest) {
+		m.ProjectionSHA256 = p6fuDigest([]byte(corrupted))
+	})
 
 	provenance, err := dm.SkillPackageProvenance(context.Background(), imported.SkillID)
 	if err != nil {
@@ -959,11 +1307,9 @@ func TestP6FollowupTheAccessorHashesAnEmptyBody(t *testing.T) {
 	}
 	// The manifest's recorded projection hash follows, so the package
 	// stays intact and the accessor reports on it.
-	if _, err := dm.db.Exec(
-		`UPDATE skill_packages SET manifest = json_set(manifest, '$.projection_sha256', ?) WHERE skill_id = ?`,
-		p6fuDigest([]byte(fm)), imported.SkillID); err != nil {
-		t.Fatalf("update the manifest's recorded projection hash: %v", err)
-	}
+	p6fuRewriteManifest(t, dm, imported.SkillID, func(m *PackageManifest) {
+		m.ProjectionSHA256 = p6fuDigest([]byte(fm))
+	})
 
 	provenance, err := dm.SkillPackageProvenance(context.Background(), imported.SkillID)
 	if err != nil {
