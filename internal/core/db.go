@@ -2982,10 +2982,11 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	// The slice is applied here, alongside ReferenceTables and WorkTables,
 	// and outside the attachShared loops. The invariant is pinned by
 	// TestSkillPackageTablesAreLocalOnly.
-	for _, sqlQuery := range SkillPackageTables {
-		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
-			return fmt.Errorf("failed to execute skill package schema: %w\nSQL: %s", err, sqlQuery)
-		}
+	if err := ApplySkillPackageTables(func(sqlQuery string) error {
+		_, err := dm.ExecTracked(sqlQuery, 5)
+		return err
+	}); err != nil {
+		return err
 	}
 
 	for _, sqlQuery := range ReferenceIndexes {

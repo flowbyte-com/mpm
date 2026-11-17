@@ -361,10 +361,11 @@ func (s *MemoryStore) InitSQLite() error {
 	// skill_packages" — the guard broke an ordinary write rather than
 	// protecting one. The managed path has always created them; this
 	// brings the standalone path to parity.
-	for _, sql := range SkillPackageTables {
-		if _, err := s.DB.Exec(sql); err != nil {
-			return fmt.Errorf("failed to create skill package table: %w", err)
-		}
+	if err := ApplySkillPackageTables(func(sqlQuery string) error {
+		_, err := s.DB.Exec(sqlQuery)
+		return err
+	}); err != nil {
+		return err
 	}
 
 	// Migration: add new columns to existing databases using safe addColumnIfNotExists
