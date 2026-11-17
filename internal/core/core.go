@@ -557,6 +557,18 @@ type CoreDB interface {
 	// entrypoint bytes, not of the derived projection.
 	SkillPackageProvenance(ctx context.Context, skillID string) (*SkillPackageProvenance, error)
 
+	// ReadSkillWithPackageProvenance reads a skill AND its package
+	// provenance from ONE consistent database snapshot (PR A).
+	//
+	// The `read` action returns both, and they must agree: a packaged
+	// skill's provenance is MANDATORY beside its body. Two independent
+	// statements left a window in which a concurrent deletion could let
+	// the body return with no provenance; one snapshot closes it.
+	//
+	// The provenance is nil for an ordinary skill — the same
+	// "absent, not an error" contract SkillPackageProvenance has.
+	ReadSkillWithPackageProvenance(ctx context.Context, nameOrID, version string) (*Skill, *SkillPackageProvenance, error)
+
 	// ─── Retrieval metadata (Observability Layer, 2026-07-26) ─────
 	// Fire-and-forget telemetry for adaptive retrieval. Called from
 	// MCP read handlers and wake_context after a successful retrieval.

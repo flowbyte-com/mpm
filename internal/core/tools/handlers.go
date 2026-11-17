@@ -3806,7 +3806,15 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	if err != nil {
 		return nil, err
 	}
-	skill, err := dm.ReadSkill(skillID, "")
+	// The skill and its package provenance come from ONE snapshot.
+	//
+	// They used to come from two independent statements: the skill row
+	// first, then the provenance. A package deleted between the two
+	// could let the body return with NO provenance — which breaks R6,
+	// because the provenance object is mandatory for a packaged skill.
+	// One snapshot closes the window: the pair is either wholly present
+	// or wholly absent.
+	skill, provenance, err := dm.ReadSkillWithPackageProvenance(context.Background(), skillID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -3834,7 +3842,9 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	// context, so the one piece of package content most likely to carry an
 	// injection would otherwise come back with nothing the caller could
 	// check. It carries the ORIGINAL entrypoint's hash — not the
-	// projection's — and the entrypoint's ACTUAL scan status.
+	// projection's — the RECORDED projection hash, the RECOMPUTED hash
+	// of the body this response returns, and the entrypoint's ACTUAL
+	// scan status.
 	//
 	// Nothing else about the response changes: the body is still the
 	// entrypoint projection's body and no supporting file is ever inlined.
@@ -3842,16 +3852,7 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	// A FAILURE HERE FAILS THE READ, and that is deliberate: the reader
 	// cannot know whether the skill is a package, so it cannot know
 	// whether the provenance is mandatory — and returning a body without it
-	// would break R6. The lookup is one indexed SELECT, so an ordinary
-	// skill's read is unaffected in the normal case.
-	//
-	// The context is `context.Background()` because the tool surface's
-	// handler signature carries no context at all; the lookup is a single
-	// statement with no timeout, so there is no unbounded work to cancel.
-	provenance, err := dm.SkillPackageProvenance(context.Background(), skill.ID)
-	if err != nil {
-		return nil, err
-	}
+	// would break R6.
 	if provenance != nil {
 		response["package"] = provenance
 	}
