@@ -958,6 +958,22 @@ EOF
     log "host integrations are not modified by the substrate uninstaller."
     log "Remove or refresh them using the corresponding agent_installation adapter."
 
+    # NAME the one artefact the substrate installed that outlives it.
+    #
+    # The substrate uninstaller is host-agnostic and deliberately does
+    # not touch a host's integration, so the isolated reviewer
+    # definition stays in force after the substrate it isolates is
+    # gone. That is the adapter's business, not this script's — but a
+    # leftover nobody is told about is a leftover nobody removes, and
+    # the reviewer definition is MPM-OWNED state (the substrate
+    # installed it) sitting under the host's own config directory. So
+    # it is named, with the command that removes it.
+    local reviewer_definition="$HOME/.config/opencode/agents/mpm-reviewer.md"
+    if [ -f "$reviewer_definition" ]; then
+        log "note: the isolated reviewer agent definition is still installed at $reviewer_definition"
+        log "      remove it with: agent_installation/mpm-opencode/install.sh --uninstall"
+    fi
+
     if [ -n "${MPM_UNINSTALL_STAGED_AT:-}" ]; then
         # We were re-executed from a staged copy. Clean up both the
         # staged file and its parent directory (the parent was created

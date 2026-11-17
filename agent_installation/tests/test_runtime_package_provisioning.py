@@ -64,14 +64,24 @@ PLUGIN_ID = "mpm-opencode"
 OPENCODE_MANIFEST = [
     "server.js",
     "dist/index.v2.js",
+    "dist/sandbox-exec.js",
     "dist/wake-context.js",
     "dist/event-envelope.js",
     "dist/event-mapper.js",
     "dist/event-subscriber.js",
     "dist/workspace.js",
     "dist/resolve-mpm-binary.js",
+    "scripts/reviewer_bwrap.py",
     "package.json",
 ]
+
+# The manifest entries that are NOT tsc output: a checked-in root shim,
+# the sandbox script the plugin spawns, and the package descriptor.
+OPENCODE_MANIFEST_NON_TSC = (
+    "server.js",
+    "scripts/reviewer_bwrap.py",
+    "package.json",
+)
 
 # The validator the OpenCode installer selects. The library's DEFAULT
 # validator is the historical OpenClaw one; the OpenCode installer
@@ -108,10 +118,17 @@ def opencode_source_tree(root: Path) -> Path:
         "event-subscriber",
         "workspace",
         "resolve-mpm-binary",
+        "sandbox-exec",
     ):
         (src / "dist" / f"{name}.js").write_text(
             "export const x = () => {};\n", encoding="utf-8"
         )
+    # The sandbox script the plugin spawns. It is payload, not a build
+    # artefact, so it travels in the manifest.
+    (src / "scripts").mkdir()
+    (src / "scripts" / "reviewer_bwrap.py").write_text(
+        "#!/usr/bin/env python3\n", encoding="utf-8"
+    )
     (src / "package.json").write_text(json.dumps({
         "name": PLUGIN_ID,
         "type": "module",
@@ -834,6 +851,7 @@ class TestManifestEntriesExistInSource(unittest.TestCase):
         expected = sorted([
             "dist/index.js",
             "dist/index.v2.js",
+            "dist/sandbox-exec.js",
             "dist/wake-context.js",
             "dist/event-envelope.js",
             "dist/event-mapper.js",
@@ -844,6 +862,40 @@ class TestManifestEntriesExistInSource(unittest.TestCase):
         self.assertEqual(emitted, expected,
                          "opencode src/ changed; the runtime manifest and "
                          "the fake-tsc test stub must both be updated")
+
+    def test_the_manifest_carries_exactly_the_emitted_modules_and_its_payload(self) -> None:
+        """Every tsc output is in the manifest, and nothing else is.
+
+        The manifest carries the compiled modules, the checked-in root
+        shim, the sandbox script the plugin spawns, and the package
+        descriptor. A module tsc emits that the manifest does not carry
+        is a package that throws on load; an entry the manifest carries
+        that tsc does not emit is a staging failure at install time.
+        """
+        src = AGENT_DIR / PLUGIN_ID / "src"
+        emitted = sorted(
+            f"dist/{p.stem}.js"
+            for p in src.glob("*.ts")
+            if not p.name.endswith(".d.ts")
+        )
+        manifest_modules = sorted(
+            entry for entry in OPENCODE_MANIFEST
+            if entry.startswith("dist/")
+        )
+        # `dist/index.js` is the HISTORICAL V1 implementation. It is
+        # compiled by tsc and is deliberately NOT staged: OpenCode 2
+        # never loads it, and the payload carries only the V2 module.
+        historical = ["dist/index.js"]
+        self.assertEqual(
+            manifest_modules,
+            [entry for entry in emitted if entry not in historical],
+        )
+        for entry in OPENCODE_MANIFEST_NON_TSC:
+            self.assertIn(entry, OPENCODE_MANIFEST)
+            self.assertTrue(
+                (AGENT_DIR / PLUGIN_ID / entry).exists(),
+                f"{entry} is in the runtime manifest but not in the source tree",
+            )
 
     def test_opencode_staged_package_carries_root_entry(self) -> None:
         """server.js is not a tsc output — it is a checked-in shim — but it

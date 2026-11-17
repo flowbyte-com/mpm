@@ -46,6 +46,10 @@ SCHED_BINARY := mpm-scheduler
 CRITIC_BINARY := mpm-critic
 TELEMETRY_BINARY := mpm-telemetry
 UPDATE_BINARY := mpm-update
+# The linter is run with `go run ./cmd/mpm-lint`, so it is not installed
+# as a binary — but it IS an MPM binary a reviewer can run, and it reads
+# the repository's own source. The reviewer's isolation covers it.
+LINT_BINARY := mpm-lint
 # Developer build output. RELATIVE on purpose: it must follow the checkout
 # into whatever worktree or scratch clone is being built, so two checkouts
 # never share artifacts and a build here can never land in someone else's
@@ -404,7 +408,7 @@ print-build-provenance:
 # systemd unit — run ./install.sh. Both routes produce the same canonical
 # layout ($(PREFIX)/bin/) for the binaries themselves; install.sh adds the
 # PATH surface that `make install` does not.
-install: build refresh-installed install-runtime-assets
+install: build refresh-installed install-runtime-assets install-reviewer-agent
 	@echo "🚀 Deploying $(BUILD_DIR)/* -> $(PREFIX)/bin/"
 	@echo "   (this REPLACES the live install binaries — it is not a build)"
 	@mkdir -p $(PREFIX)/bin
@@ -445,6 +449,36 @@ install: build refresh-installed install-runtime-assets
 	@echo ""
 	@echo "ℹ  For the full user install (PATH symlinks + systemd unit),"
 	@echo "    run: ./install.sh"
+
+# Install the ISOLATED REVIEWER agent definition into the host's agent
+# directory.
+#
+# WHY THIS IS A DEPLOYMENT STEP. The reviewer's isolation from the
+# production MPM substrate is enforced by the reviewer's PERMISSION
+# rules, and those rules exist only if the definition is INSTALLED. A
+# definition that lives only in the repository is not an isolation: a
+# fresh install would have no reviewer definition at all, and the
+# isolation would be a document rather than a mechanism.
+#
+# The installed copy is MPM-OWNED state under ~/.config/opencode/agents/,
+# so it is refreshed from the canonical template on every install — a
+# stale copy is a weaker isolation in force than the one the repository
+# defines. The guard test
+# agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py
+# fails when the installed copy drifts from the template.
+#
+# This is a DEPLOYMENT action, so it is wired into `install` and nowhere
+# else. `make build` must never run it.
+REVIEWER_AGENT_INSTALLER := agent_installation/mpm-opencode/scripts/install_reviewer_agent.py
+
+.PHONY: install-reviewer-agent
+install-reviewer-agent:
+	@echo "==> installing the isolated reviewer agent definition"
+	@python3 $(REVIEWER_AGENT_INSTALLER) --force \
+	    || { echo "    FAIL: the reviewer agent definition was not installed." >&2; \
+	         echo "    A review subagent would run with the parent's tool surface," >&2; \
+	         echo "    which is the incident this definition exists to prevent." >&2; \
+	         exit 1; }
 
 # Provision the runtime DEFINITION assets — mode/, persona/, drills/ — into
 # the runtime root, as installable copies rather than as tracked source that

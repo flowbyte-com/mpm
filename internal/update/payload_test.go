@@ -44,14 +44,21 @@ func repoRoot(t *testing.T) string {
 // The graph is the whole point of the fixture. A package carrying only
 // server.js and dist/index.v2.js — what the updater used to stage —
 // has six unresolvable imports and loads NOTHING, silently.
+//
+// `sandbox-exec.js` is in the graph because the REAL entrypoint imports
+// it: the reviewer agent's one allowed action is the host-controlled
+// tool this module registers. A fixture that omitted it would have
+// passed while the real package failed to load — which is exactly what
+// happened, and exactly what the fixture is here to catch.
 var fixtureDistModules = map[string][]string{
 	"event-envelope.js":     {},
 	"event-mapper.js":       {"event-envelope.js"},
 	"event-subscriber.js":   {"event-envelope.js", "event-mapper.js"},
 	"resolve-mpm-binary.js": {},
+	"sandbox-exec.js":       {},
 	"wake-context.js":       {},
 	"workspace.js":          {},
-	"index.v2.js":           {"event-envelope.js", "event-mapper.js", "event-subscriber.js", "resolve-mpm-binary.js", "wake-context.js", "workspace.js"},
+	"index.v2.js":           {"event-envelope.js", "event-mapper.js", "event-subscriber.js", "resolve-mpm-binary.js", "sandbox-exec.js", "wake-context.js", "workspace.js"},
 }
 
 // fixtureBuildScript is the npm build the fixture adapter runs. It
@@ -67,9 +74,10 @@ const graph = {
   "event-mapper.js": ["event-envelope.js"],
   "event-subscriber.js": ["event-envelope.js", "event-mapper.js"],
   "resolve-mpm-binary.js": [],
+  "sandbox-exec.js": [],
   "wake-context.js": [],
   "workspace.js": [],
-  "index.v2.js": ["event-envelope.js", "event-mapper.js", "event-subscriber.js", "resolve-mpm-binary.js", "wake-context.js", "workspace.js"],
+  "index.v2.js": ["event-envelope.js", "event-mapper.js", "event-subscriber.js", "resolve-mpm-binary.js", "sandbox-exec.js", "wake-context.js", "workspace.js"],
 };
 for (const [name, deps] of Object.entries(graph)) {
   const lines = deps.map((d) => "import { x } from \"./" + d + "\";");
@@ -146,6 +154,18 @@ func fixtureCheckout(t *testing.T, mutate func(root string)) string {
 		}
 	}
 
+	// The sandbox script is a CHECKED-IN source file in the real
+	// adapter — it is not compiled, so the fixture must carry it too,
+	// or the manifest's declaration of it is unsatisfiable.
+	scriptsDir := filepath.Join(adapter, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sandbox := filepath.Join(scriptsDir, "reviewer_bwrap.py")
+	if err := os.WriteFile(sandbox, []byte("# fixture reviewer sandbox\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	if mutate != nil {
 		mutate(root)
 	}
@@ -213,18 +233,29 @@ func TestTheCanonicalManifestIsTheOneTheUpdaterReads(t *testing.T) {
 			continue
 		}
 		found = true
-		// The nine files the adapter's installer declares. If the two
+		// The eleven files the adapter's installer declares. If the two
 		// lists drift, one of the two paths stages a package the other
 		// refuses.
+		//
+		// The list carries the REVIEWER SANDBOX as well as the plugin:
+		// `dist/sandbox-exec.js` is the host-controlled tool the
+		// reviewer agent's one allowed action reaches, and
+		// `scripts/reviewer_bwrap.py` is the namespace builder it
+		// runs. A package staged without them would install a
+		// reviewer whose only allowed tool cannot run — which fails
+		// closed, but fails as a broken feature rather than as a
+		// refusal, and nobody would know why.
 		want := []string{
 			"server.js",
 			"dist/index.v2.js",
+			"dist/sandbox-exec.js",
 			"dist/wake-context.js",
 			"dist/event-envelope.js",
 			"dist/event-mapper.js",
 			"dist/event-subscriber.js",
 			"dist/workspace.js",
 			"dist/resolve-mpm-binary.js",
+			"scripts/reviewer_bwrap.py",
 			"package.json",
 		}
 		got := map[string]bool{}

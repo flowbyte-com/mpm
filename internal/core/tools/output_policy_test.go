@@ -108,12 +108,28 @@ func TestOutputPolicy_NoBlobStoreReference(t *testing.T) {
 	// directory via runtime.Caller so the test is hermetic and does
 	// not require MPM_WORKSPACE in the environment.
 	//
-	// MPM_WORKSPACE is honoured when set so operators can verify
-	// against a non-standard install layout.
+	// MPM_WORKSPACE is honoured so operators can verify against a
+	// non-standard install layout - but ONLY when it actually holds
+	// the file.
+	//
+	// A workspace that does NOT hold the source tree is a perfectly
+	// ordinary thing for the environment to point at: the reviewer's
+	// disposable sandbox sets MPM_WORKSPACE to a scratch directory
+	// so the substrate resolves its workspace there, and this test
+	// then looked for a source file that is not in the scratch
+	// directory and failed. The environment variable names a
+	// RUNTIME root, not a SOURCE root, so honouring it blindly makes
+	// the test depend on the caller's layout.
+	//
+	// So the workspace path is used when the file is there, and the
+	// hermetic source-relative path is used otherwise.
 	ws := os.Getenv("MPM_WORKSPACE")
 	var thisFile string
 	if ws != "" {
-		thisFile = filepath.Join(ws, "internal/core/tools/output_policy.go")
+		candidate := filepath.Join(ws, "internal/core/tools/output_policy.go")
+		if _, err := os.Stat(candidate); err == nil {
+			thisFile = candidate
+		}
 	}
 	if thisFile == "" {
 		// Resolve output_policy.go relative to this test file's

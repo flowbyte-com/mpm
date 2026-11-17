@@ -1,0 +1,85 @@
+=== SETUP: the disposable project under review ===
+PASS  [setup] the disposable project is a git repository with Go and Python tests
+
+=== ITEMS 1-6 and 9: the actual reviewer execution path ===
+--- ITEM 1 — the reviewer can do the review inside the sandbox
+PASS  [1a] the disposable project is visible in the sandbox — go.mod, probe.go, probe_test.go, py, 
+PASS  [1b] the Go tests run inside the namespace and pass — ok  	example.com/probe	0.005s 
+PASS  [1c] the Python tests run inside the namespace and pass —  .
+----------------------------------------------------------------------
+Ran 1 test in 0.000s
+
+OK
+
+PASS  [1d] the reviewer writes findings that land in the host's findings directory — FINDING: a line and what is wrong
+--- ITEM 2 — every command executes inside the namespace
+PASS  [2a] the command runs in a DIFFERENT mount namespace — host=mnt:[4026531832] inside=mnt:[4026533007]
+PASS  [2b] the working directory is the sandbox tree, not the host's — /sandbox/repo
+PASS  [2c] the namespace mounts the reviewer's tree and NOT the host's repository — sandbox/repo present=true host path absent=true
+PASS  [2d] the process is in the namespace's own PID namespace — 2 pid:[4026533011]
+--- ITEM 3 — crafted arguments cannot escape
+PASS  [3a] a command that begins with an option is refused — refusing to run '--bind': a command may not begin with an option
+PASS  [3b] a NESTED bubblewrap inside the namespace is refused — exit=1 stderr=bwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_*_namespaces exceeded (ENOSPC)
+
+PASS  [3c] a nested USER namespace is refused — exit=1 stderr=unshare: unshare failed: No space left on device
+
+PASS  [3d] a traversal out of /sandbox lands in the namespace root, not the host root — bin dev etc lib lib64 proc sandbox sbin tmp usr
+PASS  [3e] /proc/1/root is the NAMESPACE's init, not the host's — root:x:0:0:root:/root:/bin/sh | reviewer:x:1000:1000:reviewer:/sandbox/home:/bin/sh | nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
+PASS  [3f] no operator credential leaks into the namespace environment — credential-shaped variables: 0
+--- ITEM 4 — protected host directories and credentials are unavailable
+PASS  [4a] the host-only sentinel file is ABSENT inside the namespace — ABSENT
+PASS  [4b] the operator's home directory is ABSENT inside the namespace — ABSENT
+PASS  [4c] the live MPM runtime root is ABSENT inside the namespace — ABSENT
+PASS  [4d] the host's trust store (/etc/ssl) is ABSENT inside the namespace — ABSENT
+PASS  [4e] /etc is the SYNTHETIC one: it names `reviewer`, not the operator — root:x:0:0:root:/root:/bin/sh | reviewer:x:1000:1000:reviewer:/sandbox/home:/bin/sh | nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
+PASS  [4f] the operator's own checkout path is ABSENT inside the namespace — ABSENT
+PASS  [4g] the disposable copy's own metadata names no host location — . .. HEAD config description hooks index info objects packed-refs refs
+--- ITEM 5 — network and mount restrictions are enforced
+PASS  [5a] no name resolution from inside the namespace — NO_NETWORK
+PASS  [5b] there is no default route inside the namespace — Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
+PASS  [5c] the reviewer cannot mount anything — mount: /mnt: must be superuser to use mount. |        dmesg(1) may have more information after failed mount system call. | exit=32
+PASS  [5d] the reviewer holds no capabilities — CapPrm:	0000000000000000 | CapEff:	0000000000000000
+PASS  [5e] the host's /tmp is a PRIVATE tmpfs: its sockets are ABSENT — ABSENT
+--- ITEM 6 — a sandbox that cannot be established REFUSES, with no fallback
+PASS  [6a] a base inside a protected directory is REFUSED and the command does NOT run — the sandbox tree could not be built (exit 125): refusing to sandbox <disposable-project>/gate4-protected-base: it is inside <disposable-project>
+PASS  [6b] a missing sandbox script is REFUSED, with no unsandboxed fallback — the sandbox script is missing at <gate-root>/no-such-script.py; the sandbox cannot be established and no command was run
+PASS  [6c] a working directory outside the sandbox's trees is REFUSED — the working directory must be one of repo, home, tmp, workspace, findings
+PASS  [6d] a NUL in the command is REFUSED — the command must be an array of strings without NUL
+--- ITEM 9 — the reviewer cannot delegate to an unrestricted agent
+PASS  [9a] no host agent binary is reachable from inside the namespace — NO_OPENCODE_BINARY
+PASS  [9b] no MCP endpoint or host session variable is visible inside the namespace — matches: 0
+PASS  [9c] the host's runtime sockets are ABSENT — ls: cannot access '/run': No such file or directory | ls: cannot access '/var/run': No such file or directory
+--- SUMMARY
+--- node summary: 33 checks, 0 failures
+
+=== ITEM 7: installation verifies the ACTUAL installed definition, and fails closed ===
+PASS  [7a] the canonical definition installs, is byte-identical to the template, and is mode 0600
+PASS  [7b] a definition without the default deny is REFUSED and nothing is installed
+PASS  [7c] an existing definition is not overwritten without --force — rc=1 digest-before=5567b92e36f049f123b5195c49964758 digest-after=5567b92e36f049f123b5195c49964758
+PASS  [7d] the installer verifies the INSTALLED bytes and refuses to report success on a corrupted write
+PASS  [7e] a definition that re-opens the host shell is REFUSED and nothing is installed
+
+=== ITEM 8: Alpha's ordinary engineering tools remain functional ===
+      BIN: <the-mpm-cli>
+      SAVE: 0 {"content":"gate4: Alpha tools still work","id":"6b5f81288d93e4f0","memory_id":"6b5f81288d93e4f0","memory_persisted":true,"pointer":"mpm://memory/6b5f81288d93e4f0","projection":"summary","success":true,"tags":null,"weight":5}
+      ✅ Poison phrases seeded: 20 default phrases
+      
+      READ: 0 {"count":1,"memories":[{"id":"6b5f81288d93e4f0","summary":"gate4: Alpha tools still work","summary_truncated":false,"pointer":"mpm://memory/6b5f81288d93e4f0","type":"memory","collection":"memories","created_at":1794927001,"reinforcement_count":0,"weight":5,"retrieval_metadata":{"reuse_count":1,"succ
+      HEALTH: 0 {"busy_retries":0,"db_path":"<disposable-workspace>/src/db/mpm.db","db_path_raw":"<disposable-workspace>/src/db/mpm.db","evidence_total":6,"freelist_count":0,"memories_active":1,"ok":true,
+PASS  [8a] the plugin's MPM tool route works end to end against a DISPOSABLE database
+PASS  [8b] the write landed in the DISPOSABLE workspace, not in the production database
+PASS  [8c] no database was created outside the disposable workspace
+
+=== ITEM 10: the INSTALLED plugin and its bundled files work together ===
+PASS  [10a] the payload stages into the disposable runtime root through the real staging library — <disposable-runtime-root>/agent_installation/mpm-opencode
+PASS  [10b] the staged package carries the compiled tool AND the bundled sandbox script
+      SCRIPT: <disposable-runtime-root>/agent_installation/mpm-opencode/scripts/reviewer_bwrap.py
+      EXIT: 0
+      OUT: root:x:0:0:root:/root:/bin/sh | reviewer:x:1000:1000:reviewer:/sandbox/home:/bin/sh | MARKER-OK
+PASS  [10c] the STAGED plugin runs a command through its STAGED bundled script — the installed pair works together
+PASS  [10d] the installer's dry-run accepts the definition the staged package ships — would install <the-clone>/agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md -> <gate-root>/config/opencode/agents/mpm-reviewer.md
+the template satisfies the reviewer's isolation policy
+
+=== SUMMARY ===
+checks: 46   PASS: 46   FAIL: 0
+node driver exit code: 0

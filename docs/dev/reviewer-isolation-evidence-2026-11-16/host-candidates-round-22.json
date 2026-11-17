@@ -1,0 +1,397 @@
+[
+ {
+  "id": "N01",
+  "cmd": "a(b)",
+  "note": "paren glued to a word, non-empty body"
+ },
+ {
+  "id": "N02",
+  "cmd": "a(b)c",
+  "note": "paren glued to a word + trailing text"
+ },
+ {
+  "id": "N03",
+  "cmd": "echo hi &&",
+  "note": "trailing empty slot after &&"
+ },
+ {
+  "id": "N04",
+  "cmd": "echo hi ||",
+  "note": "trailing empty slot after ||"
+ },
+ {
+  "id": "N05",
+  "cmd": "echo hi |",
+  "note": "trailing pipe"
+ },
+ {
+  "id": "N06",
+  "cmd": "echo hi &&&",
+  "note": "triple amp"
+ },
+ {
+  "id": "N07",
+  "cmd": "if true; then echo a; elif true; then echo b; fi",
+  "note": "elif with a then"
+ },
+ {
+  "id": "N08",
+  "cmd": "if true; then echo a; elif true; echo b; fi",
+  "note": "elif without then"
+ },
+ {
+  "id": "N09",
+  "cmd": "for i in 1; echo hi; done",
+  "note": "for without do"
+ },
+ {
+  "id": "N10",
+  "cmd": "for i; do echo hi; done",
+  "note": "for without in"
+ },
+ {
+  "id": "N11",
+  "cmd": "while false do echo hi; done",
+  "note": "while without ; before do"
+ },
+ {
+  "id": "N12",
+  "cmd": "case $(echo a b) in y) echo hi;; esac",
+  "note": "subject expansion with a space inside"
+ },
+ {
+  "id": "N13",
+  "cmd": "case \"a b\" in y) echo hi;; esac",
+  "note": "quoted subject with a space"
+ },
+ {
+  "id": "N14",
+  "cmd": "case x in 'a)b') echo hi;; esac",
+  "note": "single-quoted ) in a pattern"
+ },
+ {
+  "id": "N15",
+  "cmd": "case x in 'a(b') echo hi;; esac",
+  "note": "unbalanced ( inside a quoted pattern"
+ },
+ {
+  "id": "N16",
+  "cmd": "case x in y) ;; esac",
+  "note": "empty branch body"
+ },
+ {
+  "id": "N17",
+  "cmd": "case x in y) echo hi& esac",
+  "note": "& in a branch"
+ },
+ {
+  "id": "N18",
+  "cmd": "echo $(; b)",
+  "note": "empty slot inside a substitution"
+ },
+ {
+  "id": "N19",
+  "cmd": "echo $(a; b)",
+  "note": "separator inside a substitution"
+ },
+ {
+  "id": "N20",
+  "cmd": "{ echo hi; } | { echo bye; }",
+  "note": "group after a pipe"
+ },
+ {
+  "id": "N21",
+  "cmd": "echo hi && { echo hi; }",
+  "note": "group after &&"
+ },
+ {
+  "id": "N22",
+  "cmd": "( if true; then echo hi; fi )",
+  "note": "compound nested in a subshell"
+ },
+ {
+  "id": "N23",
+  "cmd": "case x in y) { echo hi; } ;; esac",
+  "note": "group inside a case branch"
+ },
+ {
+  "id": "N24",
+  "cmd": "if true\nthen echo hi\nfi",
+  "note": "then on the next line"
+ },
+ {
+  "id": "N25",
+  "cmd": "while false\ndo echo hi\ndone",
+  "note": "do on the next line"
+ },
+ {
+  "id": "N26",
+  "cmd": "for i in\n1; do echo hi; done",
+  "note": "for header spanning lines"
+ },
+ {
+  "id": "N27",
+  "cmd": "while\nfalse; do echo hi; done",
+  "note": "while condition on the next line"
+ },
+ {
+  "id": "N28",
+  "cmd": "if true; then # comment\nfi",
+  "note": "comment-only body"
+ },
+ {
+  "id": "N29",
+  "cmd": "if true; then\n\nfi",
+  "note": "empty body written with a blank line"
+ },
+ {
+  "id": "N30",
+  "cmd": "coproc \"x\" { echo hi; }",
+  "note": "quoted coproc name"
+ },
+ {
+  "id": "N31",
+  "cmd": "echo $(echo hi})",
+  "note": "} inside a substitution"
+ },
+ {
+  "id": "N32",
+  "cmd": "echo hi}",
+  "note": "} glued to a word"
+ },
+ {
+  "id": "N33",
+  "cmd": "foo)bar",
+  "note": ") glued to a word"
+ },
+ {
+  "id": "N34",
+  "cmd": "{ cat <<EOF\nhi\nEOF\n}",
+  "note": "heredoc inside a brace group"
+ },
+ {
+  "id": "N35",
+  "cmd": "echo $(case x in y) echo hi;; esac)",
+  "note": "case inside $()"
+ },
+ {
+  "id": "N36",
+  "cmd": "time { echo hi; }",
+  "note": "group after time"
+ },
+ {
+  "id": "N37",
+  "cmd": "! { echo hi; }",
+  "note": "group after !"
+ },
+ {
+  "id": "N38",
+  "cmd": "if true; then ( echo hi ) ; fi",
+  "note": "subshell in an if body"
+ },
+ {
+  "id": "N39",
+  "cmd": "echo $(echo \"a)b\")",
+  "note": "closed ) inside a quoted string in a substitution"
+ },
+ {
+  "id": "N40",
+  "cmd": "case in) echo hi;; esac",
+  "note": "case with empty subject, no space"
+ },
+ {
+  "id": "N41",
+  "cmd": "case x iny) echo hi;; esac",
+  "note": "in glued to the pattern"
+ },
+ {
+  "id": "N42",
+  "cmd": "do; done",
+  "note": "do with an empty body"
+ },
+ {
+  "id": "N43",
+  "cmd": "elif true; then echo hi; fi",
+  "note": "elif with no if"
+ },
+ {
+  "id": "N44",
+  "cmd": "if true; then echo hi; elif false; then echo bye; else echo x; fi",
+  "note": "elif plus else"
+ },
+ {
+  "id": "N45",
+  "cmd": "echo hi ;;",
+  "note": ";; outside a case"
+ },
+ {
+  "id": "N46",
+  "cmd": "echo hi ;& echo bye",
+  "note": ";& separator"
+ },
+ {
+  "id": "N47",
+  "cmd": "case x in y) echo hi;;& echo bye;; esac",
+  "note": ";;& separator"
+ },
+ {
+  "id": "N48",
+  "cmd": "case x in y) echo hi;; esac ;",
+  "note": "trailing ; after esac"
+ },
+ {
+  "id": "N49",
+  "cmd": "echo $(echo hi) $(echo bye)",
+  "note": "two substitutions"
+ },
+ {
+  "id": "N50",
+  "cmd": "echo $(echo hi)extra",
+  "note": "substitution glued to a word"
+ },
+ {
+  "id": "N51",
+  "cmd": "x=$(echo hi)y",
+  "note": "assignment with a glued substitution"
+ },
+ {
+  "id": "N52",
+  "cmd": "echo ${x:-$(echo hi)}",
+  "note": "parameter expansion with a substitution"
+ },
+ {
+  "id": "N53",
+  "cmd": "echo $(( $(echo hi) ))",
+  "note": "arithmetic with a substitution"
+ },
+ {
+  "id": "N54",
+  "cmd": "[[ $(echo hi) == x ]]",
+  "note": "context with a substitution"
+ },
+ {
+  "id": "N55",
+  "cmd": "if [[ $(echo hi) ]]; then echo hi; fi",
+  "note": "if condition is a context with a substitution"
+ },
+ {
+  "id": "N56",
+  "cmd": "> /dev/null echo hi",
+  "note": "redirect before the command"
+ },
+ {
+  "id": "N57",
+  "cmd": "echo hi |& cat",
+  "note": "|& pipe"
+ },
+ {
+  "id": "N58",
+  "cmd": "echo hi |&",
+  "note": "trailing |&"
+ },
+ {
+  "id": "N59",
+  "cmd": "echo hi &> out",
+  "note": "&> redirect"
+ },
+ {
+  "id": "N60",
+  "cmd": "echo hi &>> out",
+  "note": "&>> redirect"
+ },
+ {
+  "id": "N61",
+  "cmd": "{ echo hi; } &",
+  "note": "group backgrounded"
+ },
+ {
+  "id": "N62",
+  "cmd": "( echo hi ) &",
+  "note": "subshell backgrounded"
+ },
+ {
+  "id": "N63",
+  "cmd": "cat <<EOF > /dev/null\nhi\nEOF",
+  "note": "heredoc with a redirect"
+ },
+ {
+  "id": "N64",
+  "cmd": "<<EOF\nhi\nEOF",
+  "note": "heredoc with no command"
+ },
+ {
+  "id": "N65",
+  "cmd": "echo hi <<EOF\nhi\nEOF",
+  "note": "heredoc after a command"
+ },
+ {
+  "id": "N66",
+  "cmd": "if true; then echo hi; fi <<EOF\nhi\nEOF",
+  "note": "heredoc after fi"
+ },
+ {
+  "id": "N67",
+  "cmd": "f() { echo hi; } <<EOF\nhi\nEOF",
+  "note": "heredoc after a function body"
+ },
+ {
+  "id": "N68",
+  "cmd": "select x in a; do echo hi; done",
+  "note": "select with in"
+ },
+ {
+  "id": "N69",
+  "cmd": "select x; do echo hi; done",
+  "note": "select without in"
+ },
+ {
+  "id": "N70",
+  "cmd": "echo hi & echo bye",
+  "note": "background then command"
+ },
+ {
+  "id": "N71",
+  "cmd": "{ echo hi; } ; { echo bye; }",
+  "note": "two groups separated by ;"
+ },
+ {
+  "id": "N72",
+  "cmd": "case x in y) echo hi;; esac )",
+  "note": "stray ) after esac"
+ },
+ {
+  "id": "N73",
+  "cmd": "echo (a)",
+  "note": "paren group in argument position"
+ },
+ {
+  "id": "N74",
+  "cmd": "echo (a) b",
+  "note": "paren group in argument position with a trailing word"
+ },
+ {
+  "id": "N75",
+  "cmd": "if true; then echo hi; fi; do echo bye",
+  "note": "do after a closed if"
+ },
+ {
+  "id": "N76",
+  "cmd": "case x in y) ;; esac",
+  "note": "empty branch, twice"
+ },
+ {
+  "id": "N77",
+  "cmd": "echo hi\n\necho bye",
+  "note": "blank line between commands"
+ },
+ {
+  "id": "N78",
+  "cmd": "for i in a; do echo hi; done extra",
+  "note": "trailing text after done"
+ },
+ {
+  "id": "N80",
+  "cmd": "echo { a,b }",
+  "note": "brace expansion"
+ }
+]

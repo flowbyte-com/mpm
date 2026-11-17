@@ -2,7 +2,7 @@
 #
 # install.sh — Materialize the OpenCode ↔ MPM integration.
 #
-# Idempotent. Performs four ordered responsibilities:
+# Idempotent. Performs five ordered responsibilities:
 #
 #   1. Compile dist/ from canonical source (if dist/index.v2.js is
 #      missing, older than any module under src/, or was built from a
@@ -21,6 +21,11 @@
 #      'mpm-opencode' path.
 #   4. Refresh the AGENTS.md behavioral managed block (delegates to
 #      install_agents_instructions.py for the actual content work).
+#   5. Install the ISOLATED REVIEWER agent definition
+#      (delegates to install_reviewer_agent.py). The reviewer's
+#      isolation from the production substrate is enforced by permission
+#      rules in that definition, so an installation that omits it
+#      leaves a review subagent with the parent's tool surface.
 #
 # Migration behavior (Part 3 — registration refresh):
 #
@@ -517,12 +522,14 @@ STAGE_LIBRARY="${SCRIPT_DIR}/../scripts/stage_runtime_package.sh"
 OPENCODE_RUNTIME_MANIFEST=(
     server.js
     dist/index.v2.js
+    dist/sandbox-exec.js
     dist/wake-context.js
     dist/event-envelope.js
     dist/event-mapper.js
     dist/event-subscriber.js
     dist/workspace.js
     dist/resolve-mpm-binary.js
+    scripts/reviewer_bwrap.py
     package.json
 )
 
@@ -691,7 +698,53 @@ refresh_agents_md() {
 }
 
 # --------------------------------------------------------------------------
-# Step 5: clean up the legacy generated directory (when safe)
+# Step 5: install the ISOLATED REVIEWER agent definition
+# --------------------------------------------------------------------------
+#
+# The reviewer's isolation from the production substrate is enforced by
+# PERMISSION RULES in its agent definition, and those rules only exist
+# if the definition is INSTALLED. A definition that lives only in the
+# repository is not an isolation: a fresh install would have no reviewer
+# definition at all, and the isolation would be a document rather than a
+# mechanism.
+#
+# So the definition is installed here, from the canonical template, and
+# refreshed on every install. `--force` is used deliberately: the
+# installed copy is MPM-OWNED state, and a stale copy is exactly the
+# hazard (a weaker isolation in force than the one the repository
+# defines). The guard test
+# agent_installation/tests/test_reviewer_isolation.py fails when the
+# installed copy differs from the template, and the installer itself
+# refuses to install a definition that does not satisfy the isolation
+# policy.
+#
+# THIS STEP FAILS CLOSED.  A deployment step that fails open is worse
+# than one that fails: it converts an error into a SILENT DOWNGRADE of
+# the guarantee — a reviewer that then runs with the parent's tool
+# surface, believing it is confined.  So a missing installer, a failed
+# install, or a failed VERIFICATION stops the install.
+
+install_reviewer_agent() {
+    local installer="$SCRIPT_DIR/scripts/install_reviewer_agent.py"
+    local target="$OPENCODE_CONFIG_DIR/agents/mpm-reviewer.md"
+    if [ ! -f "$installer" ]; then
+        err "reviewer agent installer missing at $installer"
+        err "  the reviewer's isolation would not be installed at all"
+        return 1
+    fi
+    if ! python3 "$installer" --target "$OPENCODE_CONFIG_DIR/agents" --force \
+            >>"$INSTALL_LOG" 2>&1; then
+        err "reviewer agent installation FAILED (see $INSTALL_LOG)"
+        err "  refusing to continue: an install that cannot install the"
+        err "  reviewer definition leaves a review subagent with the"
+        err "  parent's tool surface, believing it is confined"
+        return 1
+    fi
+    log "isolated reviewer agent installed and verified at $target"
+}
+
+# --------------------------------------------------------------------------
+# Step 6: clean up the legacy generated directory (when safe)
 # --------------------------------------------------------------------------
 #
 # After the namespace migration, the legacy directory
@@ -723,6 +776,20 @@ cleanup_legacy_generated() {
 
 do_uninstall() {
     log "uninstalling mpm-opencode..."
+    # Remove the ISOLATED REVIEWER agent definition. It is MPM-OWNED
+    # state under ~/.config/opencode/agents/, installed by this script
+    # from the canonical template. Leaving it behind would leave a
+    # reviewer definition in force after the substrate it isolates is
+    # gone — harmless in effect, but state MPM owns should not outlive
+    # the uninstall.
+    local reviewer_target="$OPENCODE_CONFIG_DIR/agents/mpm-reviewer.md"
+    if [ -f "$reviewer_target" ]; then
+        if rm -f "$reviewer_target" 2>/dev/null; then
+            log "removed the isolated reviewer agent definition at $reviewer_target"
+        else
+            warn "could not remove $reviewer_target (operator cleanup)"
+        fi
+    fi
     # Remove the AGENTS.md managed block.
     local installer="$SCRIPT_DIR/scripts/install_agents_instructions.py"
     if [ -f "$installer" ]; then
@@ -782,6 +849,12 @@ case "$MODE" in
             exit 1
         fi
         refresh_agents_md
+        if ! install_reviewer_agent; then
+            err "install aborted: the isolated reviewer agent was not installed."
+            err "  Continuing would leave a review subagent with the parent's"
+            err "  tool surface, believing it is confined."
+            exit 1
+        fi
         cleanup_legacy_generated
         log "done"
         # State what was actually checked, and what was not. An install
@@ -815,6 +888,12 @@ case "$MODE" in
             log "  [FAIL] build provenance missing at $CANONICAL_ADAPTER_DIR/$PROVENANCE_FILE"
         fi
         log "  [ok]   AGENTS.md managed block refreshed"
+        if [ -f "$OPENCODE_CONFIG_DIR/agents/mpm-reviewer.md" ]; then
+            log "  [ok]   isolated reviewer agent installed"
+        else
+            log "  [FAIL] isolated reviewer agent missing — a review subagent"
+            log "         would run with the parent's tool surface"
+        fi
         log "NOT verified:"
         log "  whether OpenCode actually loads the plugin. Installer checks cannot"
         log "  prove runtime loading. With a running OpenCode service, ask the"

@@ -175,6 +175,12 @@ class BootstrapFixture(unittest.TestCase):
         # A minimal, VALID OpenCode payload: the root entry and the V2
         # loader must exist and be non-empty, and no relative import may
         # dangle.
+        #
+        # The file list mirrors the REAL payload's, because the
+        # canonical manifest is copied in above and names every file
+        # the release ships.  A synthetic payload that omits one of them
+        # fails the staging for a reason that has nothing to do with
+        # what this gate is about.
         adapter = self.project / "agent_installation" / "mpm-opencode"
         (adapter / "dist").mkdir(parents=True)
         (adapter / "server.js").write_text(
@@ -182,6 +188,7 @@ class BootstrapFixture(unittest.TestCase):
         )
         for js in (
             "index.v2.js",
+            "sandbox-exec.js",
             "wake-context.js",
             "event-envelope.js",
             "event-mapper.js",
@@ -191,6 +198,12 @@ class BootstrapFixture(unittest.TestCase):
         ):
             (adapter / "dist" / js).write_text(f"// {js}\nexport const name = '{js}';\n")
         (adapter / "package.json").write_text('{"name":"mpm-opencode"}\n')
+        # The reviewer sandbox is a source file the payload ships, not a
+        # compiled module.
+        (adapter / "scripts").mkdir()
+        (adapter / "scripts" / "reviewer_bwrap.py").write_text(
+            "# synthetic reviewer sandbox\n"
+        )
 
         (self.project / "install.sh.lib").write_text(
             build_sourced_lib(INSTALL_SH.read_text())
