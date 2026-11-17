@@ -35,8 +35,8 @@ Every blocking class in the gate's convergence rule is empty:
 
 | | |
 |---|---|
-| **PR #247 head (the reviewed code)** | `b4c6f118a9db2de73794ff742d31558370d9ed58` |
-| **PR #247 head (with this report added)** | one commit later — documentation only; see §5.3 for its CI |
+| **PR #247 head (the reviewed code)** | `b4c6f118a9db2de73794ff742d31558370d9ed58` — 39 files, +9193 / −12 |
+| **PR #247 head (the final head, carrying this report)** | `2c32e430352006b0b1753a685ee56a0d561c91fc` — 43 files, +10136 / −12. The four extra files are this report, the delta review, the final verdict corpus and the integration transcript; the production code is byte-identical to the row above |
 | **current `main` (authoritative, from `git ls-remote`)** | `1da6777c68112e589fc8a52af387621073bb71fe` |
 | **base** | `main` — `1da6777c68112e589fc8a52af387621073bb71fe` |
 | **mergeability** | `mergeable: true`, `mergeable_state: clean` |
@@ -333,8 +333,14 @@ two test files and this directory's evidence.
 
 ### 5.3 The final head's CI
 
-The head that carries this report is one commit later and adds only
-documentation. Its CI run is recorded in PR #247's body.
+The final head `2c32e430` — which carries this report — has its own CI run:
+
+| run | head | result |
+|---|---|---|
+| `44117836571` | `2c32e430` | **success** — *Build + core tests*, *Full test suite*, *Release gate* |
+
+The PR's mergeability at that head is `mergeable: true`,
+`mergeable_state: clean`.
 
 ---
 
