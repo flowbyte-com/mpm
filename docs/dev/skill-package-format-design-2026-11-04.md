@@ -1,14 +1,26 @@
 # MPM Skill Packages — a multi-file skill format
 
-> **Status: Proposed — at the third independent review gate.**
+> **Status: IMPLEMENTED — stages P1–P7 have shipped. Reconciled
+> against the implementation on 2026-11-17.**
 >
-> This document is a design proposal. It contains no implementation, no
-> schema migration, and no behaviour change. Nothing in the product changes
-> until the decision in §1 is taken and the stages in §10 are merged
-> separately.
+> This document began as a design proposal. It is now the **decision record**
+> for the shipped skill-package contract: the decisions, their evidence, the
+> threat model, and the disposition matrices. The stages in §10 were merged
+> separately and are in `main`.
 >
-> **Base commit:** `f8d4b95aefe60a0880409a8905ce2c4d92d22c00` (`main`).
-> **Scope:** the skill collection only.
+> **The authoritative description of the shipped behaviour is
+> `docs/SPEC.md` §6.8–§6.13.** This document remains the record of *why* the
+> contract is what it is, and **§17 reconciles it against the
+> implementation** — what shipped, what did not, and where this document's own
+> premises turned out to be wrong.
+>
+> **What shipped:** P1–P7. **What has not:** P8 (the CLI and MCP surfaces)
+> and P9 (package promotion, the collector's package reference check, and this
+> document's promotion out of `docs/dev/`). §10's table and §17.3 state each
+> difference, and §12.2's open decisions are resolved against what shipped.
+>
+> **Base commit of the design:** `f8d4b95aefe60a0880409a8905ce2c4d92d22c00`
+> (`main`). **Scope:** the skill collection only.
 
 ---
 
@@ -924,6 +936,25 @@ cannot, the tables do not exist yet — and it is reached with `force` taken
 straight from the MCP payload (`internal/core/tools/handlers.go:3758`) and
 from `SaveSkill` (`internal/core/skill_db.go:476`). It is the **only** in-place
 content writer for a skills row in the whole tree.
+
+> **CORRECTED 2026-11-17.** That last sentence was **wrong**. The force path
+> is not the only in-place content writer: `MemoryStore.UpdateMemory` and
+> `DatabaseManager.UpdateMemory` replace `memories.content` — and the whole
+> metadata column — under the same id, and neither carried this guard. The
+> gap was recorded as **issue #248** and closed: both now raise the same
+> refusal, with the same classification, and the guard's condition is folded
+> into each `UPDATE`'s own `WHERE` clause. The legacy metadata patch path
+> could rewrite the package's `version` and `content_hash` — the row's own
+> version identity and projection hash — and is now refused too, with the
+> distinct `package_metadata_immutable` code. **§17.4** records the finding and
+> what it means for this document's premises.
+>
+> This document's own **R1** disposition row (§15) had already identified the
+> risk this sentence created — "the guard must also be applied to *every*
+> future in-place writer of a skills row … a code comment should point at the
+> package tables so a later writer does not add a second" — and prescribed the
+> mitigation. **The mitigation was not carried out**, and the enumeration was
+> incomplete. §17.5 records that.
 
 **What would happen without a guard.** After a legacy `save --force` against a
 packaged skill:
@@ -1971,6 +2002,24 @@ it** — which is why the dependency is stated here rather than left implicit.
 Each stage is a separate pull request, independently testable, and green on
 its own.
 
+### What shipped
+
+| stage | pull request | merge commit | state |
+|---|---|---|---|
+| **P1** — the three tables, the local-only DDL slice | #228 | `ec7bd927` | **SHIPPED** |
+| **P2** — path canonicalisation, the manifest, `package_hash` | #239 | `cf7e5245` | **SHIPPED** |
+| **P3** — the write primitives, the **R1** guard, the skills prune exemption | #240 | `bb1ccfb5` | **SHIPPED** |
+| **P4** — the directory import and the export loss marker | #241 | `bb7e550b` | **SHIPPED** |
+| **P5** — the ZIP (`.skill`) import | #242 | `c58212c7` | **SHIPPED** |
+| **P6** — the read API | #243, then #246 | `69bc212e`, `1da6777c` | **SHIPPED** |
+| **P7** — the deterministic export writer | #245 | `1e53a9e1` | **SHIPPED** |
+| **P8** — the CLI and MCP surfaces | — | — | **NOT SHIPPED** |
+| **P9** — package promotion, the collector's package check, this document's promotion | — | — | **NOT SHIPPED** |
+
+The stage table below is the **original plan**, kept as the plan of record.
+§17.2 states what each shipped stage actually delivered and §17.3 states every
+difference between this plan and the implementation.
+
 **The ordering rule.** No stage depends on behaviour delivered only by a
 later stage. The dependency graph below is therefore written out explicitly,
 and each stage's *depends on* column names only stages that precede it.
@@ -2181,11 +2230,28 @@ what evidence, and by which correction.
 | **O12** | If the toxic-phrase file is unreadable, does the import refuse or warn? | **Refuse**, with `scanner_unavailable`, and write nothing | A warning would let an import report success on content never checked against the one scanner that looks for prompt injection. The secret scanner cannot fail open; the poison scanner can, because it reads an operator-editable file. The refusal costs one command; the alternative costs a silent hole. | **R10**, §7.2 |
 | **O13** | May `mpm prune --older-than` remove a skill that owns a package? | **No.** A prune must never destroy a packaged skill's bytes. This is a settled **safety invariant**, and this revision does not reopen it. **The mechanism** that enforces it — a blanket `collection = 'skills'` exclusion versus a package-aware check — is a separate and still-open choice, because the two have very different blast radii; see **O17** (§12.2) | The prune is a **collection-blind hard delete** with no `collection` filter, and a package's bytes have no second copy. The exclusion mirrors the existing directive exemption. A deliberate hard shred still cascades — what is removed is unintentional bulk destruction of third-party content. §6.4 specifies the blanket form as the implementation to build and states its blast radius; the operator's confirmation of that blast radius is outstanding (**O17**), so the invariant is settled while the mechanism is not. | **R7**, §6.4, **C-2** |
 
-### 12.2 Open operator decisions
+### 12.2 Operator decisions — resolved by the implementation
 
-These are **not** settled by this revision. Each has a recommendation and a
-cost, and each needs the operator's answer before the stage that implements it
-begins.
+**These were open when this revision was written.** Every one of them has
+since been settled — by the implementation, not by a further revision of this
+document. The table below records how each was settled and where it is pinned;
+the **original** open-decision table follows it, kept unchanged as the plan of
+record.
+
+| | decision | how it was settled | where it is pinned |
+|---|---|---|---|
+| **O3** | Are binary assets stored by default? | **Rejected by default; `--allow-binary` opts in.** A binary asset is stored, and its poison scan is a **disclosed skip** (`poison_scanned = 0`) — never a claim that a scan ran. | `PackageImportOptions.AllowBinary`; the importer's `scanPackageFile` |
+| **O4** | Cross-workspace sharing | **The archive is the transport.** The three package tables live in the **local-only** DDL slice (`SkillPackageTables`), not in `BaseTables`, so no shared database receives them. | `SkillPackageTables`; `TestSkillPackageTablesAreLocalOnly` |
+| **O5** | Should package files be searchable through FTS? | **No.** The package tables are not FTS-indexed; FTS stays on the entrypoint. | `SkillPackageTables` carries no FTS statement |
+| **O6** | Are the size caps right? | **Adopted as proposed, as constants**: 512 files, 32 MiB total, 4 MiB per file, 256 KiB entrypoint. | `DefaultPackageMaxFiles`, `DefaultPackageMaxTotalBytes`, `DefaultPackageMaxFileBytes`, `DefaultPackageMaxEntrypointBytes` |
+| **O9** | Package layouts: one root directory, or files at the archive's top level? | **Both accepted** — the flat layout and the wrapped one. The root is derived from the **entrypoint's parent directory**, so a flat package may carry any number of content directories; only **competing package roots** are refused, with `ambiguous_package_root`. | the archive importer's root derivation; `ambiguous_package_root` |
+| **O10** | Should a package import require `when_to_use`? | **Warn, do not block.** The import succeeds with the `missing_when_to_use` warning — exactly the recommendation, and exactly the reference package's fate. | the importer's warning list |
+| **O14** | Should a later stage add an agent-facing import? | **Deferred, as recommended.** No agent-facing action accepts a filesystem path; the package read API is internal. | `docs/SPEC.md` §6.12: "there is no CLI command, no MCP action and no agent-facing import or export surface" |
+| **O15** | Where does the full skills export put its per-package archives? | **One `.skill` archive per package, named `<name>-<version>.skill`** — the recommendation. | `PackageExportArchive.FileName` |
+| **O16** | Should the `ListSkills` read path be refactored? | **Still out of scope**, as recommended. The 256 KiB entrypoint cap stands as the mitigation. | — |
+| **O17** | The prune exemption's form: blanket or package-aware? | **Blanket**, as recommended: `collection = 'skills'` is excluded from `PruneOlderThan` in one clause, mirroring the existing directive exemption. **The cost stated in §6.4 was accepted with it**: `mpm prune --older-than` can no longer remove *any* skill, packaged or not. | `SkillsExclusionClause`; the prune-exemption tests |
+
+**The original open-decision table, unchanged:**
 
 | | decision | recommendation | cost of the alternative |
 |---|---|---|---|
@@ -2498,3 +2564,160 @@ the accepted foundation and the other four dispositions are untouched.
 * **It did not weaken any control to make a test pass.** The FAT case is
   *stronger* after C-3; the prune row is stronger after C-2; the shared-schema
   row is new after C-5.
+
+
+---
+
+## 17. Reconciliation with the shipped implementation
+
+**Reconciled 2026-11-17, against `main` @ `712064c3` and the follow-up that
+closes issue #248.**
+
+This section is the authoritative statement of where the design in this
+document and the implementation in `main` agree, and where they do not. It is
+written **after the fact, from the code**, so that a reader does not have to
+reconstruct the difference from a proposal and a repository.
+
+### 17.1 The authoritative description of the shipped contract
+
+**`docs/SPEC.md` §6.8–§6.13.** That is the description of what the product
+does. This document is the record of *why* — the decisions, the evidence, the
+threat model, and the disposition matrices — and the shipped code cites it
+**by path** (`internal/core/skill_package_*.go` name it as the design of
+record) and **by number** (O1–O17, R1–R12, and section numbers such as §5.2
+and §5.3.1).
+
+Those citations are why this document is **merged rather than closed**. Before
+this reconciliation it existed **only** on this branch, while eleven shipped
+source files named it — so the shipped code's rationale pointed at a document
+that was not in `main`. §17.4 records that gap and its closure.
+
+### 17.2 What each shipped stage delivered
+
+| stage | what it delivered, as implemented |
+|---|---|
+| **P1** | The three tables, byte-for-byte the schema this document proposed in §9 — `skill_packages`, `skill_package_files`, `skill_package_blobs` and `idx_skill_package_files_sha256`. The tables live in the **local-only** `SkillPackageTables` slice, not `BaseTables`, so no shared database receives them. The proposed schema and the shipped schema are identical; §9 needed no correction. |
+| **P2** | The path rules, the canonical-path identity, the manifest type and its own validation, the canonical JSON form and `package_hash` — as pure functions. |
+| **P3** | The tx-aware skill writer, the **R1** package-immutability guard on the force path, and the **blanket** skills prune exemption. |
+| **P4** | The directory import: the path rules, the limits enforced during the walk, the per-file scanning with the fail-closed scanner check, the derived projection with the pre-release effective version, the single-transaction write, and the export loss marker. |
+| **P5** | The `.skill` ZIP import: the entrypoint-anchored root derivation, the entry-type rejection, the path rejection, the byte and ratio caps, and CRC verification by full read. |
+| **P6** | The read API: `PackageFiles`, `PackageReadFile` and `PackageVerify`, plus the `SkillPackageProvenance` accessor the skill `read` action uses. **Internal only** — see **D1**. |
+| **P7** | The deterministic export writer: byte-identical archives for one package, the round trip, a legacy single-document skill exported as a one-file package, and the full skills export that emits one `.skill` archive per package. |
+
+### 17.3 The differences between this design and the implementation
+
+| | this document says | the implementation does | why it matters |
+|---|---|---|---|
+| **D1** | **P8** exposes the read API on the CLI and the MCP surface — `mpm skill files`, `mpm skill read-file`, `mpm skill verify`, and the `mpm_skills` action extension `files` / `read_file` / `verify`. | **P8 did not ship.** `PackageFiles`, `PackageReadFile` and `PackageVerify` are implemented and **internal**: nothing outside their own tests calls them. | **The SPEC is accurate and the design's stage plan is not.** `docs/SPEC.md` §6.12 says the three operations are internal and that "the agent-facing read surface lands in **P8**" — and §8.6 names P8's CLI as a *may*. So this is a gap between the plan and the shipped surface, not a contradiction between the contract and the code. It is the one part of the design that remains **unimplemented**, and it is a **read** surface: nothing about the package's integrity depends on it. |
+| **D2** | **P9** promotes a package: `is_global` flips on both the skill row and the package row. | **Not implemented.** `PromoteSkillToGlobal` flips `memories.is_global` only; `skill_packages.is_global` is never updated by anything. | A promoted skill's package row still reads `is_global = 0`. Nothing reads that column today, so there is **no wrong behaviour** — but the column does not mean what this document says it means. |
+| **D3** | **P9** gives the blob collector a package **reference check**. | **Satisfied by construction, not by a check.** The package bytes live in `skill_package_blobs`, a table of their own. The blobstore hard rule (§3.2, §4.4) means **no package byte ever enters the blobstore**, so `mpm blob gc` cannot reach one. | The outcome this document wants holds. The mechanism is different — and the stronger one this document also specifies makes the check unnecessary. The design's "the collector never deletes a referenced blob" is true by a route it did not predict. |
+| **D4** | **P9** promotes this document out of `docs/dev/`. | **Not done, and deliberately not done.** The shipped code cites this document **by path**; moving it would break eleven source files' citations. | The document stays at the path the code names. This is the one item of **P9** that is *deferred by constraint* rather than *omitted*. |
+| **D5** | **P3**'s acceptance requires the operator's confirmation of the prune exemption's form (**O17**), and §6.4 states the cost. | The **blanket** form shipped, and the cost was accepted with it. | `mpm prune --older-than` can no longer remove **any** skill. That is a behaviour change for every existing skill, and it is silent — exactly as §6.4 warns. The SPEC publishes the blast radius. |
+| **D6** | §5.8.1's **R1** premise: the force path is "the **only** in-place content writer for a skills row in the whole tree". | **The premise was false.** `MemoryStore.UpdateMemory` and `DatabaseManager.UpdateMemory` are also in-place content writers, and neither carried the guard; the legacy metadata patch path could also rewrite the package's `version` and `content_hash`. | **The most consequential finding of this reconciliation.** The guard was correct as written and incomplete as scoped. It is now complete — see §17.4. |
+| **D7** | §8.5 pins the wire shapes of `files`, `read_file` and `verify`. | **Not implemented** — they are internal operations whose response types carry no JSON tags, deliberately, so that the transport encoding of a binary payload is explicit rather than decided by `encoding/json`'s default. | The design's wire shapes are a **P8** concern, and P8 did not ship. The internal types are transport-agnostic by construction, which is the property §8.5 requires. |
+
+### 17.4 The gap this reconciliation found: the design of record was not in `main`
+
+**This is the reason the document is merged rather than closed.**
+
+The shipped implementation names this document as its design of record — by
+path, in eleven source files:
+
+```
+internal/core/skill_package_archive.go
+internal/core/skill_package_import.go
+internal/core/skill_package_import_errors.go
+internal/core/skill_package_manifest.go
+internal/core/skill_package_path.go
+internal/core/skill_package_read.go
+internal/core/skill_package_read_errors.go
+internal/core/skill_package_import_test.go
+internal/core/skill_package_manifest_test.go
+internal/core/skill_package_path_test.go
+internal/core/skill_package_schema_test.go
+```
+
+and cites its decisions by number throughout — **O1–O17**, **R1–R12** and its
+section numbers — in the shipped code's own comments.
+
+Before this reconciliation the document existed **only** on this branch. So
+`main` carried the implementation, and the rationale the implementation points
+at was **not in `main`**. A reader of the shipped code had no route from a
+decision number to the decision.
+
+Merging the reconciled document closes that gap: every citation now resolves
+inside the repository, and **§12.2** records what each open decision became.
+
+### 17.5 The finding that changed the contract: issue #248
+
+The reconciliation found a **real defect**, and it is recorded here because it
+is a correction to this document's own reasoning rather than a new feature.
+
+**§5.8.1** reasoned that the force path was "the **only** in-place content
+writer for a skills row in the whole tree", and therefore that guarding it
+would guard the mutation. The premise was wrong. `MemoryStore.UpdateMemory`
+and `DatabaseManager.UpdateMemory` replace `memories.content` — and the whole
+metadata column — under the same id, and neither carried the guard. The second
+of them is a **public `CoreDB` interface method**, so it was reachable by any
+consumer holding a `CoreDB`.
+
+The legacy metadata patch path was a third door, and it was **agent-reachable
+today**: `mpm_memory`'s `patch` action reaches `UpdateMemoryMetadata`, which
+merges an arbitrary JSON patch into the metadata column. It could rewrite a
+packaged skill's `version` — the row's own version identity, which the
+verification's `version_identity` check compares with the package row — and its
+`content_hash`, which is the same SHA-256 the manifest records as
+`projection_sha256`. Either rewrite produces a row that **contradicts its own
+package**.
+
+Both are now closed:
+
+| path | refusal | classification |
+|---|---|---|
+| `MemoryStore.UpdateMemory`, `DatabaseManager.UpdateMemory` | `package_immutable` | conflict — the same code as the force path |
+| the legacy metadata patch path, for `version` and `content_hash` | `package_metadata_immutable` | conflict — a distinct code, so the two refusals are countable apart |
+
+Both are **fail closed** and **atomic with the write**: the guard's condition
+is folded into the `UPDATE`'s own `WHERE` clause, so a package row that
+appears between the check and the write cannot let the mutation through.
+
+The metadata guard is deliberately **narrow**, and the narrowness is part of
+the contract: it applies only to a row that owns a package, only to the two
+keys that form the package's identity, integrity and versioning contract, and
+only when the patch would actually **change** the key. A patch that touches
+any other key lands exactly as it always did, and a patch that names a
+protected key with the value it already holds is permitted — refusing a write
+that changes nothing would be a broader prohibition than the contract
+requires.
+
+**What this means for this document.** The principle §5.8.1 stated — *refuse
+rather than teach a second write path to rewrite a package* — was right, and
+it was applied too narrowly, because the document's enumeration of the write
+paths was incomplete. The correct enumeration is not "the force path" but
+**"every path that replaces `memories.content` or a protected metadata key in
+place"**. That is now what the code enforces, and `docs/SPEC.md` publishes it.
+
+**The mitigation this document prescribed was not carried out.** §15's **R1**
+row already said what had to happen for the guard to stay a guard:
+
+> "The guard must also be applied to *every* future in-place writer of a
+> skills row; the design names the one that exists today, and a code comment
+> should point at the package tables so a later writer does not add a second."
+
+Two writers existed and were not named. The comment that was to stop the next
+one was not written. The gap between what the document prescribed and what
+the implementation did is the gap that issue #248 is, and it is recorded here
+because a design document that does not record its own missed mitigation is a
+design document that cannot be trusted about the next one.
+
+### 17.6 What this document still governs
+
+The decisions, the evidence and the threat model in §5–§8 and §11 are the
+**design of record** and remain so: the code cites them. The following are
+**not** implemented, and are recorded here so that they are not mistaken for
+shipped behaviour:
+
+* the agent-facing read surface (**D1**, **P8**);
+* package promotion flipping the package row's `is_global` (**D2**, **P9**);
+* the `files` / `read_file` / `verify` wire shapes (**D7**, **P8**);
+* an agent-facing import (**O14**) — deferred by decision, not by omission.
