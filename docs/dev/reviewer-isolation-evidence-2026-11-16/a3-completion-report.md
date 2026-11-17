@@ -180,6 +180,7 @@ credentials and the operator's checkout are **never opened** — they are
 | `--bind / /` — mount the host's root into the namespace | **refused**: the command's first element begins with `-` |
 | a command whose first element is `--version` | **refused** |
 | a working directory outside the sandbox | **refused** |
+| read the operator's checkout path from the copy's git metadata (`.git/config`, the reflog, `FETCH_HEAD`) | **refused** — the clone's records of its source are removed, so the copy names no host location |
 | a missing bubblewrap | the command **does not run on the host** — the marker file is absent |
 
 ### 5.2 The escape that DID work, and was closed
@@ -210,6 +211,29 @@ The same probe against the hardened script: **refused**, and nothing ran.
 | write into `/sandbox/findings` | **succeeds** | the findings have to go somewhere, and that somewhere is the reviewer's own tree |
 | `go version`, `python3 -V`, `git --version`, `cc --version` | **succeed** | the toolchain is bound read-only so a review can still run the tests |
 | the Go module cache | **absent** | a build needing an uncached dependency fails; that is the disclosed cost, not a hole |
+| read `/proc/self/mountinfo` | **succeeds** | it discloses the **host path of every mount the namespace was given**, and therefore the operator's username and home path. Those paths are **not bound**, so nothing there can be read through them: it is metadata about the host, not access to it. Residual risk 11 states it; the alternative — giving up the descriptor binding, or the base's location — would cost more than the disclosure is worth |
+
+### 5.4 What the independent reviewer attacked, and what closed it
+
+The reviewer's own conclusion, from the implementation review: *"the
+namespace is genuinely confined (zero capabilities, `no_new_privs` set,
+nested user namespaces blocked, host paths absent, no leaked file
+descriptors)"*. Its probes covered, among others:
+
+| route | what closed it |
+|---|---|
+| `/home`, `/root`, `/sys`, `/etc/shadow`, `/etc/sudoers` | they are **not bound**, so inside the namespace they do not exist — the absence was observed, not inferred |
+| a nested user namespace (`unshare(CLONE_NEWUSER)`) | `--disable-userns` blocks it — observed as `unshare: … No space left on device`. The **fail-closed** branch (`--assert-userns-disabled`) could not be exercised by the reviewer, because it would have needed seccomp support removed; it is verified by reading the code, not by running it |
+| setuid binaries and file capabilities | the namespace carries **zero capabilities** and `no_new_privs` |
+| a leaked file descriptor | there is none: the namespace is given no descriptor to a host mount it was not given, and the reviewer checked |
+| a symlink inside the reviewer's own tree pointing outside it | the tree is bound by **descriptor**, so the symlink resolves inside the namespace, where the target does not exist |
+| a bind of the host root through an argument the model controls | the `--` separator, the JSON-on-stdin payload, and the leading-`-` refusal (§5.2) |
+| the `/etc/alternatives` copy | it is a copy of the host's symlinks, and the host's targets are not bound, so it names nothing reachable |
+
+One route the reviewer named but did **not** directly test is
+`open_by_handle_at`: it needs a file descriptor to a host mount, and the
+namespace has none for the mounts it was not given — that is reasoning,
+not a measurement, and it is recorded as reasoning.
 
 ---
 
@@ -219,13 +243,14 @@ Three suites, all in `agent_installation/tests/`, plus the TypeScript half.
 
 | suite | what it pins | result |
 |---|---|---|
-| `test_reviewer_isolation.py` | the definition's default deny; **exactly one** allowed action; the host shell closed; the host-side file tools closed; Code Mode, the browser and the capability loader closed by name; every registry tool denied; no stale deny rules; the installer's fail-closed behaviour (a definition without the default deny, one that re-opens the shell, one that omits the sandboxed tool, and a symlinked target are all **refused**); the plugin registers the tool and has **no privileged mode**; the install flow treats a failed reviewer install as **fatal**; the sandbox script's hardening (the trust store is not bound, the writable tree is bound by descriptor, the `--` separator is present, a leading-`-` command is refused, the protection list comes from the passwd database, a forged `HOME` does not unprotect the home, a symlinked base is refused) | **38 tests, all pass** |
-| `test_reviewer_sandbox_exec_path.py` | the reviewer's **actual execution path**, driven through the invocation the plugin makes, against disposable sentinels: the sentinel is unreachable, the operator's home is unreachable, the trust store is unreachable, there is no network, the option-injection vector is refused, the working directory cannot be chosen, the disposable copy is present, the tree is writable, the environment is the disposable one, the toolchain is present, **there is no unsandboxed fallback** (a missing bubblewrap and a refused command leave the marker file absent), and the only allowed action is the sandboxed tool | **22 tests, all pass** |
+| `test_reviewer_isolation.py` | the definition's default deny; **exactly one** allowed action; the host shell closed; the host-side file tools closed; Code Mode, the browser and the capability loader closed by name; every registry tool denied; no stale deny rules; the installer's fail-closed behaviour (a definition without the default deny, one that re-opens the shell, one that omits the sandboxed tool, and a symlinked target are all **refused**); the plugin registers the tool and has **no privileged mode**; the install flow treats a failed reviewer install as **fatal**; the sandbox script's hardening (the trust store is not bound, the writable tree is bound by descriptor, the `--` separator is present, a leading-`-` command is refused, the protection list comes from the passwd database, a forged `HOME` does not unprotect the home, a symlinked base is refused); and that the **plugin's own default base is one the sandbox accepts** — the defect that would have made the tool refuse every command forever, with a message that reads like a safeguard | **42 tests, all pass** |
+| `test_reviewer_sandbox_exec_path.py` | the reviewer's **actual execution path**, driven through the invocation the plugin makes, against disposable sentinels: the sentinel is unreachable, the operator's home is unreachable, the trust store is unreachable, there is no network, the option-injection vector is refused, the working directory cannot be chosen, the disposable copy is present, the tree is writable, the environment is the disposable one, the toolchain is present, **there is no unsandboxed fallback** (a missing bubblewrap and a refused command leave the marker file absent), and the only allowed action is the sandboxed tool; and that the **disposable copy carries no path to the operator** — the clone's origin remote, reflog and `FETCH_HEAD` are removed, the history survives the scrub, and the config names no host location from inside the namespace | **27 tests, all pass** |
 | `test_reviewer_bwrap_sandbox.py` | the namespace's **shape**: the runtime is bound read-only, only the reviewer's tree is writable, nothing is bound read-write by path, `--clearenv` comes **before** the `--setenv` flags, the network and privileges are dropped, a nested user namespace is refused, `/tmp` is private, `/etc` is synthetic, a live runtime root is refused — and, live, that the protected tree, the runtime root, the operator's home and the trust store are **invisible** | **17 tests, all pass** |
 | `test_sandbox_exec.test.ts` | the TypeScript half: the tool's name is the one the definition opens, the default deny is present, a non-array command is refused, a working directory outside the sandbox is refused, a missing sandbox script **fails closed**, a command inside the sandbox cannot reach the sentinel, and the tool has **no privileged mode** | **6 tests, all pass** |
+| `internal/update/payload_test.go` (Go) | the canonical payload manifest, the adapter's own `OPENCODE_RUNTIME_MANIFEST` and the staging fixture all agree — and the fixture **emits and imports** `dist/sandbox-exec.js`, so the shape that broke CI is the shape the fixture reproduces | **the `internal/update` package passes** |
 
-The whole `agent_installation` suite: **564 tests, all pass** (1 skipped — the
-skipped case needs a condition this host does not provide).
+The whole `agent_installation` suite: **574 tests, all pass** (2 skipped — the
+skipped cases need a condition this host does not provide).
 
 ---
 
@@ -248,25 +273,73 @@ The branch head is pushed to `github` and CI is run on it by the
 `pull_request` trigger of `.github/workflows/build-test.yml` (which fires for
 every pull request, whatever its base).
 
-- **code head:** `2521dfb4` + `58cb88d7` (the browser and capability-loader
-  denies) — see §9 for the run.
-- The report commit itself is **documentation only**; its run is recorded here
-  too.
+**What CI caught, and what it was.** The first run of the implementation
+head **failed**, in two jobs, and the failure was real and worth stating:
+the canonical runtime payload manifest (`scripts/runtime_payloads.json`)
+— the declaration the updater and the shell staging both read — did not
+list the two new files, `dist/sandbox-exec.js` and
+`scripts/reviewer_bwrap.py`. The staged package therefore carried an
+entrypoint with an **unresolved import** (`dist/index.v2.js ->
+./sandbox-exec.js`): the plugin the installer would have shipped **loads
+nothing**, silently. The manifest, the adapter's own
+`OPENCODE_RUNTIME_MANIFEST`, the shell-side manifest constant and the Go
+fixture that stages a package were all brought into agreement, and the
+fixture now **emits** `dist/sandbox-exec.js` and **imports** it from the
+entrypoint, so the shape that failed in CI is the shape the fixture
+reproduces.
 
-> The CI result is filled in from the run itself — the run URL and its
-> conclusion — in §9 below, and it is the run on the **exact** head that
-> carries this report.
+> A green local suite did not catch it, because the local tree had a
+> built `dist/` and the fixture did not model the new import. A gate that
+> only tests what is already true is decoration; this one now tests the
+> shape that broke.
+
+| head | what it carries | the run |
+|---|---|---|
+| the implementation head | the A3 implementation, the manifest fix, the review's findings and this report | recorded in §8.1 below |
+| the report's own head | **documentation only** | the same pipeline; its conclusion is recorded in the PR body, which is where the final state of a run is published without making the report chase its own commit |
+
+### 8.1 The run
+
+- **workflow:** `build-and-test` (`.github/workflows/build-test.yml`), the
+  `pull_request` trigger
+- **jobs:** `Build + core tests`, `Full test suite`, `Release gate`
+
+<!-- CI-RUN-PLACEHOLDER -->
 
 ---
 
 ## 9. The independent external review
 
 The A3 work was reviewed by **Charlie**, independently, on a **different
-model** from the one that wrote the implementation. Its findings are recorded
-in `charlie-external-review.md` (the review that produced the five corrections
-and the architecture decision implemented here) and, for the implementation
-itself, in the review commissioned with this report — see
-`charlie-a3-implementation-review.md`.
+model** from the one that wrote the implementation.
+
+Two reviews exist, and they are not the same review:
+
+| record | what it reviewed | verdict |
+|---|---|---|
+| `charlie-external-review.md` | the **architecture** — it produced the five corrections and the capability-removal decision that this implementation follows | P7 APPROVED, A1/A2 APPROVED, **A3 HOLD** (the implementation was not yet written) |
+| `charlie-a3-implementation-review.md` | the **implementation** — it was given the files to read, the claims to attack, and the questions to try to break | **APPROVE** |
+
+The implementation review's verdict was **APPROVE**: the reviewer could
+not construct an escape, and confirmed each of the numbered claims above
+against the **executing** code rather than against its text — the
+namespace's shape (`/home`, `/root`, `/sys`, `/etc/shadow`,
+`/etc/sudoers` all absent), the rule order for the host's `findLast`
+evaluation, the absence of a privileged mode, the fail-closed installer,
+and the closure of the option-injection escape.
+
+It raised **three** findings, and this report does not hide them:
+
+| # | severity | finding | disposition |
+|---|---|---|---|
+| 1 | **MINOR** | the reviewer can learn the operator's **username and home path** — from the namespace's mount table, which records the host path of a descriptor-bound mount, and (then) from the clone's `remote.origin.url` | **the clone's channel is closed** (the remote, the reflog and `FETCH_HEAD` are removed, and a test pins it); **the mount-table channel remains** and is disclosed as residual risk 11 below. The test docstring that over-claimed is corrected |
+| 2 | **NIT** | the disposable copy is the **full git history**, so a secret that was committed and later rotated is still readable in the copy | accepted as scope and disclosed as residual risk 12 below |
+| 3 | **NIT** | the `--clearenv` comment's rationale was wrong (bwrap always clears and then sets, whatever the order) | **fixed**: the comment now says what bwrap does, and the behaviour is unchanged |
+
+The review also stated what it **could not** test: the host's `findLast`
+semantics (measured elsewhere — `host-verdicts-a3.json`), the
+`--assert-userns-disabled` fail-closed branch, and `install.sh` end to
+end (because running it would write into the operator's home).
 
 ---
 
@@ -313,6 +386,27 @@ Numbered, and each one is a real thing a reader could get wrong.
     executable inside the sandbox. That is deliberate (the reviewer must run
     the tests) and it is a capability: the reviewer can execute the host's
     toolchain, but only over the sandbox's own tree, with no network.
+11. **The operator's username and home path are disclosed as METADATA.** The
+    namespace's own mount table records the host path of every mount it was
+    given, so a reviewer that reads `/proc/self/mountinfo` learns the base's
+    path under the operator's home — and therefore the operator's account
+    name. The paths it names are **not bound**, so nothing there can be read
+    through them; this is a disclosure about the host, not access to it.
+    It is disclosed rather than engineered away because closing it means
+    giving up either the descriptor binding (the property that stops a
+    symlink swap from changing what is mounted) or the base's location on
+    the operator's filesystem (a weaker base). The **clone's** disclosure of
+    the same fact — the origin remote — **is** closed.
+12. **The disposable copy carries the full history.** A secret that was
+    committed and later deleted or rotated is still readable in the copy
+    through `git log -p`. The history is the review material, so it is kept;
+    a repository whose history contains secrets must be treated as a
+    repository whose history contains secrets.
+13. **The mount table is the reviewer's own.** It is the namespace's, not the
+    host's: it describes what the namespace was given, and it cannot be
+    turned into a handle on the host's filesystem — an `open_by_handle_at`
+    route needs a file descriptor the reviewer does not have, and the
+    namespace has no reference to a host mount it was not given.
 
 ---
 

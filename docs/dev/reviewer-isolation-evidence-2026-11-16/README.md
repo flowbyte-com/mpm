@@ -27,6 +27,7 @@
 | `charlie-external-review.md` | the **independent external review** — P7 APPROVED, A1/A2 APPROVED, **A3 HOLD**; the five corrections to the bubblewrap architecture; and the capability-removal architecture decision, with the reason the session-correlation alternative was rejected. |
 | `host-verdicts-a3.json` | the **host's own verdicts** for the implemented reviewer definition, measured on the operator's installed OpenCode (2.3.0) — the resolved permission set the host holds for the agent, and the verdict for every action, with the built-in agents as controls. This is the record of the boundary the A3 implementation actually gets. |
 | `a3-completion-report.md` | the **completion-gate report** for the A3 implementation: the enforced boundaries, the capabilities that remain host-side, the escape probes that succeeded and the ones that failed, the integration-test results, the CI run on the exact head, and the residual risks. |
+| `charlie-a3-implementation-review.md` | the **independent external review of the implementation**, on a different model from the one that wrote it — **VERDICT: APPROVE**, with three findings (a metadata disclosure of the operator's home path, the full-history copy, and a wrong comment) and the disposition of each. |
 
 ## Where each required record lives
 

@@ -431,6 +431,92 @@ def _synthetic_etc(target: Path) -> None:
             pass
 
 
+def _scrub_clone_metadata(target: Path) -> None:
+    """Remove the operator's PATHS from the clone's own metadata.
+
+    A `git clone` records where it came from: in `.git/config` as the
+    origin remote, in the reflog as "clone: from <path>", and in
+    `.git/FETCH_HEAD`.  Those are absolute paths under the operator's
+    home — they tell a less-trusted reviewer where the operator's
+    checkout is, and therefore what the operator's account is called.
+
+    A review needs none of it.  The copy is already made, and the
+    remote is never used again, so the records are REMOVED rather than
+    rewritten into something plausible: a scrubbed file that still
+    looks like a real one invites a reader to trust a value that was
+    edited, and the honest state is an absent one.
+
+    What is NOT removed is the history itself, and the identities in
+    it.  The history is the review material, and the commit identities
+    are public in a public repository — removing them would change
+    what is under review to make the sandbox tidier.
+    """
+    git_dir = target / ".git"
+    if not git_dir.is_dir():
+        return
+
+    # The remote: `git remote remove origin` drops the whole section,
+    # including the fetch refspec that carries the path.
+    try:
+        subprocess.run(
+            ["git", "-C", str(target), "remote", "remove", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    # The reflog and the fetch heads: they record the clone's source.
+    for name in ("logs", "FETCH_HEAD", "ORIG_HEAD", "MERGE_HEAD"):
+        path = git_dir / name
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists() or path.is_symlink():
+                path.unlink()
+        except OSError:
+            pass
+
+    # Anything else in the config that names an absolute location.
+    config = git_dir / "config"
+    try:
+        text = config.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    cleaned = _strip_path_bearing_config(text)
+    if cleaned != text:
+        try:
+            config.write_text(cleaned, encoding="utf-8")
+        except OSError:
+            pass
+
+
+def _strip_path_bearing_config(text: str) -> str:
+    """Drop the lines of a git config that name a host location.
+
+    A git config is INI-shaped: sections in brackets, `key = value`
+    lines under them.  A value that starts with `/` or `~` is a
+    location on this host, and a location on this host is exactly what
+    the reviewer must not be told.
+    """
+    kept: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            skipping = stripped.startswith("[remote")
+        if skipping:
+            continue
+        if "=" in stripped:
+            _, _, value = stripped.partition("=")
+            value = value.strip()
+            if value.startswith("/") or value.startswith("~"):
+                continue
+        kept.append(line)
+    return "\n".join(kept) + "\n"
+
+
 def _sync_repository(source: Path, target: Path) -> None:
     """Copy the repository under review into the sandbox.
 
@@ -440,7 +526,10 @@ def _sync_repository(source: Path, target: Path) -> None:
 
     A git clone gives the reviewer the history and a clean index.  The
     working tree's own uncommitted changes are overlaid afterwards, so
-    the copy is what the operator is actually looking at.
+    the copy is what the operator is actually looking at.  The clone's
+    OWN metadata — the paths it recorded about its source — is scrubbed
+    afterwards, because a review does not need to know where the
+    operator's checkout lives.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
@@ -465,6 +554,10 @@ def _sync_repository(source: Path, target: Path) -> None:
             ),
         )
         return
+
+    # The clone recorded where it came from.  The review does not need
+    # to know.
+    _scrub_clone_metadata(target)
 
     # Overlay the working tree's uncommitted changes and untracked
     # files, so the copy is the tree the operator is looking at.
@@ -630,9 +723,13 @@ def bwrap_args(tree: dict, fds: dict | None = None) -> list:
     # The kernel's pseudo-filesystems and a PRIVATE /tmp.
     args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
     # The environment: disposable HOME, TMPDIR and MPM_WORKSPACE.
-    # `--clearenv` comes FIRST: bwrap processes its arguments in order,
-    # so clearing after setting would erase the very variables the
-    # sandbox exists to isolate.
+    #
+    # `--clearenv` is emitted before the `--setenv` flags because bwrap
+    # CLEARS the environment first and then applies the `--setenv`
+    # variables, whatever order the two appear in.  The order here is
+    # not what makes it work — it is what makes it READ correctly, so
+    # that nobody "fixes" it into a form that looks equivalent and is
+    # not.
     args += ["--clearenv"]
     args += [
         "--setenv", "HOME", f"{PREFIX}/home",

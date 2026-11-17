@@ -291,7 +291,17 @@ class ReviewerExecutionPathTest(unittest.TestCase):
         """The host's `/etc/passwd` is not bound either.
 
         The sandbox carries a synthetic one that names `reviewer`, so
-        the operator's account name and home path are not disclosed.
+        the operator's ACCOUNT DATABASE is not readable inside.
+
+        What this does NOT claim: that the operator's name and home
+        path are undisclosed everywhere.  They are not disclosed
+        *here*, but the namespace's own mount table records the host
+        paths of the mounts it was given, so the base's path under the
+        operator's home is visible to anything that can read
+        `/proc/self/mountinfo`.  That is METADATA about the host — the
+        paths it names are not bound, so nothing there can be read
+        through it — and it is stated as a residual risk rather than
+        papered over.
         """
         result = self.invocation.run(["/bin/cat", "/etc/passwd"])
         self.assertEqual(result["code"], 0, result["stderr"])
@@ -367,6 +377,105 @@ class ReviewerExecutionPathTest(unittest.TestCase):
             self.skipTest("the Go toolchain is not installed on this host")
         self.assertEqual(result["code"], 0, result["stderr"])
         self.assertIn("go version", result["stdout"])
+
+
+class DisposableCopyMetadataTest(unittest.TestCase):
+    """The disposable copy does not carry the operator's PATHS.
+
+    A `git clone` records where it came from: the origin remote in
+    `.git/config`, the reflog, and `FETCH_HEAD`.  Those are absolute
+    paths under the operator's home, so they tell a less-trusted
+    reviewer where the operator's checkout is — and therefore what the
+    operator's account is called.
+
+    The review needs none of it: the copy is already made and the
+    remote is never used again.  So the records are removed.
+
+    The history is NOT removed: it is the review material.
+    """
+
+    MARKER = "operator-checkout-path-marker"
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="mpm-review-metadata-"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+        # A disposable git repository whose path carries a marker, so a
+        # disclosure of the source path is detectable.
+        self.source = self.root / self.MARKER
+        (self.source).mkdir(parents=True)
+        (self.source / "README.md").write_text("# the repository\n", encoding="utf-8")
+        env = dict(os.environ)
+        env.update(
+            {
+                "GIT_AUTHOR_NAME": "reviewer-fixture",
+                "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                "GIT_COMMITTER_NAME": "reviewer-fixture",
+                "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+            }
+        )
+        for command in (
+            ["git", "init", "--quiet"],
+            ["git", "add", "-A"],
+            ["git", "commit", "--quiet", "-m", "the first commit"],
+        ):
+            result = subprocess.run(
+                command, cwd=self.source, capture_output=True, text=True, timeout=120, env=env
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.base = self.root / "sandbox"
+        self.invocation = SandboxInvocation(self.base, [self.source], self.source)
+        built = self.invocation.init()
+        self.assertEqual(built["code"], 0, built["stderr"])
+
+        self.copy = self.base / "source" / "repo"
+
+    def test_the_copy_carries_no_path_to_the_operator(self) -> None:
+        """The clone's own metadata names no host location."""
+        config = self.copy / ".git" / "config"
+        self.assertTrue(config.is_file(), "the copy is not a git clone")
+        text = config.read_text(encoding="utf-8", errors="replace")
+        self.assertNotIn(self.MARKER, text, "the copy's config names the operator's checkout")
+        self.assertNotIn("[remote", text, "the copy still carries a remote")
+        for line in text.splitlines():
+            if "=" not in line:
+                continue
+            value = line.split("=", 1)[1].strip()
+            self.assertFalse(
+                value.startswith("/") or value.startswith("~"),
+                f"the copy's config names a host location: {line!r}",
+            )
+
+    def test_the_reflog_and_the_fetch_head_are_gone(self) -> None:
+        """The records of the clone's source are removed, not rewritten."""
+        self.assertFalse(
+            (self.copy / ".git" / "logs").exists(),
+            "the reflog still records where the clone came from",
+        )
+        self.assertFalse(
+            (self.copy / ".git" / "FETCH_HEAD").exists(),
+            "FETCH_HEAD still records where the clone came from",
+        )
+
+    def test_the_history_survives_the_scrub(self) -> None:
+        """The scrub does not damage the review material."""
+        result = subprocess.run(
+            ["git", "-C", str(self.copy), "log", "--oneline"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("the first commit", result.stdout)
+
+    @unittest.skipUnless(_bwrap_usable(), "bubblewrap cannot build a namespace here")
+    def test_the_reviewer_cannot_read_the_operator_path_from_inside(self) -> None:
+        """From inside the namespace, the copy discloses no host path."""
+        result = self.invocation.run(["/bin/cat", "/sandbox/repo/.git/config"])
+        self.assertEqual(result["code"], 0, result["stderr"])
+        self.assertNotIn(self.MARKER, result["stdout"])
+        self.assertNotIn("[remote", result["stdout"])
 
 
 class SandboxFailsClosedTest(unittest.TestCase):
