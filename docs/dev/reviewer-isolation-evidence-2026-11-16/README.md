@@ -25,6 +25,8 @@
 | `decision-report.md` | the analysis behind the decision to split A1/A2 from A3, the enforcement table (what the host enforces versus what the OS enforces), **the measured sandbox feasibility experiment** (§4 — bubblewrap 0.11.1, the sentinel probe's five results), and the finite convergence gate. |
 | `final-report.md` | the session's closing report: the two PRs, the compatibility decisions, the adversarial results, **the remaining security limitations** (ten numbered residual risks, plus the open browser and capability-loader routes) and the live-environment isolation record. |
 | `charlie-external-review.md` | the **independent external review** — P7 APPROVED, A1/A2 APPROVED, **A3 HOLD**; the five corrections to the bubblewrap architecture; and the capability-removal architecture decision, with the reason the session-correlation alternative was rejected. |
+| `host-verdicts-a3.json` | the **host's own verdicts** for the implemented reviewer definition, measured on the operator's installed OpenCode (2.3.0) — the resolved permission set the host holds for the agent, and the verdict for every action, with the built-in agents as controls. This is the record of the boundary the A3 implementation actually gets. |
+| `a3-completion-report.md` | the **completion-gate report** for the A3 implementation: the enforced boundaries, the capabilities that remain host-side, the escape probes that succeeded and the ones that failed, the integration-test results, the CI run on the exact head, and the residual risks. |
 
 ## Where each required record lives
 
@@ -79,6 +81,35 @@ merged as a completed security boundary. The matcher research is kept as
 historical evidence and optional defence in depth. See
 `charlie-external-review.md`.
 
+## What happened to the matcher campaign, and what replaced it
+
+The matcher research above is **history, not the boundary**. The external
+review's §3 correction was adopted: a permission rule is a pattern match on a
+command string, so a route the rules do not name is still a route, and twenty-three
+rounds of matcher fidelity could not change that. The campaign was **closed**, not
+resumed.
+
+What replaced it is **capability removal plus a real OS boundary**:
+
+1. the reviewer's agent definition is **default-deny** (`action: "*"`,
+   `resource: "*"`, `effect: deny`) and re-opens exactly **one** action —
+   `sandbox_exec`, a host-controlled tool;
+2. `sandbox_exec` **always** runs inside a bubblewrap mount namespace built by
+   `agent_installation/mpm-opencode/scripts/reviewer_bwrap.py`, where every path
+   that is not bound **does not exist**;
+3. there is **no unsandboxed fallback** and **no privileged mode**: the tool does
+   not identify its caller, because it does not need to — it is always confined.
+
+The guard test that modelled the old rules —
+`agent_installation/tests/test_reviewer_isolation_denies_every_mpm_tool.py`,
+4361 lines — was **deleted**, because the rules it modelled are gone and the
+shell it policed is now denied outright. Its record stays in this directory.
+
+The **measured** result is in `host-verdicts-a3.json`: on the operator's installed
+host, the reviewer agent's verdict is **deny for every action except
+`sandbox_exec`**, while the built-in agents measured in the same pass keep their
+ordinary permissions. The report is `a3-completion-report.md`.
+
 ## The disclosure this record also carries
 
 During an early round, a reviewer's probe ran the CLI with `HOME` and
@@ -91,10 +122,18 @@ to prevent. The remediation's own failing probe for it is
 
 ## Status of the work these reviews examined
 
-The code these reviews examined is **not** a completed security boundary, and
-the documents say so. The bubblewrap namespace sandbox is proved and
-committed but **inert** — it is not wired into the reviewer's actual execution
-path — so the shell protection today is **best-effort**, and the tool-catalogue
-protection is the only **enforced** layer. The residual shell routes, the
-browser family, the capability loader and the host-side file tools are all
-documented rather than glossed.
+The code these reviews examined was **not** a completed security boundary, and
+the documents say so. The bubblewrap namespace sandbox was proved and committed
+but **inert** — it was not wired into the reviewer's actual execution path — so
+the shell protection was **best-effort**, and the tool-catalogue protection was
+the only **enforced** layer.
+
+**That is no longer the state of the branch.** The A3 implementation now closes
+the gap the reviews identified: the sandbox is on the reviewer's only execution
+path, the tool catalogue is default-deny, the host-side file tools and the
+browser and capability-loader actions are closed by name, and the install fails
+closed. What the boundary does **not** cover — the operator's own session, the
+built-in `explore` and `general` subagents, the Go module cache, and the
+sandbox base's readability by the operator — is stated in
+`a3-completion-report.md` rather than glossed, and the branch is **not** merged
+or deployed.
