@@ -4485,6 +4485,8 @@ Both raise the **same** refusal, with the same `package_immutable` classificatio
 
 A skill with **no** package row is unaffected on every one of these paths: an ordinary skill and an ordinary memory are still updated in place, exactly as before.
 
+**The local schema carries the package tables on every path.** The guard's condition names `skill_packages` in its own `WHERE` clause, so a schema without that table would make the guard's statement itself fail — breaking an *ordinary* write rather than protecting one. Both the managed path (`DatabaseManager.InitSchema`) and the standalone path (`MemoryStore.InitSQLite`) therefore install the same **local-only** package-table slice (`SkillPackageTables`), and neither installs it in the shared database.
+
 ##### The package's metadata contract — `package_metadata_immutable`
 
 A packaged skill's projection row carries two metadata keys that are not decoration. They are the row's claims about the package, and they are part of its **identity**, **integrity** and **versioning** contract:
@@ -4498,6 +4500,11 @@ So the legacy metadata patch path — `mpm_memory`'s `patch` action, `mpm patch-
 
 The refusal is **fail closed**: the guard runs inside the patch's own transaction, before the `UPDATE`, so not the metadata, not the timestamp and not the FTS index move.
 
+**Its atomicity is the transaction's, not the `WHERE` clause's.** The two refusals are atomic with their writes by *different* mechanisms, and the difference is part of the contract:
+
+- the **content** path folds the guard's condition into the `UPDATE`'s own `WHERE` clause (`AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE skill_id = ?)`), so the check and the write are **one atomic statement**;
+- the **metadata** path shares **one transaction** with the `UPDATE`, so the check and the write see **one snapshot**. A package row that appears after the check cannot be seen by the write either: SQLite refuses to promote a stale snapshot to a write (`SQLITE_BUSY_SNAPSHOT`), so the write cannot land on a state the check did not see.
+
 The guard is deliberately **narrow**, and the narrowness is part of the contract:
 
 - it applies **only** to a row that owns a package row. An ordinary memory and an ordinary (unpackaged) skill keep every metadata key they always had;
@@ -4506,7 +4513,9 @@ The guard is deliberately **narrow**, and the narrowness is part of the contract
 
 `is_latest` is deliberately **not** protected: it is the substrate's own semver bookkeeping across a skill's versions, no package verification check reads it, and the substrate's own save path owns it. `author`, `promoted_at` and `decay_floor_days` are attribution and retention policy, not the package's identity.
 
-The comparison is made against the **patched** metadata, computed by SQLite itself with the same `json_patch` the `UPDATE` applies — so the guard reasons about the result the write will actually produce, with the engine's own merge semantics. A patch that replaces the metadata document with a non-object destroys every protected key the row carried, and is refused the same way.
+**The comparison is SQLite's, not Go's.** The guard compares the protected key's value before the patch with its value after the patch, and it asks the engine for both: the "after" value is computed by the very same `json_patch` the `UPDATE` applies, and both values are read with SQLite's `json_type` and `json_extract`. It does **not** decode the metadata document into a Go map, because a document can be valid JSON that a Go map cannot represent — a number outside float64's range, for instance — and a Go-side decode of the whole document would lose *every* key to that one undecodable value, missing a real change to `version`.
+
+The type is compared as well as the value, so an **absent** key is distinguished from a key whose value is JSON `null`, and a text version is distinguished from a numeric one. A patch that replaces the metadata document with a non-object destroys every protected key the row carried, and is refused the same way.
 
 ##### Retention — skills are exempt from age-based pruning
 
