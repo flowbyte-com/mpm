@@ -28,6 +28,10 @@
 | `host-verdicts-a3.json` | the **host's own verdicts** for the implemented reviewer definition, measured on the operator's installed OpenCode (2.3.0) — the resolved permission set the host holds for the agent, and the verdict for every action, with the built-in agents as controls. This is the record of the boundary the A3 implementation actually gets. |
 | `a3-completion-report.md` | the **completion-gate report** for the A3 implementation: the enforced boundaries, the capabilities that remain host-side, the escape probes that succeeded and the ones that failed, the integration-test results, the CI run on the exact head, and the residual risks. |
 | `charlie-a3-implementation-review.md` | the **independent external review of the implementation**, on a different model from the one that wrote it — **VERDICT: APPROVE**, with three findings (a metadata disclosure of the operator's home path, the full-history copy, and a wrong comment) and the disposition of each. |
+| `delta-review-a19b1a78.md` | the **narrow delta review** of the one post-review commit that changed the namespace — **VERDICT: REQUEST CHANGES** (one CRITICAL: a PATH entry could make the operator's HOME a bind root), the **live reproduction** of it, the fix, and the reviewer's **verification of the fix — VERDICT: APPROVE**. |
+| `host-verdicts-final.json` | the **host's own verdicts measured at the final head** (`fc1af83f`), with the built-in agents as controls. The reviewer agent's verdict is **deny for every action except `sandbox_exec`**; the built-in agents are unchanged. |
+| `gate4-integration-results.txt` | the **full transcript of the merge gate's integration and adversarial suite** — 46 checks, 46 pass — run against the actual plugin execution path with disposable repositories, sentinel files, a temporary runtime root and a temporary database. |
+| `a3-merge-gate-report.md` | the **final merge gate for PR #247**: the exact revisions, the delta and the independent review chain, the capability inventory, the integration and adversarial results, the CI state, the remaining documented risks, and the **APPROVE** recommendation. |
 
 ## Where each required record lives
 
@@ -138,3 +142,25 @@ built-in `explore` and `general` subagents, the Go module cache, and the
 sandbox base's readability by the operator — is stated in
 `a3-completion-report.md` rather than glossed, and the branch is **not** merged
 or deployed.
+
+## The merge gate, and the one escape it found
+
+The final merge gate for PR #247 is `a3-merge-gate-report.md`. Its
+recommendation is **APPROVE** — the branch is ready for an
+operator-authorised merge.
+
+The gate did find a real escape, and it is worth recording how: the
+post-review commit `a19b1a78` had added a **toolchain discovery** so a
+reviewer on a CI runner would still have a compiler. The narrow delta
+review of that one commit found that a PATH entry whose `bin` directory
+is a direct child of a home — `~/bin` — made the discovery derive **the
+home itself** as a bind root, so the operator's credentials became
+readable from inside the namespace. The gate reproduced it live, fixed
+it (`fc1af83f`), and the same reviewer re-verified the fix:
+**APPROVE**. The full transcript — including the reproduction and the
+reviewer's own answers to the verification brief — is in
+`delta-review-a19b1a78.md`.
+
+The lesson the record carries: a convenience feature that reads the
+host's `PATH` inherits the host's `PATH` as a threat, and the check that
+guards it must be at least as strict as the check that guards the base.
