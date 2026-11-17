@@ -508,22 +508,37 @@ class ReviewerSandboxScriptTest(unittest.TestCase):
 
         A descriptor names the INODE, so a path that is swapped for a
         symlink after the check cannot change what is mounted.
+
+        The READ-ONLY descriptor binds are the synthetic `/etc` and the
+        host's DISCOVERED toolchain roots, and nothing else.  A
+        toolchain root is a directory the reviewer can read, so the set
+        of them is part of the contract, not an implementation detail.
         """
         tree = self.sandbox.build_tree(self.base, None)
         fds = self.sandbox.open_tree(tree)
         self.addCleanup(self.sandbox.close_tree, fds)
         args = self.sandbox.bwrap_args(tree, fds)
-        binds = [
+        writable = [
             args[i + 2]
             for i, token in enumerate(args)
-            if token in ("--bind-fd", "--ro-bind-fd") and i + 2 < len(args)
+            if token == "--bind-fd" and i + 2 < len(args)
         ]
         self.assertEqual(
-            sorted(binds),
-            sorted(
-                [f"/sandbox/{name}" for name in self.sandbox.TREE] + ["/etc"]
-            ),
+            sorted(writable),
+            sorted(f"/sandbox/{name}" for name in self.sandbox.TREE),
             "the writable tree is not bound by descriptor",
+        )
+        read_only = [
+            args[i + 2]
+            for i, token in enumerate(args)
+            if token == "--ro-bind-fd" and i + 2 < len(args)
+        ]
+        self.assertEqual(
+            sorted(read_only),
+            sorted(
+                ["/etc"] + [str(root) for root in tree.get("toolchain_roots", [])]
+            ),
+            "a read-only descriptor bind carries something else",
         )
         # Nothing is bound read-write BY PATH.
         self.assertNotIn("--bind", args)

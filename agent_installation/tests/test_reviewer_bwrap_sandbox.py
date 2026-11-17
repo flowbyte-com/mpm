@@ -334,9 +334,16 @@ class ReviewerBwrapTest(unittest.TestCase):
         `alternatives` symlinks.
         """
         args = sandbox.bwrap_args(self.tree, self.fds)
-        index = args.index("--ro-bind-fd")
-        self.assertEqual(args[index + 1], str(self.fds["etc"]))
-        self.assertEqual(args[index + 2], "/etc")
+        # The synthetic `/etc` is one of the READ-ONLY descriptor binds;
+        # the others are the host's discovered toolchain roots, so the
+        # bind is located by its DESTINATION and not by its position.
+        etc_binds = [
+            args[i + 1]
+            for i, token in enumerate(args)
+            if token == "--ro-bind-fd" and i + 2 < len(args) and args[i + 2] == "/etc"
+        ]
+        self.assertEqual(len(etc_binds), 1, "the synthetic /etc is not bound exactly once")
+        self.assertEqual(etc_binds[0], str(self.fds["etc"]))
         for host_only in ("/etc/ssl", "/etc/passwd", "/etc/group"):
             self.assertNotIn(
                 host_only,
@@ -470,6 +477,25 @@ class ReviewerHomeBindTest(unittest.TestCase):
     """
 
     def test_a_home_relative_toolchain_root_is_refused(self) -> None:
+        # The reproduction needs an unprivileged USER namespace.  Where
+        # the host does not grant one — a CI runner, for instance — the
+        # live part SKIPS, and the refusal rules are still pinned by the
+        # contract tests above.
+        try:
+            probe = subprocess.run(
+                ["unshare", "-rm", "true"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("unprivileged user namespaces are not available here")
+        if probe.returncode != 0:
+            self.skipTest(
+                "this host does not grant an unprivileged user namespace: "
+                f"{probe.stderr.strip()[:200]}"
+            )
+
         script = "\n".join(
             [
                 "mount -t tmpfs tmpfs /home 2>/dev/null || exit 9",
