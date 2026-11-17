@@ -233,11 +233,24 @@ them. The installer refuses to promote a bundle that carries any of them.
 
 **What happens during the install.** The candidate bundle is assembled in
 `staging/`, the five binaries are promoted into it as one transaction, the
-bundle is validated (five executable binaries, no `.git`, no state, and an
-identity that matches the binaries inside), and only then is it renamed
-into `releases/<rev>` and the `current` pointer swapped. The swap is a
+bundle is validated (five executable binaries, no `.git`, no state, an
+identity that matches the binaries inside, the **host-asset declaration**
+the bundle carries, and the **schema preflight** — the substrate's own
+`lifecycle_events` DDL, without which the schema-collision check would
+degrade to a silent no-op), and only then is it renamed into
+`releases/<rev>` and the `current` pointer swapped. The swap is a
 `rename(2)`, so `current` never dangles and never names a half-installed
 release.
+
+**A candidate is checked for construction; an installed release is checked
+for integrity.** A bundle being assembled must account for EVERY file it
+carries — a file nobody provisioned is a file nobody owns. A release that
+was already installed is only checked for what it declares: a release
+directory accumulates files after installation (Python's bytecode caches,
+the adapter's build-provenance sidecar), and refusing it for those would
+push you towards deleting an immutable rollback target. The declaration
+itself is still required in both cases. The exact rule is in
+[`docs/dev/bundle-validation-scopes.md`](dev/bundle-validation-scopes.md).
 
 **The first conversion.** A checkout-style installation has real `bin/`
 and `agent_installation/` directories. The conversion turns them into

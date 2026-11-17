@@ -251,7 +251,7 @@ func handleSaveToMemory(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 // The threshold encodes "could another agent defend this claim from the
 // summary alone?" — a 20-char string like "shipped scratchpad" is tactical
 // noise that fails the signal-density test. 50 chars is the floor; longer
-// is preferred and the wake-context renderer allows up to 80 chars before
+// is preferred and the wake-context renderer allows up to 80 BYTES before
 // truncation.
 const MinMilestoneSummaryChars = 50
 
@@ -2806,7 +2806,14 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 		// Observability Layer: every node pulled into the boot prompt
 		// is "retrieved". Fire-and-forget; telemetry must not block
 		// the wake surface. Errors are swallowed.
-		_ = dm.RecordRetrieval(m.ID, "memory")
+		//
+		// issue #178 (F2): the write is DEFERRED, not inline. It used
+		// to be issued on this goroutine, where the shared pool's 5 s
+		// busy-handler timeout made each telemetry write cost the agent
+		// ~5 s under a held write lock — five of them cost 25.04 s of
+		// a 124.47 s request, and none of them landed. The deferred
+		// write is retried until it lands.
+		recordRetrievalAsync(dm, m.ID, "memory")
 	}
 
 	milestoneRefs := make([]map[string]interface{}, 0, len(data.RecentMilestones))
@@ -2817,7 +2824,8 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 			"pointer":    m.Pointer,
 			"created_at": m.CreatedAt,
 		})
-		_ = dm.RecordRetrieval(m.ID, "memory")
+		// issue #178 (F2): deferred, as above.
+		recordRetrievalAsync(dm, m.ID, "memory")
 	}
 
 	// Overdue-wakes surface (added 2026-08-13). Pure read — does NOT
@@ -2841,7 +2849,9 @@ func handleReadWakeContext(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, 
 	// Cold-start sweep: check for wakes that came due while the system
 	// was offline. The agent sees these immediately on boot — no need to
 	// wait for the next tool call to trigger the opportunistic fold.
-	// Pass nil kinds for backward-compatible default (notification-only).
+	// Pass nil kinds for the default delivery path: every AGENT-OWNED
+	// pending wake (notification, cascade and cron). The scheduler's
+	// kinds are excluded, so they still reach their handler.
 	wakes, wErr := dm.CheckPendingWakes(time.Now(), nil)
 
 	// v4 wire format: project the v4 fields (GlobalRules, AvailableSkills)
@@ -3796,13 +3806,21 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	if err != nil {
 		return nil, err
 	}
-	skill, err := dm.ReadSkill(skillID, "")
+	// The skill and its package provenance come from ONE snapshot.
+	//
+	// They used to come from two independent statements: the skill row
+	// first, then the provenance. A package deleted between the two
+	// could let the body return with NO provenance — which breaks R6,
+	// because the provenance object is mandatory for a packaged skill.
+	// One snapshot closes the window: the pair is either wholly present
+	// or wholly absent.
+	skill, provenance, err := dm.ReadSkillWithPackageProvenance(context.Background(), skillID, "")
 	if err != nil {
 		return nil, err
 	}
 	// Observability Layer: skill reads are retrievals.
 	_ = dm.RecordRetrieval(skill.ID, "skill")
-	return map[string]interface{}{
+	response := map[string]interface{}{
 		"success":     true,
 		"id":          skill.ID,
 		"name":        skill.Name,
@@ -3813,7 +3831,32 @@ func handleReadSkill(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 		"steps":       skill.Steps,
 		"body":        skill.Body,
 		"is_global":   skill.IsGlobal,
-	}, nil
+	}
+
+	// R6 / T40 (PR #222 §8.2.1): a PACKAGED skill's read response gains
+	// one object — the package provenance — and an ordinary skill's
+	// response is unchanged.
+	//
+	// The object is MANDATORY for a packaged skill: the `read` action
+	// inlines the entrypoint's projection body straight into the caller's
+	// context, so the one piece of package content most likely to carry an
+	// injection would otherwise come back with nothing the caller could
+	// check. It carries the ORIGINAL entrypoint's hash — not the
+	// projection's — the RECORDED projection hash, the RECOMPUTED hash
+	// of the body this response returns, and the entrypoint's ACTUAL
+	// scan status.
+	//
+	// Nothing else about the response changes: the body is still the
+	// entrypoint projection's body and no supporting file is ever inlined.
+	//
+	// A FAILURE HERE FAILS THE READ, and that is deliberate: the reader
+	// cannot know whether the skill is a package, so it cannot know
+	// whether the provenance is mandatory — and returning a body without it
+	// would break R6.
+	if provenance != nil {
+		response["package"] = provenance
+	}
+	return response, nil
 }
 
 // resolveSkillID resolves a skill identifier from the params map.
@@ -5015,7 +5058,8 @@ func splitTags(s string) []string {
 // tasks (WakesPending) from incoming epistemic events (EventWakesPending).
 //
 // kinds is forwarded to CheckPendingWakes — see that function for the
-// semantics. nil = backward-compatible default (notification-only).
+// semantics. nil = the default delivery path (every AGENT-OWNED
+// pending wake: notification, cascade and cron).
 func checkWakesAndFold(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, out map[string]interface{}, kinds []string) map[string]interface{} {
 	if out == nil {
 		out = map[string]interface{}{}
@@ -5118,11 +5162,77 @@ func handleScheduleWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p m
 			kind, strings.Join(mpminternal.AgentOwnedWakeKinds, ", "))
 	}
 
+	// The directive_id LENGTH gate.
+	//
+	// The directive_id is the one field of a wake that the agent
+	// passes BACK to the substrate: it is the id of the prime
+	// directive the wake points at, and the agent hands it to
+	// read_directives. It is therefore rendered into the wake
+	// notification block, and an unbounded directive_id is an
+	// unbounded agent-visible response — measured at the head that
+	// carried the delivery budget: one wake with a 204,800-byte
+	// directive_id rendered a 204,957-byte block against a
+	// 4,096-byte per-kind cap, and the same wake's STRUCTURED row was
+	// 205,020 bytes. One ordinary `mpm_wakes schedule` call was
+	// enough to arm it.
+	//
+	// The gate REFUSES rather than shortens. A shortened directive_id
+	// would not match any directive, so the agent would look it up
+	// and find nothing — a silent correctness failure dressed as a
+	// success. An explicit refusal says exactly what to do instead.
+	//
+	// The delivery path bounds the value too (see
+	// core.boundWakeMetadata), so a wake that reached the table by
+	// another route is still delivered within a bounded response. This
+	// gate is the prevention layer; the delivery bound is the
+	// containment layer. Both are needed: the prevention layer cannot
+	// speak for rows that already exist.
+	if err := validateWakeDirectiveID(metadata); err != nil {
+		return nil, err
+	}
+
 	out, err := dm.ScheduleWake(reason, targetTime, theoryID, createdBy, metadata)
 	if err != nil {
 		return nil, err
 	}
 	return checkWakesAndFold(dm, ac, out, nil), nil
+}
+
+// validateWakeDirectiveID refuses a wake whose metadata carries a
+// directive_id the agent-facing scheduling surface must not arm.
+//
+// The bound is MaxWakeDirectiveIDBytes — the same bound the renderer
+// applies — so an armed wake's directive_id is always rendered whole
+// and is always usable.
+//
+// A NON-STRING directive_id is refused for the same reason a
+// non-string kind is: it would persist as a JSON value that neither
+// the renderer nor read_directives can use, and a wake nobody can act
+// on is an orphan.
+func validateWakeDirectiveID(metadata map[string]interface{}) error {
+	if metadata == nil {
+		return nil
+	}
+	raw, present := metadata["directive_id"]
+	if !present || raw == nil {
+		return nil
+	}
+	id, ok := raw.(string)
+	if !ok {
+		return fmt.Errorf(
+			"metadata.directive_id must be a string, got %T — a directive id is the identifier the agent "+
+				"passes back to read_directives, so a non-string one cannot be used. This wake was NOT created.",
+			raw)
+	}
+	if len(id) > mpminternal.MaxWakeDirectiveIDBytes {
+		return fmt.Errorf(
+			"metadata.directive_id is %d bytes, over the %d-byte limit — a directive id is the identifier "+
+				"the agent passes back to read_directives, so a shortened one would name no directive and "+
+				"the wake would be unusable rather than merely truncated. Use a shorter id, or put the long "+
+				"value in the reason. This wake was NOT created.",
+			len(id), mpminternal.MaxWakeDirectiveIDBytes)
+	}
+	return nil
 }
 
 // requestedWakeKind returns the wake kind the caller asked for, or an
@@ -5176,7 +5286,8 @@ func handleCheckWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map
 
 // readKindsParam extracts the optional kinds array from a tool payload.
 // Returns nil if absent, malformed, or empty — nil triggers the
-// backward-compatible default (notification-only) in CheckPendingWakes.
+// the default delivery path (every AGENT-OWNED pending wake) in
+// CheckPendingWakes.
 func readKindsParam(p map[string]interface{}) []string {
 	if p == nil {
 		return nil
@@ -5245,13 +5356,25 @@ func handleListWakes(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p map[
 	// F-5 (2026-09-04 residual inventory, P2): the JSON Schema for
 	// mpm_wakes list advertises `kinds: string[]` but pre-fix this
 	// parameter was silently discarded — every agent filtering on
-	// kinds received the unfiltered result set. The kinds semantics
-	// here match CheckPendingWakes at wake_tools.go:226-249: nil/empty
-	// → no filter (backward-compat default for list is "all wakes",
-	// NOT notification-only); explicit list → IN filter on
-	// json_extract(metadata, '$.kind'); "*" → no filter. We post-filter
-	// the ListScheduledWakes result set rather than changing the DB
-	// layer signature, which keeps the fix narrowly scoped to the bug.
+	// kinds received the unfiltered result set.
+	//
+	// The kinds semantics here are NOT the same as CheckPendingWakes's,
+	// and an earlier version of this comment claimed they matched:
+	//
+	//	list_wakes : nil/empty → no filter (ALL wakes, including the
+	//	             scheduler-owned ones); explicit list → IN filter on
+	//	             json_extract(metadata, '$.kind'); "*" → no filter.
+	//	             list is a READ surface: it must be able to show the
+	//	             operator the scheduler's wakes too.
+	//	fold       : nil/empty → the agent-owned allowlist (notification,
+	//	             cascade, cron); explicit list → the requested
+	//	             agent-owned kinds; "*" → the agent-owned allowlist.
+	//	             The fold RETIRES what it delivers, so it may only
+	//	             ever touch wakes the agent owns.
+	//
+	// We post-filter the ListScheduledWakes result set rather than
+	// changing the DB layer signature, which keeps the fix narrowly
+	// scoped to the bug.
 	kinds := readKindsParam(p)
 	items, err := dm.ListScheduledWakes(includeFired, overdueOnly, limit)
 	if err != nil {
@@ -5466,7 +5589,9 @@ func handleHealthCheck(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 //     max_batches_reached, where work may remain.
 //   - batches_processed: count of batches that committed a lesson.
 //   - raw_processed: sum of compacted raw memories across all batches.
-//   - lessons_created: equal to batches_processed on success.
+//   - lessons_created: always 0. The compaction records its synthesis
+//     as lesson PROPOSALS, not trusted lessons, so the derived
+//     proposals_created / proposal_ids carry the count.
 //   - raw_remaining: live read of the pressure view after the loop.
 //     Counts every un-compacted memory, INCLUDING rows a refusal has
 //     deferred. It is the right number for "how much is in the pool"
@@ -6612,10 +6737,17 @@ func handleResolveWake(dm mpminternal.CoreDB, ac mpminternal.ActiveContext, p ma
 	if err != nil {
 		// Not every error is a failure to surface to the agent.
 		// For the "refused but recoverable" states (wake_not_found,
-		// not_a_wake, invalid_reason), the error message already
-		// names the cause; the agent can correct the call and
-		// retry. The `success:false` envelope makes the refusal
-		// machine-readable too.
+		// not_a_wake, invalid_reason, corrupt_metadata), the error
+		// message already names the cause; the agent can correct the
+		// call and retry. The `success:false` envelope makes the
+		// refusal machine-readable too.
+		//
+		// corrupt_metadata is the W4 refusal (issue #178): a row whose
+		// metadata is present, non-empty and not a parseable JSON
+		// document has an owner that cannot be determined, so the agent
+		// may not retire it. The row is NOT written, so its original
+		// bytes survive. Absent or empty metadata is NOT corrupt — it
+		// reads as untagged, which is agent-owned.
 		return map[string]interface{}{
 			"success": false,
 			"status":  status,

@@ -97,6 +97,25 @@ func driveMCPSaveSensitive(t *testing.T, dm *core.DatabaseManager, ac core.Activ
 	_, _ = adapter(context.Background(), req)
 }
 
+// flushDeferredInvocationWrites waits for the substrate's deferred
+// durable-write queue to drain.
+//
+// issue #178 (F2): the MCP adapter hands its per-invocation audit row
+// (tool_invocations) to that queue, so the row lands off the caller's
+// goroutine. The contract these tests pin is the CORRELATION between
+// the invocation id in tool_invocations and the one in
+// system_audit_log — not that the row is already on disk the instant
+// the adapter returns. Flushing before the read-back keeps the
+// contract and the assertion honest.
+func flushDeferredInvocationWrites(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := core.FlushDeferredWrites(ctx); err != nil {
+		t.Fatalf("flush deferred writes: %v", err)
+	}
+}
+
 // TestCorrelation_AutomaticInvocationID_MCP_Save pins the canonical
 // MCP-tool-originated correlation contract: when env is unset, the
 // same auto-generated UUID appears in BOTH the tool_invocations row
@@ -106,6 +125,7 @@ func TestCorrelation_AutomaticInvocationID_MCP_Save(t *testing.T) {
 	dm := newIsolatedTestDM(t)
 
 	driveMCPSaveSensitive(t, dm, core.ActiveContext{SessionID: "mcp-corr-session"})
+	flushDeferredInvocationWrites(t)
 
 	// Query the tool_invocations row.
 	var tiInv string
@@ -169,6 +189,7 @@ func TestCorrelation_ExplicitInvocationID_MCP_Save(t *testing.T) {
 		// FrameworkSessionID intentionally empty to verify the NULL invariant.
 	}
 	driveMCPSaveSensitive(t, dm, ac)
+	flushDeferredInvocationWrites(t)
 
 	var tiInv string
 	if err := dm.SQLDB().QueryRow(
@@ -198,6 +219,7 @@ func TestCorrelation_MCP_FrameworkNameIsMcp(t *testing.T) {
 	dm := newIsolatedTestDM(t)
 
 	driveMCPSaveSensitive(t, dm, core.ActiveContext{SessionID: "mcp-fw-session"})
+	flushDeferredInvocationWrites(t)
 
 	var tiFW, auFW string
 	if err := dm.SQLDB().QueryRow(
@@ -232,6 +254,7 @@ func TestCorrelation_MCP_NativeSessionProvided(t *testing.T) {
 		FrameworkSessionID: fwsID,
 	}
 	driveMCPSaveSensitive(t, dm, ac)
+	flushDeferredInvocationWrites(t)
 
 	var tiFWS, auFWS string
 	if err := dm.SQLDB().QueryRow(

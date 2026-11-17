@@ -37,6 +37,21 @@ LIVE_SYSTEMD_USER="${LIVE_SYSTEMD_USER:-$HOME/.config/systemd/user}"
 
 REH_ROOT="${REH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)}"
 
+# The release-identity helpers.
+#
+# The rehearsal asks the installed binaries what version they are, and
+# the answer decides whether a rehearsal obligation PASSES. A probe
+# written as a shell pipeline has no status of its own, so a producer
+# that FAILED after printing a valid identity used to satisfy the
+# obligation — the rehearsal could not fail when it should, which is
+# the one thing a rehearsal obligation is for. Issue #221.
+#
+# The helpers live with the other release-identity probe (the one the
+# installer and the bundle validator use), so there is ONE contract:
+# a producer that fails yields NO identity, and the caller checks the
+# status rather than trusting the value.
+. "$REH_ROOT/../lib/runtime_bundle.sh"
+
 # REH_WORK is where the harness puts its WORK PRODUCTS: the source
 # export, the built bundle, the simulated home, the traces and the
 # logs. It is separate from REH_ROOT so that the harness-integrity
@@ -244,6 +259,39 @@ reh_note() { printf '       %s\n' "$1"; }
 
 reh_assert() { # reh_assert <rc> <description>
   if [ "$1" = "0" ]; then reh_pass "$2"; else reh_fail "$2"; fi
+}
+
+# reh_version_line <description> <binary> <needle>
+#
+# Assert that the binary's build identity contains <needle>.
+#
+# The probe is FAIL-CLOSED, and that is the whole point of the helper
+# existing rather than a pipeline at the call site. A binary that
+# FAILED reports no identity, so it does not match, and the assertion
+# FAILS with the reason. The value alone cannot decide this: a failed
+# producer and a producer that reported the WRONG revision both yield
+# "no match", and the difference between them is exactly what the
+# rehearsal has to be able to see.
+#
+# The needle is matched as a SHELL PATTERN, not as a regular
+# expression. The rehearsal's own revision is a hexadecimal short
+# commit, so the two agree — and the glob is what the neighbouring
+# assertions already use.
+#
+# The description is the PASS message verbatim, so the wording of an
+# existing obligation does not change.
+reh_version_line() { # reh_version_line <description> <binary> <needle>
+  local desc="${1:-}" binary="${2:-}" needle="${3:-}"
+  local out rc=0
+  out="$(rb_version_first_line "$binary")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    reh_fail "$desc — the version of $binary could not be read (exit $rc), so it reports no identity"
+    return 1
+  fi
+  case "$out" in
+    *"$needle"*) reh_pass "$desc"; return 0 ;;
+    *) reh_fail "$desc — the reported version does not contain '$needle': ${out:-<empty>}"; return 1 ;;
+  esac
 }
 
 # ── the independent syscall detector's verdict ────────────────────────────

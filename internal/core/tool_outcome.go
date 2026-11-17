@@ -231,6 +231,15 @@ func ClassifyError(err error) (ToolOutcomeClass, string) {
 	if errors.Is(err, ErrPoisonContentBlocked) {
 		return OutcomeClassValidation, "poison_content_blocked"
 	}
+	// The package-immutability refusal (R1). A legacy `save --force`
+	// against a skill that owns a package is a STATE conflict, not a
+	// substrate fault and not a malformed call: the call is well-formed
+	// and the skill's current state is what forbids it. The bounded code
+	// is the refusal's own name, so the refusal is countable without
+	// parsing prose.
+	if errors.Is(err, ErrPackageImmutable) {
+		return OutcomeClassConflict, "package_immutable"
+	}
 	// Lifecycle-event ingest rejections (mpm-event/0.1). A rejected
 	// envelope is DELIBERATE POLICY ENFORCEMENT, not a substrate fault:
 	// the envelope violated the contract, so the store refuses it and

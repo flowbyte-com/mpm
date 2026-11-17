@@ -53,6 +53,14 @@ import {
   resolveProjectIdentity,
 } from "./event-envelope.js";
 import {
+  renderEnvelope,
+  resolveSandboxBase,
+  SandboxManager,
+  SANDBOX_EXEC_DESCRIPTION,
+  SANDBOX_EXEC_INPUT,
+  SANDBOX_EXEC_TOOL,
+} from "./sandbox-exec.js";
+import {
   createLifecycleObserver,
   createMpmSystemTransport,
   createUnconfiguredTransport,
@@ -472,7 +480,7 @@ There is NO params.shred: permanent shredding is operator-only and is refused on
         name: "mpm_theories",
         description: `Theory lifecycle. Literal actions:
   propose — Required params.hypothesis. Optional: params.validation_criteria, params.tags, params.dependencies, params.source_ids.
-  resolve — Resolve a pending theory. Required params.theoryId, params.conclusion ("confirmed"|"disproven"). Optional: params.newStatus ("proven"|"disproven"), params.winner_id.
+  resolve — Resolve a pending theory. Required params.id (alias params.theoryId), params.conclusion (free text — what the evidence showed) and params.status ("proven"|"disproven"; alias params.newStatus) — except on the arbitration branch, where params.winner_id (alias params.winnerId) selects the outcome instead.
   show — Fetch one theory by id. Required params.id.
   list — List theories. Optional: params.status ("pending"|"all"|"proven"|"disproven"|"resolved"; default "pending"), params.tags, params.limit (default 50).
   query — Search theories. Required params.query. Optional: params.limit (default 50).`,
@@ -571,7 +579,7 @@ To record a URL for later WITHOUT fetching it, use mpm_evidence action=add with 
   upsert_task — Create/update a cron task. Required params.id, params.name, params.cron_expr, params.directive_id, params.status.
   list_tasks — List all scheduled tasks. No params.
   delete_task — Hard-delete a task. Required params.id.
-  resolve — Resolve a fired wake. Required params.wake_id (id / wakeId are also accepted) and params.reason ("reconciled"|"obsolete"|"superseded"|"already_satisfied"). Optional: params.result_reference.`,
+  resolve — Resolve a fired wake. Required params.wake_id (id / wakeId are also accepted) and params.reason ("reconciled"|"obsolete"|"superseded"|"already_satisfied"). Optional: params.result_reference. Every ownership refusal returns success=false with a status and leaves the row untouched. A scheduler-owned or unknown kind is refused with status not_a_wake. A row whose metadata is present, non-empty and not a parseable JSON document is refused with status corrupt_metadata: its owner cannot be determined, so the agent may not retire it. Metadata that is absent or empty is not corrupt — it reads as untagged, which is agent-owned.`,
     },
     {
         name: "mpm_handoff",
@@ -749,6 +757,41 @@ export default Plugin.define({
                     },
                 });
             }
+
+            // ----- The sandboxed execution tool ----------------------------
+            //
+            // A HOST-CONTROLLED tool.  It is ALWAYS sandboxed: there is
+            // no privileged mode, and no configuration the model can
+            // supply.  The reviewer agent's definition denies the raw
+            // host shell, so this is the reviewer's ONLY way to execute
+            // anything — and what it executes is confined by the kernel.
+            //
+            // The base, the repository copy and the protected set are
+            // resolved by the HOST.  The model supplies the command and
+            // nothing else.
+            const projectDirectory = ctx.location?.directory;
+            const sandbox = new SandboxManager({
+                base: resolveSandboxBase(),
+                source: projectDirectory,
+                protect: projectDirectory ? [projectDirectory] : [],
+            });
+            editor.add({
+                name: SANDBOX_EXEC_TOOL,
+                description: SANDBOX_EXEC_DESCRIPTION,
+                input: SANDBOX_EXEC_INPUT,
+                async execute(input) {
+                    const args = (input ?? {}) as {
+                        command?: string[];
+                        cwd?: string;
+                        timeout_ms?: number;
+                    };
+                    const envelope = await sandbox.run(args.command ?? [], {
+                        cwd: args.cwd,
+                        timeoutMs: args.timeout_ms,
+                    });
+                    return { content: renderEnvelope(envelope) };
+                },
+            });
         });
 
         // ----- Hook: wake context injection ---------------------------------

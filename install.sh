@@ -819,8 +819,22 @@ phase_bundle() {
     # still have output to write, and the producer is then killed by
     # SIGPIPE — which, under pipefail and set -e, turns into an exit
     # status of 141 with no diagnostic at all. See rb_reported_commit.
-    local commit version epoch
-    commit="$(rb_reported_commit "$(build_dir)/mpm")"
+    #
+    # The probe's STATUS is checked here as well as its value, and the
+    # check is explicit. A binary that prints a valid commit and THEN
+    # fails has not reported its identity successfully, and its revision
+    # label must not be taken from it. The check cannot be left to the
+    # assignment's own status: under `set -e` that would abort the
+    # installation without saying what went wrong, and the distinction
+    # between "the binary reported NO commit" (the provenance fallback
+    # below) and "the binary FAILED" would be lost.
+    local commit version epoch probe_status=0
+    commit="$(rb_reported_commit "$(build_dir)/mpm")" || probe_status=$?
+    if [ "$probe_status" -ne 0 ]; then
+        die "the build's mpm binary failed to report its build commit (exit $probe_status).
+The installation stops here: a binary that cannot report its own identity cannot be
+given one, and the revision label would be a guess. Nothing was installed." 3
+    fi
     [ -n "$commit" ] || commit="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" commit 2>/dev/null || printf 'unknown')"
     version="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" version 2>/dev/null || printf 'unknown')"
     epoch="$(bash "$PROJECT_ROOT/scripts/build-provenance.sh" build-epoch 2>/dev/null || printf '0')"
@@ -955,13 +969,27 @@ nothing. Nothing was activated." 3
     # means the check does not need a source checkout at install time.
     local helper="$PROJECT_ROOT/scripts/lib/schema_preflight.py"
     local schema_go="$PROJECT_ROOT/internal/core/schema.go"
-    if [ -r "$helper" ] && [ -r "$schema_go" ]; then
-        install -d -m 0755 "$candidate/schema"
-        if ! python3 "$helper" extract --go "$schema_go" --table lifecycle_events \
-                --out "$candidate/schema/lifecycle_events.sql"; then
-            rm -rf "$candidate"
-            die "could not extract the substrate's lifecycle_events DDL into the candidate bundle" 3
-        fi
+    #
+    # FAIL CLOSED. The schema-collision preflight compares the live
+    # table against the DDL the substrate itself would apply. A bundle
+    # without that DDL degrades the check to a no-op, silently: the
+    # check compares the live table against nothing and reports
+    # success. A bundle that cannot carry the preflight must not be
+    # installed.
+    if [ ! -r "$helper" ] || [ ! -r "$schema_go" ]; then
+        rm -rf "$candidate"
+        die "the substrate's schema source is not readable, so the candidate bundle cannot
+carry the schema preflight:
+  helper: $helper
+  schema: $schema_go
+A bundle without the preflight installs a runtime whose schema-collision check
+degrades to a no-op. Nothing was activated." 3
+    fi
+    install -d -m 0755 "$candidate/schema"
+    if ! python3 "$helper" extract --go "$schema_go" --table lifecycle_events \
+            --out "$candidate/schema/lifecycle_events.sql"; then
+        rm -rf "$candidate"
+        die "could not extract the substrate's lifecycle_events DDL into the candidate bundle" 3
     fi
     _bundle_fail_at identity || {
         rm -rf "$candidate"
@@ -996,14 +1024,23 @@ nothing. Nothing was activated." 3
         # promotion that failed between installing the release and
         # activating it. A release is immutable, so it is NOT replaced;
         # it is validated and activated as it stands.
-        if rb_validate_bundle "$final" "$rev"; then
+        #
+        # The release is ALREADY INSTALLED, so it is checked for
+        # INTEGRITY, not for construction: a release directory
+        # accumulates files after installation (the runtime's own
+        # Python bytecode caches, the adapter's build-provenance
+        # sidecar), and refusing it for those would push the operator
+        # towards deleting an immutable rollback target.
+        if rb_validate_installed_release "$final" "$rev"; then
             log "  release $rev is already installed and valid — activating it as it stands"
             rm -rf "$candidate"
         else
             rm -rf "$candidate"
             die "release $rev already exists at $final and does not validate.
-A release is immutable, so it will not be replaced. Remove it by hand if you
-want a fresh build of that label, or install under a different --rev.
+A release is immutable, so it will not be replaced. Do NOT delete it by hand — it
+may be the operator's rollback target. Install under a different --rev, or, if
+this release was built before the host-asset contract existed, install a
+revision that carries the integration assets.
 Nothing was activated." 3
         fi
     else

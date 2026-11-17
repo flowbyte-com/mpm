@@ -1,17 +1,19 @@
 package main
 
 import (
-	"encoding/csv"
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
-	"io"
 	"github.com/flowbyte-com/mpm-core/usererror"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // handleStats shows memory statistics
@@ -197,21 +199,130 @@ func parseDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
+// exportUsage is the usage line the export help page prints.
+const exportUsage = "mpm export [options]"
+
+// exportProse is the part of the export help page that is not an option
+// list.
+//
+// It is where the JSON document's SHAPE is documented, because the shape
+// is a contract a consumer has to know and the option list cannot carry
+// it. The prose is reachable from `mpm export --help`, `mpm export -h`
+// and `mpm help export` — the router's own help interception reaches this
+// page for all three. (The handler's own fs.Usage is NOT the place: the
+// router validates the options before the handler is entered, so an
+// fs.Usage attached to the handler's flagset is never printed.)
+const exportProse = `The JSON document is an OBJECT, not a bare array:
+
+  {"memories": [ ... ],
+   "packages_omitted": { "count": N, "packages": [ ... ], "scope": { ... } },
+   "package_archives": { "count": N, "directory": "...", "archives": [ ... ] }}
+
+"packages_omitted" is ALWAYS present. It names every skill package that
+was selected and could NOT be carried, each with its reason. A count of 0
+means the export carried every package it selected - read it against
+"scope", which says how many were selected, how many were carried, and
+how many the store holds.
+
+"package_archives" is ALWAYS present. It is the index of the .skill
+archives the export produced: each archive's file name, skill id, package
+hash and archive digest. The archives themselves are written to a SIBLING
+DIRECTORY named for the export - "<output-path>.packages".
+
+"memories" is the same key mpm migrate --from reads, so an export file
+that carries NO package remains a valid input for "mpm migrate --from
+<file>". A document that carries package archives is REFUSED by the
+migration, and so is a document that DROPPED a package: the migration
+reads only the projected rows, and importing either would drop the
+packages' content silently.
+
+The CSV format is unchanged. The loss marker is a notice on standard error,
+so it never corrupts the document on standard output.
+
+A package-bearing export needs a destination that can carry the archives:
+standard output, CSV and the deprecated bare array are REFUSED for it,
+before anything is written. An export that carries no package is
+unaffected.
+
+--format json-array is the DEPRECATED legacy shape: a bare JSON array,
+with no room for the loss marker or the archive index. It is refused
+whenever the export would carry a package, because emitting the old shape
+then would drop package content silently - the one thing R11 exists to
+prevent. It is kept for one release for consumers that cannot yet read the
+object, and it will be removed.`
+
+// exportOpts holds the export command's parsed options.
+//
+// The handler's flag set and the help page are built from ONE declaration
+// (exportOptions), so the advertised option set and the accepted option
+// set cannot disagree — which is what the command's own help contract
+// requires.
+type exportOpts struct {
+	format     string
+	collection string
+	since      string
+	until      string
+	output     string
+}
+
+// exportOptions declares every option the export command accepts.
+func exportOptions(o *exportOpts) []OptionSpec {
+	return []OptionSpec{
+		HelpOption,
+		{Name: "format", Usage: "Output format", Kind: OptString, String: &o.format,
+			ValueName: "json|csv|json-array", DefaultText: "default json"},
+		{Name: "collection", Usage: "Filter by collection", Kind: OptString, String: &o.collection, ValueName: "name"},
+		{Name: "since", Usage: "Export memories since date", Kind: OptString, String: &o.since, ValueName: "YYYY-MM-DD"},
+		{Name: "until", Usage: "Export memories until date", Kind: OptString, String: &o.until, ValueName: "YYYY-MM-DD"},
+		{Name: "output", Usage: "Output file", Kind: OptString, String: &o.output, ValueName: "path"},
+	}
+}
+
+// printExportHelp renders the export command's own help page.
+func printExportHelp() int {
+	o := &exportOpts{format: "json"}
+	return PrintHelpPage(exportUsage, exportOptions(o), exportProse)
+}
+
+// exportLegacyArrayFormat is the DEPRECATED bare-array JSON format.
+//
+// It exists for one release, for consumers that cannot yet read the
+// structured object. It is REFUSED whenever the export would omit a
+// package's content, because emitting the legacy shape then would drop
+// those bytes silently — the exact loss R11 exists to make loud.
+const exportLegacyArrayFormat = "json-array"
+
 // handleExport exports memories to JSON/CSV
 func handleExport(args []string) int {
-	fs := flag.NewFlagSet("export", flag.ContinueOnError)
-	format := fs.String("format", "json", "Output format: json, csv")
-	collection := fs.String("collection", "", "Filter by collection")
-	since := fs.String("since", "", "Export memories since date (YYYY-MM-DD)")
-	until := fs.String("until", "", "Export memories until date (YYYY-MM-DD)")
-	output := fs.String("output", "", "Output file (default: stdout)")
-	fs.Usage = func() {
-		fmt.Println("Usage: mpm export [options]")
-		fmt.Println("\nExport options:")
-		fs.PrintDefaults()
+	// A help request must never export, and must never mutate. The
+	// router intercepts the top-level `mpm export --help`, but the nested
+	// `mpm ops export --help` reaches this handler with the router's
+	// rewritten "help" token — so the handler short-circuits on it too.
+	if requireHelpShortCircuit(args, func() { printExportHelp() }) {
+		return 0
 	}
+
+	var o exportOpts
+	o.format = "json"
+	opts := exportOptions(&o)
+
+	fs := flag.NewFlagSet("export", flag.ContinueOnError)
+	fs.SetOutput(discardWriter{})
+	RegisterOptions(fs, opts)
+
+	// The router has already consumed -h/--help.
+	if rc := RejectUnknownOptionInArgs("export", exportUsage, opts, args[1:]); rc != 0 {
+		return rc
+	}
+
 	if err := fs.Parse(args[1:]); err != nil {
-		return 1
+		return usererror.Error("export: %v", err)
+	}
+
+	switch o.format {
+	case "json", "csv", exportLegacyArrayFormat:
+	default:
+		return usererror.Error("Unknown export format %q: expected json, csv or %s", o.format, exportLegacyArrayFormat)
 	}
 
 	dm := getDB()
@@ -219,81 +330,233 @@ func handleExport(args []string) int {
 		return 1
 	}
 
-	memories, err := dm.GetMemoriesForExport(*collection, *since, *until)
+	memories, err := dm.GetMemoriesForExport(o.collection, o.since, o.until)
 	if err != nil {
 		return usererror.Error("Export failed: %v", err)
 	}
 
-	var writer *csv.Writer
-	var outputFile *os.File
-	// outputTarget is where format writers send their output. Defaults
-	// to stdout; switches to the --output file when requested. Status
-	// messages always go to stderr (via usererror.Notice) so they don't
-	// pollute a stdout-mode export.
-	outputTarget := io.Writer(os.Stdout)
-	usedFile := false
-
-	if *output != "" {
-		// Defect B (2026-09-13 acceptance): pre-fix the JSON path
-		// hardcoded os.Stdout regardless of --output. The output file
-		// was created and truncated but nothing was ever written to
-		// it — a 0-byte file with stdout JSON next to it. The fix
-		// routes the writer to the file when --output is set.
-		outputFile, err = os.Create(*output)
+	// ── The packages this export is ABOUT. ──────────────────────────────
+	//
+	// The scope mirrors the memory selection exactly — the same
+	// collection, since and until — so the two surfaces cannot disagree
+	// about which packages this export covers.
+	//
+	// Before P7 this was the LOSS marker: the skills export carried the
+	// PROJECTED SKILL ROW only, so every package's reference files,
+	// scripts and assets were dropped, and the marker named them.
+	// P7 makes the export COMPLETE — the archives are written beside
+	// the document — so the scope is what the export is ABOUT, and the
+	// marker (built from the export's own omissions, below) is what it
+	// could NOT carry.
+	//
+	// The marker is carried structurally in the JSON response AND printed
+	// as a loud notice. There is no configuration in which a loss is
+	// silent.
+	//
+	// The concrete manager is used rather than the CoreDB interface: the
+	// scope is a property of the export, not a substrate read surface,
+	// and the CLI-only operations stay off CoreDB on purpose (the same
+	// boundary TestPurge_IsNotOnCoreDB pins).
+	scope := &mpminternal.SkillPackageExportScopeResult{}
+	if concrete := getDBConcrete(); concrete != nil {
+		selected, err := concrete.SkillPackageExportScope(o.collection, o.since, o.until)
 		if err != nil {
-			return usererror.Error("Cannot create output file: %v", err)
+			return usererror.Error("Export failed: %v", err)
 		}
-		defer outputFile.Close()
-		outputTarget = outputFile
-		usedFile = true
+		scope = selected
+	}
+	packageBearing := len(scope.Packages) > 0
 
-		if *format == "csv" {
-			writer = csv.NewWriter(outputFile)
+	// ── The DESTINATION policy. ────────────────────────────────────────
+	//
+	// A package-bearing export needs a destination that can carry the
+	// archives AND the index that names them. The refusal happens
+	// BEFORE anything is written, so a refused export has written
+	// nothing at all — not a truncated document, not a half-published
+	// directory.
+	//
+	// Standard output cannot carry the archives, and neither can the
+	// CSV format or the DEPRECATED bare-array format: neither has room
+	// for the index, and an export that dropped the archives silently
+	// would be the exact loss R11 exists to prevent.
+	if packageBearing {
+		switch {
+		case o.output == "":
+			return usererrorf(
+				"this export is about %d skill package(s), and their .skill archives cannot be carried to standard output. "+
+					"Re-run with --output <path>: the export writes the document to that path and the archives to the sibling "+
+					"directory named after it, with the suffix %q.",
+				len(scope.Packages), packageExportDirectorySuffix)
+		case o.format == "csv":
+			return usererrorf(
+				"the CSV format cannot carry the .skill archives of the %d skill package(s) in scope, nor the index that names them. "+
+					"Use --format json with --output <path>. The CSV format is unchanged for an export that carries no package.",
+				len(scope.Packages))
+		case o.format == exportLegacyArrayFormat:
+			return usererrorf(
+				"the legacy %q format cannot carry the .skill archives of the %d skill package(s) in scope, nor the index that names them. "+
+					"Use --format json with --output <path>.",
+				exportLegacyArrayFormat, len(scope.Packages))
 		}
 	}
 
-	if *format == "json" {
-		enc := json.NewEncoder(outputTarget)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(memories); err != nil {
-			return usererror.Error("JSON encode failed: %v", err)
+	// ── Export the packages. ───────────────────────────────────────────
+	//
+	// The export is driven by the SCOPE, not by the exported rows: the
+	// scope is the list of packages this export is ABOUT. An ordinary
+	// skill is not in the scope — it has no package — so it is never
+	// offered to the exporter, and it is never named as an omission.
+	//
+	// The scope's packages whose skill row is NOT among the exported
+	// rows are named as omissions too: the export's two surfaces would
+	// otherwise disagree about what the export covers, and a package
+	// that is in scope but not carried is exactly the silent loss R11
+	// exists to prevent.
+	//
+	// The archives are produced BEFORE anything is published, so the
+	// document that names them is complete before it is written.
+	var (
+		archives []*mpminternal.PackageExportArchive
+		omitted  []mpminternal.SkillPackageExportOmitted
+	)
+	if packageBearing {
+		concrete := getDBConcrete()
+		if concrete == nil {
+			return usererrorf("Export failed: the package export needs the concrete database manager")
 		}
-	} else if *format == "csv" {
-		if writer == nil {
-			writer = csv.NewWriter(outputTarget)
-		}
-		defer writer.Flush()
-
-		// CSV header
-		csvErr := writer.Write([]string{"id", "collection", "content", "tags", "created_at", "reinforcement_count", "weight", "is_long_term"})
-		if csvErr == nil {
-			for _, m := range memories {
-				id := stringFromMap(m, "id")
-				coll := stringFromMap(m, "collection")
-				content := stringFromMap(m, "content")
-				created := stringFromMap(m, "created_at")
-				tags := stringFromMap(m, "tags")
-				// Use strict helpers: per the D-001 / W-008 contract from
-				// GetMemoriesForExport, reinforcement_count and is_long_term
-				// are int64 (INTEGER columns) and weight is float64 (REAL).
-				// A type mismatch now warns instead of silently defaulting.
-				rcVal, _ := int64FromMap(m, "reinforcement_count")
-				weightVal, _ := float64FromMap(m, "weight")
-				ltVal, _ := int64FromMap(m, "is_long_term")
-				// weight is real-valued; present with 2 decimals in CSV.
-				weightStr := strconv.FormatFloat(weightVal, 'f', 2, 64)
-				if err := writer.Write([]string{id, coll, content, tags, created, fmt.Sprintf("%d", rcVal), weightStr, fmt.Sprintf("%d", ltVal)}); err != nil {
-					usererror.Error("CSV write error: %v", err)
-					break
-				}
+		exportedRows := skillIDsAmong(memories)
+		toExport := make([]string, 0, len(scope.Packages))
+		for _, candidate := range scope.Packages {
+			if exportedRows[candidate.SkillID] {
+				toExport = append(toExport, candidate.SkillID)
+				continue
 			}
+			omitted = append(omitted, mpminternal.SkillPackageExportOmitted{
+				SkillID:     candidate.SkillID,
+				Name:        candidate.Name,
+				Version:     candidate.Version,
+				FileCount:   candidate.FileCount,
+				PackageHash: candidate.PackageHash,
+				Reason:      "skill_row_not_exported",
+				Detail: "the package is in the export's scope, but its skill row is not among " +
+					"the exported rows; the archive was not carried",
+			})
+		}
+		produced, failures, err := concrete.ExportSkillPackages(context.Background(), toExport)
+		if err != nil {
+			return usererrorf("Export failed: %v", err)
+		}
+		archives = produced
+		omitted = append(omitted, failures...)
+	}
+
+	// ── The LOSS MARKER. ───────────────────────────────────────────────
+	//
+	// Before P7 the marker named every package the export did not
+	// carry, because the export carried none. Now the export CARRIES
+	// the packages, so the marker names only the ones that could not be
+	// carried — and the scope says how many were in scope, so a count
+	// of zero is a positive statement about a KNOWN denominator rather
+	// than an empty claim.
+	packageLoss := &mpminternal.SkillPackageExportLoss{
+		Count:    len(omitted),
+		Packages: omitted,
+		Scope: mpminternal.SkillPackageExportScope{
+			Total:    scope.Total,
+			Selected: len(scope.Packages),
+			Carried:  len(archives),
+		},
+	}
+	if packageLoss.Packages == nil {
+		packageLoss.Packages = []mpminternal.SkillPackageExportOmitted{}
+	}
+	// The omissions are sorted GLOBALLY, by skill id. They arrive from
+	// two sources — the scope's own omissions and the exporter's
+	// failures — and each is sorted on its own, so without this the
+	// two lists would interleave differently depending on which source
+	// an omission came from. One order for the whole list makes the
+	// report reproducible.
+	sort.SliceStable(packageLoss.Packages, func(i, j int) bool {
+		return packageLoss.Packages[i].SkillID < packageLoss.Packages[j].SkillID
+	})
+
+	// ── The DOCUMENT. ──────────────────────────────────────────────────
+	//
+	// It is rendered in full, in memory, BEFORE anything is published —
+	// so a document is never truncated before its content is known to be
+	// complete, and a failure leaves the previous output intact.
+	var document []byte
+	switch o.format {
+	case "json":
+		index := &packageExportIndex{
+			Count:    len(archives),
+			Archives: archives,
+		}
+		if packageBearing {
+			index.Directory = filepath.Base(resolvePackageExportTarget(o.output).DirectoryPath)
+		}
+		document, err = encodePackageExportDocument(memories, packageLoss, index)
+		if err != nil {
+			return usererrorf("Export failed: %v", err)
+		}
+	case exportLegacyArrayFormat:
+		// The DEPRECATED bare array — the shape the export had before
+		// the loss marker existed. It is only reachable when there is
+		// nothing to lose (the refusal above), so it is never a silent
+		// loss.
+		document, err = encodeExportJSON(nonNilMemories(memories))
+		if err != nil {
+			return usererrorf("Export failed: %v", err)
+		}
+	default:
+		// CSV.
+		document, err = encodeExportCSV(memories)
+		if err != nil {
+			return usererrorf("Export failed: %v", err)
 		}
 	}
 
-	if usedFile {
-		usererror.Notice("Exported %d memories to %s", len(memories), *output)
+	// ── PUBLISH. ───────────────────────────────────────────────────────
+	//
+	// The package-bearing path publishes the ARCHIVES and the document
+	// together, through the staging-and-rename machinery. The ordinary
+	// path writes the document alone — still atomically, so an existing
+	// output is never truncated before its content is complete.
+	if packageBearing {
+		target := resolvePackageExportTarget(o.output)
+		if err := publishPackageExport(target, archives, document); err != nil {
+			return usererrorf("Export failed: %v", err)
+		}
+		usererror.Notice("Exported %d memories and %d package archive(s) to %s (archives in %s)",
+			len(memories), len(archives), o.output, target.DirectoryPath)
+	} else if o.output != "" {
+		if err := writeFileAtomically(o.output, document); err != nil {
+			return usererrorf("Export failed: %v", err)
+		}
+		usererror.Notice("Exported %d memories to %s", len(memories), o.output)
 	} else {
+		if _, err := os.Stdout.Write(document); err != nil {
+			return usererrorf("Export failed: %v", err)
+		}
 		usererror.Notice("Exported %d memories", len(memories))
+	}
+
+	// The loss marker, on standard error so it never corrupts the
+	// document on standard output — and loud enough that a caller who
+	// never read the response still sees it.
+	if notice := packageLoss.Notice(); notice != "" {
+		usererror.Notice("%s", notice)
+	}
+
+	// The deprecation notice for the legacy shape. It goes to standard
+	// error for the same reason the loss marker does: standard output
+	// carries the document, and the document must stay parseable.
+	if o.format == exportLegacyArrayFormat {
+		usererror.Notice(
+			"WARNING: --format %s is DEPRECATED and will be removed in a future release. "+
+				"It emits the legacy bare array, which cannot carry the package loss marker. "+
+				"Use --format json, which names every omitted package.",
+			exportLegacyArrayFormat)
 	}
 	return 0
 }
@@ -361,20 +624,38 @@ func handleMaintain(args []string) int {
 
 	fmt.Println("\n🧠 Running self-maintenance...")
 
-	// Run full self-maintenance
+	// Run full self-maintenance.
+	//
+	// The statistics and the error are NOT exclusive. A failed operation does
+	// not make the numbers that DID succeed useless, so the partial statistics
+	// are printed either way and the EXIT CODE carries the failure. This used
+	// to print "complete" and exit 0 while decay, pruning or consolidation had
+	// not run at all.
 	stats, err := dm.RunSelfMaintenance()
-	if err != nil {
-		usererror.Error("%v", err)
-		return 1
+
+	if err != nil && stats == nil {
+		return usererror.Error("self-maintenance failed: %v", err)
 	}
 
-	fmt.Println("\n✅ Self-maintenance complete:")
+	if err != nil {
+		fmt.Println("\n⚠ Self-maintenance completed WITH ERRORS:")
+	} else {
+		fmt.Println("\n✅ Self-maintenance complete:")
+	}
 	fmt.Printf("   Decayed weights:      %d\n", stats["decayed_weights"])
 	fmt.Printf("   Pruned total:        %d\n", stats["pruned_total"])
 	fmt.Printf("   Consolidated:         %d\n", stats["consolidated"])
 	fmt.Printf("   Never accessed:      %d\n", stats["never_accessed"])
 	fmt.Printf("   Low weight:          %d\n", stats["low_weight"])
 	fmt.Printf("   For review:          %d\n", stats["for_spaced_reinforcement"])
+
+	if err != nil {
+		if failed, ok := stats["errors"].([]string); ok && len(failed) > 0 {
+			fmt.Printf("   Failed operations:   %s\n", strings.Join(failed, ", "))
+		}
+		fmt.Println()
+		return usererror.Error("self-maintenance failed: %v", err)
+	}
 
 	// Deferred VACUUM: reclaim space from hard deletes during idle maintenance
 	var deletedCount int

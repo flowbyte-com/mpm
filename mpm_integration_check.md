@@ -361,7 +361,7 @@ CLI fallback tools
 Where available, inspect the current Registry and/or the live discovery mechanism:
 
 ```bash
-mpm call mpm_system --payload '{"action":"help","params":{}}' 2>&1 | head -40
+mpm call mpm_help --payload '{"action":"list"}' 2>&1 | head -40
 ```
 
 For MCP integrations, distinguish between:

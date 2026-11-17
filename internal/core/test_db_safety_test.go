@@ -146,6 +146,7 @@ var testDBSafetyWhitelist = map[string]string{
 	"release_acceptance/cross_agent_continuity_test.go": "every test calls makeAcceptanceWorkspace(t), which sets MPM_WORKSPACE to a t.TempDir() root before NewDatabaseManager(\"\"); the scenario is built to reopen one SQLite file in a second DM to simulate a separate agent process, which is the property under test",
 	"release_acceptance/supersession_trace_test.go":     "same makeAcceptanceWorkspace(t) isolation; the second NewDatabaseManager(\"\") is the deliberate process-restart reopen that the supersession trace asserts across",
 	"internal/core/memory_malformed_config_test.go":      "sets MPM_WORKSPACE to t.TempDir() before NewMemoryStore(\"\"); the store's argument is discarded, so the only isolation is the MPM_WORKSPACE redirection — and the property under test is precisely that a MALFORMED configuration cannot crash the constructor, which needs the production path",
+	"internal/core/skill_package_schema_test.go":        "skillPkgWorkspace sets MPM_WORKSPACE to a t.TempDir() before every NewDatabaseManager(\"\"); the tests deliberately reopen the SAME file-backed database in a second manager to prove the Skill Package migration and idempotent-reopen properties, which an in-memory store cannot simulate, and the production DSN's _foreign_keys=1 is required for the foreign-key enforcement assertions to be real",
 }
 
 // dbSafetySkipDirs are directory names never descended into. testdata

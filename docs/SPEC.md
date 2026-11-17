@@ -65,6 +65,12 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.5 [Multi-Agent Shared Epistemology (Layers 0–4)](#65-multi-agent-shared-epistemology-layers-04)
    - 6.6 [Telemetry Sidecar (mpm-telemetry)](#66-telemetry-sidecar-mpm-telemetry)
    - 6.7 [Epistemic Compaction](#67-epistemic-compaction)
+   - 6.8 [Skill Package Storage (P1 — storage only)](#68-skill-package-storage-p1--storage-only)
+   - 6.9 [Project-Scoped Continuity Storage (Stage 1 — storage only)](#69-project-scoped-continuity-storage-stage-1--storage-only)
+   - 6.10 [Skill Package Import (P4 — directory import and the export loss marker)](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker)
+   - 6.11 [Skill Package Archive Import (P5 — the `.skill` ZIP adapter)](#611-skill-package-archive-import-p5--the-skill-zip-adapter)
+   - 6.12 [Skill Package Retrieval (P6 — the read-only retrieval and verification API)](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api)
+   - 6.13 [Skill Package Export (P7 — the deterministic `.skill` writer and the complete skills export)](#613-skill-package-export-p7--the-deterministic-skill-writer-and-the-complete-skills-export)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -275,6 +281,8 @@ Reusable knowledge that survives across tasks — best practices, warnings, patt
 #### Skill
 
 Procedural memory: "how to act." A skill is a markdown document with YAML frontmatter (name, version, when_to_use, domain, constraints, steps) describing a procedure the agent can run. Skills live in `collection='skills'`, are scanned by the secret/poison scanner on every write, and are surfaced via three discovery tiers (list, read, mpm_context action=proactive_recall_hint). New and revised procedures can be evaluated through the **Skills Workshop** before publication; see §9 for the full authoring and discovery surface.
+
+**Multi-file skill packages.** The storage for a multi-file package — an entrypoint plus references, scripts and assets — is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The **archive importer** is specified in [§6.11](#611-skill-package-archive-import-p5--the-skill-zip-adapter). A package can now be imported from a directory and stored atomically; the **internal** read API is specified in [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api); the **deterministic `.skill` export** and the **complete skills export** are specified in [§6.13](#613-skill-package-export-p7--the-deterministic-skill-writer-and-the-complete-skills-export), so a package's bytes can now leave the substrate as a deterministic archive and re-enter as the same package. The **agent-facing read surface** and the **package CLI/MCP surfaces** are still later stages, and a skill saved the ordinary way is unaffected.
 
 #### Evidence
 
@@ -1262,11 +1270,46 @@ Historical note: the 2026-06-23 migration replaced an earlier *per-agent* plugin
 
 For a step-by-step recipe for connecting OpenCode — including the plugin registration, the `MPM_PROVENANCE_*` environment variables, and the wake-context injection path — see [`agent_installation/mpm-opencode/README.md`](../agent_installation/mpm-opencode/README.md).
 
+#### The isolated reviewer agent
+
+A **review** subagent runs in a child session with the parent's tool surface. On 2026-11-15 a review subagent wrote a memory into the operator's **live** MPM database through the `mpm_memory` tool, against an explicit instruction not to touch it. A written instruction was not enough, and could not have been: the tool was still **registered** for the reviewer, so "do not call it" was the only thing standing between a review note and a write into the operator's substrate.
+
+The first fix was a **permission layer** of pattern rules: deny the MPM tools by name, deny the binaries wherever they are named, deny the live workspace paths. Twenty-three independent reviews established that the pattern was never complete — a rule that does not name a route is not a closure, and a pattern matcher is not a boundary. The second fix is **capability removal**, and it is the one in force.
+
+The canonical definition is [`agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md`](../agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md), installed by `agent_installation/mpm-opencode/scripts/install_reviewer_agent.py` into `~/.config/opencode/agents/mpm-reviewer.md`. The install is part of the **canonical install flow** (`agent_installation/mpm-opencode/install.sh` and `make install`), because a definition that lives only in the repository is not an isolation — a fresh install would have no reviewer definition at all.
+
+**The architecture: capability removal.**
+
+| layer | mechanism | what it closes |
+|---|---|---|
+| **the tool catalogue** | the definition is **default-deny** — `action: "*"`, `resource: "*"`, `effect: deny` — and re-opens exactly **one** action | every host capability, including any the host adds later: an omitted rule is not a closure, and a default deny makes the omission safe |
+| **the one route out** | `sandbox_exec`, a **host-controlled** tool registered by the installed plugin (`agent_installation/mpm-opencode/src/sandbox-exec.ts`) | nothing — it is the route. It is **always** sandboxed, has no privileged mode, and takes its base, its repository copy and its protected set from the HOST |
+| **the boundary** | `agent_installation/mpm-opencode/scripts/reviewer_bwrap.py` builds a **bubblewrap mount namespace**: the runtime is bound read-only, the reviewer's disposable tree is bound read-write at `/sandbox`, **every other path is not bound at all** and so does not exist inside, `/etc` is **synthetic**, `/tmp` is a private tmpfs, the network is unshared, the environment is cleared before the disposable variables are set, every capability is dropped, and a nested user namespace is refused | the operator's filesystem, the live runtime root, the credentials, the trust store, and the network |
+
+**Why the tool is host-controlled, and why there is no session correlation.** The alternative — rewriting the command in the host's shell hook and identifying the reviewer's command by a session identifier — was **measured and rejected**: the hook's event carries the command, the working directory, the shell, the timeout and the environment, but **no session identifier**, and the environment's `OPENCODE_SESSION_ID` is **agent-influenceable**. A security authority the agent can influence is not an authority. Capability removal removes the question: there is **exactly one execution path**, and it is always sandboxed, so the reviewer never has to be *identified* at execution time — because it has no other way to execute. The **same** reasoning applies to the host-side file tools: `read`, `write`, `edit`, `patch`, `grep`, `glob` and `list` run in the **host's** process, outside any namespace, so they are not confined by the sandbox at all. They are closed, and files are reached **through** the sandbox instead.
+
+**The sandbox's shape, stated as a contract.**
+
+- The **binding list is an allow-list**: a path in it is a path the reviewer can READ. `/etc` is **not** bound; the sandbox carries a **synthetic** `/etc` — a passwd and a group file that name `reviewer`, and a copy of the host's `alternatives` symlinks — so the operator's account database, the trust store at `/etc/ssl` and the private keys under `/etc/ssl/private` are not readable.
+- The reviewer's **writable** tree is bound by **file descriptor**, opened with `O_NOFOLLOW`: a descriptor names the **inode**, so a path that is swapped for a symlink after the check cannot change what is mounted. The base is refused when any component of it is a symlink, and the **protection list comes from the passwd database** — `$HOME` is agent-influenceable, so an environment variable cannot decide what is protected.
+- The **command** reaches the sandbox as a **JSON array on stdin**, so it never reaches the wrapper's option parser; the namespace's own `--` separator stops it reaching bubblewrap's parser either; and a command whose first element begins with `-` is refused outright. Without the separator, a command vector carrying `--bind / /` mounts the **host's root** into the namespace — a complete escape. That was reproduced against the pre-hardening script, and it is closed.
+- The environment is **cleared** and then set: `HOME`, `TMPDIR` and `MPM_WORKSPACE` point inside the sandbox, `GOPROXY=off`, and the Go caches point inside.
+- The **toolchain is discovered on the host** and bound **read-only**, from wherever the host keeps it: the static list is the system's (`/usr`, `/usr/local`), and a host that keeps its toolchain elsewhere — a CI runner's hosted tool cache, for instance — would otherwise give the reviewer no compiler at all. The discovery runs **host-side**, before the namespace exists, on the host's own `PATH`, and the model contributes nothing to it; a discovered root that resolves inside a protected root, or under a path the namespace mounts fresh, is **not** bound.
+- The network is **unshared**, the namespace is **read-only** for the runtime, and `--assert-userns-disabled` makes the sandbox **refuse to start** if a nested user namespace cannot be refused.
+
+**There is no unsandboxed fallback.** If bubblewrap is missing, if the namespace cannot be built, or if the command is refused, the command **does not run** and the model receives the refusal. A sandbox that cannot be established is a refusal, not a degraded mode.
+
+**The install FAILS CLOSED.** The installer parses the canonical template's frontmatter, checks its **policy** — the default deny, the one allowed action, every host-side capability, and every MPM tool the registry publishes — and **refuses** a definition that does not satisfy it. It writes the copy atomically with mode `0600` in a `0700` directory, reads it **back**, compares it byte-for-byte with the template, checks its policy again, and exits **non-zero** if any of that fails. The install flow treats a failed reviewer install as **fatal**: a deployment step that fails open converts an error into a **silent downgrade** of the guarantee.
+
+**MEASURED**, against disposable sentinels and never the real substrate: the sentinel tree, the live runtime root, the operator's home, the trust store and the host's account database are **invisible** from inside; the disposable copy of the repository is **present** and its tree is **writable**; there is **no network**; the option-injection vector is **refused**; and a command does **not** run on the host when the namespace cannot be built. The Go toolchain, Python and Git work inside — the toolchain is bound read-only from wherever the host keeps it — so a review can still run the tests. The contract is pinned by `agent_installation/tests/test_reviewer_bwrap_sandbox.py`, the route closure and the install's fail-closed behaviour by `agent_installation/tests/test_reviewer_isolation.py`, and the reviewer's **actual execution path** by `agent_installation/tests/test_reviewer_sandbox_exec_path.py`.
+
+**What the boundary does NOT cover, stated rather than glossed.** (1) The **operator's own session** is trusted: the boundary protects the operator's data from a less-trusted reviewer, and it does not protect the operator from themselves. (2) The boundary covers the **configured reviewer environment** only — the built-in `explore` and `general` subagents, and any agent the operator spawns, run with the host's ordinary tool surface and are **not** confined. A common sandbox policy for additional delegated agents is a **future** decision, not a property of this one. (3) The **Go module cache** is not bound by default, so a build that needs a dependency the sandbox has not already cached **fails**; an operator who wants it can bind a cache explicitly, and that is a capability grant with a disclosure cost. (4) The **sandbox's base** lives on the host's filesystem, and the operator's own account can read it — the boundary protects the reviewer from the host, not the host from the reviewer.
+
 #### MCP tool surface
 
 The MCP server exposes the full MPM substrate as native function calls. Adding a new tool is a single Go function — no plugin path, no shell wrapper, no parallel documentation.
 
-The **default model-facing surface** is the compact 3-tool set: `mpm_memory`, `mpm_context`, `mpm_help` — **intentionally fixed**, not derived. Hosts receive this on session start; the model sees a small, stable surface covering the core loop: memorise and recall (`mpm_memory`), wake refresh, directives, routing and the activity feed (`mpm_context`), plus handoff through `mpm_context` action `write_handoff` (see the handoff table below), and capability discovery (`mpm_help`). It does **not** cover skills, work items, topics, references or the scratchpad — those need `MPM_EXPOSE_ALL_TOOLS=1` or the `mpm call` fallback. The OpenCode plugin is the exception: it registers 17 typed tools directly, so every one of them is native there. The block below lists the **Registry entries** — the internal substrate; the count is derived dynamically from the live Registry and grows or shrinks as tools are added or removed. The full registered MCP surface includes those Registry entries plus the `mpm_help` discovery closure (registered at server init by `cmd/mpm-mcp`); the on-wire tool count is `len(Registry) + 1` and is **not** pinned in prose. The agent discovers specialist tools on demand via `mpm_help`'s `list`/`show` actions; those same actions are reachable over the CLI fallback (`mpm call mpm_help --payload '{"action":"list"}'`), so a host with no native tool surface can still enumerate the surface instead of consulting a hard-coded tool list. Tools filtered out of the default `tools/list` are NOT directly callable over the compact MCP transport; reach them through `mpm call <tool> --payload '...'` (CLI fallback, every host) or by setting `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block to restore the full registered MCP surface natively.
+The **default model-facing surface** is the compact 3-tool set: `mpm_memory`, `mpm_context`, `mpm_help` — **intentionally fixed**, not derived. Hosts receive this on session start; the model sees a small, stable surface covering the core loop: memorise and recall (`mpm_memory`), wake refresh, directives, routing and the activity feed (`mpm_context`), plus handoff through `mpm_context` action `write_handoff` (see the handoff table below), and capability discovery (`mpm_help`). It does **not** cover skills, work items, topics, references or the scratchpad — those need `MPM_EXPOSE_ALL_TOOLS=1` or the `mpm call` fallback. The OpenCode plugin is the exception: it registers 17 typed tools directly, so every one of them is native there. The block below lists the **Registry entries** — the internal substrate; the count is derived dynamically from the live Registry and grows or shrinks as tools are added or removed. The full registered MCP surface includes those Registry entries plus the `mpm_help` discovery closure and the `mpm_route` router (both registered at server init by `cmd/mpm-mcp`); the on-wire tool count is `len(Registry) + 2` — 23 with the 21 entries above. The agent discovers specialist tools on demand via `mpm_help`'s `list`/`show` actions; those same actions are reachable over the CLI fallback (`mpm call mpm_help --payload '{"action":"list"}'`), so a host with no native tool surface can still enumerate the surface instead of consulting a hard-coded tool list. Tools filtered out of the default `tools/list` are NOT directly callable over the compact MCP transport; reach them through `mpm call <tool> --payload '...'` (CLI fallback, every host) or by setting `MPM_EXPOSE_ALL_TOOLS=1` on the MCP env block to restore the full registered MCP surface natively.
 
 ```
 <!-- tools:begin — auto-generated by `go generate ./internal/tools/`. Do not edit by hand. -->
@@ -1354,7 +1397,7 @@ Because the rule lives in the transport rather than in any one handler, it appli
 
 #### MCP/CLI parity: what is exposed via both surfaces
 
-Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The one tool that is not a Registry entry — the `mpm_help` discovery closure — is reachable through `mpm call mpm_help` as well, and both **discovery** transports serve the same catalogue, so discovery never reports a different schema depending on which discovery transport was used. (That parity is between the two ways of asking for discovery. It is not a claim that a tool's registered schema is the schema its native compact MCP wrapper publishes — see the `mpm_help` actions paragraph below.) The set of names `mpm call` can reach without a Registry entry is defined once (`tools.CallRoutedTools`) and is read both by the CLI dispatcher and by the agent-protocol documentation guard, so a name cannot be documented as reachable and then fail at call time. The full Registry has **21 entries** (the MCP surface is 22 — those 21 plus the `mpm_help` discovery closure registered at server init by `cmd/mpm-mcp`). Of those 21:
+Every `mpm call <tool>` entry has a matching MCP tool spec; both call the same `CoreDB` methods. The one tool that is not a Registry entry — the `mpm_help` discovery closure — is reachable through `mpm call mpm_help` as well, and both **discovery** transports serve the same catalogue, so discovery never reports a different schema depending on which discovery transport was used. (That parity is between the two ways of asking for discovery. It is not a claim that a tool's registered schema is the schema its native compact MCP wrapper publishes — see the `mpm_help` actions paragraph below.) The set of names `mpm call` can reach without a Registry entry is defined once (`tools.CallRoutedTools`) and is read both by the CLI dispatcher and by the agent-protocol documentation guard, so a name cannot be documented as reachable and then fail at call time. The full Registry has **21 entries** (the full MCP surface is 23 — those 21 plus the `mpm_help` discovery closure and the `mpm_route` router, both registered at server init by `cmd/mpm-mcp`; the default compact surface is 3). Of those 21:
 
 - **15 aggregator tools** (`{action, params}` shape): `mpm_memory`, `mpm_theories`, `mpm_decisions`, `mpm_lessons`, `mpm_topics`, `mpm_references`, `mpm_evidence`, `mpm_confidence`, `mpm_context`, `mpm_skills`, `mpm_wakes`, `mpm_handoff`, `mpm_scratchpad`, `mpm_system`, `mpm_work`. These cover the daily cognitive workflow: read/write memory and the memory feedback loop (`mpm_memory` actions `save`/`query`/`show`/`delete`/`restore`/`reinforce`/`weaken`/`snooze`/`set_weight`/`patch`/`promote`/`review`/`synthesize`/`challenge`/`commit_milestone`; permanent shredding is operator-only on the CLI and refused here), lessons, topics, references, theories, decisions, evidence, confidence, route + wake + directives, cross-session handoff (`mpm_handoff` actions `write`/`read`/`list`/`shred`), intra-session scratchpad (`mpm_scratchpad` actions `flush`/`read`/`discard`/`promote`), work tracking (`mpm_work` — same Fat-RPC pattern), and system maintenance + health.
 - **6 standalone tools** (each with its own narrower schema): `mpm_retrieval_diagnose` (per-node BM25 diagnostic with 3-stage trace; CLI form `mpm call explain_retrieval`), `mpm_resolve` (resolves `mpm://memory/<id>` / `mpm://lesson/<id>` / `mpm://theory/<id>` / `mpm://work/<id>` URI pointers with a default 512-byte cap, caller-controllable via `opts.MaxBytes`), `mpm_blob_read` (raw blob fetch by id, 256 KiB server ceiling), `mpm_blob_search` (pointer search across the blobstore), `mpm_log_to_changelog` (self-report agent work tied to a git commit SHA), and `mpm_request_review` (concurrent multi-component review).
@@ -1490,7 +1533,7 @@ There is no explicit `mpm ops init --shared` command. Creation happens implicitl
 3. `attachShared` ensures the directory exists (`os.MkdirAll`, mode 0700), ATTACHes the file via `ATTACH DATABASE '<path>' AS shared` (creating it if absent — SQLite creates the file on first write), and runs the canonical `BaseTables` DDL (`CREATE TABLE IF NOT EXISTS`) plus `SafeMigrations` against the attached schema.
 4. After boot, `mpm ops shared status` confirms: `MPM_SHARED_DB` value, `shared_attached: true|false`, `shared.memories` row count, `is_global=1` count, file size.
 
-The shared DB uses the **same table schema** as the local DB (`memories`, `theories`, `evidence`, `directives`, etc.). Volatile host-only tables (`scheduled_wakes`, local `sessions`, transient `scratchpads`) are deliberately **excluded** from the shared schema — their lifecycle is host-local and would be wrong if cross-shared. Cross-DB queries are plain SQL: `SELECT … FROM shared.memories WHERE …`. No IPC, no separate service.
+The shared DB uses the **same table schema** as the local DB (`memories`, `theories`, `evidence`, `directives`, etc.). Volatile host-only tables (`scheduled_wakes`, local `sessions`, transient `scratchpads`) are deliberately **excluded** from the shared schema — their lifecycle is host-local and would be wrong if cross-shared. The Project-Scoped Continuity tables (`projects`, `project_names`, `continuity_threads`, `continuity_checkpoints`) are excluded for the same reason: a project's identity is durable inside one workspace, and broadcasting it would give the same project id to unrelated work — see [§6.9](#69-project-scoped-continuity-storage-stage-1--storage-only). Cross-DB queries are plain SQL: `SELECT … FROM shared.memories WHERE …`. No IPC, no separate service.
 
 #### How Agents Know to Use It
 
@@ -1820,6 +1863,1031 @@ raw_count        = actionable_pending + deferred_count
 Returning a deferred row to the pool is `mpm compact requeue-deferred` — **CLI only, and deliberately not exposed on the MCP surface**. A deferral is a machine decision; a requeue is a *human overriding a machine decision*, and an agent able to requeue could undo a refusal on its own judgement, putting the loop back just more slowly. The `compact` action's params schema is `additionalProperties: false`, so requeue is not merely undocumented there — it is unreachable.
 
 The operator can always see what they are overriding: `mpm compact deferred` lists the deferred rows with their reason, batch, and a content sample. See [`mpm compact`](#compact--compaction-operator-surface) for the command surface.
+
+### 6.8 Skill Package Storage (P1 — storage only)
+
+MPM skills are single Markdown documents. The multi-file **skill package** format — an entrypoint plus supporting references, scripts and assets, distributed as a ZIP archive — is specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), which is delivered in stages; **this section describes stage P1, which is storage only.**
+
+#### What P1 adds
+
+Three **additive** tables. No existing table, row, index or trigger is modified.
+
+```sql
+-- Content-addressed storage. One row per distinct byte sequence.
+CREATE TABLE IF NOT EXISTS skill_package_blobs (
+    sha256      TEXT PRIMARY KEY,
+    size_bytes  INTEGER NOT NULL,
+    content     BLOB NOT NULL,
+    created_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+);
+
+-- The package manifest. One row per skill version that has a package.
+CREATE TABLE IF NOT EXISTS skill_packages (
+    skill_id          TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    version           TEXT NOT NULL,
+    declared_version  TEXT,
+    version_source    TEXT NOT NULL,
+    format            TEXT NOT NULL DEFAULT 'mpm-skill-package/1',
+    entrypoint        TEXT NOT NULL,
+    entrypoint_sha256 TEXT NOT NULL,
+    manifest          TEXT NOT NULL,
+    package_hash      TEXT NOT NULL,
+    source_sha256     TEXT,
+    is_global         INTEGER NOT NULL DEFAULT 0,
+    created_at        INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    updated_at        INTEGER,
+    FOREIGN KEY (skill_id) REFERENCES memories(id) ON DELETE CASCADE
+);
+
+-- One row per file in a package.
+CREATE TABLE IF NOT EXISTS skill_package_files (
+    skill_id         TEXT NOT NULL,
+    path             TEXT NOT NULL,
+    sha256           TEXT NOT NULL,
+    size_bytes       INTEGER NOT NULL,
+    content_type     TEXT NOT NULL,
+    role             TEXT NOT NULL,
+    executable       INTEGER NOT NULL DEFAULT 0,
+    secret_scanned   INTEGER NOT NULL DEFAULT 0,
+    poison_scanned   INTEGER NOT NULL DEFAULT 0,
+    raw_path         TEXT,
+    PRIMARY KEY (skill_id, path),
+    FOREIGN KEY (skill_id) REFERENCES skill_packages(skill_id) ON DELETE CASCADE,
+    FOREIGN KEY (sha256) REFERENCES skill_package_blobs(sha256) ON DELETE NO ACTION
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_package_files_sha256
+    ON skill_package_files(sha256);
+```
+
+The primary key of `skill_packages` **is** the skill id: there is no second identity space and no mapping table. `skill_package_files` is keyed on `(skill_id, path)`, where `path` is the **canonical** path — NFC-normalised, POSIX-separated, collision-checked — and it is the file's identity; `raw_path` is the name as it appeared in the source archive and is **display-only**. `secret_scanned` and `poison_scanned` record **which scanners actually ran** on a file: a binary asset carries `poison_scanned = 0`, a *disclosed skip* rather than a claim of safety. `ON DELETE NO ACTION` on the blob foreign key means a blob still referenced by a file row cannot be deleted, so a garbage collector must delete file rows first and unreferenced blobs second.
+
+#### What P1 does **not** add
+
+**No reader, writer, importer or exporter exists for these tables.** They are created empty and stay empty. There is no CLI command, no MCP action and no agent-facing surface for packages. A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
+
+> **Stage P4 has since added the writer.** This subsection describes **stage P1**, which is storage only. The **directory importer** — the first functional multi-file import — and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The import is **internal**: no CLI command, no MCP action and no agent-facing import surface exists for it either, and the agent-facing read surface, the full package export and the package CLI/MCP surfaces are still later stages.
+
+The later stages — canonicalisation, the importer, the read API, the export writer, the CLI and MCP surfaces — are described in §10 of the design document and are **not** part of this change. Several operator decisions in that design (the accepted archive layouts, the binary-asset default, cross-workspace sharing) are **open**, and this stage does not decide any of them.
+
+**One of them is no longer open.** The prune exemption's *form* was decided after P1: the operator approved the **blanket** exclusion of `collection = 'skills'` from the age-based `PruneOlderThan` (operator decision **O17**), and P3 implemented it. The age-based prune therefore no longer removes ordinary skills exactly as it did before — it no longer removes **any** skill. The compatibility impact and the reasoning are in [Skills (Procedural Memory)](#skills-procedural-memory); the implementation is `SkillsExclusionClause` in `internal/core/skill_db.go`. P3 also added the package-immutability guard on the legacy write path and the transaction-aware skill writer the importer will use. The importer has since landed (P4 and P5), and the **internal** read API with it (P6 — [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api)); the export writer and the package CLI/MCP surfaces are still later stages.
+
+#### The tables are local-only
+
+The shared database runs "the same table schema as the local DB", but only the tables in `BaseTables` reach it: `attachShared` rewrites every `CREATE TABLE` in that slice to `shared.<name>` and runs it against the attached file. The package tables are declared in their own schema slice, `SkillPackageTables` — a sibling of `ReferenceTables`, **not** a member of `BaseTables` — and are applied by the local schema-initialisation path outside the `attachShared` loops.
+
+**Consequence: no shared database ever receives the package tables, not even empty ones.** A package's bytes live in the local substrate; the `.skill` archive is the portable artefact, not the shared schema. `internal/core/skill_package_schema_test.go` pins this, and pins the negative control that the shared-schema probe can tell a shared table from a local-only one.
+
+#### The restore allow-list
+
+The three tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **accepts** a dump that contains them. Without that registration every backup taken after this change would be rejected by `mpm restore-db` — a loud, immediate failure.
+
+They are deliberately **not** on `RuntimeCanonicalSchema`: they are declared in Go source, and the source-checked half of the allow-list is the correct one.
+
+The registration also has a second, deliberate consequence, described next.
+
+#### The two rollbacks are different operations
+
+| | **binary rollback (lossless, blind)** | **schema rollback (destructive)** |
+|---|---|---|
+| what it is | an old binary runs against a database that has the package tables | `DROP TABLE` on the three package tables |
+| package bytes | **retained but invisible** — still in the file; they reappear when the new binary returns | **irreversibly destroyed**, including third-party files that exist nowhere else |
+| everything else | untouched | untouched |
+| operator-visible signal | none — there is no schema-version gate anywhere in the tree, so the old binary opens the newer database without complaint | the tables are gone |
+| pre-condition | **export the packages first** | **export the packages first** — this is the only copy |
+
+"Lossless" applies to the database, not to the operator's ability to use it. A binary rollback preserves the bytes on disk, but it also creates a restore incompatibility, and the two are not independent.
+
+**"Blind" is the accurate word for the old binary's view.** An old binary has no way to know the three tables exist; it does not warn, it does not refuse, and it does not adapt. Nothing in the substrate would tell an operator that a package was present.
+
+#### After a binary rollback, `mpm restore-db` of a new-binary backup fails closed
+
+`mpm backup` is `sqlite3 .dump` — generic. It does not know which tables exist. So a backup taken by the **new** binary contains the three package tables, and an **old** binary's `mpm restore-db` rejects any dump naming a table that is not on its `CanonicalMPMSchema` allow-list — and the three package tables are not on it.
+
+> **After a binary rollback, restoring a backup taken by the new binary fails closed.** The old binary can produce a backup it cannot restore, and it can refuse a backup it produced itself once the new binary has run.
+
+**The allow-list is not weakened to hide this.** Relaxing `restore-db` to skip unknown tables with a warning would trade a loud, safe refusal for a silent, partial restore — exactly the class of failure the validator exists to prevent.
+
+**The operator procedure is therefore mandatory, not advisory:**
+
+1. **Before any binary rollback**, export every package to a `.skill` archive: `mpm skill export <name> --output <file>.skill` for each package. *(The export writer is a later stage; until it ships, no package can exist and the export step is a no-op — see "What P1 does not add" above.)*
+2. Verify the exports exist and are non-empty.
+3. Only then roll the binary back.
+4. The old binary's `restore-db` will still refuse a new-binary dump. Restore with the **old** binary from a backup taken **before** packages existed, or restore with the new binary.
+
+This is stated rather than designed away: making the old binary able to restore a package-bearing dump is impossible without changing the old binary, which by definition is not being changed. The incompatibility is a property of the rollback, not a defect to be papered over.
+
+### 6.9 Project-Scoped Continuity Storage (Stage 1 — storage only)
+
+MPM's substrate is organised around **artifacts** — memories, lessons, theories, evidence — and each artifact belongs to one session and one workspace. A **project** is a different grain: a durable identity that outlives every thread, every checkpoint and every session inside it. Project-Scoped Continuity adds that grain.
+
+The architecture is specified in the **Continuity architecture document** (PR #224, *"Project-Scoped Continuity"*), which is delivered in stages; **this section describes stage 1, which is storage only.**
+
+#### What stage 1 adds
+
+Four **additive** tables. No existing table, row, index or trigger is modified, and no existing reader, writer, API or scheduler behaviour changes.
+
+| table | what it holds |
+|---|---|
+| `projects` | the permanent stub: an identity that outlives every thread, every checkpoint and every session. `deleted_at IS NULL` means alive. |
+| `project_names` | the resolution domain: every key that resolves to a project, with `name` case-insensitive (`COLLATE NOCASE`). |
+| `continuity_threads` | an independent line of work inside a project; several may be active at once, each with its own `revision` for optimistic concurrency. |
+| `continuity_checkpoints` | the append-only ledger of resume briefs. A checkpoint is never edited; it is superseded by a later one, and the thread's `last_checkpoint_id` names the current one. |
+
+The DDL is authoritative in `internal/core/migration_continuity_project_model.go`, where it is a single literal transcribed byte-for-byte from the architecture document. A test pins its SHA-256, so the shipped schema cannot drift from the approved architecture without failing the build. It is deliberately **not** copied here: a second copy in prose is a second thing to keep in sync, and this document is the product contract, not the schema source.
+
+Four properties are enforced by the database itself, not by convention:
+
+- **No silent duplicate project creation.** At most one *live* holder of a name, case-insensitively; at most one *canonical* live name per project. A withdrawn name is history and does not occupy the name, so a name becomes reusable after its holder is deleted.
+- **Containment is a storage property.** `continuity_checkpoints.project_id` is denormalised from the thread, and a composite foreign key keeps the denormalisation honest: a checkpoint cannot name a project other than its thread's. Every reference is `ON DELETE RESTRICT`, so a hard delete of a project with children is refused and the ledger cannot be destroyed by a cascade.
+- **The resume pointer is sound.** A thread's `last_checkpoint_id` may only name a checkpoint of *that* thread, and a checkpoint's `supersedes` may only name a checkpoint of *its own* thread.
+- **Focus is unique while live.** One live thread per normalised focus slug per project; a superseded or deleted thread releases its focus.
+
+`created_by` / `deleted_by` carry the **writer identity**, not an owner: the workspace is a single-operator trust domain and there is no authorization model in this design.
+
+#### What stage 1 does **not** add
+
+**No reader, writer, project API, deletion operation or audit write exists for these tables.** They are created empty and stay empty. There is no CLI command, no MCP action and no agent-facing surface for projects.
+
+Session-to-project binding, automatic checkpointing and pointer resolution are later stages. The stage-1 schema exists so that the later stages have somewhere to put state, and so that the containment guarantees are established at the storage boundary before any API can rely on them.
+
+#### The tables are local-only
+
+The shared database runs "the same table schema as the local DB", but only the tables in `BaseTables` reach it: `attachShared` rewrites every `CREATE TABLE` in that slice to `shared.<name>` and runs it against the attached file. The Continuity tables are **not** in `BaseTables` — they are created by a migration, in the local schema only.
+
+**Consequence: no shared database ever receives the Continuity tables, not even empty ones.** A project's identity is durable inside *one* workspace; broadcasting it to every workspace that reads the shared store would give the same project id to unrelated work.
+
+#### The restore allow-list
+
+The four tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **accepts** a dump that contains them. Without that registration every backup taken after this change would be rejected by `mpm restore-db` — a loud, immediate failure.
+
+They are deliberately **not** on `RuntimeCanonicalSchema`: they are declared in Go source, and the source-checked half of the allow-list is the correct one.
+
+The registration has a second, deliberate consequence: an **old** binary's allow-list does not name them, so **restoring a backup taken by the new binary with an old binary fails closed** — the old binary refuses the dump. The allow-list is not weakened to hide this. Relaxing `restore-db` to skip unknown tables with a warning would trade a loud, safe refusal for a silent, partial restore — exactly the class of failure the validator exists to prevent.
+
+---
+
+### 6.10 Skill Package Import (P4 — directory import and the export loss marker)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). **Stage P4** adds the **directory importer** — the first functional multi-file import milestone — and the **export loss marker** that keeps the existing skills export honest while full package export does not yet exist.
+
+The format and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5, §6.3, §7, §9, §10 and §13. **This section describes stage P4.**
+
+#### What P4 adds
+
+An **internal** importer — `DatabaseManager.ImportSkillPackageFromDir` — that takes an operator-selected directory containing `SKILL.md`, or a standalone `SKILL.md` as a one-file package, and stores the whole package **atomically**.
+
+It is **internal**: there is no CLI command, no MCP action and no agent-facing import surface. P4 is the storage milestone; the operator-facing command lands in a later stage.
+
+Five properties are load-bearing and are pinned by tests:
+
+**1. The import directory is untrusted input, and the walk is confined to the root's OPENED directory.** The confinement rests on an **identity chain**, and the order of that chain is the guarantee:
+
+> **original resolved identity → scanner preflight → opened descriptor → identity comparison → confined traversal**
+
+The import root is resolved **once**, and its identity — the device and inode the operator's path named at that moment — is **captured at resolution**. The capture happens **before the scanner preflight**: the preflight reads the operator's toxic-phrase configuration, which is the one step of the plan that blocks on something outside the import root, and therefore the window in which the root's path can be re-pointed. The identity then travels with the plan.
+
+The anchor **opens a descriptor** on the resolved path and **compares the opened descriptor's identity with the captured one** (`os.SameFile`). A disagreement means the path now names a different inode, and the import is refused (`changed_during_read`). Every inspection and every read is then issued **relative to that descriptor** (`os.Root`), so the bytes come from the inode the operator selected even if the paths underneath it are re-pointed while the walk runs.
+
+The comparison is against the **captured** identity, never against a fresh lookup of the path. This is the load-bearing distinction: a fresh lookup would be a *second* observation taken after the substitution, so a path re-pointed at a different **real directory** — not merely at a symlink — would produce two observations that agree with each other, and the substitution would be adopted. Any replacement between the capture and the open is therefore refused, whether it is the root itself, an **ancestor** of the root, or a symlink in either position.
+
+A **symlinked directory** is refused outright (`symlinked_directory`); a symlink whose target resolves **outside** the resolved import root is refused (`path_escapes_root`); a regular-file symlink whose target resolves **inside** the root is admitted, and its target's bytes are stored. The opened **file**'s identity and the opened **directory**'s identity are each compared with the inspected one, so a file or a directory swapped between the two is detected (`changed_during_read`). A standalone one-file package is covered equivalently: the identity of the file **and** of its parent directory — the anchor for that shape — are both captured at resolution and both compared with the opened descriptor.
+
+**2. The limits are enforced during the traversal, not after the listing.** The file-count cap is checked before the file is read; the per-file and total byte caps are checked as the bytes are read. The walk **stops at the first violation** and never materialises the whole tree — the directory listing is read in bounded batches.
+
+**3. The scanners fail closed, and the per-file scan status is truthful.** Every file is scanned before anything is stored. A file carrying a secret is refused (`scanner_secret`); a file carrying a toxic phrase is refused (`scanner_poison`). The poison scanner's configuration is an **operator-editable file**, so the importer checks that the file is **readable** before scanning: a scan that could not run must never be reported as a scan that passed, and an unreadable configuration refuses the **whole** import (`scanner_unavailable`). The stored `secret_scanned` / `poison_scanned` columns record **which scanners actually ran**: a binary asset carries `poison_scanned = 0`, a *disclosed skip* rather than a claim of safety.
+
+**4. The write is one transaction, and it is verified after the commit.** A single transaction covers the projected `memories` skill row, the prior versions' `is_latest` changes, the content-addressed blob rows, the package manifest row, the per-file rows and the transactional provenance. Validation and scanning happen **before** the transaction opens, so a rejected package writes nothing at all; a failure inside the transaction rolls the whole import back. Because the P3 transaction writer defers its read-back assertion to the caller's commit, the importer performs a **post-commit verification**: the package row, the file rows, the blob rows and the projected skill row are read back and checked. The blobs are **content-verified**: the stored bytes are re-hashed and must hash to the address the file row records, because the store is content-addressed and the sha256 column *is* the address.
+
+**5. A resurrection replaces the content, so it refreshes the attribution.** Reviving a soft-deleted skill rewrites its `memories.content` **in place**. The row's `artifact_provenance` therefore describes a writer who no longer wrote it, which is the false attribution the substrate's `refreshArtifactProvenance` exists to prevent — and which the legacy force path already avoids. The resurrection refreshes the provenance **inside the caller's transaction** (the tx-scoped `RecordArtifactProvenanceUpsert`, not `refreshArtifactProvenance`, which opens a transaction of its own and would contend with the caller's), so the content change and the attribution change commit together or not at all. A caller that supplies an `ActiveContext` with a provenance identity gets **that** identity; a caller that supplies an **empty** context gets the **ambient** identity, and the previous writer's attribution is **overwritten** rather than retained. A provenance write that fails rolls the resurrection back and is reported as `provenance_failed` — never as a successful resurrection with a stale writer.
+
+**Imported content is never executed.** A script is stored and **flagged** (`executable = 1`); there is no code path from package bytes to process execution.
+
+#### Version handling
+
+The third-party `SKILL.md` bytes are **never rewritten**. What is derived is the `memories` **projection** — the row that discovery reads — and it differs from the original by exactly one inserted frontmatter line, and only when the package declares no version.
+
+| case | effective version | `version_source` | the stored `SKILL.md` bytes | the projection |
+|---|---|---|---|---|
+| the entrypoint declares a version | the declared version | `declared` | unchanged | identical to the original (`projection_sha256 == entrypoint_sha256`) |
+| the entrypoint declares none | `1.0.0-unversioned` | `package_declares_no_version` | unchanged | carries `version: 1.0.0-unversioned` |
+| the entrypoint declares none and the operator overrides | the override | `package_declares_no_version` | unchanged | carries the override |
+
+The effective version is a **pre-release** identifier, and that is load-bearing: a pre-release sorts below the corresponding release, so a later genuine `1.0.0` of the same name wins the `is_latest` flag and both packages coexist.
+
+An effective-version override for a package that **declares** a version is **refused** (`version_override_conflict`), not silently ignored: the declared version *is* the effective one, so ignoring the operator's override would be worse than refusing it.
+
+`entrypoint_sha256` describes the **original** entrypoint bytes; `projection_sha256` describes the **projected** bytes. Both are recorded, and neither is allowed to describe the other.
+
+#### Idempotence, immutability and duplication
+
+The package's identity is the skill's own id — `skill:<name>-v<version>` — so there is no second identity space.
+
+| situation | outcome |
+|---|---|
+| the same `(name, version)` with the **same** package hash | `already_installed` — nothing is written |
+| the same `(name, version)` with a **different** package hash | `version_conflict` — **there is no force escape**; a published package is immutable |
+| the same package re-imported after a soft shred | `resurrected` — an explicit revival, not the legacy force path, so the `package_immutable` refusal does not apply to it |
+| a **soft-deleted ordinary** skill occupying the id | `resurrected` — the import revives it with the package's projection. Nothing live is overwritten: the row was already deleted, and this is the substrate's existing resurrection semantics. A **live** ordinary skill occupying the id is **refused** instead |
+| a **different** version of the same name | a new package; the prior version stays, and `is_latest` moves inside the same transaction |
+| a file whose SHA-256 already exists in the blob table | stored **once** and shared — deduplication, not a duplicate-package signal |
+| a **different** skill identity sharing content | the advisory `possible_duplicate_content` — **advisory only, never a block** |
+
+A live skill that owns **no** package and already occupies the id is **refused** (`skill_id_conflict`): the importer does not overwrite an ordinary skill in place. That is the legacy force path's behaviour, and it is exactly the mutation the package immutability refusal exists to prevent.
+
+#### The export loss marker (R11)
+
+**P4 is the first stage in which a stored skill can carry files the existing skills export does not include.** Before the full package export writer exists (stage P7), `mpm export --collection skills` carries the **projected skill row only** — a package's reference files, scripts and assets are not in the export.
+
+Those bytes exist nowhere else: the `.skill` archive is the transport, and the export writer is P7. So between P4 and P7 the skills export **is** a loss path, and the contract is that the loss is **never silent**:
+
+- the export **response** carries a structured loss marker, naming every package that was not included, with the count;
+- the CLI prints a **notice** on standard error naming the same packages.
+
+The JSON document's shape is now an **object**, not a bare array:
+
+```json
+{
+  "memories": [ ... ],
+  "packages_omitted": {
+    "count": 1,
+    "packages": [
+      {
+        "skill_id": "skill:system-prompt-writer-v1.0.0",
+        "name": "system-prompt-writer",
+        "version": "1.0.0",
+        "file_count": 3,
+        "package_hash": "…"
+      }
+    ],
+    "scope": { "total": 12, "selected": 9, "carried": 8 }
+  }
+}
+```
+
+`packages_omitted` is **always present**. It keeps the response's type stable, so a consumer never has to branch on whether the field exists. The marker's scope mirrors the export's own filters exactly, so it names precisely the packages that were **in the export's scope and whose content was not carried** — which is not quite the same set as "the packages whose skill rows were exported": a package can be in scope and still have no exported skill row, and the export names it too, with the reason `skill_row_not_exported`. The reason field says which.
+
+**The marker's meaning changed with P7, and this section states the current one.** The count is the number of packages that were **selected and not carried** — the packages whose content this export could not carry. It is **not** the number of packages the export carried, and it is **not** the number of packages in the store. A count of zero is a positive statement only against a **known denominator**, which is why the marker carries a `scope` (`total`, `selected`, `carried`): "zero omitted out of twelve selected" is a complete export, while "zero omitted out of zero selected" says nothing about the packages that were never selected. The P7 section (§6.13) states the same rule from the export side.
+
+The CSV format is unchanged; the marker is a notice on standard error.
+
+##### The compatibility policy for the JSON shape
+
+The shape change is a **breaking change to a CLI output contract**, so it is given an explicit policy rather than being left implicit.
+
+**The structured object is the default.** It is the only shape that can carry the marker, and R11 requires the marker to be *in the response*.
+
+**`--format json-array` is the deprecated legacy shape** — a bare JSON array, the shape the export had before the marker existed. It is kept for **one release**, for consumers that cannot yet read the object.
+
+**The legacy shape is REFUSED whenever the export is PACKAGE-BEARING.** A bare array has nowhere to put the loss marker, so emitting one while content is being dropped would drop those bytes **silently** — the exact failure R11 exists to prevent, and the legacy shape would reintroduce it for precisely the consumers that have not migrated. So the legacy format is available only when there is **nothing to lose**: an export of any collection other than `skills`, or a skills export in which **no package is in scope**. The refusal is on the export being package-bearing, not on whether a package would actually be omitted: a package in scope is a package whose `.skill` archive and index entry the bare array cannot carry, whether or not the export managed to produce them. (This supersedes the P4-era condition, which refused only when content was actually dropped — that condition was correct when the export carried no archives at all, and is too weak now that the archives exist. §6.13 states the rule from the export side.) The deprecation is announced on standard error, so the document on standard output stays parseable.
+
+**The `memories` key's coupling with `mpm migrate --from` is pinned by a test.** `mpm migrate --from <export.json>` reads a `memories` array, so the export's top-level key name is a real coupling between the export writer and the migrate parser — it was incidental, and a regression test now feeds the document the export actually emits to the substrate's own JSON parser and asserts the rows come back. An export file therefore remains a valid input for `mpm migrate --from` — **when it carries no package**. A document that carries package archives is refused, and so is a document that **dropped** a package (§6.13): the migration reads the projected rows only, and importing either would silently lose the packages' content.
+
+**The marker's stream is a recorded deviation.** The design (§6.3, T44) says the marker appears *"in the response and on standard output"*. The implementation puts the CLI notice on **standard error** (`usererror.Notice`), which is the repository convention and keeps stdout parseable — a notice on stdout would corrupt a stdout-mode JSON document. The marker is still **in the response** (the response carries it structurally), so R11's substantive requirement is met. This is a deviation from the design's literal wording and is recorded here for the design owner's confirmation.
+
+> **PROPOSAL, not an approved design change.** The compatibility policy above — the deprecated `json-array` format, the refusal when content would be omitted, and the one-release window — is a **proposal** put forward in response to the independent review of this PR. It requires **operator acceptance** before it becomes the design's contract. The structured object as the default satisfies R11 either way; what the proposal adds is the migration path for consumers of the old shape.
+
+> **A pre-existing limitation, recorded and not changed here.** `mpm export --since` / `--until` compare the INTEGER `created_at` column against a TEXT date literal, and SQLite never compares an INTEGER against a TEXT value in the way the comparison intends — so **any** `--since` value matches no rows (the export is empty) and **any** `--until` value matches **every** row (the filter does nothing). This is a **pre-existing** defect in `GetMemoriesForExport` (identical at the commit before this stage), it is **not** introduced by P4 or by P7, and it is **not** fixed here: the fix changes shared read-path semantics that other consumers depend on, and it belongs in its own change with its own tests. Both the loss marker (P4) and the package scope (P7) mirror the export's filters **exactly** — the same comparison, against the same column — so the two surfaces cannot disagree about which packages this export covers, and no package is dropped relative to the selected rows. The consequence is that a date-filtered export is empty, with a notice on standard error.
+
+#### Provisional operator decisions — not approvals
+
+Three operator decisions in PR #222 remain **open**. P4 implements the design's **recommended** behaviour as a **provisional default**, and this section records it so it can be accepted or adjusted **before merge**. These are recommendations, **not** evidence of operator approval:
+
+| decision | open question | P4's provisional default |
+|---|---|---|
+| **O3** | binary assets | **rejected by default**; an explicit opt-in stores them, and an executable binary (ELF, PE, Mach-O — detected whatever the extension claims) is refused unless the opt-in is given. Even with the opt-in the bytes are only **stored**, never executed |
+| **O6** | file-count and byte limits | **512 files**, **32 MiB** total, **4 MiB** per file, **256 KiB** for the entrypoint. The limits are configurable per import; the zero value means the recommended default |
+| **O10** | a missing `when_to_use` | a **warning**, not a block |
+
+Two further decisions are **not** P4's to make: **O9** concerns the P5 archive layouts and does not complicate P4, and **O17** is already approved — the blanket skills prune exemption is preserved unchanged.
+
+The content-type allow-list is **explicit and closed**: `.md .txt .json .yaml .yml .sh .py .js .rb .pl .png .jpg .jpeg .svg .pdf .woff2`. An extension that is not on it is **refused** (`content_type_not_allowed`), not guessed at: an unknown extension is an unknown content type, and an unknown content type has no defined scanner coverage, so storing it would mean storing a file whose scan coverage nobody specified.
+
+#### What P4 does **not** add
+
+**No ZIP import.** That is P5, and it has its own root-derivation rules.
+
+**No full package export.** The export carries the projected skill row only, and says so (§6.10, the loss marker above). The package export writer is P7.
+
+**No agent-facing import surface.** No MCP action, no agent-facing CLI. The importer is internal; the operator-facing command is a later stage.
+
+**No new identity scheme.** The package's identity is the skill's own id. The existing skill IDs, frontmatter contract and semver ordering are reused unchanged.
+
+**No change to ordinary skills.** A skill saved the ordinary way is still a single `memories` row in `collection='skills'` and behaves exactly as before.
+
+### 6.11 Skill Package Archive Import (P5 — the `.skill` ZIP adapter)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** is specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). **Stage P5** adds the **archive importer** — the `.skill` ZIP adapter — and it is the second half of the same pipeline.
+
+The format and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5.3, §5.3.1, §5.4, §4.4 Rule 2, §7, §7.1, §10, §12.2 and §13. **This section describes stage P5.**
+
+#### What P5 adds
+
+An **internal** importer — `DatabaseManager.ImportSkillPackageFromArchive` — that takes an operator-selected `.skill` ZIP archive and stores the whole package **atomically**, through the **same** plan, the **same** transaction and the **same** post-commit verification the directory path uses.
+
+It is **internal**, exactly as the P4 importer is: there is no CLI command, no MCP action and no agent-facing import surface. The operator-facing command lands in a later stage (P8).
+
+The P5 property that everything else serves is **equivalence**: the same logical package produces the **same** canonical identity, the **same** file rows, the **same** per-file hashes, the **same** `package_hash` and the **same** stored content, whether it arrived as a directory or as a ZIP. The two layouts of the archive — flat and wrapped — produce **byte-identical** packages except for the display-only `raw_path`.
+
+#### The ingestion architecture — one boundary, not two importers
+
+P5 is an **adapter**, not a second importer. The pipeline is:
+
+```
+ZIP archive
+    ↓  readPackageArchive          ← the ADAPTER: this is all P5 adds
+       · open + identity check
+       · EOCD pre-scan (entry count)
+       · per-entry: type / encryption / count / path / size
+       · read the bytes (bounded)
+    ↓  packageImportSource          ← the SHARED validated representation
+    ↓  planPackageImportFiles       ← P4's planner, unchanged
+       · entrypoint cap · version derivation · semver · name
+       · secret + poison scans · binary/executable rules
+       · manifest · per-file hashes · package hash · identity
+    ↓  commitPackageImport          ← P4's transaction, unchanged
+    ↓  verifyPackageImport          ← P4's post-commit verification, unchanged
+```
+
+The boundary is drawn **after** the bytes are in memory, because that is where the two paths genuinely converge: once the bytes exist, the rules that decide whether a package may be stored are the **same** rules, and they are the rules the directory path has always applied. Every rule the mission lists as "reuse P4" — the frontmatter contract, the canonical path validation, the secret and poison scans, the binary and executable handling, the hashing and the manifest, the identity and semver, the idempotence and version-conflict rules, the transactional projection and provenance, the blob dedup and the post-commit verification — is applied **once**, in one place.
+
+P4's planner was **split** to make that boundary explicit and testable. `planPackageImport` (the directory path) resolves the root, runs the scanner preflight, walks the tree and selects the entrypoint; it then hands a `packageImportSource` to `planPackageImportFiles`, which is the **whole** of the remaining logic. No rule was duplicated, and no protection was weakened.
+
+**No package byte ever reaches the filesystem.** The archive is read **directly into the shared representation**; there is no temporary extraction tree, so there is nothing to clean up and no window in which an extracted file exists outside the database. This is **Rule 2** (§4.4) honoured literally, and it is what makes the next section's asymmetry safe.
+
+#### The accepted layouts (O9) and the root derivation
+
+**Exactly two** archive layouts are accepted, per the operator's decision **O9**:
+
+| layout | shape | the package root |
+|---|---|---|
+| **flat** | `SKILL.md` at the archive's top level | the archive root |
+| **wrapped** | one enclosing directory holding the whole package | that directory |
+
+The root is derived from the **entrypoint's parent directory** (§5.3.1) — never from a count of directories. The derivation is **order-independent** and **hash-neutral**: a flat archive and a wrapped archive carrying the same package produce the **same** `package_hash`, and only the display-only `raw_path` differs.
+
+The derivation is **not** a directory count, and that is load-bearing: a flat package may carry `references/`, `scripts/`, `assets/` and any number of other directories beside its entrypoint — those are **content directories of that package**, not competing roots. What is refused is a genuinely **competing package root**: more than one `SKILL.md` (`ambiguous_package_root`).
+
+The rules are applied in the design's order:
+
+1. **directory entries are skipped** — an entry whose name ends in `/` or whose attributes carry the MS-DOS directory bit is not a file, is not stored and does not participate in the derivation;
+2. **the remaining entries are canonicalised** — and a duplicate, a unicode collision or a case collision is refused here, **before** the entrypoint's uniqueness is considered;
+3. **the entrypoint is the file entry whose base name is exactly `SKILL.md`** — more than one is `ambiguous_package_root`; none is `entrypoint_not_found`;
+4. **the package root is the entrypoint's parent directory**;
+5. **every file entry must lie under the root** (`path_outside_root`) — otherwise an entry beside the wrapper belongs to a different tree, and nothing is dropped silently;
+6. **the root segment is stripped by whole segment**, and the root itself is never stored — so `pkg-extra/x.md` is *outside* a root of `pkg`, not a sibling of `pkg`;
+7. **the derivation is order-independent** — it uses the complete entry set, and the files are sorted by canonical path, so two archives carrying the same entries in a different order produce identical rows, manifests and hashes.
+
+#### The security model — Rule 2 is the boundary, not the entry-type check
+
+An archive entry's **type** is determined by an attacker-chosen header byte — the central directory's creator byte — so the type check is available only for a Unix-attribute archive:
+
+| creator byte | a symlink / FIFO / device entry |
+|---|---|
+| **Unix** (3), **macOS** (19) | **refused** (`unsupported_entry_type`) |
+| **FAT** (0), **NTFS** (11), **VFAT** (14) | **degrades to a regular file**, and the import **succeeds** |
+
+That asymmetry is deliberate and safe **because of Rule 2** (§4.4): an import writes the bytes into a database column and never materialises them as a file. There is no filesystem object for a symlink to escape into, and no code path connects package content to execution. The entry-type check is **defence in depth**; Rule 2 is the boundary.
+
+The **directory** entry is the exception, and it is detected under **both** creator bytes: a name ending in `/` identifies it on its own, and the MS-DOS directory attribute is a second, independent signal.
+
+The rest of the hostile-archive handling:
+
+| threat | refusal |
+|---|---|
+| a `..` segment (ZIP-slip) | `path_traversal` |
+| a leading `/` | `absolute_path` |
+| a drive-letter prefix (`C:`) | `drive_letter_prefix` |
+| a UNC prefix | `unc_path` |
+| a backslash separator | `backslash_separator` |
+| a NUL byte or a control character | `nul_byte` / `control_character` |
+| a `.` segment, an empty segment, a trailing slash | `dot_segment` / `empty_path_segment` / `trailing_slash` |
+| two entries with the same canonical path | `duplicate_path` |
+| two paths differing only by ASCII case | `path_case_collision` |
+| two paths differing only by Unicode normalisation form | `path_unicode_collision` |
+| an encrypted entry | `archive_encrypted` |
+| a malformed structure, a truncated entry, a CRC failure | `archive_invalid` / `checksum_mismatch` |
+
+The **path** codes are the canonical-path rules' **own** strings — the P2 path reasons, carried verbatim — so a caller branches on one vocabulary rather than on a second encoding of the same rule.
+
+**The limits are enforced while reading**, never after a complete listing is collected. The **declared** size is checked against the per-file cap **before** the entry is decompressed, so a decompression bomb is refused without ever being materialised, and the cap is **also** enforced while the bytes are read, because a header can lie. The total-byte cap is checked as the bytes are read.
+
+The **central directory is bounded before it is parsed.** `archive/zip` builds one header per central-directory record when the reader is created, and it validates the **declared** count only *afterwards*, so the declared count alone does not bound that allocation: an archive that declares two entries and carries 20 000 real records has all 20 000 parsed — and a header allocated for each — before the mismatch is noticed.
+
+Three bounds are applied, and together they hold:
+
+1. the **declared** count — the cheap check, which refuses an archive that plainly declares too many entries;
+2. the **parse window's** byte extent — the bytes `archive/zip` may read as central-directory records, which bounds both the count walk below and the allocation that follows it (the allocation is proportional to the window's size — measured at between **4.8×** and **5.7×** — so this cap *is* the allocation bound);
+3. the **record count**, obtained by walking the directory's records **before** the reader is built — an upper bound on the reader's count, and equal to it for every archive whose declared offsets are consistent.
+
+The count must be the **real** record count, and that is a substantive point rather than a detail. A byte-derived *estimate* of it is far too pessimistic to refuse on: a record is at least 46 bytes, but its **name** is not, so the estimate counts a legitimate package's long paths as extra records. Measured, the legitimate worst case — 512 files and 511 directories, every name at the 511-byte archive-path maximum — has **1 023** real records but a byte-derived estimate of **12 387**, and an estimate-based cap that clears the real count would refuse the estimate. (The regression test uses a flatter fixture of the same shape — 246-byte directory paths and 251-byte file paths — whose real count is also 1 023 and whose estimate is 6 555; both exceed the 4 096 cap.) So the records are **counted**, not estimated, before the reader is built: the refusal then costs nothing, a lying header cannot defeat it, and no legitimate package is refused.
+
+**The invariant the bound rests on is this: the count is never lower than the number of records `archive/zip` will parse, and it is equal to it for every well-formed archive** — every ordinary archive, and every self-extracting one. Two things together give it.
+
+**First, the walk never under-counts.** It uses the same signature test and the same 46-bytes-plus-lengths advance as the reader, and it counts every record whose signature is right. `archive/zip` counts a *subset* of those, on **every** Go version: it additionally refuses a record whose name, extra field or comment runs past the end of the file, and — depending on the version — one whose ZIP64 extra field is malformed or whose size is saturated. So the walk stops no earlier than the reader does and counts no fewer records. The walk reads only what it needs — one 46-byte header at a time — so a start offset that is not a central directory costs 46 bytes and not the whole window.
+
+**The walk is version-independent too**, and deliberately so: it applies the *structural* rule and nothing more, so it is a superset of every Go version's records rather than a copy of any one of them.
+
+**Second, the count is taken over BOTH of the reader's candidate parse starts, and the larger is kept.** The reader's start is one of two: the **normal** start (the central directory's first byte) or the **fallback** start (the declared offset, which the reader uses only for an archive whose declared offsets are inconsistent). Taking the maximum over both makes the count an upper bound on the reader's own, whatever the fallback decision turns out to be — the reader's start is one of the two, and the walk never under-counts from either.
+
+The price of that upper bound is that an archive whose declared offsets are **inconsistent** may be counted **higher** than the reader would count it — the reader takes the fallback and reads one record, while the normal start reaches the whole central directory. Such an archive is then **refused** with `file_count_limit`. It is a malformed archive, it fails closed, and the refusal is a clear reason rather than a silent miscount.
+
+The fallback is **decided** by the same question `archive/zip` asks: is there a central-directory header at the declared offset? The importer answers it with the **structural** rule — the 46-byte fixed header is readable, the signature is the central-directory one, and the name, extra field and comment the header declares are readable — and **nothing more**.
+
+**That is deliberate, and it is the whole point of the rule.** `archive/zip` applies further refinements on top of the structural rule, and they are **not stable across Go versions**:
+
+- **Go 1.26.6** refuses a header whose compressed size or local-header offset is **saturated** and which carries no ZIP64 extra field — `if needCSize || needHeaderOffset { return ErrFormat }`;
+- **Go 1.27.3** has no such check, but it refuses a header whose **second** ZIP64 extra field is shorter than the eight bytes it would need, because it does not clear the saturation when it resolves the first one.
+
+So the two versions differ in **both** directions, no fixed rule mirrors both, and a mirror pinned to one version's internals would make the importer's behaviour depend on the toolchain it was built with. That is not hypothetical: it is exactly what this stage's CI caught, when the mirror — written against Go 1.27.3 — disagreed with the Go 1.26.6 reader the build actually used.
+
+**What the bound needs is one direction only: the mirror must never be STRICTER than the reader.** It may be more permissive, and it is:
+
+- the mirror says "valid" and the reader says "no" — the reader keeps the normal start, the importer takes the fallback, and the importer's window is therefore **larger** than the reader's. That is the safe direction.
+- the mirror says "invalid" and the reader says "valid" — the reader takes the fallback, the importer keeps the normal start, and the importer's window would be **smaller** than the reader's. That is the unsafe direction, and the structural rule cannot produce it: every Go version refuses a header that is not structurally valid.
+
+So the rule is version-independent by construction, and future-proof in the safe direction — a Go version that refuses more headers than this rule does only makes the importer more conservative.
+
+The price of the permissive direction is stated here, because it is real. The rule is consulted only for an archive whose declared offsets are **inconsistent** — which for a legitimate archive means a **prefixed (self-extracting)** one. Such an archive's declared offset points into its prefix, and the prefix is arbitrary bytes: the rule accepts it only if the prefix happens to carry a central-directory signature at exactly that offset, with readable lengths. When it does, the importer takes the fallback and the parse window grows to cover the prefix. The archive is then **refused** if the grown window exceeds the parse-window cap — with `file_count_limit`, so it fails closed with a clear reason. A prefix small enough to stay under the cap is not refused on this ground; it is bounded like any other archive. That is a deliberate trade: a possible false refusal of a malformed archive, in exchange for a bound that does not depend on which Go version the binary was built with.
+
+The structural rule is also what the **signature-only** test got wrong, in both directions. A **prefixed (self-extracting)** archive's declared offset points into its prefix, so a signature-only test would treat the whole prefix as parseable central directory. And a **crafted** header — the right signature, but lengths that run past the end of the file — is not a header the reader can parse, so a signature-only test would move the parse start onto it.
+
+A regression test compares the two counts **directly**, over a range of archive shapes — the ordinary ones and the awkward ones (directory entries, maximum-length names, many entries, and archives whose declared offsets are inconsistent and point at a crafted header, with and without a malformed ZIP64 extra field) — and requires them to be equal.
+
+A **differential fuzz** checks the invariant across the mutation classes that have historically diverged: the declared offset, the declared size, a crafted header with absurd lengths, a crafted header carrying a malformed ZIP64 extra field, and a lying declared count. It compares the importer's count against the reader's for every mutation the reader accepts, and requires the importer's count never to be lower. Because it measures the importer against `archive/zip` rather than against a hand-written expectation, it cannot disagree with the reader by construction.
+
+A second regression pins the **mirror's rule** itself: over 200 000 randomised headers, the mirror's verdict must equal the structural rule, computed independently in the test — the fixed header readable, the signature right, the declared lengths within the file. The test also asserts that the mirror is **more permissive** than the refinements `archive/zip` applies: it accepts a saturated compressed size, a saturated local-header offset, every value saturated, and a short ZIP64 extra field. Those are exactly the refinements that differ between Go versions, so accepting all of them is what makes the rule version-independent. A mirror pinned to one version's internals would fail this test on the other.
+
+A third regression checks the property the bound actually needs, against the **real** `archive/zip`: **the mirror never refuses a header the reader parses**. The oracle is the reader itself — the archive is built so that the reader's two possible parse starts give different results (the declared offset points at the candidate header, and the declared size makes the normal start land in the local-header region, where there is no record at all), so the reader's own count check decides whether it parsed the header. The mirror may refuse **less** than the reader; it must never refuse more.
+
+> A note on how that oracle was arrived at, because the first version of it was wrong in a way that would have hidden a defect: a **transcription** of `archive/zip`'s `readDirectoryHeader` cannot be the oracle, because a transcription can encode the same wrong model as the code it checks — and that is exactly what happened twice. The earlier transcription read the local-header offset from the **first** eight bytes of the ZIP64 field, where the reader reads it from whichever eight bytes the cursor stands on; and it modelled the ZIP64 field as consumed at fixed offsets, where the reader consumes it **sequentially**. Both times the differential test agreed with itself and with nothing else. The oracle has to be the reader.
+
+A fourth regression pins the **backstop** on its own: an archive whose declared offset points at a **valid** record spliced into the local-header region, so the reader's two candidate starts **disagree** — the reader takes the fallback and reads one record, while the normal start reaches the whole central directory. The importer's count must be the **larger** of the two.
+
+A fifth regression builds the dangerous shape end to end: an archive whose declared count **lies**, whose declared offset points at a crafted ZIP64-extra header, and which carries 20 001 real records. The reader parses all 20 001 of them; the importer must refuse it **before** the reader is built, and the test asserts the allocation that proves it.
+
+A ZIP64 locator is checked the way `archive/zip` checks it: it must name **disk zero** and a **single-disk** archive, and its offset is resolved **absolutely** — so a prefixed ZIP64 archive is refused rather than mis-parsed, the same behaviour `archive/zip` itself has, and it fails closed. An archive that declares ZIP64 fields but carries no usable locator is refused outright, before the reader is built.
+
+#### The limits and their justification
+
+The package's **content** limits are P4's, unchanged: **512 files**, **32 MiB** total, **4 MiB** per file, **256 KiB** for the entrypoint (O6). The archive path inherits them exactly, which is what makes the directory/ZIP equivalence hold.
+
+P5 adds exactly **three** archive-level limits, and each is stated with its reason:
+
+| limit | value | justification |
+|---|---|---|
+| `MaxArchiveBytes` | **64 MiB** | The on-disk size bounds the **central directory**, which `archive/zip` parses eagerly into one header per entry, and bounds the compressed payload a single entry may carry. A legitimate archive holds at most 32 MiB of content; DEFLATE never expands and STORED entries are the same size as their content, so 64 MiB — twice the content cap — accommodates every legitimate archive with room for the central directory and the local headers, while refusing an archive whose size is driven by something other than package content. |
+| `MaxArchiveEntries` | **4096** | The entry count is what bounds `archive/zip`'s per-record header allocation, so this is the **policy** bound on how many records an archive may carry. The count it is compared against is the **real** record count — the records are counted by walking the directory before the reader is built, over both of the reader's candidate starts, and the count is never lower than the reader's — so the cap compares against a real number and cannot refuse a legitimate package. A legitimate package carries at most 512 files (P4's cap) and at most one directory entry per directory it contains, so at most about **1 023** entries; 4096 leaves four times that headroom. |
+| `MaxParseWindowBytes` | **4 MiB** | The allocation `archive/zip` makes on the central directory is proportional to the **parse window**'s size — measured at between **4.8×** and **5.7×** the bytes, for the per-record header (`sizeof(zip.File)` = 168 bytes) and its index — so this cap is the **allocation** bound, stated in the unit the allocation is actually made in. For a well-formed archive the window is the central directory plus the End-of-Central-Directory record and its comment. The legitimate worst case — 512 files and 511 directories, every name at the 511-byte archive-path maximum — has a **569 811-byte** central directory; 4 MiB leaves seven times that headroom. |
+
+All three are **read before the allocation they bound** — the file size before the archive is opened for parsing, and the parse window's byte extent and the record count before the central directory is parsed.
+
+**The archive's *content* limits are P4's, inherited exactly**: 512 files, 32 MiB total, 4 MiB per file and 256 KiB for the entrypoint. The three limits above are **additional** archive-level limits, and they bound the *archive*, not the package's content — a package's own content is bounded by P4's limits, unchanged.
+
+#### The reason codes P5 adds
+
+The refusal vocabulary is **closed**. P5's additions are **additive** — every code the directory path already had keeps its meaning:
+
+| code | meaning |
+|---|---|
+| `archive_invalid` | the archive's structure is unusable: not a ZIP, a truncated or malformed central directory, an entry whose declared size does not match its payload, or an entry cut short mid-stream |
+| `checksum_mismatch` | an entry's bytes did not match the CRC-32 the archive declares |
+| `path_outside_root` | a file entry does not lie under the derived package root (§5.3.1 rule 5) |
+| `unsupported_archive_layout` | the package root is neither the archive root nor a **single** enclosing directory |
+| `archive_encrypted` | an entry is encrypted, so its bytes cannot be validated by the scanners that guard every stored byte |
+
+The path rules are reported with the **P2 path reasons verbatim** — `path_traversal`, `absolute_path`, `drive_letter_prefix`, `duplicate_path`, `path_case_collision`, `path_unicode_collision`, `nul_byte`, `control_character`, `backslash_separator`, `unc_path`, `dot_segment`, `empty_path_segment`, `trailing_slash`, `empty_path`, `path_too_long`, `path_too_deep` — and the mapping between the two vocabularies is **total**.
+
+Every refusal on the archive path is **fail closed** in the same sense the directory path's refusals are: validation and scanning happen **before** the transaction opens, so a rejected archive writes **nothing** — no package row, no file row, no blob row, no projection, no provenance row.
+
+#### The deviation — a nested wrapper is refused
+
+§5.3.1's derivation would accept a package root **deeper than one segment** and treat the entrypoint's whole parent path as the root. **O9 accepts exactly two shapes** — the flat layout and the single-wrapper layout — so a root two segments deep is a **third** shape, and it is **refused** (`unsupported_archive_layout`) rather than silently reinterpreted.
+
+This is the one place where the implementation is **narrower** than the design's derivation. The narrower rule is the operator's O9 instruction, and it is recorded here for the design owner's confirmation.
+
+#### What P5 does **not** add
+
+**No read APIs.** The package's read surface is P6.
+
+**No export writer.** The `.skill` archive is the *transport*; the writer that produces one is P7.
+
+**No CLI or MCP surface.** The importer is internal, exactly as P4's is. The operator-facing command is P8.
+
+**No promotion or garbage collection.** P9.
+
+**No second package database.** The storage is the one specified in §6.8, and the archive path writes to it through the same transaction as the directory path.
+
+**No change to P4's rules.** Every protection the directory path applies — the confinement and the identity chain, the scanner preflight, the limits, the secret and poison scans, the binary and executable rules, the version derivation, the idempotence and version-conflict rules, the transactional projection and provenance, the blob dedup and the post-commit verification — is applied to an archive import **unchanged**. The archive path adds a way to **obtain** the bytes; it does not add a way to **decide** whether they may be stored.
+
+---
+
+### 6.12 Skill Package Retrieval (P6 — the read-only retrieval and verification API)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** is specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The **archive importer** is specified in [§6.11](#611-skill-package-archive-import-p5--the-skill-zip-adapter). **Stage P6** adds the **reader** — the read-only retrieval and integrity-verification API over the packages those two stages stored.
+
+The format, the retrieval contract and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5.4, §5.5, §8.1–§8.7, §10, §13. **This section describes stage P6.**
+
+#### What P6 adds
+
+Three **internal**, read-only operations, plus one accessor that the existing skill `read` action uses to attach the package provenance:
+
+| operation | what it returns |
+|---|---|
+| `DatabaseManager.PackageFiles` | the package's file **metadata** — never content (§8.5 `files`) |
+| `DatabaseManager.PackageReadFile` | **one** file's original bytes, optionally bounded (§8.5 `read_file`, §8.6) |
+| `DatabaseManager.PackageVerify` | the package's **integrity report** (§8.5 `verify`) |
+| `DatabaseManager.SkillPackageProvenance` | the §8.2.1 provenance object, or nothing at all for an ordinary skill |
+
+They are **internal**, exactly as P4's and P5's importers are: there is no CLI command, no MCP action and no agent-facing import or export surface. The agent-facing read surface lands in **P8**.
+
+#### The reader is a reader, not a writer
+
+The reader **never** creates, repairs, reimports, rescans or replaces anything. It never materialises a package on the filesystem, it never executes a stored script, and it never treats retrieved content as instructions — the bytes are **data**, whatever they say.
+
+It is also deliberately **separate** from the import and archive paths: the importer owns the bytes, the reader only reads the rows the importer wrote. Every rule the reader needs is **reused**, not duplicated: the identity rules are P1's `SkillIDForNameAndVersion`, the path validation is P2's `CanonicalPackagePath`, the manifest hashing is P2's `VerifyPackageHash`, the role and content-type classes are P2's, and the manifest and file types are P2's own.
+
+#### Every read re-hashes what it returns
+
+The stored SHA-256 is **not** taken on trust. The reader re-hashes the blob on the way out, so a blob row whose content was mutated in place is **refused** with `content_hash_mismatch` rather than returned (§8.6, T34). The same code covers a size disagreement, because a size that does not describe the bytes is the same defect seen from another side.
+
+There is exactly one exception, and it is a deliberate one: `SkillPackageProvenance` reports the **recorded** hashes and leaves the re-hashing to `verify`. The `read` action must stay a cheap retrieval, and `verify` is the operation that *proves* the package.
+
+**The re-hash proves the bytes are the ones the ROW names; the manifest is what commits the package to its file list.** A blob is content-addressed, so re-hashing it proves nothing about the *file list*: a row repointed at another blob — with its size repointed too, so the row and the blob agree with each other — would otherwise be served, self-consistently, while the manifest says something else. So the row is reconciled against the manifest **before** the bytes are served, and refuses with `integrity_failure` when the two disagree.
+
+**The two paths cannot differ, because there is one load path and one comparison.** Both `files` and `read_file` load the package through `loadPackageContext`, and both apply the **same** reconciliation — the listing's own `reconcilePackageFiles`, over the **whole** file set, not over the one path being asked for.
+
+`loadPackageContext` refuses a stored manifest that `PackageManifest.Validate()` would refuse, and the rules it decides are the manifest module's **own**: the format; the name and the version (valid semver); the version provenance (the override record — its effective version is the version, its reason is a known one, it is valid semver — and the declared version); the well-formedness of `entrypoint_sha256` and of `projection_sha256`; the entrypoint (canonical, and carried by exactly one file); and, for every file, the canonical path (and no path twice), the SHA-256's well-formedness, the non-negative size, the non-empty content type and the role — plus the entrypoint file's role and its hash against `entrypoint_sha256`. They are all decided by the **same primitive the importer used** to accept the manifest in the first place. The importer validates every manifest before it writes one, so a stored manifest that fails validation can only have come from a tampered store.
+
+**The reconciliation covers the whole file set, and that is deliberate.** A row deleted from a package the manifest still describes is **corruption**, and corruption is never reported as a missing file: the read of the deleted path would otherwise answer `file_not_found`, and the read of a healthy sibling would answer with bytes from a package the listing refuses. So the read reconciles the file set **first**, and only then looks for the path it was asked for. A path the package simply does not carry is still a **`file_not_found`** — the two are never confused.
+
+So the guarantee is stated exactly: **a package the listing refuses is a package the read refuses.** `verify` is the one operation that does not refuse — it **reports** the damage under its own check names, because the caller asked whether the package is sound rather than for its contents.
+
+#### The listing is metadata, and it is deterministic
+
+`PackageFiles` returns each file's canonical path, SHA-256, size, content type, role, executable flag and **actual** scan status — the statuses the import recorded, which scanners really ran — plus the package hash and the file count. The files are returned in **canonical-path order**, every time, because the query orders them and the order is part of the contract.
+
+It contains **no content**: the listing exists so a caller can decide what to ask for, and a listing that inlined the bytes would defeat the progressive retrieval the design is built on.
+
+#### One consistent snapshot per read
+
+Every read takes its metadata and its bytes from **one** read snapshot, so a package row and the blob it references can never come from two different database states. The snapshot is a **deferred, read-only** transaction: it takes a shared lock on its first read, holds it for the read and releases it at the end. It never takes a write lock.
+
+A one-file request loads the package's file **rows** and **one** blob — never the package's content. The rows are metadata, and the manifest they are compared with is parsed in full on every read anyway; the **bytes** are still loaded one file at a time, which is what §8.7's "bytes loaded" column counts.
+
+The **provenance accessor** was the one exception in P6, and it needed none: its read was a **single statement**, and a single statement sees one consistent snapshot on its own. That kept the `read` action's hot path free of a connection checkout and a `BEGIN`/`ROLLBACK`. The follow-up changed that — the accessor now reads the **manifest** for the recorded projection hash, and the `read` action reads its body and its provenance from **one** snapshot, so the accessor is no longer a single statement. See [The `read` action's body and its provenance come from ONE snapshot](#the-read-actions-body-and-its-provenance-come-from-one-snapshot) for the invariant and the measured cost.
+
+#### The bounded read (§8.6, exactly)
+
+The three parameters use three **different** units and are never converted into one another: `offset` and `limit` count **lines**, `max_bytes` counts **bytes**.
+
+| rule | behaviour |
+|---|---|
+| the default byte cap | **64 KiB** (`max_bytes: 0` means the default) |
+| the hard byte cap | **1 MiB** — a request above it is **refused** with `invalid_bounds`, never clamped |
+| the line unit | a line **keeps its terminator**; `""` has zero lines, `"a\nb"` has the lines `"a\n"` and `"b"`, `"\n"` has the single line `"\n"` |
+| the byte cap | applied **at a line boundary** — a line cut in half by the cap is **not** returned |
+| `next_offset` | the index of the **first line that was not returned** — a **line** index, never a byte offset |
+| `next_offset` when complete | **null** |
+| the progress guarantee | every **non-terminal** truncated response satisfies `next_offset > offset` |
+
+`limit: 0` means "no line-count bound", consistently with `max_bytes: 0` meaning "the default".
+
+**The terminal case** (§8.6, T49): a file whose first line alone exceeds the cap returns **zero** lines, `truncated: true`, `next_offset == offset` and the reason code **`line_too_large`**. It is marked `terminal`, and it is the **only** response that may carry an unchanged `next_offset` — so a caller never has to infer that it must stop rather than resume. Raising `max_bytes`, up to the 1 MiB hard cap, is the only way forward.
+
+**The continuation** (§8.6, T47): because a line keeps its terminator and the cap truncates at a line boundary, the concatenation of every successive window reproduces the requested file **byte for byte** — no gap, no repeated line, no altered byte.
+
+#### Binary content is never carried through a text field by accident
+
+The internal API always returns the **exact bytes**. The `raw` parameter decides how they are carried:
+
+| `raw` | content | transport encoding |
+|---|---|---|
+| `false` (default) | the content must be **text-safe** — a binary asset, or bytes that are not valid UTF-8, is refused with `binary_requires_raw` | `utf-8` |
+| `true` | the bytes themselves | `base64` |
+
+So `raw` is meaningful for text as well as binary: it says "give me the bytes, do not interpret them", and the response's `Encoding` field names the lossless form. A future JSON layer **must** use the encoding the response names.
+
+#### The integrity report (§8.5 `verify`)
+
+`verify` is read-only and it **repairs nothing**: no row is rewritten, no blob is re-imported, no scanner is re-run, nothing is replaced. A corrupt package is **reported** as corrupt — never as verified.
+
+The checks, each with a stable name:
+
+| check | what it proves |
+|---|---|
+| `manifest_package_hash` | the canonical manifest matches the recorded package hash |
+| `manifest_valid` | the stored manifest satisfies the manifest module's own rules — its format, its version provenance, its canonical paths, its roles, its hashes and its entrypoint |
+| `manifest_identity` | the manifest and the package row describe the same name, effective version, declared version, format, entrypoint, entrypoint hash, and version source |
+| `file_metadata_matches_manifest` | the file rows match the manifest |
+| `blob_exists` | every referenced blob exists |
+| `blob_content_hash` | every stored blob's content matches its recorded SHA-256 |
+| `blob_size` | every stored size matches the actual byte length |
+| `entrypoint_hash` | the entrypoint hash matches the **original** `SKILL.md` bytes |
+| `projection_hash` | the skill projection matches the manifest's `projection_sha256` |
+| `version_identity` | the package and the projection identify the expected skill version |
+
+**The report names the checks that RAN.** `manifest_valid` and `manifest_identity` run only when the stored manifest parses — there is nothing to compare it against otherwise — so when it does not, the report names **eight** checks rather than ten, and the failure list is always a **subset** of the list the report names. A caller that wants to know whether a check ran reads `Checks`; a caller that wants to know whether the package is sound reads `Verified`.
+
+Damage is a **result**, not an error: the caller asked whether the package is sound, and the answer is a structured list of what is not. Only "there is no such package", an unusable selector and a substrate failure are errors.
+
+#### The provenance on `read` (R6 / T40)
+
+The existing `mpm_skills` `read` action gains **one** object for a **packaged** skill, and **nothing** changes for an ordinary one:
+
+```json
+{
+  "success": true,
+  "id": "skill:system-prompt-writer-v1.0.0-unversioned",
+  "body": "…",
+  "is_global": false,
+  "package": {
+    "entrypoint": "SKILL.md",
+    "entrypoint_sha256": "783ece4b…",
+    "projection_sha256": "9a1f3c22…",
+    "body_sha256": "5d7e9014…",
+    "hash_origins": {"entrypoint_sha256": "recorded",
+                     "projection_sha256": "recorded",
+                     "body_sha256": "recomputed"},
+    "file_count": 3,
+    "package_hash": "…",
+    "scanned": true,
+    "scan_status": {"secret": true, "poison": true},
+    "version_override": {"declared": null, "effective": "1.0.0-unversioned",
+                         "reason": "package_declares_no_version"}
+  }
+}
+```
+
+The object is **mandatory** for a packaged skill. The `read` action inlines the entrypoint's projection body straight into the agent's context, so the one piece of package content most likely to carry an injection would otherwise come back with nothing the caller could check.
+
+`entrypoint_sha256` is the hash of the **original** file bytes, as supplied — **not** the hash of the derived projection. (The two coincide for a package that declares a version, because §8.2 makes such a projection byte-identical to the original; they differ for a versionless package, and the distinction is pinned by a test.) `scanned` is `true` only when every scanner that applies to the entrypoint actually ran and passed — it is **not** a constant, and it is reported from the entrypoint file row's own status.
+
+For a skill that is **not** a package the object is **absent** — not present and empty — so a caller of today's API sees today's response byte for byte.
+
+The `read` action still returns the entrypoint **projection's** body only. No supporting file is ever inlined beside it: the agent must ask for a specific file.
+
+**The three hashes, and which of them the store is claiming.** The `package` object carries **three** hashes, and they are not interchangeable. `entrypoint_sha256` and `projection_sha256` are **recorded** — they are claims the STORE makes, read out of the package's own records. `body_sha256` is **recomputed** — it is a measurement the READER takes, over the exact bytes the response carries. The `hash_origins` object says which is which, so a caller never has to guess whether it is holding a stored claim or a fresh observation.
+
+| hash | covers | origin | what a caller can do with it |
+|---|---|---|---|
+| `entrypoint_sha256` | the **original** `SKILL.md`, frontmatter included | recorded | check that the body *derives from* the recorded file |
+| `projection_sha256` | the complete **derived projection** — the original plus one inserted `version:` line, and only when the package declares no version (§5.2) | recorded | check that the projection the store holds is the one the store recorded |
+| `body_sha256` | the exact UTF-8 bytes of the **`body` field this response returns** | recomputed | check the bytes it is holding, on its own |
+
+**`body_sha256` has the same three origins, and they are stated rather than implied.** The hash is **recomputed** from the body the response carries — including when that body is **empty**, because the hash of an empty byte string is well defined and an empty body is a body *with* a hash. The origin is **`unavailable`** only when there is no body to hash at all: in the standalone accessor, a document whose frontmatter does not parse has no body, and the hash is empty rather than the hash of a body that was never found.
+
+**`projection_sha256` is obtained from the manifest and validated.** It is not a hash this reader invents: the recorded value lives in the stored manifest, so the accessor reads the manifest, parses it, and applies the manifest module's **own** rules to it (`PackageManifest.Validate()` — the same primitive the importer used to accept the manifest, and the same one the reader's other paths use). It then compares the recorded value with the hash of the projection it is actually returning. A manifest that does not parse, or that does not validate, leaves no recorded value that could be validated: the read still returns the body — that is what `verify` is for — and the provenance reports the projection hash as **`unavailable`** (`hash_origins.projection_sha256 == "unavailable"`), not as an empty string that reads like a hash. A manifest that **does** validate and whose recorded projection hash **disagrees** with the projection the store holds is a positive claim of corruption, and the read **fails closed** on it with `integrity_failure`.
+
+**The package's IDENTITY is checked first, and by the rule the reader's other paths already use.** Two records describe one package's identity: the package **row** carries a `package_hash`, and the manifest carries another. They must agree, and the manifest's claim must describe the manifest's **own** content — `package_hash` is the hash of the manifest's canonical form, so a manifest edited in place no longer describes itself. The reader re-derives that hash with the manifest module's **own** primitive (`VerifyPackageHash` — the same one `loadPackageContext` uses, and the same one the reader's `verify` reports as `manifest_package_hash`) and compares it with the row's.
+
+The two tolerant cases above are the two tolerant cases for the identity too: a manifest that does not parse, and a manifest that does not validate, never reach this check, because a manifest the module would not accept carries no identity to check. A manifest that **does** validate and whose identity disagrees — with its own content, or with its row — is a positive claim of corruption, and the read **fails closed** on it with `integrity_failure`.
+
+**This closes a gap the accessor had.** It used to discard the manifest's claimed `package_hash` and report the row's unchecked, so a manifest substituted from another package would have returned that other package's validated projection hash beside the first package's own `package_hash`, with nothing in the response saying which of the two recorded values was unchecked. `verify` caught it (`manifest_package_hash`); `read` did not. The accessor's tolerance list below is shorter by one entry because of it.
+
+**`body_sha256` closes the gap the P6 spec named.** P6 stated that no hash in the response covered the body: a caller that hashed the returned `body` and compared it with `entrypoint_sha256` mismatched for **every** package, and could not reconstruct the document the hash covered. `body_sha256` is the hash of exactly the bytes the caller receives, so the caller can now check the one thing it is actually holding.
+
+**The `scanned` boolean and the `scan_status` object are both kept.** `scanned` is the compatibility shape — a single boolean that says whether every scanner that applies ran and passed. `scan_status` is the **detail**: which scanner ran, per scanner (`{"secret": true, "poison": true}`). They always agree for an entrypoint, because `SKILL.md` is text and a binary asset's disclosed poison skip cannot arise for it; the disclosed-skip case is visible in the `files` listing. `scan_status` is an **additive extension** of §8.2.1's six-field object, and §8.2.1's own prose asks the object to carry *"the entrypoint's hash and its scan status"* — so it is recorded here, in the design of record, and the discrepancy with §8.5's `scanned`-as-object is reconciled by naming the two shapes: `scanned` is the **summary**, `scan_status` is the **detail**.
+
+**The version override is read from the package row's own version provenance** (`declared_version`, `version`, `version_source`), which is the same record the manifest's `version_override` carries, because the importer writes both from the same plan.
+
+**What the accessor does NOT check, and where it is checked.** The accessor's entrypoint hash is the **package row's** `entrypoint_sha256`, and the accessor does **not** apply the comparison `loadPackageContext` applies — the one that refuses when the manifest and the row disagree about the entrypoint's hash. (The comparison about the package's **identity** it does apply, and applies it the same way — see above.) The two paths therefore differ **deliberately, and not silently**: the accessor is a hot-path retrieval that reports the recorded provenance, while the read paths and `verify` are where a disagreement is judged (`verify`'s `entrypoint_hash` and `manifest_identity` checks both report it). A caller that needs the package *proved* calls `verify`; a caller that needs the *recorded* provenance calls `read`. The row-wins decision of record applies to the version provenance; it is **not** a claim that the row is right about the entrypoint's hash.
+
+**`file_count` is the number of file ROWS the store holds.** The accessor counts `skill_package_files`, because the count is of the store's **rows**, not of the manifest's file list. So on a package whose rows do not match its manifest, `file_count` is the store's count and the manifest's is different: a deleted row lowers it **silently**, with no failure and no disagreement. The accessor's tolerance list is therefore **namely**: the recorded **entrypoint path**, the recorded **entrypoint hash**, the recorded **file count**, the recorded **version provenance**, and the entrypoint file row's **scan status** — none of them checked against the manifest. The recorded **package hash** is **not** on that list any more: it is checked, and a disagreement about it fails the read closed. The scan status is the one worth naming, because it is the field R6 exists for: `files` and `read_file` **refuse** a package whose row and manifest disagree about a file's scan status, while `read` reports the row's status unchecked. That is not an escalation — a row flipped to "scanned" cannot grant more trust than the manifest's own entry already implies, and the conservative direction is reported faithfully. `files` and `read_file` refuse such a package and `verify` reports it; `read` reports what is stored.
+
+**The hashes the accessor DOES check against the manifest are the projection's and the package's own identity** — because it now reports them, and a recorded value that does not describe the bytes beside it would be a false claim. The asymmetry is deliberate and is stated rather than glossed: the accessor reports the **projection** hash it has validated, and reports the **entrypoint** hash the row claims. The package's identity is **established** rather than merely reported: it is checked against the manifest, and the package row's recorded `package_hash` is reported beside the three hashes — without an origin of its own, because it is not one of them. A package whose identity cannot be established is refused rather than described.
+
+**The failure envelope is wider than it was, deliberately.** A substrate failure while determining whether the skill is a package now fails the `read`. That is the fail-closed direction: the reader cannot know whether the skill is a package, so it cannot know whether the provenance is mandatory, and returning a body without it would break R6. An ordinary skill is unaffected in the normal case — its lookup is one indexed `SELECT` that returns no rows.
+
+#### The `read` action's body and its provenance come from ONE snapshot
+
+P6 disclosed that the `read` action's body and its provenance came from **two** reads — the body from `memories`, the provenance from `skill_packages` — and that a package row removed between them would let a body come back with no `package` object, which is the one shape that would break R6. Every deletion path in the substrate removes the skill row and the package row together (the foreign key cascades), so the shape was a **race rather than a reachable path**. It is now **closed**.
+
+`ReadSkillWithPackageProvenance` reads both halves inside **one** deferred read snapshot. The snapshot is taken at the first read and held until it is released, so a concurrent deletion is either **wholly visible** (both halves gone — the ordinary not-found answer) or **wholly invisible** (both halves present — a consistent pair). There is no state in which a body is returned without the provenance that describes it.
+
+**The invariant, stated exactly:** *a successful read of a packaged skill cannot return its body without its package provenance because a concurrent deletion occurred between queries.* The result is always either a consistent skill/provenance pair or the appropriate not-found response.
+
+The snapshot is **not** a full-package integrity scan. No blob is read and no package **file** byte is hashed: the read loads the skill's projection and the package's metadata, and hashes the **one** projection document the response is about, plus the stored **manifest**'s canonical form — a metadata document the read already holds, and the one the package's identity is computed from.
+
+**What it cost, measured.** The P6 hot path was a skill read plus **one** statement. The combined read is a transaction plus three statements, a manifest parse, and the package's **identity** check. Every number below is produced by a benchmark in `internal/core/skill_package_provenance_followup_test.go`, so it can be re-measured rather than believed:
+
+| shape | benchmark | ns/op (median) | observed range |
+|---|---|---|---|
+| P6 hot path (skill read + one statement) | `BenchmarkP6FollowupReadSkillOldShape` | 78,501 | 74,503 – 84,841 |
+| **combined read (one snapshot)** | `BenchmarkP6FollowupReadSkillWithProvenance` | **141,623** | 137,342 – 143,497 |
+| the accessor called separately (each call opens its own snapshot) | `BenchmarkP6FollowupReadSkillTwoStatements` | 207,185 | 183,850 – 226,728 |
+
+**The identity check is the largest single cost in the read, and it is the price of the contract.** The same benchmarks, measured in the **same session on the same host** against the head **without** the identity check, give 79,293 / 114,805 / 148,288 ns/op — so the check adds **+26.8 µs** to the combined read (114,805 → 141,623), which matches its own component measurement of 29 µs below. The overhead over the P6 hot path is therefore **+63.1 µs (+80%)** with the check and **+35.5 µs (+45%)** without it; against calling the accessor separately it is **−65.6 µs (−32%)** with the check and **−33.5 µs (−23%)** without it. The accessor pays the same check — it is the same code path — which is why the third row moves by as much as the second.
+
+**The absolute figures MOVE, and the table says so.** Measurement sessions on the same machine gave the overhead (before the identity check) as +31 µs (+37%), +55 µs (+57%) and +37 µs (+40%) — the host's load moves the read by tens of percent, because the read is a transaction with three statements in it. So the claim is the **order of magnitude and the sign**, not the figure: the combined read costs **tens of microseconds more** than the P6 shape, and **less** than calling the accessor separately, which opens a snapshot of its own. A reader who re-measures on a loaded machine will get a different number; that is why the range is quoted beside every figure. The identity check moves the read by a **fixed** amount, because it is a fixed piece of work: a manifest parse, a canonical round trip and a SHA-256.
+
+**The third row is labelled for what it measures.** It is *not* "two independent reads": the accessor opens its **own** snapshot now — it has to, because it reads the manifest — so the shape it measures is a skill read on the pool plus an accessor call that takes a transaction of its own. That is the cost of the pre-follow-up arrangement *as it stands today*, not a hypothetical one.
+
+The components are the **reproducible** part, because each is a small, self-contained operation:
+
+| component | benchmark | ns/op (median) |
+|---|---|---|
+| the read snapshot itself (BEGIN, ROLLBACK, connection checkout) | `BenchmarkP6FollowupComponentTransaction` | 3,508 |
+| the manifest `SELECT` **inside** a snapshot — which INCLUDES the snapshot's own cost, so this row already contains the row above | `BenchmarkP6FollowupComponentManifestSelectInSnapshot` | 17,888 |
+| the manifest parse | `BenchmarkP6FollowupComponentManifestParse` | 5,662 |
+| the manifest **validation** | `BenchmarkP6FollowupComponentManifestValidate` | 330 |
+| the package's **identity** — the manifest parsed again, its canonical form re-derived, and the SHA-256 of that form compared with the hash the manifest claims | `BenchmarkP6FollowupComponentPackageIdentity` | **29,039** |
+
+**The rows overlap, and the table says so.** The in-snapshot `SELECT` benchmark takes the snapshot around the statement, so it already pays the transaction's cost — the two rows are not additive. And the combined read issues its manifest `SELECT` **inside** the snapshot, never on the pool, so the pool variant (`BenchmarkP6FollowupComponentManifestSelect`, 6,547 ns here) is **not** part of the combined read's cost at all; it is quoted only as a comparison, and its ordering against the in-snapshot variant is **within the noise on this host** — two measurement sessions put them in opposite orders. The claim is the **order of magnitude** of each piece, not their ranking.
+
+So the validation is **free** (0.3 µs against a 142 µs read), and the **identity** check is the one that is not: 29 µs, a fifth of the read, is what it costs to establish that the manifest and the package row describe one package. The measured components account for about **56 µs** of the overhead; the remainder is the per-statement cost the transaction adds and the read's own variance. The read is still **not** an unconditional integrity scan: no blob is read and no package **file** byte is hashed — the manifest's canonical form is a metadata document the read already holds.
+
+**Measurement host and protocol.** The figures above were measured on the development host (Linux x86-64, 12 CPUs, Go 1.27.3, SQLite in WAL mode, the package's own disposable workspace) with `go test -bench 'BenchmarkP6Followup' -benchtime=5000x -count=7`, on an otherwise idle machine. The identity-check figures were measured on **2026-11-16**, against the corrected head and against the head without the check **in the same session, on the same host**, so the two columns are comparable. Absolute numbers are host- and load-specific; the benchmarks are in the repository so a reader can re-measure them on their own host.
+
+**The skill-document loader was extracted so the guard covers it.** The combined read needs the skill-loading logic to run inside a caller's transaction, so it moved from `skill_db.go` into `skill_document.go`, written against the smallest read surface that both `*sql.DB` and `*sql.Tx` satisfy. That file is now part of the reader's **guarded set**: the write-guard walks it, so a write could not hide in the skill loader and go unseen. The loader is **one** implementation — `ReadSkill` and the combined read share it, so they cannot drift.
+
+
+#### The reason vocabulary
+
+The reader has its own **closed** vocabulary, mirroring the importer's. It is shared by two kinds of outcome, and the distinction matters: a **refusal** is an error, and the one **response classification** is not.
+
+**The refusals** — an error, with a stable reason:
+
+| reason | meaning |
+|---|---|
+| `package_not_found` | no package is published for the skill (including a skill that owns none) |
+| `file_not_found` | the package carries no file at that canonical path |
+| `invalid_path` | the requested path is not a canonical package path |
+| `content_hash_mismatch` | the stored bytes are not the bytes that were recorded |
+| `integrity_failure` | the stored package is not internally consistent |
+| `unpublishable` | the package — or the ordinary skill — is intact, but it cannot be **published** under a safe file name. A skill's name is an identifier, and `a/b` is a legal one |
+| `invalid_bounds` | the read's bounds are not admissible |
+| `database_failure` | the substrate failed |
+| `binary_requires_raw` | the content cannot be carried as text without loss |
+| `selector_invalid` | the package was named in a way that does not identify one package |
+
+**The one response classification** — not an error:
+
+| reason | meaning |
+|---|---|
+| `line_too_large` | the first requested line alone exceeds the byte cap. The response is **terminal**, not a failure: it carries zero lines, `truncated: true` and an unchanged `next_offset` (§8.6, T49) |
+
+Corruption is **never** reported as a missing file, and there is no fallback to the unverified projection or to unverified blob bytes. The reader fails closed.
+
+#### The deviations
+
+**The selector requires a version.** A package is named by its canonical skill id, **or** by a name **and** a version. A name alone does not identify one package, and the reader never picks a version silently — the design's parameter table says `name` + `version` as well. P8's CLI (`mpm skill files <name|id> [--version V]`) may resolve a latest version itself, above this API.
+
+**`truncated` means "the file was not fully returned".** When `limit` — rather than the byte cap — ends the read, the response is still `truncated: true` and still carries `next_offset`, because unread lines remain. A response is `truncated: false` only when the reader reached the end of the file.
+
+**`verify` checks more than the design guarantees, and says so.** The design requires that a corrupt package is never reported as verified. The reader adds the checks that make that claim **demonstrable** — the per-blob content hash, the per-blob size, the manifest-to-rows reconciliation and the projection hash — and each is reported under its own stable name, so a caller can tell **which** guarantee failed rather than only that something did.
+
+**The read path refuses a manifest the importer would not have written, and that is the decision of record.** `PackageManifest.Validate()` is the manifest module's rule set: the format, the version provenance, the canonical paths, the roles, the content types, the hashes and the entrypoint. The importer calls it on every manifest **before** it writes one, so a stored manifest that fails it can only have come from a tampered store. The reader therefore calls the **same primitive** on the manifest it reads, and refuses with `integrity_failure` — rather than carrying a second, partial rule set of its own. The alternative was to validate a subset and to publish the subset; the subset was the source of the asymmetry an independent review found (a manifest naming one path twice was refused by the listing and served by the read), so the full rule set is used instead. `verify` reports the same damage under the `manifest_valid` check rather than refusing, because a report is what that caller asked for.
+
+**`Validate()` is now load-bearing for every read, and that has a consequence for the format.** The reader treats it as the arbiter of what a stored manifest may be, so a change to its rules that would refuse a manifest **already accepted** under `mpm-skill-package/1` would refuse packages that are already published. The decision of record: **such a change requires a format bump** — a new `mpm-skill-package/N` — or an explicit migration of the stored manifests, because the stored manifest is hashed (`package_hash`) and the reader compares the two. A rule that only refuses manifests the importer never wrote needs no bump: such a manifest was never valid. This change makes no such change — `Validate()` is P2's, unchanged, and P6 only **calls** it.
+
+**The provenance's `version_override` comes from the PACKAGE ROW, and it is always present.** The row's `declared_version`, `version` and `version_source` are the same record the manifest's `version_override` carries — the importer writes both from the same plan — so the accessor reads the row and does not parse the manifest. For an importer-written package the two are identical.
+
+**That is the decision of record for the disagreement case: the ROW wins.** If a row and its manifest ever disagree about the version provenance, the provenance reports the **row's** values and `verify` reports the disagreement as a `manifest_identity` failure. The row is what the package IS, in the store the reader reads; the manifest is what the package CLAIMS about itself. A reader that silently preferred the claim would be reporting the manifest's story rather than the package's state.
+
+Because the row's `version` and `version_source` columns are `NOT NULL` (§6.8), the version provenance **always exists** for a packaged skill, and the accessor therefore always emits the object — including when the stored manifest does not parse. The accessor does not test the values for emptiness: a packaged skill with no version provenance would be a row that contradicts its own schema, and `verify` — not the provenance — is where such a contradiction is judged. That is a change from the first commit, where the override was recovered from the manifest and was therefore absent when the manifest was unreadable; it is disclosed here because it changes the `read` response's shape for a damaged package.
+
+**The provenance accessor is tolerant where the rest of the reader is strict.** `read` must keep returning the entrypoint's projection even when the package's manifest is broken — that is what `verify` is for. The tolerance has a boundary, and the boundary is the package's **identity**: a manifest that does not parse and a manifest that does not validate are both tolerated, but a manifest that validates and carries a contradictory identity is refused with `integrity_failure`, because a package whose identity cannot be established is not a package the reader can describe. What the accessor never does is claim a scan that was not recorded: a missing entrypoint file row reports **no** scan.
+
+**The wire shape is P8's.** The internal response types carry no JSON tags, deliberately. The design pins the `files` and `read_file` wire shapes (§8.5), but it also requires that a binary payload's JSON encoding be **explicit and lossless** — and `encoding/json`'s default handling of a `[]byte` is base64, which would silently decide that question for every file, text ones included. The reader therefore stays transport-agnostic and names the encoding explicitly in its `Encoding` field; P8 writes the mapper against §8.5 and honours that field. The one exception is the file record itself, which is P2's `PackageManifestFile` — already carrying §5.5's own tags, so P8's mapper for it is empty.
+
+**`max_bytes` bounds CONTENT bytes, not wire bytes.** A response carried as base64 is about four thirds of the cap in size, because the cap applies to the bytes the reader returned, not to their encoding. A caller that budgets the wire size must budget accordingly; the cap is a bound on the file content, which is what §8.6 specifies.
+
+**`scanned` is a summary; `scan_status` is the detail.** `scanned` is true only when every scanner that applies to the entrypoint ran and passed. For an entrypoint the two always apply — `SKILL.md` is text, and a binary asset's disclosed poison skip can therefore never arise for it — so `scanned` is `scan_status.secret && scan_status.poison` and the two agree. The disclosed-skip case is visible in the `files` listing, where the per-scanner status is reported for every file.
+
+**The read operations are not on the `CoreDB` interface.** Only the provenance accessor is, because the MCP `read` action needs it and the tool layer holds a `CoreDB`. `PackageFiles`, `PackageReadFile` and `PackageVerify` are methods on the concrete `*DatabaseManager`, which is where P8 will reach them — with the interface widening as part of P8's surface, not P6's.
+
+**The read snapshot's read-only nature rests on discipline, and the discipline is pinned.** The transaction is opened with `sql.TxOptions{ReadOnly: true}`, but the SQLite driver ignores that option and issues a plain (deferred) `BEGIN`. The snapshot therefore takes a shared lock and no write lock, and it is read-only because the reader issues no write.
+
+That is pinned by an **AST walk** over the reader's own source — **both** reader files, not one — rather than by a hand-maintained list. The check is **statement-based**, and it is anchored on **SQLite's own grammar**, not on a keyword list.
+
+- the **spaced** reading is SQLite's tokenization: SQLite treats a comment as **whitespace**, so `DELETE/*x*/FROM t` is two tokens — `DELETE` and `FROM` — and every **executable** write is visible in it;
+- a statement must be a **single** statement — a `;` anywhere but at the very end means another statement follows, and a `;` inside a comment or a string literal is not a separator;
+- a statement that begins with `SELECT` is a read, **full stop**: SQLite allows no DML in a subquery (`SELECT * FROM (DELETE …)` is a syntax error), none in a CTE body, and no `SELECT … INTO`;
+- a statement that begins with `WITH` is read only if it carries **no write keyword at the top level**. SQLite's only legal main statements after a CTE list are `SELECT`, `INSERT`, `UPDATE`, `DELETE` and `REPLACE`, and the last four are write keywords; the main statement sits at the top level, so the top-level words carry it;
+- anything else — `DELETE`, `INSERT`, `PRAGMA`, `EXPLAIN`, `END`, `VACUUM`, `REVOKE` — is refused, because the reader issues plain `SELECT`s and nothing else.
+
+**The side effects a `SELECT` cannot have.** SQLite allows no DML in a subquery, none in a CTE body and no `SELECT … INTO`, so a `SELECT` cannot write **the database**. The two process-level side effects it could otherwise have are closed as well: the substrate registers **no user-defined function** (`RegisterFunc` appears only in comments explaining why it is avoided), and this build's SQLite is compiled with `SQLITE_OMIT_LOAD_EXTENSION`, so `SELECT load_extension(…)` is refused at run time. `TestP6TheGuardRefusesARouteSQLiteReallyExecutes` **pins** that, so a change to the build shows up in the test suite rather than in a security review.
+
+The **removed** reading rejoins a keyword that a comment split, which SQLite does not do. It contributes exactly **one** rule: if its first word is a **write** keyword, the text is refused. That catches `DE/*x*/LETE` — which SQLite rejects as a syntax error, so refusing it costs nothing — **without** manufacturing a keyword out of two unrelated tokens, which is what would make `SELECT up/*x*/date` a false positive. A word immediately followed by `(` names a **function**, and a function call is never a statement keyword: `SELECT replace(x,'a','b')` is a read.
+
+The walk closes these routes, and **every one of them is pinned in the repository**: the evasion matrix in `TestP6TheReadOnlyGuardCatchesEveryEvasion` splices each of them into a **copy** of the reader and requires the guard to report it, and `TestP6TheReadOnlyGuardRefusesNoLegitimateRead` splices the controls into a copy and requires the guard to stay silent. The matrix's **size** and its **historically-important routes** are pinned as well — the count is a constant, and the routes that have caught a real defect are pinned by name **and by the SHA-256 of their snippet** — so the matrix can be neither quietly shrunk nor quietly substituted: a name pin alone stops a deletion, and only the digest stops a swap. **The digest pin is a review aid, not an enforcement mechanism**: the pin lives in the same file as the snippet it pins, so a simultaneous edit of both is possible — and what it guarantees is that such an edit shows **two** changed lines in one hunk instead of one.
+
+The table below gives the guard's message for each route, **up to the SQL it quotes**.
+
+| evasion | what the guard says |
+|---|---|
+| a write through `ExecContext` | *"issues a write through ExecContext at line N: the reader must never write"* |
+| a write through `Exec` | *"issues a write through Exec at line N: the reader must never write"* |
+| a **method value** — `exec := db.ExecContext` | *"binds the database method ExecContext at line N: the reader must never bind a database method"* |
+| a method value passed as an **argument** | *"binds the database method ExecContext at line N: the reader must never bind a database method"* |
+| a write smuggled through `QueryContext` | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT: \"…\""* |
+| a write smuggled through `PrepareContext` | the same, at the prepare site — a prepared statement's SQL lives there |
+| a write executed through a prepared statement | *"issues a write through ExecContext at line N: the reader must never write"* |
+| a write in a constant, **used** | *"issues a statement that is not a single read statement at line N: the statement begins with DELETE, not SELECT: \"…\""* |
+| a write in a constant, **unused** | *"the SQL constant X is not a single read statement: the statement begins with DELETE, not SELECT: \"…\""* |
+| a write in a **concatenated** constant (`"DELETE " + "FROM …"`) | the same — the concatenation is resolved |
+| a write in a `WITH … UPDATE` constant | *"…the statement carries the write keyword UPDATE: \"…\""* |
+| a write in a **comment-prefixed** constant | *"…the statement begins with DELETE, not SELECT: \"…\""* — the comment is removed, not obeyed |
+| a write behind a **comment-split keyword** (`DE/*x*/LETE`) | *"…the statement begins with DELETE, not SELECT: \"…\""* — the comment is removed whole |
+| a write behind a **comment-split keyword**, line comment (`DE--x⏎LETE`) | the same |
+| a write with a comment **between** its keywords (`DELETE/*x*/FROM t`) | *"…the statement begins with DELETE, not SELECT: \"…\""* — the comment is spaced, and the tokens stay separate |
+| an `EXPLAIN DELETE` | *"…the statement begins with EXPLAIN, not SELECT"* |
+| an `END` — a transaction control | *"…the statement begins with END, not SELECT"* |
+| a `REVOKE` | *"…the statement begins with REVOKE, not SELECT"* |
+| a statement whose SQL is a concatenation of literals | *"issues a statement whose SQL is neither a literal nor a constant at line N"* |
+| a statement whose SQL is built at run time (`fmt.Sprintf`) | the same — the argument is neither a literal nor a constant |
+| a **multi-statement** `"SELECT 1; DELETE …"` | *"…the statement carries more than one statement: \"…\""* |
+| a **dead** SQL constant no statement uses | *"the SQL constant X is never used by a statement: \"…\""* |
+
+That is **twenty-two routes**. The **seventeen controls** — the legitimate reads the guard must not refuse — are pinned beside them: a plain `SELECT` written as a raw backtick literal, the same written as a double-quoted literal, a trailing semicolon, a `UNION` subquery, a read-only CTE, a `'UPDATE'` string literal, a `last_update` column, a `;` inside a literal, a doubled quote inside a literal, a `--` inside a literal, a bracket identifier containing a `;`, a bracket identifier containing a write keyword, a `?` bind placeholder, a **function** whose name is a statement keyword (`replace(x,'a','b')`), a **column** named after a statement keyword, an identifier split by a comment, and a CTE whose body is a read.
+
+**The matrix is not merely about the guard's classifier.** A statement SQLite rejects as a syntax error proves nothing, so one route is checked **against SQLite itself**: `TestP6TheGuardRefusesARouteSQLiteReallyExecutes` runs `DELETE/*x*/FROM skill_package_files` against a real in-memory database and asserts that the row it would have removed is **gone** — and that the guard refuses the same text. The live database is never opened.
+
+**The scope of the claim.** The walk covers the reader's **own two files**: every statement they issue, every statement they declare as a constant, and every database method they bind. A string literal passed to a non-database function is not inspected — it is not a statement the reader issues — and a statement issued by a helper in another file of the package is outside the walk. The behavioural pin covers the rest: the census in `TestP6ReadsChangeNothing` shows the whole substrate unchanged after every read. The guard is a source-level regression pin, **not** a security boundary: it audits the reader's own SQL text, not what a user-defined function, an extension, or a future hand-written `db.Exec` in another file of the package would do.
+
+**The residual over-strictness, stated as a rule.** A `WITH` statement is refused if **any top-level word is a write keyword** — except a word that names a **function**, which is never a statement keyword — even when SQLite would accept it. The identifier that trips it may be the CTE's own name (`WITH replace AS (SELECT 1) SELECT * FROM replace`), a column reference in the main statement (`… ORDER BY release`), or anything else at the top level; the same word inside the **column list** (`WITH x (release) AS …`) is not affected, because it sits inside parentheses. The guard cannot tell a write keyword in the main statement from one used as an identifier without SQLite's parser. **The reader's own statements contain no `WITH`**, so nothing it owns is affected, and the refusal fails **closed**.
+
+#### What P6 does **not** add
+
+**No P7 export writer.** The `.skill` archive is the transport; the writer that produces one is P7.
+
+**No P8 CLI or MCP surface.** The reader is internal. No `mpm skill files`, `read-file` or `verify` command and no new MCP action registration lands here.
+
+**No agent-facing import.**
+
+**No P9 promotion, garbage collection or lifecycle mutation.**
+
+**No automatic execution.** A stored script is stored and flagged, never run.
+
+**No HAL integration.**
+
+**No change to the shared model-configuration project.**
+
+**No new table and no schema change.** The reader reads the three package tables §6.8 specifies — `skill_packages`, `skill_package_files` and `skill_package_blobs` — plus `memories`, which `verify` reads to check the projection's hash and its version. It touches nothing else.
+
+### 6.13 Skill Package Export (P7 — the deterministic `.skill` writer and the complete skills export)
+
+The storage for a multi-file package is specified in [§6.8](#68-skill-package-storage-p1--storage-only). The **directory importer** and the export loss marker are specified in [§6.10](#610-skill-package-import-p4--directory-import-and-the-export-loss-marker). The **archive importer** is specified in [§6.11](#611-skill-package-archive-import-p5--the-skill-zip-adapter). The **reader** is specified in [§6.12](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api). **Stage P7** adds the **writer**: the deterministic `.skill` export, and the complete skills export that carries every package it selects.
+
+The format, the export contract and the stage plan are specified in the **Skill Packages design** (PR #222, *"MPM Skill Packages — a multi-file skill format"*), §5.4, §5.5, §5.6, §6.3, §10 and §13. **This section describes stage P7.**
+
+#### What P7 changes
+
+Before P7 the skills export carried the **projected skill row only**, and the loss marker named every package whose content had been dropped. P7 makes the export **complete**: the packages' bytes are exported, and the marker names only what could **not** be carried.
+
+That is a change in the marker's **meaning**, so the marker is stated again here:
+
+| field | meaning in P7 |
+|---|---|
+| `packages_omitted.count` | the number of packages that were **selected and not carried** — zero when the export carried every one of them |
+| `packages_omitted.packages[]` | each omitted package, **with its reason** (`integrity_failure`, `package_not_found`, `file_name_collision`, `skill_row_not_exported`, `database_failure`, `export_failed`) and a human-readable detail. Every entry also carries the package's **identity** — `file_count` and `package_hash` — because the hash is the identifier that names the lost bytes. Both are read on the SAME snapshot the archives are read from, and they are carried for the omissions the EXPORTER produced as well as the ones the SCOPE produced |
+| `packages_omitted.scope.total` | the number of packages in the store, whatever the export's filters selected. It is counted on **every** path, including an export of a collection that selects no package: a report that says "0 packages are in the store" when three are is a false statement about the store |
+| `packages_omitted.scope.selected` | the number of packages the export's filters chose — the denominator the omission count is measured against |
+| `packages_omitted.scope.carried` | the number of `.skill` archives the export actually produced |
+
+**The omission reason is a closed vocabulary, and it separates "the bytes are bad" from "the publication failed".** The six reasons are:
+
+| reason | meaning |
+|---|---|
+| `integrity_failure` | the package did not verify — its bytes are inconsistent |
+| `package_not_found` | the package row is gone |
+| `file_name_collision` | another package in the same export derives the same published file name |
+| `skill_row_not_exported` | the package is in the export's scope, but its skill row is not among the exported rows |
+| `database_failure` | the substrate failed |
+| `export_failed` | the **catch-all**: any other cause. A package that **verified** and could not be published under a safe file name is one of them — it is not an `integrity_failure`, because its bytes are consistent and only the publication failed |
+
+The `detail` field names the cause in every case, so a consumer that needs to know WHICH failure occurred reads it rather than the reason.
+
+**A zero omission count is a positive statement only in the light of the scope.** Zero omitted out of twelve selected packages is a *complete* export; zero omitted out of zero selected packages says nothing about the packages that were never selected. That is why the scope is part of the marker.
+
+#### The deterministic writer
+
+A `.skill` archive is the **transport** for a package: the bytes a package is moved in. Two exports of the same package must therefore produce the **same bytes**, or the transport has no identity of its own and an operator cannot tell a faithful copy from a tampered one.
+
+Everything that could vary between two exports is pinned:
+
+| field | value |
+|---|---|
+| **layout** | **flat** — every canonical path sits at the archive's top level, so `SKILL.md` is at the archive's top level and §5.3.1's rule 4 makes the archive root the package root |
+| **order** | `SKILL.md` first, then the other canonical paths **sorted**. The comparator is a **strict weak ordering** — irreflexive, asymmetric and transitive — because Go does **not** validate the ordering it is handed to `sort` |
+| **timestamp** | every entry carries **1980-01-01 00:00:00 UTC** — the ZIP epoch, and the earliest instant a DOS timestamp can express |
+| **permissions** | `0644`; `0755` for a file the manifest marks executable |
+| **compression** | **`Store`** — no compression at all |
+| **header fields** | no extra field of the **caller's** own, no comment, no archive comment — Go's `archive/zip` writer appends its own Info-ZIP extended-timestamp field (`0x5455`) to every entry, and that field's value is the pinned epoch, so it is part of the deterministic shape |
+| **content** | the **original** package bytes, never the derived projection |
+
+**The compression choice is load-bearing, and it is measured rather than assumed.** Go's DEFLATE output is **not stable across Go releases**: the same bytes compressed by Go **1.26.6** and by Go **1.27.3** produce archives of **different sizes and different digests**. (The exact sizes and digests depend on the fixture, so neither is quoted here — the **digests differing** is the claim.) A deflate archive's identity would therefore depend on the **toolchain** that produced it, which defeats the purpose of a deterministic transport. `Store` makes the archive's bytes a function of the package's bytes and the pinned header fields alone, so the same package exports to the same bytes on **every** Go release. The cost is size: an archive is the sum of its files rather than a compressed fraction of it.
+
+That claim is **pinned as a constant**, not as a comparison: `TestP7ExportArchiveBytesAreIdenticalAcrossGoReleases` asserts the archive's SHA-256 against a literal. A test that compared two exports of the same package would pass on **both** Go releases — and would not have caught the toolchain dependence the `Store` decision avoids. A constant catches both, because the constant is measured on one toolchain and CI runs the other.
+
+#### Verify before export, in one snapshot
+
+The exporter **verifies** a package before it serialises it, reusing **P6's own verification** (`verifyPackageInTx`) and the **P1/P2 manifest primitives**. A missing blob, a corrupted hash, a mismatched file size, an invalid manifest, or a projection that contradicts the manifest **refuses the export**. There is no "export what is there" mode: an archive is a claim that these are the package's bytes, and a damaged package cannot make that claim.
+
+The verification and the serialisation read the **same snapshot**. A verify-then-export sequence across two snapshots would permit the content to change between the verification and the serialisation — which is exactly the window the verification exists to close.
+
+The exporter never **repairs**, never **mutates** and never **rescans**. It reads the rows the importer wrote and serialises them.
+
+#### The round trip
+
+`stored package → deterministic .skill → P5 import → identical package_hash and file hashes`
+
+The property holds because the manifest's per-file fields — path, sha256, size, content type, role, executable and the scan statuses — are all **re-derived identically** by the importer from the same bytes. The `executable` flag comes from the file's **extension** (the import's own allow-list), not from the archive's mode bits, so the mode bits are documentation rather than identity.
+
+The round trip is pinned across: a version-declaring package; a **versionless** package (whose effective version is `1.0.0-unversioned`); the **original** `SKILL.md` versus the derived projection; markdown references; scripts; binary assets; **shared content-addressed blobs**; empty supporting files; and packages built from **differently ordered** sources — which must export to the same bytes.
+
+#### The legacy single-document skill
+
+An ordinary skill — one with no package — can be exported as a **one-file** `.skill` archive: a single `SKILL.md` entry holding the skill's own bytes. The archive is a valid package for the P5 importer, which is what makes an ordinary skill movable by the same transport a package uses.
+
+**This is an internal interface, not a surface.** `ExportSkillDocument` is part of the export interface P8 calls; `mpm export` does not use it yet, and the batch export carries **packages**, not ordinary skills. The claim it makes is deliberately narrow, and it is **refused** rather than approximated whenever the narrow claim does not hold:
+
+- a **packaged** skill is **refused**. The skill's row holds the **projection** of its package — the original plus, for a package that declares no version, one inserted `version:` line — and the package's other files (references, scripts, assets) live in their own rows and blobs. A one-file archive built from the row would carry the projection rather than the original bytes and would omit every other file, so the package would come back a **different** package, or no package at all. That is the silent loss §6.3 exists to prevent, so the exporter refuses and names the way out: export the package.
+
+**The transport adaptation is named, not glossed.** The archive carries the skill's **original** document — the bytes the skill's row holds, which for an ordinary skill **are** the original document. On the way back in, the importer derives a projection from it, and because a document that declares a version projects to itself, the round trip is byte-exact.
+
+There is **no versionless case** in this transport. The substrate **refuses** to store a skill whose document declares no version (§5.2's frontmatter rule, enforced at the door by `SaveSkill`), so every skill in the store declares a version, the one-file archive always carries one, and the exporter never has to insert a line. The `1.0.0-unversioned` effective version belongs to the **package** path, where the importer inserts it into the projection it stores; it is not something the one-file export invents. The exporter changes no document and writes nothing to the database.
+
+#### The complete skills export
+
+The operator accepted the design's **sibling-directory** approach. A batch skills export writes:
+
+- the **export document** — the same JSON document the export has always written, with the `memories` array, the `packages_omitted` marker and the new `package_archives` index;
+- a **sibling directory** named for that export — `<output-path>.packages` — holding one `<name>-<version>.skill` archive per packaged skill.
+
+The `package_archives` index is **machine-readable**: it names the directory, and for each archive its file name, the skill id, the package hash, the archive's own SHA-256 and its size. An operator can therefore check every archive without re-deriving what it should contain.
+
+**The file name is derived from the package's canonical identity, and the derivation is checked as a FILE NAME.** A skill name is an **identifier**, and an identifier may contain a path separator — `a/b` is a legal skill name, and `a/b-1.0.0.skill` is a path, not a file name. So the derived name is refused when it is not a single safe path component: no path separator, not `.` or `..`, no leading dot, no control character.
+
+**The derivation is not injective, so a collision is possible.** The skill `a` at version `1.0.0-b-2.0.0` and the skill `a-1.0.0-b` at version `2.0.0` both derive `a-1.0.0-b-2.0.0.skill`. Two archives with one name cannot both be published — the second would overwrite the first — so the **first** archive in the canonical skill-id order keeps the name, and every other one is **named as an omission** with the reason `file_name_collision`. An export never silently overwrites an archive.
+
+#### The destination policy
+
+A package-bearing export needs a destination that can carry the archives **and** the index that names them.
+
+| destination | package-bearing export | package-free export |
+|---|---|---|
+| `--output <path>` | the document and the sibling directory | the document alone |
+| **standard output** | **refused** — before anything is emitted | unchanged |
+| **`--format csv`** | **refused** | unchanged |
+| **`--format json-array`** (deprecated) | **refused** | unchanged |
+
+The refusals happen **before anything is written**, so a refused export has written nothing at all — not a truncated document, not a half-published directory. Standard output cannot carry the archives; neither can CSV or the deprecated bare array, and an export that dropped the archives silently would be the exact loss R11 exists to prevent.
+
+**The deprecated `json-array` policy is preserved, not widened.** The bare array is still available for every export that has nothing to lose, and it is refused for the one that does. The compatibility shim is safe in the same shape it had before P7: a consumer that cannot yet read the structured object keeps working for every complete export, and is given a clear error — not silent data loss — for the one that is not.
+
+#### The migration consumer fails closed
+
+`mpm migrate --from` reads the document's **`memories` array** — the projected rows — and nothing else. Importing a package-bearing document would therefore write the projected rows and **silently drop** every package's reference files, scripts and assets. Those bytes exist nowhere else.
+
+So the consumer **refuses**, with a diagnostic that says what is missing and where it is. The complete import path — the document's archives imported as packages — belongs with the package import surface (**P8**), not with the memory migration, so it is **deferred deliberately** rather than half-built.
+
+**TWO numbers decide the refusal, not one.** The document carries two independent statements about its packages, and the consumer reads both:
+
+| key | says |
+|---|---|
+| `package_archives.count` | the archives the export **produced** |
+| `packages_omitted.count` | the packages the export could **not** carry |
+
+Reading only the first is a **fail-open**: an export whose every package failed verification writes `package_archives.count = 0` and `packages_omitted.count = 1`, and a guard that reads the first number imports that document normally — the projected rows land and the package's content is left behind. That is the loss the refusal exists to prevent, and it is reachable from this export's own output. So a document that **dropped** anything is package-bearing, whether or not it also carries an index.
+
+**A MALFORMED shape is refused too.** A count that cannot be read, a negative count, and a count that disagrees with the list it accompanies (`package_archives.count` against `package_archives.archives`, `packages_omitted.count` against `packages_omitted.packages`) all leave the number of packages **unknown** — and an unknown number is not zero. A string count, a fractional count, a missing count, a null count, and an index that is not an object at all are all refused, with a diagnostic that says the index is malformed. The safe reading of an unreadable index is the one that refuses; treating it as "no packages" would be a fail-open in a fail-closed design.
+
+**The SCOPE's arithmetic is checked too.** The document carries a third and fourth number, inside the marker's `scope`: `selected` is how many packages the export was about, and `carried` is how many it actually carried. Those and the counts above are one identity — `selected == carried + omitted`, and `carried` is the same number as the archive index's `count`. A document that breaks either identity is contradicting **itself** about how many packages it holds, and is refused. The quiet case is the one that matters: a document that says *"five packages were selected, none were carried and none were omitted"* names no loss at all, and a guard that reads only the counts would import it — leaving five packages' content behind without a word. A document with **no** scope is a pre-P7 document; there is nothing to check its numbers against, so it is imported normally.
+
+A document that carries **both** counts at zero — a complete export of a workspace with no packages — is imported normally.
+
+#### The filesystem safety
+
+Archives and export metadata are written through **private staging paths**:
+
+- The staging directory is created with a **random** name **beside** the output, so the publication is a same-filesystem rename and a predictable name cannot be pre-created as a symlink. It is removed on every failure path.
+- Nothing is published until every archive has been written **and** its digest re-read from the staged file and checked.
+- The document is written to a temporary name and **renamed** over the output, so the output is never truncated before its content is known to be complete.
+- A **symlink** is never followed: the output path and the sibling directory are inspected **without** following links, and a symlink in either place is refused.
+- An existing sibling directory that holds files is **refused**. An export never silently overwrites an archive.
+- Every **published** archive's digest is verified by reading it **back** from the published location.
+- The **document** is published with the mode `0644` on **both** paths, and the mode is set **explicitly**, so it does not depend on the caller's umask. The package-free path and the package-bearing path use the **same** writer, and the writer sets the mode before the rename: a temporary file is `0600`, because that is what a temporary file is, and a rename publishes that mode. (Before P7 the package-free path published `0666 & ~umask`, which is `0600` under umask `077` and `0644` under umask `022` — so the mode it published depended on the operator's umask.) The **archives** stay private (`0600`, inside a `0700` directory): the document is a shareable artefact, and the packages' contents are not.
+
+**The publication is NOT one atomic operation, and the design does not pretend otherwise.** The directory is published by a rename and the document by a second rename. The **order** makes the intermediate state harmless: the **directory is published first** and the **document second**, so a document is never published pointing at archives that are not there — a lie the consumer could not detect. The reverse — a directory with no document — points at nothing, and the recovery is to remove the directory and run the export again.
+
+**The recovery path is tested, not assumed.** An interruption between the two renames leaves a directory of archives and no document. The test asserts that the archives the interruption left behind are **intact and importable** — the interruption damaged nothing — that the next export **refuses** to run into that directory and says how to recover, and that removing the directory and running the export again succeeds.
+
+**A partial publication is reported honestly.** Every failure that happens *after* the directory rename says so: the error names the published directory, says it holds this export's archives, and says to remove it and run the export again. An error that said only "the export failed" would leave the operator with a directory they did not know was there.
+
+#### What P7 does **not** add
+
+**No `mpm skill export` command and no new `mpm_skills` MCP actions.** Those belong to **P8**. P7 extends the existing `mpm export` command, because complete skills export is explicitly part of the P7 contract, and it exposes an **internal export interface** — `ExportSkillPackage` (one package), `ExportSkillPackages` (a set, for the batch export) and `ExportSkillDocument` (an ordinary skill, as a one-file archive) — that P8's CLI and MCP surfaces call directly. None of the three is reachable from a command yet: `mpm export` uses the first two, and the third is P8's.
+
+**No new multi-package ZIP format.** One archive carries one package. The batch export's archives are separate files beside the document, named by the document's index.
+
+**No P9 lifecycle management, no agent-executable package content and no HAL integration.** A stored script is stored and flagged, never run.
+
+**No change to the database schema, and no write to the database at all.** The exporter reads the three package tables §6.8 specifies, plus `memories`. It writes nothing.
+
+**No change to the importer.** The `.skill` archive the writer produces is accepted by the existing P5 importer **by construction** — the flat layout is what §5.3.1's root rule expects — and no importer change was needed to make it so.
 
 ---
 
@@ -2532,6 +3600,21 @@ mpm resolve_theory <id> <conclusion> --winner=<id>     # Arc 1 closure: arbitrat
 mpm ops topic|lesson|session|reference|memory|wake|gateway
 ```
 
+**`mpm ops maintain` reports what actually happened.** It runs decay,
+pruning and consolidation, and prints the statistics each one produced. Each
+count is the work the run **actually changed**, not the work it attempted: a
+soft-delete that matches no row — because another process removed or already
+deleted it — is not counted as a consolidation.
+
+If an operation **fails**, the statistics are still printed — the work that DID
+happen is real — but the run is marked `completed WITH ERRORS`, the failed
+operations are named, and the process **exits non-zero**. A clean run prints
+`Self-maintenance complete` and exits 0.
+
+The two signals are therefore separate and both truthful: the **counts** say
+what was changed, and the **exit status** says whether every operation ran. A
+routine race with a concurrent writer changes a count; it does not fail the run.
+
 ### `debug` — Low-Level Inspection
 
 ```bash
@@ -2603,6 +3686,107 @@ mpm compact requeue-deferred [limit] [--limit N] [--json]
 Requeue returns the row to the pool; it does not schedule a synthesis. A requeued row is offered again on the next drain, spending stage budget like any other row.
 
 **Not exposed over MCP.** `requeue-deferred` has no `mpm_system` counterpart and no `mpm call` equivalent — reach the drain itself through `mpm call mpm_system --payload '{"action":"compact",...}'` if you need the agent path. The `compact` action's params schema is `additionalProperties: false`, so a requeue parameter cannot be passed even by an agent that guesses the name.
+
+### Operator attention — pending lesson proposals
+
+`mpm lesson proposals` has always listed the review queue, but an operator had
+to already know to run it. `mpm status` and `mpm doctor` now both surface the
+backlog, from one canonical count, so a queue cannot accumulate silently.
+
+**A pending lesson proposal is a DECISION, not a fault.** An agent may propose
+a lesson; only an operator can accept it. The proposal sits between those two
+facts, and the substrate's job is to make it visible without ever deciding it.
+
+Three queues are deliberately distinct, and confusing them is the defect this
+section exists to prevent:
+
+| what you see | what it means | what clears it | is it a fault? |
+|---|---|---|---|
+| **Pending lesson proposals** | an agent proposed a lesson; the operator has not accepted or rejected it | `mpm lesson promote <id>` / `mpm lesson reject <id>` | **no** — an unmade decision |
+| **Spaced memory review** (`mpm review`, Doctor's "Review backlog") | memories due for reinforcement under the spaced-repetition schedule | answering the review, or the window passing | no |
+| **Doctor PASS/WARN/FAIL** | the substrate's own operational health | fixing the fault | **yes** — this is the only one of the three |
+
+The first two never enter the health tally. An installation with a full review
+queue is a healthy installation with work waiting.
+
+#### `mpm status`
+
+The dashboard carries its own `Attention` block, rendered even at zero so
+"nothing is waiting" is visible rather than inferred:
+
+```
+Attention
+  Lesson proposals : 3 pending review
+        → Run `mpm lesson proposals` to review them.
+```
+
+```
+Attention
+  Lesson proposals : 0 pending
+```
+
+If the count cannot be established, the row says `unavailable` — never `0`.
+Zero is the healthy answer, so a failed query must not be allowed to produce it.
+
+`mpm status --json` carries the same number additively. Every pre-existing key
+keeps its meaning:
+
+```json
+"lesson_proposals": { "pending": 3 }
+```
+
+```json
+"lesson_proposals": { "pending": null, "unavailable": true }
+```
+
+#### `mpm doctor`
+
+The same count appears in Doctor's existing `Attention` section, which is where
+non-failing operator signals already live:
+
+```
+MPM · Attention
+
+  Operational issues  0 in 7d
+  Audit clusters      0 active
+  Lesson proposals    3 pending review
+        → Run `mpm lesson proposals` to review them.
+```
+
+JSON, under the existing `attention` object:
+
+```json
+"attention": {
+  "operational_issues_7d": 0,
+  "audit_clusters": [],
+  "lesson_proposals": { "pending": 3 }
+}
+```
+
+A pending proposal is not a `Check`: it contributes nothing to
+`passed`/`warnings`/`failed`, cannot turn a PASS into a WARN, and does not
+change Doctor's exit code. A count that fails degrades **only its own field**
+to `unavailable`; it does not take the operational or cluster sections with it.
+
+#### Reviewing the queue
+
+```bash
+mpm lesson proposals                      # pending only (the default)
+mpm lesson proposals --status all         # every state, for audit
+mpm lesson promote <id>                   # accept: becomes a TRUSTED lesson
+mpm lesson reject <id>                    # decline: stays untrusted, forever
+```
+
+`mpm lesson proposals` is bounded (default 50 rows, `--limit` to narrow), so its
+rendered `count` is the length of the LIST, not the size of the backlog. The
+backlog total is `CountPendingLessonProposals()` in `internal/core`, which is
+what Status and Doctor read.
+
+**The trust boundary is unchanged.** Proposals remain untrusted until an
+operator acts: they are invisible to lesson search, lesson lists and the wake
+context, and promotion through the operator CLI is still the only path from a
+proposal to a trusted lesson. Surfacing the queue — in Status, in Doctor, any
+number of times, in text or JSON — reads the count and writes nothing.
 
 ### CLI-side input/output limits
 
@@ -2732,7 +3916,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`skill`** — Skill CRUD + workshop (form | refine)
 - **`snooze`** — Suppress from recall (temporary)
 - **`stats`** — Show memory statistics
-- **`status`** — Show system status
+- **`status`** — Show system status (incl. lesson proposals awaiting operator review)
 - **`switch`** — Switch persona/mode interactively
 - **`synthesize`** — Merge near-duplicate memories
 - **`tasks`** — Manage scheduled tasks (upsert|list|delete)
@@ -2786,12 +3970,14 @@ Companion tools: `check_wakes`, `list_wakes`. Architecture: `scheduled_wakes` ta
 
 **Wakes are one-shot.** A wake fires once, gets marked `fired=1`, and is retired by GC. For *recurring* workflows, use `scheduled_tasks` (the Agentic Cron surface — see below). The `recurring_rule` field that historically lived on `schedule_wake` is retired as of 2026-10-04; see the migration note further down.
 
+**A wake whose `metadata` is not a parseable JSON document belongs to no partition.** A row whose metadata is present, non-empty and malformed is *corrupt*: it is never delivered by the fold, never claimed by the scheduler, never retired by a retention sweep, and never resolved by an agent — `mpm_wakes resolve` refuses it with the status `corrupt_metadata`. Its original bytes are preserved, because they are the only evidence of what the row was (a truncated `{"kind": "cron"` names a cron wake that cannot be read back). Every surface that meets one rejects it individually, with a diagnostic carrying those bytes, and carries on with the healthy rows: one corrupt row never blocks, delays or rolls back work on any other row. The `wakes_corrupt_metadata` health counter counts them. A *valid* but non-object document (`null`, `42`, `[]`) is **not** corrupt — it parses, so it is normalised to an empty object plus the audit note.
+
 **Trade-off vs. a real-time push daemon:** MCP has no server-initiated messages over stdio, so `mpm-mcp` cannot fire a wake back to a sleeping agent. The opportunistic fold is the next-best mechanism — at-most-once-on-next-contact, not real-time. For Wimbledon R1, WC2026 group stage, and monthly Meshal reminder use cases this is sufficient. Real-time push would require an SSE transport change and is deferred.
 #### Autonomous wake execution (mpm-scheduler + mpm-critic)
 
 *System-kind wakes (snapshot, critic, GC, broadcast) execute unattended via the 60s ticker — for the tasks the agent would forget.*
 
-For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; after each handler returns, the scheduler calls MarkFired (`fired=1`) which here records the system-kind terminal transition (the handler's completion is itself the terminal event — internal to the scheduler, no separate user/agent ack is needed). Notification-kind and untagged wakes pass through to the opportunistic fold unchanged. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Build via `make build` (to `.build/bin/`); promote to the install prefix with `make install` or `./install.sh`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters system kinds from the opportunistic fold so the two surfaces don't race for the same wake.
+For system-level actions that must run unattended regardless of user presence (pre-flight snapshots, critic audits, GC sweeps, broadcasts), `cmd/mpm-scheduler` is a companion Go daemon that consumes `scheduled_wakes` on a 60s ticker. Wakes tagged with `metadata.kind=snapshot|critic_audit|gc|broadcast` are dispatched to registered handlers and execute inline; after each handler returns, the scheduler calls MarkFired (`fired=1`) which here records the system-kind terminal transition (the handler's completion is itself the terminal event — internal to the scheduler, no separate user/agent ack is needed). The agent-owned kinds — `notification` (explicitly or untagged), `cascade` and `cron` — pass through to the opportunistic fold unchanged, and the fold delivers and retires them. `cmd/mpm-critic` is the standalone runner for one audit cycle — the scheduler's `critic_audit` handler shells out to it. Build via `make build` (to `.build/bin/`); promote to the install prefix with `make install` or `./install.sh`; ship under systemd as a user service for persistence. Both binaries are first-class artifacts (Go, no shell wrappers). The two-way bridge with `mpm-mcp`: `CheckPendingWakes` filters the SCHEDULER-owned kinds out of the opportunistic fold so the two surfaces don't race for the same wake.
 
 **Wake ownership.** A wake kind has exactly one owner, and the fold only ever retires what it owns.
 
@@ -2799,6 +3985,10 @@ For system-level actions that must run unattended regardless of user presence (p
 * The **scheduler** owns every other kind — `snapshot`, `critic_audit`, `gc`, `broadcast`, `cascade_summary`, `drill`, and any kind a future binary introduces. The scheduler runs them through a registered handler and retires them after the handler returns. Registering a handler for an agent-owned kind is refused, because the fold would retire the wake before the handler could run it.
 
 The agent's list is an allowlist, so the default is deny: an unknown kind is not the agent's. The practical consequence for the public surface is that `mpm_wakes check` with `kinds=["*"]` surfaces every AGENT-OWNED pending wake and no scheduler-owned wake, and a `kinds` list naming a scheduler-owned kind surfaces nothing. A scheduler-owned wake that is already persisted is never reclassified, deleted or retired by an agent-facing operation.
+
+**The default fold and the wildcard fold are the same predicate.** `CheckPendingWakes`'s no-kinds branch — the one every CLI and MCP request runs — filters to the same agent-owned allowlist as `kinds=["*"]`. It used to match notification wakes only, which meant the two kinds the fold owns but the default omitted (`cascade` and `cron`) were delivered to nobody: a `cron` wake became due, was invisible on every agent surface, and was eventually retired by the cron retention sweep with its `directive_id` undelivered. The `cascade` wake had the same fate, although its producer documents "immediate delivery on next check_wakes" and `check_wakes` without a `kinds` argument uses the default branch. One predicate for "what the fold delivers" is the point of the allowlist: a kind the agent owns is delivered by the fold, and a kind the scheduler owns never is.
+
+**The delivery-state axis is scheduler-dispatch only, and the cron wake is now on the other side of that line.** The axis (`delivery_state` / `claimed_by` / `claimed_at` / `delivered_at` / `lease_expires_at`) records what the **scheduler** dispatched. It does not record what the **agent** received, so a fold-delivered row keeps `delivery_state IS NULL` and `delivered_at IS NULL` — "retired, never delivered", in the delivery-state design's own words — even when the agent did receive it. The corrections this raises for the axis (a `presented` state, a claim/lease so a crashed fold is reclaimable, and the scope decision itself) are recorded in [`docs/dev/issue-178-delivery-state-errata-2026-11-06.md`](dev/issue-178-delivery-state-errata-2026-11-06.md). The design document itself is frozen and unedited.
 
 **Arming authorisation.** Ownership is enforced in both directions. The agent-facing scheduling surface (`mpm_wakes schedule`) may arm only the kinds the agent owns — `notification` (explicitly or untagged), `cascade` and `cron`. A request naming a scheduler-owned kind (`drill`, `broadcast`, `snapshot`, `gc`, `critic_audit`, `cascade_summary`) or an unknown kind is refused and no wake row is created. The refusal names the kind and the armable set, so the caller can correct itself.
 
@@ -2813,6 +4003,22 @@ The gate is at the agent-facing boundary, not in the DB-layer producer: `Schedul
 *Recurring workflows with fail-fast directive validation — catch typos at upsert, not silent wake drops at 3 AM.*
 
 For work that should run **on a schedule** rather than once, `scheduled_tasks` is the registry of recurring agentic workflows. The `mpm-scheduler` daemon's 60s tick loop polls `scheduled_tasks WHERE status='active' AND next_run_at <= ?` and, for each due task, injects a standard `scheduled_wakes` row in the same transaction as the `next_run_at` rollover. A daemon crash between injection and rollover cannot double-fire. The injected wake surfaces to the agent on its next MCP call via the standard opportunistic fold.
+
+The injected row carries `metadata.kind=cron`, so it is an agent-owned wake, and the default fold delivers it on the agent's next call. The row also carries `metadata.directive_id` — the prime directive the agent has to consult — and the fold's `<system_wake_notification>` block renders that `directive_id` for the agent, so the agent does not need a follow-up lookup to find it.
+
+**The cron retention window is the delivery deadline.** The scheduler's cron retention sweep retires a `cron` row once `CronRetentionWindow` (one hour) has elapsed since its `target_time`. That window is how long the delivery opportunity stays open: inside it, the fold delivers the row; outside it, the row is retired as dead weight and the next tick supersedes it. The retirement is a compare-and-set on `fired=0`, so a row the fold settled in the meantime is skipped rather than overwritten, and it writes an `expired.reason=cron_1h_retention` audit note into the row's metadata. A cron tick is recurring — `scheduled_tasks.last_run_at` records that the task ran — so a tick whose wake was never delivered is not a lost obligation; that is why the cron window is an hour and not the notification sweep's seven days.
+
+**The audit note belongs to the sweep, not to the fold.** A swept row is distinguishable from a delivered one because the sweep writes `expired.reason=cron_1h_retention` into the row's metadata. The fold writes no note, and the fold's pipeline is `selected → COMMIT(fired=1) → presented`, so a crash between the COMMIT and the presentation leaves a row that is byte-identical to a genuinely delivered one. There are therefore **three** states, not two:
+
+| state | `fired` / `fired_at` | metadata |
+|---|---|---|
+| **LOST** (the fold settled it, then crashed before presenting it) | `1` / set | no note |
+| **SWEPT** (the retention sweep retired an undelivered row) | `1` / set | `expired.reason=cron_1h_retention` |
+| **DELIVERED** (the agent received it) | `1` / set | no note |
+
+`LOST` and `DELIVERED` are **indistinguishable** in the substrate. Opportunistic delivery is **at-most-once and not crash-safe**: a wake lost in the fold's crash window is not re-delivered (the row is `fired=1`) and, for a cron wake, not re-injected (the next tick is a new row). The delivery axis needs a `presented` write by the fold, plus a claim/lease so a crashed fold is reclaimable, before a cron wake can be called a delivery obligation — that is Stage B/C work, and the axis (`delivery_state` / `delivered_at`) is **scheduler-dispatch only** today, so a fold-delivered row keeps `delivery_state IS NULL` and `delivered_at IS NULL` ("retired, never delivered", in the delivery-state design's own words).
+
+**The retention window does not bound the fold's batch.** The fold's batch is bounded by the **pending backlog**, and the backlog is bounded only while `cron-tasks × 60 rows/hour ≤ sweep capacity per hour` — where the sweep capacity is `CronRetentionNormalLimit = 60`/hour normally and `CronRetentionCatchUpLimit = 180` on catch-up. One one-minute cron task produces exactly 60 rows/hour and the sweep retires exactly 60/hour: balanced at one task. The **second** one-minute task produces 120/hour against a 60/hour sweep and the backlog grows by 60 rows/hour; from the fourth task it grows even in catch-up mode (240 produced vs 180 retired). `CronRetentionNormalLimit` must therefore be re-derived — together with the doctor's escalation ladder (60/240) — when a second one-minute cron task is added. The fold's own per-call delivery budget bounds what the **agent** receives per call; it does not bound the backlog, and it does not make a backlog that outruns the sweep deliverable.
 
 ```
 mpm tasks upsert epistemic-compaction \
@@ -2848,7 +4054,7 @@ BEGIN;
   -- 2. INSERT wake rows (one per due task)
   INSERT INTO scheduled_wakes (id, target_time, reason, created_by, metadata)
     VALUES (?, ?, 'cron:<task_id>', 'mpm-scheduler',
-            '{"source":"cron","task_id":"<id>","directive_id":"<id>"}');
+            '{"kind":"cron","source":"cron","task_id":"<id>","directive_id":"<id>"}');
   -- 3. ROLLOVER next_run_at
   UPDATE scheduled_tasks
     SET last_run_at=?, next_run_at=?, updated_at=?
@@ -2856,7 +4062,7 @@ BEGIN;
 COMMIT;
 ```
 
-The wake injected by the cron engine has `reason='cron:<task_id>'` and `metadata={source:'cron', task_id, directive_id}`. The agent sees the wake on its next call, parses `cron:` prefix to recognize the source, reads `metadata.directive_id`, looks up the directive via `mpm_context action=read_directives`, executes. **No new wake-handling code path** — the cron engine plugs into the existing wake queue.
+The wake injected by the cron engine has `reason='cron:<task_id>'` and `metadata={kind:'cron', source:'cron', task_id, directive_id}`. The `kind` tag is what the `check_wakes` kinds taxonomy matches on (`kinds: ["cron"]`), and it is also what makes the row agent-owned, so the default opportunistic fold delivers it. The agent sees the wake on its next call, parses `cron:` prefix to recognize the source, reads `metadata.directive_id`, looks up the directive via `mpm_context action=read_directives`, executes. **No new wake-handling code path** — the cron engine plugs into the existing wake queue.
 
 **Companion schema** (for the database-design curious):
 
@@ -3251,6 +4457,32 @@ Three paths exist, each routed through the secret/poison scanner — no write pa
 The first two paths assume the caller already knows the skill is worth storing. The third path is the **formation/refinement gate**: it evaluates whether the proposed procedure actually belongs in the procedural-memory layer, derives a deterministic version when refining, and only writes when the decision model + validation + duplicate checks agree.
 
 Saving the same `(name, version)` pair requires `force=true` — silent overwrites are rejected. Saving a new version for an existing name flips the prior version's `is_latest` to `0` in the same transaction and stamps `supersedes` linkage, so older versions remain queryable but no longer advertise themselves as current.
+
+##### Package immutability — the `package_immutable` refusal
+
+**A skill that owns a package cannot be overwritten through the legacy single-document write path.** `mpm save-skill --force`, `mpm skill add --force` and the MCP `mpm_skills save` action with `force: true` all refuse such a skill with the distinct `package_immutable` refusal, on both the CLI and the MCP surface.
+
+The refusal is **fail closed**: nothing is written — not the content, not the metadata, not the provenance, not the package manifest, not the file rows, not the blobs. The old projection and the package entrypoint cannot diverge, because neither moves.
+
+The reason is that the legacy force path replaces `memories.content` **in place**, under the same id. For a packaged skill that would give one id two documents: `read` would return the new body while `read_file(SKILL.md)` returned the old bytes, `projection_sha256` would stop describing `memories.content`, and the package row, the file rows and the blobs would all still describe the previous document. The refusal is the only outcome that keeps those two views identical.
+
+The refusal applies to a **soft-deleted** packaged skill too. A soft shred preserves the skill row and — through the foreign key — the package row, so the package stays soft-shredded until it is explicitly re-imported; the legacy force path does not resurrect it.
+
+A skill with **no** package row is unaffected. `force=true` still overwrites an ordinary skill in place, still resurrects a soft-deleted ordinary skill, and still refreshes its provenance.
+
+The guard is transactionally safe: the check and the write share one transaction, and the `UPDATE` carries the guard's condition in its own `WHERE` clause, so the check and the write are one atomic statement even against a stale snapshot. There is no time-of-check/time-of-use window — a package row cannot appear between the check and the write.
+
+##### Retention — skills are exempt from age-based pruning
+
+**The age-based prune (`mpm prune --older-than <n>d`) never removes a skill.** The exclusion is a `collection` filter on the delete statement itself (`SkillsExclusionClause`), so it protects **every** skill — packaged or not, in every version.
+
+The blast radius is wider than "packages", and it is stated here rather than discovered by an operator: **an operator who has been using `--older-than` to reclaim space from stale skills will find that it silently stops doing anything for skills.** There is no error, no warning, and no count of skipped rows. The reported deletion count remains exact — it counts the rows that were deleted, never the rows the statement skipped.
+
+The exemption is **blanket** rather than package-aware, and that is deliberate. A package's bytes have no second copy, so an age-based delete of a packaged skill destroys content that exists nowhere else. A package-aware `NOT EXISTS` check would preserve age-based pruning for ordinary skills, but it puts a per-row check inside a bulk delete — which leaves a race between the check and the delete — and it is a larger change to a statement that carries exactly one exclusion clause. The blanket form mirrors the existing directive exemption (`DirectiveExclusionClause`), which is the precedent for a collection-scoped exemption in a hard delete.
+
+The other pruning operations keep their existing contracts: `PruneNeverAccessed`, `PruneExpired` and both `AutoPrunePolicy` rules are unchanged. Skills are `is_long_term = 1` with a `NULL` `expires_at`, so no expiry rule reaches them either.
+
+**Deliberate removal is unaffected.** `mpm skill delete` soft-shreds a skill and `mpm skill shred` hard-deletes it, cascading to the package row and the file rows; the blob becomes an unreferenced garbage-collection candidate. The exemption removes the unintentional, bulk, age-based destruction of content that exists nowhere else — it does not remove the operator's explicit routes.
 
 ##### Skills Workshop
 
@@ -4034,6 +5266,132 @@ mpm call read_wake_context
 # → "Audit Summary (Last 7 Days):\n- N errors, M warnings logged.\n
 #    - Active Clusters (Unknown):\n  * [security] 4 events since 2026-07-02 (ID: security:...)"
 ```
+
+### Observational writes do not block the agent
+
+Every write MPM makes falls into one of four classes, and the class
+decides **when** the write happens:
+
+| class | examples | when |
+|---|---|---|
+| durable user state | the wake context's mark-read (`session_handoffs.read_at`), a memory save, a handoff write | **inline**, on the caller's goroutine, with the statement-level retry budget |
+| essential audit evidence | the per-invocation `tool_invocations` row, the failure-path `system_audit_log` row | **deferred** (below) |
+| best-effort telemetry | the `retrieval_metadata` reuse counters | **deferred** (below) |
+| caller-visible failure | a handler's returned error | inline, and reported to the caller |
+
+The rule is that a write which only *observes* — it records what
+happened, it does not make it happen — must not be on the agent's
+critical path. A contended SQLite write costs the substrate's busy
+timeout on every attempt, so paying an observational write inline costs
+the agent seconds it has no use for.
+
+**Deferred does not mean dropped — and this is the precise contract.**
+
+A deferred write is handed to the substrate's deferred durable-write
+queue. The obligation stays pending until it lands, and the caller is
+never told the write succeeded before it did. The queue's promise has
+four parts, and each part is enforced by a test:
+
+1. **An ACCEPTED obligation is retried until it lands.** The queue
+   counts the obligation *being written* as well as the ones waiting, so
+   the slot an in-flight obligation needs for its retry is **reserved**
+   while it is in flight. A producer that wants that slot is refused,
+   loudly, rather than taking it. Without this reservation a saturated
+   queue silently discarded accepted obligations — the failure this
+   contract exists to rule out.
+2. **Only the *clearable* class of failure is retried.** Ordinary
+   `SQLITE_BUSY` is a wait, and waiting clears it; a constraint
+   violation or a closed database is not a wait, and retrying it forever
+   would strand every other obligation behind it. Those are dropped,
+   loudly, and **counted**.
+3. **A REFUSED obligation was never accepted.** When the queue is full
+   or closed it returns `false`, the write is **not** made, and the
+   caller is told at the moment of refusal. A caller that ignores that
+   result is claiming a write was queued when it was not; the substrate
+   does not allow that to go unremarked.
+4. **The queue is bounded.** 256 obligations, pending and in-flight
+   together. A slice of that (64) is **reserved for audit evidence**:
+   telemetry is losable by its own contract, audit evidence is not, so
+   telemetry may not consume the reserve.
+
+**The queue is memory-only, and is NOT crash-durable.** Nothing is
+persisted, so a `SIGKILL` — or any death that does not run the shutdown
+path — loses every pending obligation, with no report. That is
+acceptable for telemetry and is **not** acceptable for audit evidence,
+and this contract does not pretend otherwise. Closing that gap needs a
+*different* mechanism (a durable obligation record), not a better
+promise from this one; see
+[`docs/dev/issue-178-observational-write-latency-2026-11-08.md`](dev/issue-178-observational-write-latency-2026-11-08.md)
+§4.8 for what that mechanism would have to be, and why it is not part of
+this slice.
+
+**What is reported, and where.** The four outcomes are distinct and are
+counted separately:
+
+| outcome | meaning | reported by |
+|---|---|---|
+| **landed** | written successfully | the queue's counters |
+| **accepted** | the queue took responsibility; still pending | the queue's counters |
+| **rejected** | never accepted — the queue was full or closed | the caller is told at the refusal; a `WARN` line; the queue's counters |
+| **lost** | accepted and then lost — a terminal failure, or the queue closing underneath it | a `WARN` line at the loss; the next `FlushDeferredWrites` reports it; the shutdown path reports the count at `ERROR` |
+
+A lost **evidence** obligation is reported by the next
+`FlushDeferredWrites` — a caller that treats a nil flush as "the audit
+record is there" is not told a falsehood. A lost **telemetry**
+obligation is counted and logged but does not fail that flush: telemetry
+is losable by contract, and a caller waiting for audit evidence must not
+be failed by a lost reuse counter.
+
+This is **stronger** than the inline behaviour it replaces, not weaker.
+The inline writes had a bounded retry budget and then lost the row:
+under a held write lock the failure-path audit row cost ~33 s and
+produced **no row at all**, and the telemetry rows cost ~25 s and
+produced no rows. Deferred, they are retried until they land.
+
+| write | inline cost under a held lock | deferred |
+|---|---|---|
+| retrieval telemetry (5 rows) | ~25 s, then lost | off the caller's goroutine, retried until it lands |
+| failure-path audit row | ~33 s, then lost | off the caller's goroutine, retried until it lands |
+| per-invocation audit row | ~33 s, then lost | off the caller's goroutine, retried until it lands |
+| mark-read (durable user state) | ~33 s, durable | **unchanged** — inline and durable |
+
+**What stays inline, and why.** The mark-read records that a handoff
+has been delivered. The handoff is delivered exactly once, so the mark
+must be durable before the agent is told the handoff was delivered, and
+several substrate contracts assert the mark synchronously. It also
+carries the substrate's documented write budget, so a recoverable
+contention window of up to ~20 s is absorbed rather than lost.
+
+**Measured effect.** One MCP wake request against a held SQLite write
+lock: **124.47 s → 33.16 s** (73% reduction). The remainder is the
+durable mark-read and nothing else.
+
+That figure is for the **no-pending-wake** configuration, and the
+configuration matters: `read_wake_context` calls the wake fold on every
+request, and with no pending wake the fold's settlement write never
+runs. With a pending wake the same request measures **39.42 s** — an
+extra ~6.2 s for the fold's settlement, which meets the stale-snapshot
+class and therefore fails fast instead of burning a full budget. The
+wake is **delayed, not lost**: it stays pending (`fired = 0`) and a
+later call delivers it, and it is never falsely settled.
+
+| configuration | wall clock | vs. the 124.47 s baseline |
+|---|---|---|
+| no pending wake | 33.16 s | −73% |
+| with a pending wake | 39.42 s | −68% |
+
+The full measurement, the acceptance thresholds, and the mutation
+controls are in
+[`docs/dev/issue-178-observational-write-latency-2026-11-08.md`](dev/issue-178-observational-write-latency-2026-11-08.md).
+
+**A deferred write still needs a transaction to be restart-tolerant.**
+Introducing a second writer on the shared pool means any transaction
+that reads and then writes can meet a stale snapshot
+(`SQLITE_BUSY_SNAPSHOT`), which no statement-level retry can clear.
+Such a transaction must run under `dm.WithTx`, which restarts it against
+a fresh snapshot. A bare `dm.db.Begin()` plus a raw `tx.Exec` loses the
+write — see `ResolveWake` and `CheckPendingWakes`, which are the two
+places in the substrate that had that shape and now do not.
 
 ### Dispatch outcome classification
 
@@ -4866,17 +6224,88 @@ The `!hasOldConf` clause treats a brand-new confidence record as if its prior va
 
 ### D.8 Wake delivery cap
 
-`CheckPendingWakes` caps cascade-kind wakes at `MaxCascadeWakePerCheck = 3` per call.
+`CheckPendingWakes` bounds what it delivers in one call, **per kind**. There are two limits, and both are needed:
 
-> The cap throttles **delivery**, not intent creation. It never discards, suppresses, or coalesces pending intents — those live in `epistemic_cascade_outbox` and are unaffected. It only bounds how many cascade-flavoured wake rows surface to the agent in a single `check_wakes` call.
+| limit | value | what it bounds |
+|---|---|---|
+| `MaxNotificationWakePerCheck` | 16 | notification-kind (and untagged) wake rows delivered per call |
+| `MaxCronWakePerCheck` | 16 | cron-kind wake rows delivered per call |
+| `MaxCascadeWakePerCheck` | 3 | cascade-kind wake rows delivered per call |
+| `MaxWakeNotificationBytesPerKind` | 4096 | bytes each kind may contribute to the rendered `<system_wake_notification>` block |
 
-Notification and cron wakes are unaffected. Nine pending cascade wakes drain over three `check_wakes` calls: 3, 3, 3.
+> The cap throttles **delivery**, not intent creation. It never discards, suppresses, or coalesces pending intents — those live in `epistemic_cascade_outbox` and are unaffected. It only bounds how many wake rows surface to the agent in a single `check_wakes` call.
+
+Nine pending cascade wakes drain over three `check_wakes` calls: 3, 3, 3.
+
+The cap applies to the default (no-`kinds`) `check_wakes` call as well as to an explicit `kinds=["cascade"]` request, because the default fold selects the agent-owned allowlist and therefore includes `cascade`. The wakes beyond the cap stay pending (`fired=0`) and are delivered by a later call.
+
+**The byte cap is a real bound, because every rendered field is itself bounded.** A cap measured on a batch bounds the *response* only if every member of the batch is bounded, and the row cap does not bound the members: the `directive_id` is caller-supplied, so one wake could carry a 200 KB `directive_id` and make the block fifty times its own cap. Measured at the head that carried the byte cap but not the field bounds: one wake with a 204,800-byte `directive_id` rendered a **204,957-byte** block against a 4,096-byte per-kind cap, and the same wake's *structured* row was **205,020 bytes**.
+
+| bound | value | what it bounds |
+|---|---|---|
+| `MaxWakeRenderedIDBytes` | 8 | the rendered wake id |
+| `MaxWakeRenderedReasonBytes` | 80 | the rendered reason, in **bytes** |
+| `MaxWakeDirectiveIDBytes` | 256 | the rendered `directive_id`, in bytes |
+
+Every cut is made at a **character** boundary. A byte cut can land inside a multi-byte character; the renderer then escapes the orphan byte as `\xNN`, which mangles the text the agent reads and makes the line's byte cost unpredictable. The reason is therefore quoted as *up to 80 bytes*, not *up to 80 chars*.
+
+With those bounds in place a single rendered row is at most ~450 bytes, so **the per-kind byte cap is never exceeded** — not even by one row — and the block is bounded at `3 × 4096` bytes plus its fixed wrapper.
+
+**The structured payload is a separate surface, with a separate bound.** The rendered block is not the only thing the agent receives. A tool whose handler consumes due wakes itself returns them in its own envelope (`WakesPending` / `wakes_pending`), and that payload carries the same caller-supplied fields. It is bounded by the delivered-row bounds, not by the rendered block's byte cap:
+
+| bound | value | what it bounds |
+|---|---|---|
+| `MaxWakeDeliveredStringBytes` | 256 | each caller-supplied string in a delivered row — the reason, the `theory_id`, the `created_by`, and every string value in the metadata |
+| `MaxWakeDeliveredMetadataBytes` | 512 | the marshalled metadata document of a delivered row |
+| `MaxWakeDeliveredMetadataKeys` | 16 | the number of keys in a delivered row's metadata |
+| `MaxWakeDeliveredIDBytes` | 64 | the wake id in a delivered row (defensive — the id is substrate-generated) |
+
+A metadata key that did not fit is not silently lost: the delivered metadata carries a `_mpm_meta_truncated` marker naming how many keys were omitted. The **stored** row is not modified — the persisted value stays the source of truth and remains readable through `mpm_wakes list`. The bound is on the **delivered** view.
+
+**The accounting: three quantities, three bounds, and they do not share one budget.**
+
+| quantity | bound |
+|---|---|
+| the rendered wake block | `3 × MaxWakeNotificationBytesPerKind` + the block's fixed wrapper |
+| the structured `WakesPending` payload | the row caps × the per-row delivered bounds above |
+| the tool's own payload | the MCP output policy's own threshold, 20,480 bytes (`internal/core/tools/output_policy.go`) |
+| the MCP **envelope** | the block **plus** the tool's payload — it MAY exceed the policy's threshold, even when neither part does |
+
+The MCP adapter prepends the wake block to the tool's response **after** the output-policy spill decision, so the policy's threshold applies to the tool's payload **alone** and never bounded the wake block. The envelope is the sum of two independently bounded quantities. Measured over the real MCP transport: a 9,043-byte block beside a 54,965-byte tool payload — which the policy spilled on its own — is 1,393 bytes to the host.
+
+**The arming path refuses what it cannot render.** The `directive_id` is the identifier the agent passes back to `read_directives`, so a shortened one would name no directive: the wake would be unusable rather than merely truncated. `mpm_wakes schedule` therefore **refuses** a `directive_id` longer than `MaxWakeDirectiveIDBytes` and says that no wake was created. The refusal is at the agent-facing boundary, so the internal producers keep their capabilities. A wake that reached the table by another route — an older binary, direct SQL, a future producer — is still bounded on delivery, and a `directive_id` that was cut says so: the marker names the original byte length.
+
+**The budget is per kind, so no kind can starve another.** A single global budget applied in selection order would let the oldest kind consume the whole allowance on every call — with a 7-day notification backlog and a 1-hour cron backlog, the newer kind's share would be zero *forever*, which is a silent loss window. Per-kind limits give every kind an independent share, so every kind makes progress on every call.
+
+**The budget throttles; it never drops.** A wake that does not fit stays **pending** (`fired=0`) and remains eligible for the next call, exactly as a cascade wake above `MaxCascadeWakePerCheck` already behaves. Nor can an oversized wake starve the wakes behind it: every rendered field is bounded, so an oversized wake costs only its *bounded* size against the budget, and the healthy wakes behind it are delivered in the **same** call. Before the field bounds, the oversized row consumed its kind's whole allowance and the ten rows behind it waited for the next call.
+
+**Why 16.** The budget has to keep up with production: one one-minute cron task produces 60 wakes/hour, so 16 wakes per call keeps up with an agent that issues one request every four minutes, and has 16× headroom for an agent that issues one per minute. It also has to be small enough not to swamp the agent's triage — the seeded directive `mpm-seed-wake-triage-policy` tells the agent to alert the user for every entry with `overdue_secs <= 86400`, so a burst of 60 identical cron entries is 60 identical alerts. 16 is a page, not a wall.
+
+**The budget does not bound the backlog.** The fold's batch is bounded by the pending backlog, and the backlog is bounded only while `cron-tasks × 60 rows/hour ≤ sweep capacity per hour` — see [the Agentic Cron section](#agentic-cron-recurring-tasks) for the arithmetic and for the requirement to re-derive `CronRetentionNormalLimit` when a second one-minute cron task is added.
 
 ```sql
+-- The canonical kind predicate the budget's per-kind selection uses.
+-- It reads the kind through the always-valid JSON expression, so a
+-- corrupt metadata row cannot abort the statement and a row written
+-- with different whitespace is classified identically.
 SELECT * FROM scheduled_wakes
-WHERE metadata LIKE '%"kind":"cascade"%'
-ORDER BY target_time ASC;
+WHERE fired = 0
+  AND (json_extract(CASE WHEN json_valid(metadata) THEN CASE WHEN json_type(metadata) = 'object' THEN metadata ELSE '{}' END ELSE '{}' END, '$.kind') = 'cascade')
+ORDER BY target_time ASC, id ASC
+LIMIT 3;
 ```
+
+### D.8a Wake delivery is at-most-once and not crash-safe
+
+The fold's pipeline is `selected → COMMIT(fired=1, fired_at) → presented to the agent`. A crash between the COMMIT and the presentation loses the wake: the row is `fired=1` with no metadata note, byte-identical to a genuinely delivered row (see [the Agentic Cron section](#agentic-cron-recurring-tasks) for the three states).
+
+Consequences, stated plainly:
+
+- Opportunistic delivery is **at-most-once**. A wake is delivered at most once, and a wake lost in the crash window is **not** re-delivered.
+- The fold writes **no** delivery audit note. The `expired.reason=cron_1h_retention` note belongs to the **sweep** path alone; its absence proves nothing about the fold.
+- The delivery axis (`delivery_state` / `delivered_at`) is **scheduler-dispatch only** today. A fold-delivered row keeps `delivery_state IS NULL` and `delivered_at IS NULL` — "retired, never delivered", in the delivery-state design's own words — even though the agent did receive it.
+
+Before a cron wake can be called a delivery **obligation**, the axis needs a `presented`/`delivered_at` write by the fold, plus a claim/lease so a crashed fold is reclaimable. That is Stage B/C work and is not implemented here.
 
 ### D.9 Drain budget semantics
 

@@ -270,6 +270,96 @@ persistent-state, skill-discovery, and handoff invariants. The plugin wires
 wake-context injection automatically via `ctx.session.hook("context")`; the
 AGENTS.md managed block delivers the rest of the protocol.
 
+## The isolated reviewer agent
+
+A review subagent runs in a child session with the parent's tool surface.
+On 2026-11-15 a review subagent wrote a memory into the operator's
+**live** MPM database through the `mpm_memory` tool, against an
+explicit instruction not to touch it.
+
+The isolation is **capability removal**, and it has three parts.
+
+**1. The tool catalogue is DEFAULT-DENY.**
+[`tests/../mpm-opencode/templates/agents/mpm-reviewer.md`](./templates/agents/mpm-reviewer.md)
+denies `action: "*"` for `resource: "*"`, and re-opens exactly **one**
+action: `sandbox_exec`. An omitted permission rule is not a closure, and
+a default deny makes the omission safe — a capability the host adds
+later is closed on arrival.
+
+**2. The one route out is HOST-CONTROLLED and always sandboxed.**
+`sandbox_exec` is registered by the installed plugin
+(`mpm-opencode/src/sandbox-exec.ts`). It runs the command inside a
+**bubblewrap mount namespace** built by
+`mpm-opencode/scripts/reviewer_bwrap.py`: the runtime is bound read-only,
+the reviewer's disposable tree is bound read-write at `/sandbox`, and
+**every other path is not bound at all** — so it does not exist inside.
+`/etc` is a **synthetic** directory (the trust store, the private keys
+and the operator's account database are not readable), `/tmp` is a
+private tmpfs, the network is unshared, the environment is cleared
+before the disposable variables are set, every capability is dropped and
+a nested user namespace is refused.
+
+The host controls the sandbox's base, the repository copy and the
+protected set. The model supplies the command and nothing else: it
+arrives as a **JSON array on stdin**, so it never reaches a command-line
+parser, and the namespace's own `--` separator stops it reaching
+bubblewrap's parser either.
+
+There is **no unsandboxed fallback**: if bubblewrap is missing or the
+namespace cannot be built, the command does not run and the model gets
+the refusal. There is also **no privileged mode** — the tool does not
+know whether it is being used by the reviewer or by the operator, and
+it does not need to, because it is always confined.
+
+The alternative — rewriting the command in the host's shell hook and
+identifying the reviewer by a session identifier — was measured and
+**rejected**: the hook's event carries no session identifier, and the
+environment's `OPENCODE_SESSION_ID` is agent-influenceable. A security
+authority the agent can influence is not an authority.
+
+**3. The install FAILS CLOSED.**
+`mpm-opencode/scripts/install_reviewer_agent.py` parses the canonical
+template, checks its **policy** (the default deny, the one allowed
+action, every host-side capability, and every MPM tool the registry
+publishes), and **refuses** a definition that does not satisfy it. It
+writes the copy atomically with mode `0600`, reads it **back**, compares
+it byte-for-byte with the template, checks its policy again, and exits
+**non-zero** if any of that fails. `install.sh` treats a failed reviewer
+install as **fatal**, because a deployment step that fails open converts
+an error into a **silent downgrade** of the guarantee.
+
+**The host-side capabilities that are closed, and why.** The shell is
+closed **entirely** — it is a host process with the host user's
+authority, and no rule on a command string makes it a boundary. The
+file tools (`read`, `write`, `edit`, `patch`, `grep`, `glob`, `list`)
+are closed because they run in the host's process, outside any
+namespace; files are reached **through** the sandbox instead. Code Mode
+(`execute`) is closed, and with it the browser family: the browser can
+open a `file://` URL and move server-local bytes, and no permission rule
+confines it. The network tools (`webfetch`, `websearch`) are closed
+because they reach the network from outside the namespace. The MPM
+tools are closed by name, and the list is **machine-checked against
+the registry** — `internal/core/tools/registry_list.go` is the
+authoritative list, and
+[`tests/test_reviewer_isolation.py`](../tests/test_reviewer_isolation.py)
+fails if a tool is added to the registry without a matching deny rule,
+or if a stale rule survives for a tool the registry no longer publishes.
+
+**What it does NOT cover.** The operator's own session is trusted. The
+built-in `explore` and `general` subagents are **not** confined: the
+boundary covers the configured reviewer environment only. A common
+sandbox policy for other delegated agents is a future decision. The Go
+module cache is not bound by default, so a build needing a dependency
+the sandbox has not cached fails.
+
+**The evidence.** The namespace's contract is pinned by
+[`tests/test_reviewer_bwrap_sandbox.py`](../tests/test_reviewer_bwrap_sandbox.py);
+the route closure and the install's fail-closed behaviour by
+[`tests/test_reviewer_isolation.py`](../tests/test_reviewer_isolation.py);
+and the reviewer's **actual execution path** — driven through the exact
+invocation the plugin makes, against disposable sentinels — by
+[`tests/test_reviewer_sandbox_exec_path.py`](../tests/test_reviewer_sandbox_exec_path.py).
+
 ## Verification
 
 ```bash

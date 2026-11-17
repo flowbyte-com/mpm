@@ -78,7 +78,7 @@ Do not use when: you just want to remember something (mpm_memory); you have a co
 					"oneOf": [
 						{
 							"properties": {
-								"hypothesis":        {"type": "string"},
+								"hypothesis":        {"type": "string", "minLength": 1, "description": "Required. The hypothesis being proposed."},
 								"validation_criteria": {"type": "string"},
 								"tags":             {"type": "array", "items": {"type": "string"}},
 								"dependencies":     {"type": "array", "items": {"type": "string"}},
@@ -89,12 +89,66 @@ Do not use when: you just want to remember something (mpm_memory); you have a co
 						},
 						{
 							"properties": {
-								"theoryId":   {"type": "string"},
-								"conclusion": {"type": "string"},
-								"winnerId":  {"type": "string"},
-								"newStatus": {"type": "string", "enum": ["proven","disproven"]}
+								"id":         {"type": "string", "description": "Canonical: the id of the theory being resolved. At least one identity field is required - id, or the compatibility aliases theoryId / theory_id.", "examples": ["T-8f3c1a9d2b7e405"]},
+								"theoryId":   {"type": "string", "description": "Compatibility alias for id."},
+								"theory_id":  {"type": "string", "description": "Compatibility alias for id."},
+								"conclusion": {"type": "string", "minLength": 1, "description": "Required. What the evidence showed - free text.", "examples": ["The reproduction ran on 3 machines with the same result"]},
+								"status":     {"type": "string", "description": "Canonical outcome: proven or disproven. At least one outcome is required - status, a status alias, or an arbitration winner. The handler reads the outcome from status, then new_status, then newStatus - the first non-empty one wins - and refuses two supplied keys that disagree; it never reads new_status when both status and newStatus are supplied.", "examples": ["proven", "disproven"]},
+								"newStatus":  {"type": "string", "description": "Compatibility alias for status (proven | disproven). The handler reads the outcome from status, then new_status, then newStatus - the first non-empty one wins."},
+								"new_status": {"type": "string", "description": "Compatibility alias for status (proven | disproven). The handler reads the outcome from status, then new_status, then newStatus - the first non-empty one wins."},
+								"winner_id":  {"type": "string", "description": "Canonical: the id of the winning theory. An arbitration winner selects the outcome, so it needs no status - and a status supplied alongside it is ignored, exactly as the handler ignores it."},
+								"winnerId":   {"type": "string", "description": "Compatibility alias for winner_id."}
 							},
-							"required": ["theoryId", "conclusion"]
+							"required": ["conclusion"],
+							"allOf": [
+								{"anyOf": [
+									{"required": ["id"],        "properties": {"id":        {"minLength": 1}}},
+									{"required": ["theoryId"],  "properties": {"theoryId":  {"minLength": 1}}},
+									{"required": ["theory_id"], "properties": {"theory_id": {"minLength": 1}}}
+								]},
+								{"anyOf": [
+									{"required": ["status"],     "properties": {"status":     {"minLength": 1}}},
+									{"required": ["newStatus"],  "properties": {"newStatus":  {"minLength": 1}}},
+									{"required": ["new_status"], "properties": {"new_status": {"minLength": 1}}},
+									{"required": ["winner_id"],  "properties": {"winner_id":  {"minLength": 1}}},
+									{"required": ["winnerId"],   "properties": {"winnerId":   {"minLength": 1}}}
+								]},
+								{"anyOf": [
+									{"anyOf": [
+										{"required": ["winner_id"], "properties": {"winner_id": {"minLength": 1}}},
+										{"required": ["winnerId"],  "properties": {"winnerId":  {"minLength": 1}}}
+									]},
+									{"not": {"anyOf": [
+										{"required": ["winner_id"], "properties": {"winner_id": {"minLength": 1}}},
+										{"required": ["winnerId"],  "properties": {"winnerId":  {"minLength": 1}}}
+									]},
+									 "allOf": [
+										{"anyOf": [
+											{"not": {"required": ["status"],     "properties": {"status":     {"minLength": 1}}}},
+											{"required": ["status"],             "properties": {"status":     {"minLength": 1, "enum": ["proven", "disproven"]}}}
+										]},
+										{"anyOf": [
+											{"not": {"required": ["newStatus"],  "properties": {"newStatus":  {"minLength": 1}}}},
+											{"required": ["newStatus"],          "properties": {"newStatus":  {"minLength": 1, "enum": ["proven", "disproven"]}}}
+										]},
+										{"anyOf": [
+											{"not": {"required": ["new_status"], "properties": {"new_status": {"minLength": 1}}}},
+											{"required": ["new_status"],         "properties": {"new_status": {"minLength": 1}},
+											 "anyOf": [
+												{"not": {"allOf": [
+													{"required": ["status"],    "properties": {"status":    {"minLength": 1}}},
+													{"required": ["newStatus"], "properties": {"newStatus": {"minLength": 1}}}
+												]},
+												 "properties": {"new_status": {"enum": ["proven", "disproven"]}}},
+												{"allOf": [
+													{"required": ["status"],    "properties": {"status":    {"minLength": 1}}},
+													{"required": ["newStatus"], "properties": {"newStatus": {"minLength": 1}}}
+												]}
+											 ]}
+										]}
+									 ]}
+								]}
+							]
 						}
 					],
 					"additionalProperties": true
@@ -380,7 +434,7 @@ Lifecycle asymmetry: promote_to_global is one-way / additive. The local row is p
 Use when: you need to schedule a check-in, reminder, or follow-up task to fire automatically at a specific time without the agent running continuously. Wakes survive agent restarts — the scheduler fires them regardless of what session is active.
 Tasks (upsert_task) are recurring cron-style triggers; one-shot wakes (schedule) fire once and are marked fired.
 Lifecycle asymmetry: delete_task is permanent removal of the task row. For reversibility / preserving history, prefer upsert_task with status='paused' (the row stays, the scheduler skips it, you can flip back to 'active' later without losing state).
-The resolve action is the explicit, audited mechanism for retiring a wake without consuming it through the delivery path (the CheckPendingWakes / list cycle). Idempotent; retires only the agent-owned kinds (notification — explicit or untagged — cascade and cron); a scheduler-owned or unknown kind is refused with status not_a_wake and the wake stays pending for its handler. Required params: wake_id, reason (reconciled|obsolete|superseded|already_satisfied). The reason taxonomy is canonical and bounded — see internal/core/wake_tools.go:isValidWakeResolveReason.
+The resolve action is the explicit, audited mechanism for retiring a wake without consuming it through the delivery path (the CheckPendingWakes / list cycle). Idempotent; retires only the agent-owned kinds (notification — explicit or untagged — cascade and cron); a scheduler-owned or unknown kind is refused with status not_a_wake and the wake stays pending for its handler. Required params: wake_id, reason (reconciled|obsolete|superseded|already_satisfied). The reason taxonomy is canonical and bounded — see internal/core/wake_tools.go:isValidWakeResolveReason. Every ownership refusal returns success=false with a status and leaves the row untouched. A row whose metadata is present, non-empty and not a parseable JSON document is refused with status corrupt_metadata: its owner cannot be determined, so the agent may not retire it — reading it as untagged would let the agent retire scheduler-owned work whose handler never ran. Metadata that is absent or empty is not corrupt: it reads as untagged, which is agent-owned.
 
 Wake ownership: a wake kind has exactly one owner. The agent owns notification (explicit or untagged), cascade and cron — the kinds the check surface delivers and retires. Every other kind (snapshot, critic_audit, gc, broadcast, cascade_summary, drill, and any unknown kind) belongs to the scheduler, which runs it through a registered handler. The check action therefore never retires a scheduler-owned wake: kinds=["*"] surfaces every AGENT-OWNED pending wake, and a kinds list naming a scheduler-owned kind surfaces nothing. The list action is a read-only queue inspection and is not narrowed.
 

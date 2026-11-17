@@ -273,21 +273,33 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 		return out, err
 	}
 
-	if err := preflight(candidateDir(cand), dataRoot); err != nil {
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
-		return out, err
-	}
-	if err := failPoint(o.failAt(), "preflight"); err != nil {
-		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
-		return out, err
-	}
-
+	// THE BUNDLE IS PROVED BEFORE IT IS EXECUTED.
+	//
+	// The preflight COMPILES the candidate's reference DDL — it runs
+	// the file against an in-memory database and compares the shape it
+	// produces with the live table's. So the preflight is an
+	// execution of the candidate's own content, and it must not happen
+	// before the content has been proved to be a single CREATE TABLE
+	// statement and nothing else.
+	//
+	// The order is the fix: validation first, execution second. A
+	// bundle whose preflight carries an ATTACH, a DROP or a second
+	// statement is refused before anything in it is run.
 	rep := ValidateBundle(candidateDir(cand), src.Rev)
 	if !rep.Valid {
 		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", rep.ValidationError().Error())
 		return out, rep.ValidationError()
 	}
 	if err := failPoint(o.failAt(), "validate"); err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
+		return out, err
+	}
+
+	if err := preflight(candidateDir(cand), dataRoot); err != nil {
+		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
+		return out, err
+	}
+	if err := failPoint(o.failAt(), "preflight"); err != nil {
 		recordOutcome(dataRoot, "update", out.FromRev, src.Rev, src, backupDir, preFP, "", "failed", err.Error())
 		return out, err
 	}
@@ -419,6 +431,23 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 		}
 		return compatUnchanged
 	}
+	// The stable paths are established now that the pointer has moved,
+	// because they resolve through it. They are created only when they
+	// are ABSENT: a path that already exists is the operator's
+	// arrangement, and the updater does not move it aside the way the
+	// installer does. Anything unexpected is reported rather than
+	// changed.
+	//
+	// A failure here is a failure AFTER the activation, so it falls
+	// back exactly like every other one — the pointer is restored, and
+	// the stable paths (which resolve through it) follow.
+	stableWarnings, err := ensureStablePaths(dataRoot)
+	if err != nil {
+		return failAfterActivate("", compatUnchanged, err)
+	}
+	if err := failPoint(o.failAt(), "stable-paths"); err != nil {
+		return failAfterActivate("", compatUnchanged, err)
+	}
 	if err := failPoint(o.failAt(), "activate"); err != nil {
 		return failAfterActivate("", compatUnchanged, err)
 	}
@@ -519,6 +548,9 @@ func Update(ctx context.Context, o Options) (Outcome, error) {
 	for _, w := range identityWarnings {
 		fmt.Fprintf(&b, "warning: %s\n", w)
 	}
+	for _, w := range stableWarnings {
+		fmt.Fprintf(&b, "warning: %s\n", w)
+	}
 	b.WriteString(staleNote(dataRoot))
 	out.Report = b.String()
 	return out, nil
@@ -545,12 +577,16 @@ func dryRunUpdate(ctx context.Context, o Options, dataRoot string, src Source, o
 	if err != nil {
 		return *out, err
 	}
-	if err := preflight(candidateDir(cand), dataRoot); err != nil {
-		return *out, err
-	}
+	// The dry run proves the bundle before it executes anything, in
+	// the same order as the promotion: the preflight COMPILES the
+	// candidate's reference DDL, so it must not run before the file's
+	// content has been checked.
 	rep := ValidateBundle(candidateDir(cand), src.Rev)
 	if !rep.Valid {
 		return *out, rep.ValidationError()
+	}
+	if err := preflight(candidateDir(cand), dataRoot); err != nil {
+		return *out, err
 	}
 	out.Report = dryRunReport(out.FromRev, src, rep)
 	return *out, nil

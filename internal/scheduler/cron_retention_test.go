@@ -60,7 +60,7 @@ func TestCronSweep_RetainsRecentCronWakes(t *testing.T) {
 	seedCronWake(t, s, now.Add(-30*time.Minute), "epistemic-compaction")
 	seedCronWake(t, s, now.Add(-59*time.Minute), "epistemic-compaction")
 
-	retired, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
+	retired, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestCronSweep_RetiresOldCronWakes(t *testing.T) {
 	id1d := seedCronWake(t, s, now.Add(-24*time.Hour), "epistemic-compaction")
 	id7d := seedCronWake(t, s, now.Add(-7*24*time.Hour), "epistemic-compaction")
 
-	retired, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
+	retired, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestCronSweep_BoundedByNormalLimit(t *testing.T) {
 		seedCronWake(t, s, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
 	}
 
-	retired, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
+	retired, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestCronSweep_BoundedByNormalLimit(t *testing.T) {
 	}
 
 	// Second call drains the rest.
-	retired2, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
+	retired2, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
 	if err != nil {
 		t.Fatalf("second sweep: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestCronSweep_BoundedByCatchUpLimit(t *testing.T) {
 		seedCronWake(t, s, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
 	}
 
-	retired, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionCatchUpLimit)
+	retired, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionCatchUpLimit)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestCronSweep_HardCeiling180(t *testing.T) {
 		seedCronWake(t, s, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
 	}
 
-	retired, err := SweepOverdueCronWakes(context.Background(), s.db, now, 10000)
+	retired, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, 10000)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestCronSweep_DoesNotRetireNonCronKinds(t *testing.T) {
 		seedWake(t, s, "noncron-"+kind, now.Add(-30*24*time.Hour), kind)
 	}
 
-	retired, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionCatchUpLimit)
+	retired, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionCatchUpLimit)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestCronSweep_IsIdempotent(t *testing.T) {
 		seedCronWake(t, s, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
 	}
 
-	first, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
+	first, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
 	if err != nil {
 		t.Fatalf("first sweep: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestCronSweep_IsIdempotent(t *testing.T) {
 		t.Fatalf("first sweep retired %d, want 5", first)
 	}
 
-	second, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
+	second, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
 	if err != nil {
 		t.Fatalf("second sweep: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestCronSweepTickHandler_ProductionRateBounded(t *testing.T) {
 	// For the test we directly invoke SweepOverdueCronWakes again
 	// (the tick handler refuses to run twice within Cadence; the
 	// underlying function honors the cap correctly).
-	retired, err := SweepOverdueCronWakes(context.Background(), s.db, time.Now(), CronRetentionNormalLimit)
+	retired, _, err := SweepOverdueCronWakes(context.Background(), s.db, time.Now(), CronRetentionNormalLimit)
 	if err != nil {
 		t.Fatalf("direct sweep 2: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestCronSweepTickHandler_ProductionRateBounded(t *testing.T) {
 	}
 
 	// Third sweep drains the remainder.
-	retired3, err := SweepOverdueCronWakes(context.Background(), s.db, time.Now(), CronRetentionNormalLimit)
+	retired3, _, err := SweepOverdueCronWakes(context.Background(), s.db, time.Now(), CronRetentionNormalLimit)
 	if err != nil {
 		t.Fatalf("direct sweep 3: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestCronSweep_PreservesMetadata(t *testing.T) {
 
 	id := seedCronWake(t, s, now.Add(-2*time.Hour), "epistemic-compaction")
 
-	if _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit); err != nil {
+	if _, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -539,7 +539,7 @@ func TestCronSweep_DropsRetiredFromOverdueQuery(t *testing.T) {
 	// Run a single normal-mode sweep — retires 60 of the 50+ cron rows
 	// (capped by limit, not by candidate count). All 50 cron rows are
 	// past retention so all 50 retire.
-	if _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit); err != nil {
+	if _, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -598,7 +598,7 @@ func TestCronSweep_DoesNotDispatchOldCronEvents(t *testing.T) {
 	}
 	seedWake(t, s, "live-notification", now.Add(-1*time.Hour), "notification")
 
-	if _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionCatchUpLimit); err != nil {
+	if _, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionCatchUpLimit); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -683,7 +683,7 @@ func TestCronSweep_BacklogConvergesAcrossCycles(t *testing.T) {
 	calls := 0
 	total := 0
 	for total < seed {
-		n, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionCatchUpLimit)
+		n, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionCatchUpLimit)
 		if err != nil {
 			t.Fatalf("sweep %d: %v", calls+1, err)
 		}
@@ -766,7 +766,7 @@ func TestCronSweep_NoOpOnZeroCandidates(t *testing.T) {
 	// Only seed a recent (under-window) cron row.
 	seedCronWake(t, s, now.Add(-1*time.Minute), "epistemic-compaction")
 
-	retired, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
+	retired, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -790,7 +790,7 @@ func TestCronSweep_ProductionRateDoesNotInflateWakesOverdue(t *testing.T) {
 		seedCronWake(t, s, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
 	}
 
-	if _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit); err != nil {
+	if _, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -847,7 +847,7 @@ func TestCronSweep_SweepUnderManyDifferentCapValues(t *testing.T) {
 			for i := 0; i < seed; i++ {
 				seedCronWake(t, fresh, now.Add(-time.Duration(i+2)*time.Hour), "epistemic-compaction")
 			}
-			got, err := SweepOverdueCronWakes(context.Background(), fresh.db, now, tc.maxRows)
+			got, _, err := SweepOverdueCronWakes(context.Background(), fresh.db, now, tc.maxRows)
 			if err != nil {
 				t.Fatalf("sweep: %v", err)
 			}
@@ -884,7 +884,7 @@ func TestCronSweep_PreservesExistingSchemaMetadata(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit); err != nil {
+	if _, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, CronRetentionNormalLimit); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 
@@ -1073,7 +1073,7 @@ func TestCronRetention_StartupCalibrationSequence(t *testing.T) {
 	// Probe + sweep helper that uses an explicit `now`.
 	runSweepAt := func(label string, now time.Time, maxRows int) (retired int) {
 		t.Helper()
-		retired, err := SweepOverdueCronWakes(context.Background(), s.db, now, maxRows)
+		retired, _, err := SweepOverdueCronWakes(context.Background(), s.db, now, maxRows)
 		if err != nil {
 			t.Fatalf("%s sweep: %v", label, err)
 		}

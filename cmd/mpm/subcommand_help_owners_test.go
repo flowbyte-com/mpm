@@ -59,7 +59,6 @@ var knownNonOwningSubcommandHelp = map[string]string{
 	"ops stats":       "accrues runtime state — verified MUTATING",
 	"ops status":      "accrues runtime state — verified MUTATING",
 	"ops prune":       "runs the prune and reports how many rows it removed",
-	"ops export":      "dumps JSON to stdout",
 
 	// --- Paths that are INTERCEPTED: `mpm <path> help` exits 0, prints
 	// the family's help page, and never reaches the handler. Each was
@@ -83,8 +82,20 @@ var knownNonOwningSubcommandHelp = map[string]string{
 	"memory show":       "intercepted; prints the `mpm memory` page",
 	"memory snooze":     "intercepted; prints the `mpm memory` page",
 	"memory weaken":     "intercepted; prints the `mpm memory` page",
-	"ops logs":          "intercepted; prints the `mpm ops` page — cost: the handler's own logs page is not reached",
-	"ops reference":     "intercepted; prints the `mpm ops` page — cost: the handler's own reference page is not reached",
+	// "ops export" moved here on 2026-11-14. It used to be classified as
+	// a path whose handler EXECUTES on a help token ("dumps JSON to
+	// stdout"), which was true while handleExport had no help
+	// short-circuit. The export command now has its OWN help page — the
+	// page that documents the JSON document's shape — and handleExport
+	// short-circuits on a help token BEFORE it opens the database. The
+	// path is still NOT an owner: Execute intercepts it and prints the
+	// `mpm ops` family page, so the export's own page is not reached from
+	// here. The cost is help specificity, and the export's own page is
+	// reachable from `mpm export --help`, `mpm export -h` and
+	// `mpm help export`.
+	"ops export":    "intercepted; prints the `mpm ops` page — cost: the export's own help page (the one that documents the JSON document's shape) is not reached from this path; it is reached from `mpm export --help`, `mpm export -h` and `mpm help export`",
+	"ops logs":      "intercepted; prints the `mpm ops` page — cost: the handler's own logs page is not reached",
+	"ops reference": "intercepted; prints the `mpm ops` page — cost: the handler's own reference page is not reached",
 	// "ops resolve-contradictions" was here until 2026-10-14 and was
 	// PROMOTED to subcommandHelpOwners: its handler recognises a help token
 	// and returns before opening the database, so owning it is safe. The

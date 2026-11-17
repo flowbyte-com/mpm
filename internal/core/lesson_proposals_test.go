@@ -18,6 +18,7 @@ package internal
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 )
 
@@ -243,6 +244,122 @@ func TestLessonProposal_ListPinsTheReviewQueue(t *testing.T) {
 	// An unknown status is refused rather than silently meaning "all".
 	if _, err := dm.ListLessonProposals("approved", 0); err == nil {
 		t.Error("an unknown status was accepted")
+	}
+}
+
+// TestLessonProposal_CountIsTheBacklogNotTheListLength pins the
+// distinction the count API exists for.
+//
+// ListLessonProposals is an INBOX: it is bounded (default 50) because an
+// operator reviews the recent ones. The backlog total must not inherit
+// that bound, or the one number an operator needs in order to notice
+// that a queue is accumulating would be wrong in exactly the situation
+// that matters.
+func TestLessonProposal_CountIsTheBacklogNotTheListLength(t *testing.T) {
+	dm := newProposalTestDM(t)
+
+	const total = 120
+	for i := 0; i < total; i++ {
+		if _, err := dm.AddLessonProposal(
+			fmt.Sprintf("proposal %03d", i), "insight", nil, nil,
+		); err != nil {
+			t.Fatalf("AddLessonProposal #%d: %v", i, err)
+		}
+	}
+
+	listed, err := dm.ListLessonProposals(LessonProposalPending, 0)
+	if err != nil {
+		t.Fatalf("ListLessonProposals: %v", err)
+	}
+	if len(listed) != 50 {
+		t.Fatalf("premise broken: the default list returned %d rows, want the documented cap of 50", len(listed))
+	}
+
+	got, err := dm.CountPendingLessonProposals()
+	if err != nil {
+		t.Fatalf("CountPendingLessonProposals: %v", err)
+	}
+	if got != total {
+		t.Errorf("CountPendingLessonProposals = %d, want the untruncated total %d "+
+			"(the bounded list holds %d)", got, total, len(listed))
+	}
+}
+
+// TestLessonProposal_CountExcludesReviewedAndSurvivesTheLifecycle
+// pins the status filter and the read-only property together: the count
+// moves only when an operator acts.
+func TestLessonProposal_CountExcludesReviewedAndSurvivesTheLifecycle(t *testing.T) {
+	dm := newProposalTestDM(t)
+
+	ids := make([]string, 0, 4)
+	for i := 0; i < 4; i++ {
+		p, err := dm.AddLessonProposal(
+			fmt.Sprintf("proposal %d", i), "insight", nil, nil,
+		)
+		if err != nil {
+			t.Fatalf("AddLessonProposal #%d: %v", i, err)
+		}
+		ids = append(ids, p.ID)
+	}
+
+	count := func() int {
+		t.Helper()
+		n, err := dm.CountPendingLessonProposals()
+		if err != nil {
+			t.Fatalf("CountPendingLessonProposals: %v", err)
+		}
+		return n
+	}
+
+	if got := count(); got != 4 {
+		t.Fatalf("initial pending = %d, want 4", got)
+	}
+
+	// Reading is not deciding: repeated reads must not move the count.
+	for i := 0; i < 5; i++ {
+		_ = count()
+	}
+	if got := count(); got != 4 {
+		t.Errorf("pending = %d after repeated reads, want 4", got)
+	}
+
+	if _, _, _, err := dm.PromoteLessonProposal(ids[0]); err != nil {
+		t.Fatalf("PromoteLessonProposal: %v", err)
+	}
+	if got := count(); got != 3 {
+		t.Errorf("pending = %d after a promotion, want 3", got)
+	}
+
+	if _, err := dm.RejectLessonProposal(ids[1]); err != nil {
+		t.Fatalf("RejectLessonProposal: %v", err)
+	}
+	if got := count(); got != 2 {
+		t.Errorf("pending = %d after a rejection, want 2", got)
+	}
+}
+
+// TestLessonProposal_CountFailsLoudlyWhenItCannotBeTaken pins that the
+// error is returned rather than folded into a zero. Zero is the healthy
+// answer, so a failed query must not be able to produce it.
+func TestLessonProposal_CountFailsLoudlyWhenItCannotBeTaken(t *testing.T) {
+	dm := newProposalTestDM(t)
+	if _, err := dm.AddLessonProposal("a pending proposal", "insight", nil, nil); err != nil {
+		t.Fatalf("AddLessonProposal: %v", err)
+	}
+
+	// Move the table out from under the query. A DROP would be undone
+	// by the next InitSchema (CREATE TABLE IF NOT EXISTS), which would
+	// turn the failure into a legitimate zero.
+	if _, err := dm.SQLDB().Exec(`ALTER TABLE lesson_proposals RENAME TO lesson_proposals_moved`); err != nil {
+		t.Fatalf("rename lesson_proposals: %v", err)
+	}
+
+	n, err := dm.CountPendingLessonProposals()
+	if err == nil {
+		t.Fatalf("CountPendingLessonProposals returned (%d, nil) for a missing table; the error must be reported", n)
+	}
+	if n != 0 {
+		t.Errorf("a failed count returned %d alongside its error; the caller must not be able to read it as a total", n)
 	}
 }
 

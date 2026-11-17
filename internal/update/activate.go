@@ -30,11 +30,22 @@ func installRelease(dataRoot, candidateDir, rev string) (installed bool, err err
 		return false, fmt.Errorf("cannot create %s: %w", l.Releases(), err)
 	}
 	if fi, err := os.Stat(final); err == nil && fi.IsDir() {
-		rep := ValidateBundle(final, rev)
+		// The release is ALREADY INSTALLED. It is checked for
+		// INTEGRITY, not for construction: a release directory
+		// accumulates files after installation (the runtime's own
+		// bytecode caches, the adapter's build-provenance sidecar),
+		// and refusing the release for those would push the operator
+		// towards deleting an immutable rollback target.
+		//
+		// The host-asset declaration is still required. A release that
+		// carries none was built before the contract existed and is
+		// genuinely incomplete; detecting that must not be traded
+		// away for the convenience of an installed directory.
+		rep := ValidateInstalledRelease(final, rev)
 		if rep.Valid {
 			return false, nil
 		}
-		return false, fmt.Errorf("release %s already exists at %s and does not validate; a release is immutable, so it will not be replaced", rev, final)
+		return false, fmt.Errorf("release %s already exists at %s and does not validate (%s). A release is immutable, so it will not be replaced. Do NOT delete it by hand — it may be the operator's rollback target. Promote a different revision; if this release was built before the host-asset contract existed, promote a revision that carries the integration assets", rev, final, failedCheckNames(rep))
 	}
 	if err := os.Rename(candidateDir, final); err != nil {
 		return false, fmt.Errorf("could not install the bundle into %s: %w", final, err)

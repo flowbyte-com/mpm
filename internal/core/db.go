@@ -605,8 +605,16 @@ func (dm *DatabaseManager) BusyRetryCount() uint64 {
 //   - page_count, freelist_count: from PRAGMA page_count / freelist_count
 //   - memories_active: count of non-deleted memories
 //   - theories_pending: count of pending theories
+//   - wakes_corrupt_metadata: count of scheduled_wakes rows whose metadata
+//     is present, non-empty and NOT a parseable JSON document. Such a row
+//     is owned by NO partition (issue #178, W4): it is never delivered,
+//     claimed, retired or resolved, and its original bytes are preserved
+//     because they are the only evidence of what it was. The counter is
+//     the always-available operator signal for "a row needs attention".
 //   - wakes_overdue: count of actionable unfired wakes whose target_time < now
-//     (notification, cascade, or untagged; cron-kind bookkeeping is
+//     (notification, cascade, or untagged; a corrupt row is NOT counted,
+//     because no surface will ever deliver it and the count would never
+//     fall; cron-kind bookkeeping is
 //     excluded — it is retained and boundedly swept by the cron
 //     retention sweep in internal/scheduler/wake_expiration.go)
 //   - busy_retries: lifetime SQLITE_BUSY retry counter (process-local)
@@ -709,7 +717,8 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 	}{
 		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND ` + DirectiveExclusionClause},
 		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > strftime('%s','now')) AND json_extract(metadata, '$.status') = 'pending'`},
-		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND (metadata IS NULL OR metadata = '' OR json_extract(metadata, '$.kind') IS NULL OR json_extract(metadata, '$.kind') = '' OR json_extract(metadata, '$.kind') IN ('notification','cascade'))`},
+		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND ` + WakeNotificationAndCascadeKindFilter + ` AND NOT ` + WakeMetadataIsCorrupt},
+		{"wakes_corrupt_metadata", `SELECT COUNT(*) FROM scheduled_wakes WHERE ` + WakeMetadataIsCorrupt},
 		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
 	}
 	now := time.Now().Unix()
@@ -739,7 +748,8 @@ func (dm *DatabaseManager) HealthCheck() (map[string]interface{}, error) {
 //
 // The map-shape is preserved for compatibility with the doctor
 // renderer, which reads fields by name (ok, page_count, freelist_count,
-// memories_active, theories_pending, wakes_overdue, evidence_total,
+// memories_active, theories_pending, wakes_overdue, wakes_corrupt_metadata,
+// evidence_total,
 // busy_retries, db_path, db_path_raw, shared_attached, shared_path).
 // New fields (`warnings`, `journal_mode`) are additive; existing
 // field semantics are unchanged.
@@ -852,7 +862,8 @@ func (dm *DatabaseManager) HealthCheckReadOnly() (ReadOnlyHealthCheck, error) {
 	}{
 		{"memories_active", `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL AND ` + DirectiveExclusionClause},
 		{"theories_pending", `SELECT COUNT(*) FROM memories WHERE collection = 'theories' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > strftime('%s','now')) AND json_extract(metadata, '$.status') = 'pending'`},
-		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND (metadata IS NULL OR metadata = '' OR json_extract(metadata, '$.kind') IS NULL OR json_extract(metadata, '$.kind') = '' OR json_extract(metadata, '$.kind') IN ('notification','cascade'))`},
+		{"wakes_overdue", `SELECT COUNT(*) FROM scheduled_wakes WHERE fired = 0 AND target_time < ? AND ` + WakeNotificationAndCascadeKindFilter + ` AND NOT ` + WakeMetadataIsCorrupt},
+		{"wakes_corrupt_metadata", `SELECT COUNT(*) FROM scheduled_wakes WHERE ` + WakeMetadataIsCorrupt},
 		{"evidence_total", `SELECT COUNT(*) FROM evidence`},
 	}
 	now := time.Now().Unix()
@@ -2954,6 +2965,29 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		}
 	}
 
+	// Skill Package storage — LOCAL-ONLY.
+	//
+	// This slice is deliberately NOT part of BaseTables: attachShared
+	// rewrites every `CREATE TABLE` in BaseTables to `shared.<name>` and
+	// runs it against the attached shared database, so a package table
+	// declared there would be created as `shared.skill_packages` in EVERY
+	// shared database. Package bytes live in the local substrate; the
+	// `.skill` archive is the transport, not the shared schema.
+	//
+	// The tables are created empty and stay empty: this is storage only.
+	// No reader, writer, importer or exporter for them exists yet — the
+	// import/export paths are later stages of the approved Skill Packages
+	// design (PR #222, §10).
+	//
+	// The slice is applied here, alongside ReferenceTables and WorkTables,
+	// and outside the attachShared loops. The invariant is pinned by
+	// TestSkillPackageTablesAreLocalOnly.
+	for _, sqlQuery := range SkillPackageTables {
+		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
+			return fmt.Errorf("failed to execute skill package schema: %w\nSQL: %s", err, sqlQuery)
+		}
+	}
+
 	for _, sqlQuery := range ReferenceIndexes {
 		if _, err := dm.ExecTracked(sqlQuery, 5); err != nil {
 			return fmt.Errorf("failed to execute reference index: %w\nSQL: %s", err, sqlQuery)
@@ -3136,6 +3170,29 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("scheduled_wakes dispatched_at migration failed: %w", err)
 	}
+	// 2026-11-04, issue #178 Stage A (M1): the delivery-state axis on
+	// scheduled_wakes — five nullable columns (delivery_state,
+	// lease_expires_at, claimed_by, claimed_at, delivered_at) and the
+	// partial index idx_sw_delivery_claim.
+	//
+	// STRICTLY ADDITIVE and BEHAVIOUR-NEUTRAL: no row is modified, no
+	// backfill runs, and no reader, writer or predicate changes. The
+	// axis is carried by columns nothing reads yet.
+	//
+	// It runs HERE, inside the FATAL migration transaction, and NOT in
+	// SafeMigrations: that loop is best-effort and silences errors (it
+	// only warns), and a silently-missing column is far worse than a
+	// failed open. A failure rolls the whole migration back and
+	// NewDatabaseManager returns an error.
+	//
+	// The base DDL is deliberately unchanged: dispatched_at and
+	// fired_by are migration-only columns too, so a fresh database and
+	// a migrated one have identical schemas produced by one code path.
+	// See migration_scheduled_wakes_delivery_state.go.
+	if err := MigrateScheduledWakesDeliveryState(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("scheduled_wakes delivery_state migration failed: %w", err)
+	}
 	// Positive-direction (constructive) cascade: polarity column on
 	// epistemic_provenance. Idempotent via the schema_migrations sentinel
 	// pattern. See migration_epistemic_provenance_polarity.go for the
@@ -3205,6 +3262,26 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 	if err := MigrateTagsJSONNormalize(tx); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("tags JSON normalize migration failed: %w", err)
+	}
+	// Project-Scoped Continuity, Stage 1 — the additive four-table
+	// storage: projects, project_names, continuity_threads,
+	// continuity_checkpoints. The DDL and the sentinel share THIS
+	// transaction, so a failure at either rolls the whole thing back
+	// and NewDatabaseManager returns an error rather than leaving a
+	// half-migrated database.
+	//
+	// The tables are NOT in BaseTables on purpose: BaseTables is the
+	// slice attachShared propagates into the cross-workspace `shared`
+	// schema (db.go:2132, db.go:2160), and project identity must stay
+	// inside one workspace. Idempotent via the
+	// continuity_project_model_v1 sentinel.
+	//
+	// See internal/core/migration_continuity_project_model.go for the
+	// DDL's provenance (it is byte-for-byte §4.1 of the approved
+	// architecture) and for why the sentinel is written last.
+	if err := MigrateContinuityProjectModel(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("continuity project model migration failed: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
@@ -4280,8 +4357,12 @@ func (dm *DatabaseManager) MaterializeCascadeIntentsFor(
 
 // UpdateSessionSummary upserts the LLM-generated summary for a session.
 // Uses the session_id as the unique key.
+//
+// retries=5 (issue #178): the substrate's documented statement-level write
+// budget. The write is a plain overwrite of one column, so a retry is
+// idempotent — it lands the same value it landed the first time.
 func (dm *DatabaseManager) UpdateSessionSummary(sessionID, summary string) error {
-	_, err := dm.db.Exec(`UPDATE sessions SET summary = ? WHERE session_id = ?`, summary, sessionID)
+	_, err := dm.ExecTracked(`UPDATE sessions SET summary = ? WHERE session_id = ?`, 5, summary, sessionID)
 	return err
 }
 
@@ -5513,8 +5594,13 @@ func (dm *DatabaseManager) AddMemoryToTopic(memoryID, topicID, role string) erro
 	}
 
 	now := time.Now().Unix()
-	_, err = dm.db.Exec(`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
-		memoryID, topicID, now, role)
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The statement is INSERT OR IGNORE, so it is
+	// duplicate-tolerant by construction — a retry cannot create a second
+	// membership, and the timestamp is computed once above so the retry
+	// carries the same value.
+	_, err = dm.ExecTracked(`INSERT OR IGNORE INTO topic_memberships (memory_id, topic_id, created_at, role) VALUES (?, ?, ?, ?)`,
+		5, memoryID, topicID, now, role)
 	return err
 }
 
@@ -5586,7 +5672,12 @@ func (dm *DatabaseManager) RemoveMemoryFromTopic(memoryID, topicID string) (bool
 	if topicID == "" {
 		return false, fmt.Errorf("topic_id is required")
 	}
-	res, err := dm.db.Exec(`DELETE FROM topic_memberships WHERE memory_id = ? AND topic_id = ?`, memoryID, topicID)
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The DELETE is idempotent — a retry deletes nothing
+	// more — and RowsAffected stays truthful: a SQLITE_BUSY attempt
+	// removed no row, so the count that comes back with the successful
+	// attempt is the count of rows actually removed.
+	res, err := dm.ExecTracked(`DELETE FROM topic_memberships WHERE memory_id = ? AND topic_id = ?`, 5, memoryID, topicID)
 	if err != nil {
 		return false, fmt.Errorf("remove membership: %w", err)
 	}
@@ -6611,10 +6702,14 @@ func (dm *DatabaseManager) AddWork(title, content, sessionID string) (*Work, err
 		sessionIDArg = sessionID
 	}
 
-	_, err := dm.db.Exec(`
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The id is generated BEFORE the call, so a retry
+	// re-uses it rather than inserting a second work item — the same
+	// argument addWorkTx makes for the transactional twin.
+	_, err := dm.ExecTracked(`
 		INSERT INTO works (id, title, content, status, created_at, updated_at, session_id, migrated_at)
 		VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
-	`, id, title, content, now, now, sessionIDArg, now)
+	`, 5, id, title, content, now, now, sessionIDArg, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert work: %w", err)
 	}
@@ -7096,9 +7191,15 @@ func (dm *DatabaseManager) updateWorkStatus(id string, status WorkStatus) (*Work
 			ErrInvalidWorkTransition, current, status, id)
 	}
 
-	res, err := dm.db.Exec(`
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The statement writes ABSOLUTE values (not
+	// increments), so a retry is idempotent. The transition itself was
+	// validated by the read above, which is deliberately OUTSIDE the
+	// write: a retry re-runs the same statement against the same
+	// already-validated transition.
+	res, err := dm.ExecTracked(`
 		UPDATE works SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?
-	`, status, now, completedAt, id)
+	`, 5, status, now, completedAt, id)
 	if err != nil {
 		return nil, fmt.Errorf("update work status: %w", err)
 	}
@@ -7726,7 +7827,13 @@ func (dm *DatabaseManager) DeriveWorkVerification(workID string) (WorkVerificati
 	}
 
 	// Persist the derived value to the works row.
-	_, err = dm.db.Exec(`UPDATE works SET verification = ? WHERE id = ?`, string(verification), workID)
+	//
+	// retries=5 (issue #178): the substrate's documented statement-level
+	// write budget. The statement writes an ABSOLUTE derived value, so a
+	// retry is idempotent — the column ends up holding the value the
+	// derivation computed, whether the first attempt or a later one
+	// landed it.
+	_, err = dm.ExecTracked(`UPDATE works SET verification = ? WHERE id = ?`, 5, string(verification), workID)
 	if err != nil {
 		return WorkVerificationUnverified, fmt.Errorf("derive verification: persist: %w", err)
 	}

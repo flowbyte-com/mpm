@@ -829,9 +829,13 @@ func TestResolveWake_SchedulerOwnedWakeIsRefused(t *testing.T) {
 // TestResolveWake_MalformedAndLegacyMetadata pins the metadata probe
 // through the resolver.
 //
-// The resolver's kind probe must keep collapsing every legacy shape to
+// The resolver's kind probe must keep collapsing every LEGACY shape to
 // "no kind" — an untagged wake is a notification wake, which the agent
 // owns — while a non-string kind is still a kind the agent does not own.
+//
+// A MALFORMED document is the one shape that is NOT collapsed: its owner
+// cannot be determined, so the resolver refuses it with the status
+// "corrupt_metadata" and leaves the row untouched.
 //
 // (The same shapes are pinned against the probe itself in
 // wake_legacy_metadata_safety_test.go; this test pins them through the
@@ -848,8 +852,6 @@ func TestResolveWake_MalformedAndLegacyMetadata(t *testing.T) {
 		{"empty object", "{}"},
 		{"null kind", `{"kind":null}`},
 		{"empty kind", `{"kind":""}`},
-		{"malformed json", "not json at all"},
-		{"truncated json", `{"kind":`},
 		{"notification kind", `{"kind":"notification"}`},
 		{"cascade kind", `{"kind":"cascade"}`},
 		{"cron kind", `{"kind":"cron"}`},
@@ -866,6 +868,43 @@ func TestResolveWake_MalformedAndLegacyMetadata(t *testing.T) {
 			}
 			if n := resolverAuditCount(t, h.dm, wakeID); n != 1 {
 				t.Fatalf("%s must write exactly one audit row, got %d", tc.name, n)
+			}
+		})
+	}
+
+	// A CORRUPT ROW IS REFUSED, NOT RESOLVED. Its owner cannot be
+	// determined: the truncated prefix '{"kind": "snapshot"' names a
+	// snapshot row, and reading it as untagged would make it an
+	// agent-owned notification wake the agent may retire — which
+	// would suppress a scheduler handler that never ran. The status is
+	// its own, so the refusal is legible to the caller.
+	corrupt := []struct {
+		name     string
+		metadata string
+	}{
+		{"malformed json", "not json at all"},
+		{"truncated json", `{"kind":`},
+		{"truncated snapshot json", `{"kind": "snapshot"`},
+	}
+	for _, tc := range corrupt {
+		t.Run("corrupt/"+tc.name, func(t *testing.T) {
+			wakeID := seedResolveContentionWakeWithMetadata(t, h.dm, tc.metadata)
+			resolved, status, err := h.dm.ResolveWake(wakeID, "reconciled", "")
+			if err == nil {
+				t.Fatalf("%s must be refused", tc.name)
+			}
+			if resolved {
+				t.Fatalf("%s must not report resolved", tc.name)
+			}
+			if status != "corrupt_metadata" {
+				t.Fatalf("expected status corrupt_metadata for %s, got %q", tc.name, status)
+			}
+			s := readResolveWakeState(t, h.dm, wakeID)
+			if s.Fired != 0 {
+				t.Fatalf("%s must leave the wake pending, got %+v", tc.name, s)
+			}
+			if n := resolverAuditCount(t, h.dm, wakeID); n != 0 {
+				t.Fatalf("%s must not write an audit row, got %d", tc.name, n)
 			}
 		})
 	}

@@ -544,6 +544,30 @@ type CoreDB interface {
 	// PermanentlyShredSkill is the destructive complement of ShredSkill:
 	// hard DELETE plus cascade cleanup. Not recoverable. Idempotent.
 	PermanentlyShredSkill(skillID string) error
+	// SkillPackageProvenance returns the package provenance object for a
+	// skill (PR #222 §8.2.1, R6/T40).
+	//
+	// It returns (nil, nil) for a skill that owns NO package: the object
+	// is absent for an ordinary single-document skill, and its absence is
+	// not an error. For a packaged skill the object is MANDATORY — the
+	// caller must not be able to receive package content without the
+	// entrypoint's hash and scan status beside it.
+	//
+	// The entrypoint hash it carries is the hash of the ORIGINAL
+	// entrypoint bytes, not of the derived projection.
+	SkillPackageProvenance(ctx context.Context, skillID string) (*SkillPackageProvenance, error)
+
+	// ReadSkillWithPackageProvenance reads a skill AND its package
+	// provenance from ONE consistent database snapshot (PR A).
+	//
+	// The `read` action returns both, and they must agree: a packaged
+	// skill's provenance is MANDATORY beside its body. Two independent
+	// statements left a window in which a concurrent deletion could let
+	// the body return with no provenance; one snapshot closes it.
+	//
+	// The provenance is nil for an ordinary skill — the same
+	// "absent, not an error" contract SkillPackageProvenance has.
+	ReadSkillWithPackageProvenance(ctx context.Context, nameOrID, version string) (*Skill, *SkillPackageProvenance, error)
 
 	// ─── Retrieval metadata (Observability Layer, 2026-07-26) ─────
 	// Fire-and-forget telemetry for adaptive retrieval. Called from
@@ -552,6 +576,18 @@ type CoreDB interface {
 	// fail the user-facing path.
 	RecordRetrieval(nodeID, nodeType string) error
 	RecordRetrievalSuccess(nodeID, nodeType string) error
+	// RecordRetrievalDeferred records the retrieval WITHOUT blocking the
+	// caller.
+	//
+	// It returns true when the obligation was accepted by the deferred
+	// durable-write queue and false when it was not (the queue is full
+	// or closed). A false return means the write was NOT queued and will
+	// not happen at all — the caller owns that outcome.
+	//
+	// The obligation is pending until the worker lands it, so a caller
+	// must not report the retrieval as recorded before the queue
+	// accepts it.
+	RecordRetrievalDeferred(nodeID, nodeType string) bool
 	IncrementSuccess(nodeID, nodeType string) error
 	GetRetrievalMetadata(nodeID string) (RetrievalMetadata, error)
 

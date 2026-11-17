@@ -516,8 +516,17 @@ func (r *ScansRule) blockCallsLogError(body *ast.BlockStmt) bool {
 			return true
 		}
 
-		// Any *.LogAudit(...) call is an audit-trail observation.
-		if sel.Sel.Name == "LogAudit" {
+		// Any *.LogAudit*(...) call is an audit-trail observation.
+		//
+		// The family, not just one name: LogAudit (the swallowing
+		// wrapper), LogAuditErr (the same write with its error
+		// returned), LogAuditDeferred (the same write handed to the
+		// deferred queue), and LogAuditForInvocation (the
+		// tool-originated correlator) all record the error in the
+		// audit trail. A call that RECORDS an error is an observation
+		// of it, so the block is not discarding the error silently —
+		// whichever member of the family performs the recording.
+		if strings.HasPrefix(sel.Sel.Name, "LogAudit") {
 			found = true
 			return false
 		}

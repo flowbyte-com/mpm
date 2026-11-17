@@ -1,0 +1,379 @@
+{
+  "what": "The HOST's own permission verdicts for the configured reviewer agent.",
+  "date": "2026-11-17",
+  "host": "opencode 2.3.0 (the operator's installed CLI), run as an isolated server",
+  "method": [
+    "An isolated OpenCode server was started with HOME, XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME and XDG_CACHE_HOME redirected under a disposable run root, and with the canonical reviewer definition installed at $HOME/.config/opencode/agents/mpm-reviewer.md.",
+    "A pre-flight read of the host's own agent registry ('opencode debug agents --standalone') confirmed the host loads the definition and recorded the RESOLVED permission set.",
+    "The definition file was then touched, which fires the host's config watcher and makes it reload its agent registry: a freshly started server does not always load its agent documents before the first question is asked, and an agent the host does not know is refused EVERY action - indistinguishable from outside, from a definition that denies everything.",
+    "For each agent, a session was created, the session was switched to that agent (POST /api/session/{id}/agent), and the host's own permission service was asked for its verdict for each action (POST /api/session/{id}/permission). The verdict is the host's decision, not a reading of the definition's text.",
+    "The built-in agents were measured in the same pass as CONTROLS. Without them a refusal proves nothing: the mechanism itself might be refusing everything."
+  ],
+  "caveats": [
+    "The measurement asks the host what it DECIDES for an action, using a wildcard resource. It does not enumerate the agent's final tool list, which the host computes per session at prompt time.",
+    "The verdict is measured through session.switchAgent, which is the same registry the subagent path uses."
+  ],
+  "resolvedPermissionSet": {
+    "id": "mpm-reviewer",
+    "name": "mpm-reviewer",
+    "request": {
+      "settings": {},
+      "headers": {},
+      "body": {}
+    },
+    "system": "<!--\n  Managed source: agent_installation/mpm-opencode/templates/agents/mpm-reviewer.md\n  Installed by:   agent_installation/mpm-opencode/scripts/install_reviewer_agent.py\n\n  Do not edit this installed copy. The canonical install overwrites it, and\n  agent_installation/tests/test_reviewer_isolation.py FAILS when the installed\n  copy differs from the template - a reviewer definition that has drifted is a\n  reviewer without the isolation.\n-->\n\nYou are an INDEPENDENT REVIEWER. You report findings. You do not fix them.\n\nYOUR TOOL SURFACE\n\nYou have exactly ONE tool: `sandbox_exec`. It runs a command inside an\nOS-confined sandbox.\n\n    sandbox_exec({ \"command\": [\"go\", \"test\", \"./...\"], \"cwd\": \"repo\" })\n\n`command` is an ARRAY of arguments and is executed directly, without a\nshell. When you need shell syntax, say so in the array:\n\n    sandbox_exec({ \"command\": [\"sh\", \"-c\", \"go test ./... | tee /sandbox/findings/out.txt\"] })\n\n`cwd` is one of `repo`, `home`, `tmp`, `workspace` or `findings`.\n`repo` is a DISPOSABLE COPY of the repository under review: the\noperator's own checkout is never the tree you write in.\n\nWHAT THE HARNESS ENFORCES FOR YOU\n\nThese are not requests. The host enforces them, and the kernel enforces\nthe last one:\n\n- Every tool other than `sandbox_exec` is CLOSED. The default is deny,\n  so a capability added to the host later is closed on arrival.\n- The production MPM tools are unavailable to you. They are removed from\n  your tool list entirely, so you cannot call one and cannot see one.\n- The host shell is closed. There is no unsandboxed execution route.\n- The host-side file tools are closed. Reach files through the sandbox:\n  `cat`, `ls`, `rg`, `sed` and friends, run inside it.\n- Code Mode is closed, and with it the browser family: the browser can\n  open a `file://` URL and move server-local bytes, and no permission\n  rule confines it. The `browser` action is closed BY NAME as well.\n- The capability loader is closed BY NAME (`skill`): a capability is\n  text from elsewhere, and a review that has read instructions it did\n  not ask for is not a review you can trust.\n- The network is unshared inside the namespace, and the host's network\n  tools are closed.\n- You cannot edit, you cannot launch another agent, you cannot ask the\n  operator a question, and you cannot move your own session.\n\nWHAT THE SANDBOX ACTUALLY DOES\n\nInside the namespace:\n\n- `/sandbox/repo` - the disposable copy of the repository under review,\n  read-write.\n- `/sandbox/home` - a disposable HOME. `$HOME` points here.\n- `/sandbox/tmp` - a disposable TMPDIR. `$TMPDIR` and the Go caches\n  point here.\n- `/sandbox/workspace` - a disposable `MPM_WORKSPACE`.\n- `/sandbox/findings` - where your findings belong.\n- `/usr` and the usual system paths, READ-ONLY.\n- `/etc` - a synthetic one: a passwd and a group file that name\n  `reviewer`, and the `alternatives` symlinks. The host's own `/etc` is\n  NOT there.\n\nAnd that is ALL there is. The operator's home directory, the live MPM\nruntime root, the operator's credentials, the trust store at\n`/etc/ssl`, and the network do not exist inside the namespace. A path\nthat is not bound is not refused - it is ABSENT.\n\nTHERE IS NO FALLBACK\n\nIf the sandbox cannot be established, the command does not run and you\nget a refusal. That is the intended behaviour, not a fault to work\naround. Report it and stop.\n\nWHAT IS NOT ENFORCED, AND WHAT YOU DO INSTEAD\n\nThree things are outside the boundary, and they are outside it for\neveryone, not for you in particular:\n\n- The OPERATOR's own session is trusted. The boundary protects the\n  operator's data from a less-trusted reviewer; it does not protect\n  the operator from themselves.\n- The BROWSER is a host-side capability that no permission rule can\n  confine. It is closed here because Code Mode is closed, and because\n  a code review does not need it.\n- The CAPABILITY LOADER is not gated by any permission action on this\n  host. It is closed here because every tool other than\n  `sandbox_exec` is closed - but if you ever find a route to it, do\n  not take it: a capability is text from elsewhere, and a review that\n  has read instructions it did not ask for is not a review you can\n  trust.\n\nThe OTHER subagent types are NOT confined. `explore` and `general` run\nwith the host's ordinary tool surface, and the operator's own session\nruns with everything. The sandbox covers the configured reviewer\nenvironment only.\n\nHOW TO WORK\n\n- Read the code through the sandbox: `rg`, `sed -n`, `cat`, `ls`.\n- Run the tests through the sandbox. The Go toolchain, Python and Git\n  are all present. The module cache is NOT: a build that needs a\n  dependency it does not already have will fail, and that is expected.\n- Put what you want to keep in `/sandbox/findings`, and quote it in\n  your final report.\n- Report findings with a file, a line and what is wrong with it. Do\n  not fix them.\n- If a command is refused, say so and move on. Do not try to reach the\n  same thing by another route.",
+    "description": "Isolated reviewer subagent - one sandboxed execution tool, no host access",
+    "mode": "subagent",
+    "hidden": false,
+    "permissions": [
+      {
+        "action": "*",
+        "resource": "*",
+        "effect": "allow"
+      },
+      {
+        "action": "read",
+        "resource": "*.env",
+        "effect": "ask"
+      },
+      {
+        "action": "read",
+        "resource": "*.env.*",
+        "effect": "ask"
+      },
+      {
+        "action": "read",
+        "resource": "*.env.example",
+        "effect": "allow"
+      },
+      {
+        "action": "*",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "sandbox_exec",
+        "resource": "*",
+        "effect": "allow"
+      },
+      {
+        "action": "shell",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "read",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "write",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "edit",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "patch",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "grep",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "glob",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "list",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "external_directory",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "execute",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "browser",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "skill",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "webfetch",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "websearch",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "subagent",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "question",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "opencode_*",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_blob_read",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_blob_search",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_confidence",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_context",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_decisions",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_evidence",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_handoff",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_lessons",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_log_to_changelog",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_memory",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_references",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_request_review",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_resolve",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_retrieval_diagnose",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_scratchpad",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_skills",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_system",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_theories",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_topics",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_wakes",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "mpm_work",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "browser",
+        "resource": "*",
+        "effect": "deny"
+      },
+      {
+        "action": "skill",
+        "resource": "browser",
+        "effect": "deny"
+      }
+    ]
+  },
+  "verdicts": {
+    "mpm-reviewer": {
+      "switchStatus": 200,
+      "verdicts": {
+        "shell": "deny",
+        "read": "deny",
+        "write": "deny",
+        "edit": "deny",
+        "patch": "deny",
+        "grep": "deny",
+        "glob": "deny",
+        "list": "deny",
+        "external_directory": "deny",
+        "execute": "deny",
+        "browser": "deny",
+        "skill": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "subagent": "deny",
+        "question": "deny",
+        "sandbox_exec": "allow",
+        "mpm_memory": "deny",
+        "mpm_context": "deny",
+        "mpm_skills": "deny",
+        "mpm_system": "deny",
+        "mpm_work": "deny",
+        "mpm_resolve": "deny",
+        "mpm_help": "deny"
+      }
+    },
+    "build": {
+      "switchStatus": 200,
+      "verdicts": {
+        "shell": "allow",
+        "read": "allow",
+        "write": "allow",
+        "edit": "allow",
+        "patch": "allow",
+        "grep": "allow",
+        "glob": "allow",
+        "list": "allow",
+        "external_directory": "allow",
+        "execute": "allow",
+        "browser": "deny",
+        "skill": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "subagent": "allow",
+        "question": "allow",
+        "sandbox_exec": "allow",
+        "mpm_memory": "allow",
+        "mpm_context": "allow",
+        "mpm_skills": "allow",
+        "mpm_system": "allow",
+        "mpm_work": "allow",
+        "mpm_resolve": "allow",
+        "mpm_help": "allow"
+      }
+    },
+    "explore": {
+      "switchStatus": 200,
+      "verdicts": {
+        "shell": "allow",
+        "read": "allow",
+        "write": "deny",
+        "edit": "deny",
+        "patch": "deny",
+        "grep": "allow",
+        "glob": "allow",
+        "list": "deny",
+        "external_directory": "allow",
+        "execute": "deny",
+        "browser": "deny",
+        "skill": "deny",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "subagent": "deny",
+        "question": "deny",
+        "sandbox_exec": "deny",
+        "mpm_memory": "deny",
+        "mpm_context": "deny",
+        "mpm_skills": "deny",
+        "mpm_system": "deny",
+        "mpm_work": "deny",
+        "mpm_resolve": "deny",
+        "mpm_help": "deny"
+      }
+    },
+    "general": {
+      "switchStatus": 200,
+      "verdicts": {
+        "shell": "allow",
+        "read": "allow",
+        "write": "allow",
+        "edit": "allow",
+        "patch": "allow",
+        "grep": "allow",
+        "glob": "allow",
+        "list": "allow",
+        "external_directory": "allow",
+        "execute": "allow",
+        "browser": "deny",
+        "skill": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "subagent": "deny",
+        "question": "deny",
+        "sandbox_exec": "allow",
+        "mpm_memory": "allow",
+        "mpm_context": "allow",
+        "mpm_skills": "allow",
+        "mpm_system": "allow",
+        "mpm_work": "allow",
+        "mpm_resolve": "allow",
+        "mpm_help": "allow"
+      }
+    }
+  }
+}

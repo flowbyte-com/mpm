@@ -16,12 +16,21 @@
 // What this file does NOT do:
 //   - It does not execute a wake handler. The scheduler's Tick loop
 //     dispatches system kinds (snapshot, gc, etc.). Notification kinds
-//     have no in-process handler — they surface via read_wake_context
-//     and the agent decides what to do on the next MCP call.
-//   - It does not call MarkFired. The UPDATE inside the claim is itself
-//     the fired-flip, so a successful claim means fired=1.
+//     have no in-process handler — they are delivered to the agent by
+//     the opportunistic fold (CheckPendingWakes), and the agent decides
+//     what to do with them on the next MCP call.
+//   - It does not call MarkFired, and it does NOT flip fired=1. The
+//     claim's UPDATE stamps dispatched_at and metadata.dispatched_by;
+//     the row stays fired=0, which is what leaves it visible to the
+//     fold that will actually deliver it. The claim records "the
+//     scheduler took this row", not "the agent received this row".
+//     An earlier version of this comment claimed the UPDATE was
+//     itself the fired-flip; that was wrong, and it was wrong in the
+//     file that holds the keystone delivery invariant.
+//     docs/dev/session-b-audit.md records the observed behaviour: the
+//     claim "deliberately leaves fired=0".
 //
-// The Substrate Defense Triad applies: the write here is the firing
+// The Substrate Defense Triad applies: the write here is the claim
 // mutation, so we read it back implicitly via RETURNING (the row we
 // just claimed is the one we got back).
 package scheduler
@@ -32,6 +41,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	core "github.com/flowbyte-com/mpm-core"
 )
 
 // dispatchClaimNextAdHocWake atomically claims exactly one due
@@ -49,6 +60,28 @@ import (
 // This matches the existing Kind() default (untagged wakes report
 // kind = "notification") so the claim partition is precisely the
 // complement of the system-kind set.
+//
+// MALFORMED METADATA. The kind filter is
+// core.WakeNotificationKindFilter, which reads the kind through an
+// always-valid-JSON extraction. json_extract() RAISES on malformed
+// JSON, so an unguarded call would abort this statement on a single
+// corrupt metadata row and the claim would then fail for EVERY row —
+// one bad row would stall the whole notification queue. The
+// always-valid form never raises and carries no dependence on SQL
+// evaluation order, which an OR-chain of json_extract() calls would.
+//
+// A CORRUPT ROW IS NOT CLAIMED. The always-valid form reads a corrupt
+// document as UNTAGGED, and an untagged row matches the notification
+// filter — so without an explicit exclusion the claim would deliver
+// scheduler-owned work to the agent as an ordinary notification. The
+// truncated prefix '{"kind": "snapshot"' names a snapshot row; reading
+// it as untagged would retire a partition the agent does not own and
+// lose the work. The claim therefore excludes corrupt rows with
+// core.WakeMetadataIsCorrupt — the canonical predicate, so the
+// claim, the retention sweeps and the fold cannot disagree about which
+// rows belong to no partition. A corrupt row keeps its bytes and its
+// fired=0 state; it is reported by the retention sweep's diagnostic
+// and by the wakes_corrupt_metadata health counter.
 //
 // CRITICAL: this function does NOT flip fired=1. The 2026-09-23
 // release-blocker repair splits the scheduler-dispatch audit trail
@@ -85,7 +118,7 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 		UPDATE scheduled_wakes
 		SET dispatched_at = ?,
 		    metadata = json_set(
-		        CASE WHEN metadata IS NULL OR metadata = '' THEN '{}' ELSE metadata END,
+		        ` + core.WakeMetadataJSON + `,
 		        '$.dispatched_by', 'mpm-scheduler'
 		    )
 		WHERE id = (
@@ -93,13 +126,8 @@ func dispatchClaimNextAdHocWake(ctx context.Context, db *sql.DB, now time.Time) 
 			WHERE fired = 0
 			  AND dispatched_at IS NULL
 			  AND target_time <= ?
-			  AND (
-			    metadata IS NULL
-			    OR metadata = ''
-			    OR json_extract(metadata, '$.kind') IS NULL
-			    OR json_extract(metadata, '$.kind') = ''
-			    OR json_extract(metadata, '$.kind') = 'notification'
-			  )
+			  AND `+core.WakeNotificationKindFilter+`
+			  AND NOT `+core.WakeMetadataIsCorrupt+`
 			ORDER BY target_time ASC
 			LIMIT 1
 		)

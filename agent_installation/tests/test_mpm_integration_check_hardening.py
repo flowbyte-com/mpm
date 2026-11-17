@@ -671,3 +671,135 @@ class OpenCodePersistentBlockContract(unittest.TestCase):
         snippet = self._section_text(text)
         self.assertIn("Wake runtime injection", snippet)
         self.assertIn("MPM managed block in AGENTS.md", snippet)
+
+
+# --------------------------------------------------------------------------
+# The commands the diagnostic tells an operator to RUN must be commands
+# that WORK.
+# --------------------------------------------------------------------------
+
+
+class DiagnosticCommandsAreReal(unittest.TestCase):
+    """Every `mpm call <tool> --payload '{...}'` in the diagnostic must
+    name a tool and an action that exist.
+
+    WHY THIS EXISTS
+    ---------------
+    The diagnostic is the procedure an operator (or an auditing agent)
+    follows to establish the live tool surface. Section 7 says to
+    "inspect the current Registry and/or the live discovery mechanism"
+    and then gives a command to run.
+
+    That command named `mpm_system` with action `help`. `mpm_system`
+    has no `help` action: its registry enum is `gc_run`, `compact`,
+    `health_check`, `migrate`, `query_audit_log`, `list_clusters`,
+    `snooze_cluster`, `unsnooze_cluster`, `resolve_cluster`,
+    `annotate_cluster`, `critic_findings`, `event_ingest`,
+    `event_counters`. The command fails:
+
+        {"error":"unknown action \\"help\\" for mpm_system. ...","success":false}
+
+    So the procedure that exists to establish the tool surface could
+    not establish it. An agent following the diagnostic literally would
+    read the error, and the diagnostic's own §7.1 tool-count
+    reconciliation rule ("derive the count from the live surface")
+    would then be unsatisfiable.
+
+    This is the same defect class as the tool-reference contract drift:
+    an agent-facing document naming an action the implementation does
+    not offer. It is checked here, against the live registry, so it
+    cannot come back.
+    """
+
+    REGISTRY_PATH = REPO_ROOT / "internal" / "core" / "tools" / "registry_list.go"
+
+    # `mpm call` dispatches these by name rather than through the
+    # registry (internal/core/tools/call_routed.go). Their actions come
+    # from the same routing table, not from a Registry entry.
+    CALL_ROUTED = {
+        "mpm_help": {"list", "show"},
+    }
+
+    # `mpm call mpm_<tool> --payload '{"action":"<act>"...`
+    CALL_RE = re.compile(
+        r"mpm\s+call\s+(mpm_[a-z_]+)\s+--payload\s+'(\{.*?\})'",
+        re.S,
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.registry = cls._registry_actions()
+        cls.commands = cls._commands(_read_diagnostic())
+
+    @classmethod
+    def _registry_actions(cls):
+        """tool name -> its action enum, or None when it has no enum."""
+        src = cls.REGISTRY_PATH.read_text(encoding="utf-8")
+        out = {}
+        for m in re.finditer(r'\{\n\t\tName: "([^"]+)",', src):
+            end = src.find("\n\t},\n", m.end())
+            if end < 0:
+                continue
+            body = src[m.start():end]
+            a = re.search(
+                r'"action"\s*:\s*\{[^{}]*?"enum"\s*:\s*\[([^\]]*)\]', body, re.S
+            )
+            out[m.group(1)] = (
+                set(re.findall(r'"([^"]+)"', a.group(1))) if a else None
+            )
+        return out
+
+    @classmethod
+    def _commands(cls, text):
+        """(tool, action) for every concrete command in the diagnostic."""
+        found = []
+        for m in cls.CALL_RE.finditer(text):
+            tool = m.group(1)
+            payload = m.group(2)
+            a = re.search(r'"action"\s*:\s*"([^"]+)"', payload)
+            if a:
+                found.append((tool, a.group(1)))
+            else:
+                found.append((tool, None))
+        return found
+
+    def test_the_registry_parses(self):
+        self.assertGreaterEqual(
+            len(self.registry), 20,
+            "the registry did not parse into a usable set of tools — this "
+            "guard would pass vacuously",
+        )
+
+    def test_the_diagnostic_names_concrete_commands(self):
+        self.assertTrue(
+            self.commands,
+            "no `mpm call <tool> --payload '{...}'` command was found in the "
+            "diagnostic — the guard would pass vacuously",
+        )
+
+    def test_every_command_names_a_real_tool_and_action(self):
+        problems = []
+        for tool, action in self.commands:
+            if tool in self.CALL_ROUTED:
+                allowed = self.CALL_ROUTED[tool]
+            elif tool in self.registry:
+                allowed = self.registry[tool]
+                if allowed is None:
+                    continue  # no action enum: the call takes its own fields
+            else:
+                problems.append(
+                    f"{tool}: no such tool (not a Registry entry and not a "
+                    f"call-routed capability)"
+                )
+                continue
+            if action is not None and action not in allowed:
+                problems.append(
+                    f"{tool}: action {action!r} does not exist "
+                    f"(valid: {sorted(allowed)})"
+                )
+        self.assertEqual(
+            [],
+            problems,
+            "the diagnostic tells an operator to run commands that fail:\n  "
+            + "\n  ".join(problems),
+        )

@@ -192,7 +192,7 @@ OUT="$(bash "$DRIVER" --workspace "$WS" --rollback --rev "$REV" 2>&1)"
 RC=$?
 [ "$RC" = "0" ]; reh_assert $? "the rollback succeeded (rc=$RC)"
 [ "$(readlink "$WS/current")" = "releases/$REV" ]; reh_assert $? "the active pointer is back at the previous revision"
-"$WS/bin/mpm" --version 2>&1 | head -1 | grep -q "g$REV"; reh_assert $? "the rolled-back runtime reports the right revision"
+reh_version_line "the rolled-back runtime reports the right revision" "$WS/bin/mpm" "g$REV"
 [ -d "$WS/releases/n5-old" ]; reh_assert $? "the rolled-back revision is retained on disk"
 [ -d "$WS/releases/$REV" ]; reh_assert $? "the previous revision is retained on disk"
 
@@ -231,7 +231,7 @@ for POINT in after-stage after-install after-swap after-convert; do
   RC2=$?
   [ "$RC2" = "0" ]; reh_assert $? "[$POINT] a re-run completes the promotion (rc=$RC2)"
   [ "$(readlink "$WS/current" 2>/dev/null)" = "releases/n7-$POINT" ]; reh_assert $? "[$POINT] the recovered installation points at the new revision"
-  "$WS/bin/mpm" --version 2>&1 | head -1 | grep -q "g$REV"; reh_assert $? "[$POINT] the recovered runtime works"
+  reh_version_line "[$POINT] the recovered runtime works" "$WS/bin/mpm" "g$REV"
 
   REC_FP="$(python3 "$REH_DIR/state_fingerprint.py" "$WS/src/db/mpm.db" --content)"
   [ "$BEFORE_FP" = "$REC_FP" ]; reh_assert $? "[$POINT] the state is intact after the recovery too"

@@ -49,7 +49,12 @@ const doctorProse = `The deep-scan modes are mutually exclusive with each other 
   mpm doctor                      the standard report (read-only)
   mpm doctor --explain            the FTS5 query plan
   mpm doctor --deep-scan          the FTS/integrity audit (read-only)
-  mpm doctor --deep-scan --fix    the audit, and the repairs it supports`
+  mpm doctor --deep-scan --fix    the audit, and the repairs it supports
+
+The standard report's Attention section counts lesson proposals awaiting
+your review. That is a decision you owe the substrate, not a fault: it is
+reported as attention and never as a warning or a failure. Review them
+with: mpm lesson proposals`
 
 // doctorOptions declares every option `mpm doctor` accepts.
 //

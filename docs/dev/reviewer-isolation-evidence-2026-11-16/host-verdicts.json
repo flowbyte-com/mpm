@@ -1,0 +1,438 @@
+{
+ "N01": [
+  "DENY",
+  "dynamic-execution"
+ ],
+ "N02": [
+  "DENY",
+  "dynamic-execution"
+ ],
+ "N03": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N04": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N05": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N06": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N07": [
+  "ALLOW",
+  ""
+ ],
+ "N08": [
+  "DENY",
+  "compound-command"
+ ],
+ "N09": [
+  "DENY",
+  "compound-command"
+ ],
+ "N10": [
+  "ALLOW",
+  ""
+ ],
+ "N11": [
+  "DENY",
+  "compound-command"
+ ],
+ "N12": [
+  "ALLOW",
+  ""
+ ],
+ "N13": [
+  "ALLOW",
+  ""
+ ],
+ "N14": [
+  "ALLOW",
+  ""
+ ],
+ "N15": [
+  "ALLOW",
+  ""
+ ],
+ "N16": [
+  "ALLOW",
+  ""
+ ],
+ "N17": [
+  "ALLOW",
+  ""
+ ],
+ "N18": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N19": [
+  "ALLOW",
+  ""
+ ],
+ "N20": [
+  "ALLOW",
+  ""
+ ],
+ "N21": [
+  "ALLOW",
+  ""
+ ],
+ "N22": [
+  "ALLOW",
+  ""
+ ],
+ "N23": [
+  "ALLOW",
+  ""
+ ],
+ "N24": [
+  "ALLOW",
+  ""
+ ],
+ "N25": [
+  "ALLOW",
+  ""
+ ],
+ "N26": [
+  "ALLOW",
+  ""
+ ],
+ "N27": [
+  "ALLOW",
+  ""
+ ],
+ "N28": [
+  "DENY",
+  "compound-command"
+ ],
+ "N29": [
+  "DENY",
+  "compound-command"
+ ],
+ "N30": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N31": [
+  "ALLOW",
+  ""
+ ],
+ "N32": [
+  "ALLOW",
+  ""
+ ],
+ "N33": [
+  "DENY",
+  "compound-command"
+ ],
+ "N34": [
+  "ALLOW",
+  ""
+ ],
+ "N35": [
+  "ALLOW",
+  ""
+ ],
+ "N36": [
+  "ALLOW",
+  ""
+ ],
+ "N37": [
+  "ALLOW",
+  ""
+ ],
+ "N38": [
+  "ALLOW",
+  ""
+ ],
+ "N39": [
+  "ALLOW",
+  ""
+ ],
+ "N40": [
+  "DENY",
+  "compound-command"
+ ],
+ "N41": [
+  "DENY",
+  "compound-command"
+ ],
+ "N42": [
+  "DENY",
+  "compound-command"
+ ],
+ "N43": [
+  "DENY",
+  "compound-command"
+ ],
+ "N44": [
+  "ALLOW",
+  ""
+ ],
+ "N45": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N46": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N47": [
+  "DENY",
+  "compound-command"
+ ],
+ "N48": [
+  "ALLOW",
+  ""
+ ],
+ "N49": [
+  "ALLOW",
+  ""
+ ],
+ "N50": [
+  "ALLOW",
+  ""
+ ],
+ "N51": [
+  "ALLOW",
+  ""
+ ],
+ "N52": [
+  "ALLOW",
+  ""
+ ],
+ "N53": [
+  "ALLOW",
+  ""
+ ],
+ "N54": [
+  "ALLOW",
+  ""
+ ],
+ "N55": [
+  "ALLOW",
+  ""
+ ],
+ "N56": [
+  "ALLOW",
+  ""
+ ],
+ "N57": [
+  "ALLOW",
+  ""
+ ],
+ "N58": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N59": [
+  "ALLOW",
+  ""
+ ],
+ "N60": [
+  "ALLOW",
+  ""
+ ],
+ "N61": [
+  "ALLOW",
+  ""
+ ],
+ "N62": [
+  "ALLOW",
+  ""
+ ],
+ "N63": [
+  "ALLOW",
+  ""
+ ],
+ "N64": [
+  "ALLOW",
+  ""
+ ],
+ "N65": [
+  "ALLOW",
+  ""
+ ],
+ "N66": [
+  "ALLOW",
+  ""
+ ],
+ "N67": [
+  "ALLOW",
+  ""
+ ],
+ "N68": [
+  "ALLOW",
+  ""
+ ],
+ "N69": [
+  "ALLOW",
+  ""
+ ],
+ "N70": [
+  "ALLOW",
+  ""
+ ],
+ "N71": [
+  "ALLOW",
+  ""
+ ],
+ "N72": [
+  "DENY",
+  "compound-command"
+ ],
+ "N73": [
+  "DENY",
+  "compound-command"
+ ],
+ "N74": [
+  "DENY",
+  "compound-command"
+ ],
+ "N75": [
+  "DENY",
+  "compound-command"
+ ],
+ "N76": [
+  "ALLOW",
+  ""
+ ],
+ "N77": [
+  "ALLOW",
+  ""
+ ],
+ "N78": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N80": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N81": [
+  "DENY",
+  "dynamic-execution"
+ ],
+ "N82": [
+  "DENY",
+  "dynamic-execution"
+ ],
+ "N83": [
+  "DENY",
+  "dynamic-execution"
+ ],
+ "N84": [
+  "ALLOW",
+  ""
+ ],
+ "N85": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N86": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N87": [
+  "DENY",
+  "compound-command"
+ ],
+ "N88": [
+  "DENY",
+  "compound-command"
+ ],
+ "N89": [
+  "DENY",
+  "compound-command"
+ ],
+ "N90": [
+  "DENY",
+  "dynamic-execution"
+ ],
+ "N91": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N92": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N93": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N94": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N95": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N96": [
+  "ALLOW",
+  ""
+ ],
+ "N97": [
+  "DENY",
+  "compound-command"
+ ],
+ "N98": [
+  "DENY",
+  "compound-command"
+ ],
+ "N99": [
+  "DENY",
+  "compound-command"
+ ],
+ "N100": [
+  "DENY",
+  "compound-command"
+ ],
+ "N101": [
+  "DENY",
+  "compound-command"
+ ],
+ "N102": [
+  "DENY",
+  "compound-command"
+ ],
+ "N103": [
+  "DENY",
+  "compound-command"
+ ],
+ "N104": [
+  "ALLOW",
+  ""
+ ],
+ "N105": [
+  "ALLOW",
+  ""
+ ],
+ "N106": [
+  "DENY",
+  "dynamic-execution"
+ ],
+ "N107": [
+  "DENY",
+  "compound-command"
+ ],
+ "N108": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N109": [
+  "DENY",
+  "invalid-structure"
+ ],
+ "N110": [
+  "DENY",
+  "invalid-structure"
+ ]
+}

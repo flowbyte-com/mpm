@@ -55,8 +55,18 @@ This document covers:
    ```
 
    The adapter builds the plugin payload, registers it in
-   `~/.config/opencode/opencode.jsonc`, and refreshes the managed
-   behavioural block in `~/.config/opencode/AGENTS.md`.
+   `~/.config/opencode/opencode.jsonc`, refreshes the managed
+   behavioural block in `~/.config/opencode/AGENTS.md`, and installs the
+   **isolated reviewer agent** at
+   `~/.config/opencode/agents/mpm-reviewer.md`.
+
+   The reviewer definition is MPM-owned state, refreshed from the
+   canonical template on every install. It is what keeps a **review
+   subagent** away from the production substrate: the reviewer's
+   isolation is enforced by permission rules in that definition, so an
+   installation without it would leave a review subagent with the
+   parent's tool surface. See
+   [`README.md`](./README.md#the-isolated-reviewer-agent).
 
 4. **Never overwrite user working instructions.** Before touching
    `AGENTS.md`, inspect it. The installer preserves everything outside the
@@ -333,6 +343,7 @@ and the `save_payload` hand-off pattern are host-agnostic.
 | `~/.mpm/agent_installation/mpm-opencode/dist/` | `mpm-opencode/install.sh` | The compiled plugin payload (`dist/index.v2.js` + `dist/mpm-build-provenance.json`) |
 | `~/.config/opencode/AGENTS.md` (or `<project>/AGENTS.md`) | `install_agents_instructions.py` (invoked by `install.sh`) | Persistent instructions: MPM behavioral protocol in a managed block |
 | `~/.mpm/bin/mpm` | External (Makefile + install.sh) | `mpm` binary on `$PATH` |
+| `~/.config/opencode/agents/mpm-reviewer.md` | `install_reviewer_agent.py` (invoked by `install.sh` and `make install`) | The **isolated reviewer agent**: the permission rules that keep a review subagent away from the production substrate |
 
 > **No symlink is created.** The OpenCode 2 loader resolves a *directory*
 > plugin from the `plugins` array in `opencode.jsonc`; a hand-made symlink

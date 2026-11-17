@@ -513,7 +513,7 @@ There is NO params.shred: permanent shredding is operator-only and is refused on
 		name: "mpm_theories",
 		description: `Theory lifecycle. Literal actions:
   propose — Required params.hypothesis. Optional: params.validation_criteria, params.tags, params.dependencies, params.source_ids.
-  resolve — Resolve a pending theory. Required params.theoryId, params.conclusion ("confirmed"|"disproven"). Optional: params.newStatus ("proven"|"disproven"), params.winner_id.
+  resolve — Resolve a pending theory. Required params.id (alias params.theoryId), params.conclusion (free text — what the evidence showed) and params.status ("proven"|"disproven"; alias params.newStatus) — except on the arbitration branch, where params.winner_id (alias params.winnerId) selects the outcome instead.
   show — Fetch one theory by id. Required params.id.
   list — List theories. Optional: params.status ("pending"|"all"|"proven"|"disproven"|"resolved"; default "pending"), params.tags, params.limit (default 50).
   query — Search theories. Required params.query. Optional: params.limit (default 50).`,
@@ -621,7 +621,7 @@ To record a URL for later WITHOUT fetching it, use mpm_evidence action=add with 
   upsert_task — Create/update a cron task. Required params.id, params.name, params.cron_expr, params.directive_id, params.status.
   list_tasks — List all scheduled tasks. No params.
   delete_task — Hard-delete a task. Required params.id.
-  resolve — Resolve a fired wake. Required params.wake_id (id / wakeId are also accepted) and params.reason ("reconciled"|"obsolete"|"superseded"|"already_satisfied"). Optional: params.result_reference.`,
+  resolve — Resolve a fired wake. Required params.wake_id (id / wakeId are also accepted) and params.reason ("reconciled"|"obsolete"|"superseded"|"already_satisfied"). Optional: params.result_reference. Every ownership refusal returns success=false with a status and leaves the row untouched. A scheduler-owned or unknown kind is refused with status not_a_wake. A row whose metadata is present, non-empty and not a parseable JSON document is refused with status corrupt_metadata: its owner cannot be determined, so the agent may not retire it. Metadata that is absent or empty is not corrupt — it reads as untagged, which is agent-owned.`,
 	});
 
 	registerDomainTool(bin, tools, {

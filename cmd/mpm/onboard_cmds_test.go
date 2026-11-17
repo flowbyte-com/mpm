@@ -714,6 +714,29 @@ func digestDirTree(t *testing.T, root string) string {
 		if strings.HasSuffix(name, "-wal") || strings.HasSuffix(name, "-shm") {
 			return nil
 		}
+		// The watchdog's diagnostic log is excluded for the same
+		// reason the WAL/SHM siblings are: it is not state.
+		//
+		// The watchdog appends a line when a statement takes longer
+		// than the slow-query threshold (100 ms). That threshold is
+		// a LOAD-dependent measurement, so on a loaded machine an
+		// otherwise-inert inspection (a schema probe, a trigger
+		// repair) can cross it and leave a line in
+		// `src/db/watchdog.jsonl`. The file records a diagnostic
+		// about a statement's DURATION; it holds no user or agent
+		// state, and the substrate's own contract is that a slow
+		// statement is worth noticing, not worth failing over.
+		//
+		// Before this exclusion the digest reported "the workspace
+		// changed" whenever the machine was slow enough, which is
+		// the test asserting a timing accident instead of the
+		// behaviour it names. The defect is pre-existing and was
+		// exposed by the CI of issue #178's bare-write slice; see
+		// docs/dev/issue-178-bare-write-audit-and-slice-1-2026-11-06.md
+		// §9.1.
+		if name == "watchdog.jsonl" {
+			return nil
+		}
 		rel, _ := filepath.Rel(root, p)
 		b.WriteString(rel)
 

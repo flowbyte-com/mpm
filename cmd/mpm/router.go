@@ -77,7 +77,7 @@ func NewRouter() *CommandRouter {
 		"shred":        {Name: "shred", Description: "Remove memory from active state (hard delete + cascades; not byte erasure)", MinArgs: 0},
 		"stats":        {Name: "stats", Description: "Show memory statistics", MinArgs: 0},
 		"prune":        {Name: "prune", Description: "Prune expired memories", MinArgs: 0},
-		"export":       {Name: "export", Description: "Export memories to JSON", MinArgs: 0},
+		"export":       {Name: "export", Description: "Export memories to JSON (structured object with the package loss marker)", MinArgs: 0, Help: printExportHelp},
 		"integration":  {Name: "integration", Description: "Cross-framework config emitters (export-mcp)", MinArgs: 1},
 		"maintain":     {Name: "maintain", Description: "Run self-maintenance sweep", MinArgs: 0},
 
@@ -144,7 +144,7 @@ func NewRouter() *CommandRouter {
 		"restore-db": {Name: "restore-db", Description: "Restore database from SQL dump", MinArgs: 1},
 		"directives": {Name: "directives", Description: "Show behavioral directives"},
 		"lifecycle":  {Name: "lifecycle", Description: "Lifecycle asymmetry notes for artifact families", MinArgs: 0, MaxArgs: 1},
-		"status":     {Name: "status", Description: "Show system status", MinArgs: 0},
+		"status":     {Name: "status", Description: "Show system status (incl. lesson proposals awaiting operator review)", MinArgs: 0},
 		"update":     {Name: "update", Description: "Update the runtime to a newer release (check, apply, rollback)", MinArgs: 0},
 		"persona":    {Name: "persona", Description: "Manage personas"},
 		"ops":        {Name: "ops", Description: "Engine-room operations (maintenance, diagnostics)"},

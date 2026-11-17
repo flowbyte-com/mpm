@@ -110,6 +110,47 @@ type memExecer interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
+// poolMemExecer is a memExecer over the substrate's pool whose writes
+// carry a statement-level retry budget.
+//
+// WHY IT EXISTS
+// -------------
+// The primitives that take a memExecer (recordMemoryReviewOn,
+// weakenMemoryOn) are deliberately shared between the POOL path and the
+// TRANSACTION path, so that their validation and read-back assertions
+// cannot drift apart. That sharing is right for the SEMANTICS and wrong
+// for the RETRY POLICY.
+//
+// On the pool path the executor was a bare *sql.DB, and a bare pool
+// write is lost when the contention outlasts SQLite's busy timeout:
+// the review record and the weight change are agent-facing state, and
+// losing them is the defect issue #178 is about. This adapter gives the
+// pool path the substrate's budget of 5 while leaving the transactional
+// path — whose retry policy belongs to the transaction, not to the
+// statement — exactly as it was.
+//
+// It writes to the SAME pool the primitive used before, so the only
+// thing that changes is the retry policy.
+type poolMemExecer struct {
+	db      *sql.DB
+	retries int
+}
+
+// Exec runs the statement under the substrate's statement-level retry
+// policy: an ordinary SQLITE_BUSY is a wait, and the budget decides how
+// long the substrate waits it out before the write is lost.
+func (p poolMemExecer) Exec(query string, args ...any) (sql.Result, error) {
+	out := execTracked(p.db, query, p.retries, nil, args...)
+	return out.Result, out.Err
+}
+
+// QueryRow reads a row. A read is not the defect class: it is the WRITE
+// that is lost under contention, and the read-back that follows the
+// write runs against the same pool.
+func (p poolMemExecer) QueryRow(query string, args ...any) *sql.Row {
+	return p.db.QueryRow(query, args...)
+}
+
 // ReviewCandidate is one memory whose spaced review is due.
 //
 // It carries the review-relevant facts explicitly rather than as a bag of
@@ -293,7 +334,7 @@ func (s *MemoryStore) RecordMemoryReview(memoryID string, decision string, note 
 			return err
 		}
 	}
-	return s.recordMemoryReviewOn(s.DB, memoryID, decision, note)
+	return s.recordMemoryReviewOn(poolMemExecer{db: s.DB.DB, retries: 5}, memoryID, decision, note)
 }
 
 // recordMemoryReviewOn records the review through the given executor.
