@@ -274,8 +274,8 @@ The branch head is pushed to `github` and CI is run on it by the
 `pull_request` trigger of `.github/workflows/build-test.yml` (which fires for
 every pull request, whatever its base).
 
-**What CI caught, and what it was.** The first run of the implementation
-head **failed**, in two jobs, and both failures were real:
+**What CI caught, and what it was.** The runs of the implementation head
+**failed**, and every failure was real:
 
 1. **The staged package carried an unresolved import.** The canonical
    runtime payload manifest (`scripts/runtime_payloads.json`) — the
@@ -301,12 +301,24 @@ head **failed**, in two jobs, and both failures were real:
    the host** and bound read-only, and the test asserts the property that
    is actually guaranteed — *the toolchain the host has is runnable
    inside* — skipping only on a host that has none.
+3. **A rebuilt payload was missing a file the manifest names.** The
+   adapter's install tests use a **fake `tsc`**, so the build is
+   hermetic; the fake emitted a **hand-written list** of `dist/` files
+   and the list had not learned about `sandbox-exec.ts`. The rebuilt
+   payload was therefore incomplete, the staging **refused** it, and the
+   install failed — fifteen tests, with an error message that pointed at
+   the payload and not at the stub. The fake now emits **one `.js` per
+   `.ts` under `src/`**, which is what the real compiler does, so a
+   module added to `src/` is carried into the payload **by
+   construction**.
 
-> A green local suite did not catch either one. The local tree had a
-> built `dist/` and a toolchain under `/usr/local`; the fixtures did not
-> model the new import, and the test baked in the operator's own layout.
-> A gate that only tests what is already true is decoration; both of
-> these now test the shapes that broke.
+> A green local suite did not catch any of the three. The local tree had
+> a built `dist/`, a toolchain under `/usr/local`, and a fake `tsc`
+> whose list happened to be complete. **All three were hand-written
+> mirrors of a real shape** — a manifest, a path, a file list — and a
+> mirror maintained by hand is a mirror that goes stale. Each of them
+> now derives from the thing it mirrors, so the shape that broke is the
+> shape the gate exercises.
 
 | head | what it carries | the run |
 |---|---|---|
@@ -317,9 +329,24 @@ head **failed**, in two jobs, and both failures were real:
 
 - **workflow:** `build-and-test` (`.github/workflows/build-test.yml`), the
   `pull_request` trigger
-- **jobs:** `Build + core tests`, `Full test suite`, `Release gate`
+- **head:** `a810a2ce` — the implementation head: the A3 implementation, the
+  manifest fix, the review's findings, and the three CI fixes
+- **run:** [44081964509](https://github.com/flowbyte-com/mpm/actions/runs/44081964509)
+- **conclusion: SUCCESS** — all three jobs green:
 
-<!-- CI-RUN-PLACEHOLDER -->
+| job | result |
+|---|---|
+| `Build + core tests` | **success** — the build, `go vet`, the `mpm-lint` gate, the core tests, the renderer-parity suite, the documentation-freshness gate, the installer-contract suite (`scripts/tests`) and the benchmark harness |
+| `Full test suite` | **success** — the full Go sweep with the coverage profile |
+| `Release gate (cross-agent continuity + public-CLI subprocess suite)` | **success** — `make release-gate`, which is the job that runs the agent_installation suite **with the plugin built** — the job that caught the two sandbox defects |
+
+The head that carries **this report** is **documentation only**, and it runs the
+same pipeline; its conclusion is published in the PR body, which is where a
+run's final state belongs without the report chasing its own commit.
+
+> Three earlier runs failed, and the record of them is in §8: they are the
+> reason the run above is green. A gate that has never failed is a gate that
+> has never been tested.
 
 ---
 
