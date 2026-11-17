@@ -26,7 +26,7 @@ Every blocking class in the gate's convergence rule is empty:
 | an unconfined tool or delegated execution route | **none** — the host's own permission service refuses 23 of 24 actions for the reviewer; the one action it opens is confined by the kernel |
 | a sandbox or installer that fails open | **none** — 8 refusal paths measured, each refusing without running the command |
 | an inaccurate security guarantee | **one found and corrected** — the definition claimed a denied tool is *"removed from your tool list entirely … cannot see one"*, which was never verified; it now states the measured fact |
-| a failed required test or CI check | **none** — every local gate and every CI run at the reviewed head is green |
+| a failed required test or CI check | **one found during the gate, and closed** — the CI run on the first reviewed head failed three tests; all three were the tests' own assumption that the toolchain discovery never finds anything, which holds on this host and does **not** hold on a CI runner. They were fixed, the condition was reproduced locally under a simulated runner, and the CI run at the final code head is **green on all three jobs** |
 | an unexpected implementation change affecting the security boundary | **one found during the gate** — the post-review toolchain-discovery delta; it was submitted to a narrow independent delta review, which returned REQUEST CHANGES, and the fix was re-verified to APPROVE |
 
 ---
@@ -35,8 +35,8 @@ Every blocking class in the gate's convergence rule is empty:
 
 | | |
 |---|---|
-| **PR #247 head (the reviewed code)** | `fc1af83f13de783e269e66da25b952b9d419778a` |
-| **PR #247 head (with this report added)** | one commit later — documentation only; see §6 for the CI run at the final head |
+| **PR #247 head (the reviewed code)** | `b4c6f118a9db2de73794ff742d31558370d9ed58` |
+| **PR #247 head (with this report added)** | one commit later — documentation only; see §5.3 for its CI |
 | **current `main` (authoritative, from `git ls-remote`)** | `1da6777c68112e589fc8a52af387621073bb71fe` |
 | **base** | `main` — `1da6777c68112e589fc8a52af387621073bb71fe` |
 | **mergeability** | `mergeable: true`, `mergeable_state: clean` |
@@ -291,12 +291,50 @@ READ, and only to answer *"is this absent inside the namespace?"*.
 |---|---|---|
 | `44081964509` | `a810a2ce` (the implementation head) | **success** — all 3 jobs |
 | `44092644993` | `23ffcaa4` (the report head) | **success** — all 3 jobs |
-| `44107514553` | `fc1af83f` (**the reviewed code head**) | **success** — all 3 jobs |
-| the final head (this report) | one commit later | see the PR body — documentation only |
+| `44107514553` | `fc1af83f` (the first reviewed code head) | **FAILURE** — *Build + core tests*, at the "Renderer parity" step: **three** tests failed |
+| `44110362350` | `b4c6f118` (**the final code head**) | **success** — all 3 jobs |
 
 Two earlier runs failed (`44063808134`, `44075419731`); both were
 diagnosed and fixed, and both fixes are in the history (`8fa97292`,
 `a810a2ce`).
+
+### 5.1 The CI failure, and what it was
+
+The three failures were **all** the same class of assumption, and it was
+the tests' assumption, not the product's:
+
+| failing test | the assumption it made | the fix |
+|---|---|---|
+| `test_the_writable_tree_is_bound_by_descriptor` | every descriptor bind is one of the five writable trees and `/etc` | it now pins the read-write binds and the read-only descriptor binds **separately**, and the read-only set is exactly the synthetic `/etc` plus the **discovered** toolchain roots — which is the contract |
+| `test_the_hosts_etc_is_not_the_sandboxes_etc` | the **first** `--ro-bind-fd` is the `/etc` bind | it locates the bind by its **destination** instead of its position |
+| `test_a_home_relative_toolchain_root_is_refused` | the host grants an unprivileged user namespace | it probes for that capability first and **skips** where the host cannot provide it; the refusal rules it pins are covered by the contract tests either way |
+
+The assumption held on this host — `go` lives under `/usr/local`, already
+covered by the static runtime list — and did **not** hold on a CI
+runner, whose hosted tool cache the discovery finds at
+`/opt/hostedtoolcache`. **The feature did what it was built to do; the
+tests had never seen it fire.**
+
+The condition was reproduced locally, in a private mount namespace
+carrying a hosted tool cache at `/opt`, so the discovery fires: the
+suite passes there, and the three failures are gone.
+
+### 5.2 The production code at the final head is the approved code
+
+The only changes after the independent reviewer's **APPROVE** are tests
+and documentation:
+
+```
+git diff --stat fc1af83f HEAD -- <every production path>   →   EMPTY
+```
+
+`fc1af83f` is the head the reviewer approved. Everything after it is
+two test files and this directory's evidence.
+
+### 5.3 The final head's CI
+
+The head that carries this report is one commit later and adds only
+documentation. Its CI run is recorded in PR #247's body.
 
 ---
 

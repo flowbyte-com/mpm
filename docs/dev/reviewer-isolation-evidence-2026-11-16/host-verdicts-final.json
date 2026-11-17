@@ -1,7 +1,7 @@
 {
   "date": "2026-11-17",
   "host": "opencode 2.3.0 (the operator's installed CLI), run as an isolated server",
-  "measured_at_head": "fc1af83f13de783e269e66da25b952b9d419778a",
+  "measured_at_head": "b4c6f118a9db2de73794ff742d31558370d9ed58",
   "how": "The definition is installed into an isolated host whose HOME, XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME and XDG_CACHE_HOME all point into a disposable run root. The host's own permission service is then asked, over its own API and from OUTSIDE the host, what it decides for each agent and each action. The built-in agents are measured in the SAME pass, so they are the control.",
   "note": "The host loads its agent documents through a watcher-driven pass, and a freshly started server does not always have them before the first question. An agent the host does not know is denied EVERY action, which is indistinguishable from the outside from a definition that denies everything \u2014 so the definition is touched before the measurement, which fires the watcher and makes the host reload its agent registry. The unknown-agent case is therefore distinguishable: it is the one where `sandbox_exec`, the ONE action the definition opens, is refused as well.",
   "verdicts": {
@@ -121,5 +121,6 @@
         "mpm_help": "allow"
       }
     }
-  }
+  },
+  "measured_at_head_note": "The measurement was taken at fc1af83f, whose agent definition is BYTE-IDENTICAL to the final code head b4c6f118: the commit between them touches two test files and no definition, no permission rule and no tool registration."
 }
