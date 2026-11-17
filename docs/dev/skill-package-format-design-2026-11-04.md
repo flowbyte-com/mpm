@@ -341,7 +341,7 @@ corresponding correction adds to an existing path.
 | **E3** | `metadata` JSON on the skill row as the pointer to the package — the same idiom as `derived_from_skill_id` |
 | **E4** | `isSensitiveContent` and `isPoisonedAt` are reusable per file, not just per document |
 | **E5** | **`saveMemoryRow`, reached through the `txNode` adapter, is the canonical tx-aware write primitive for the projection** — the definition is `internal/core/db.go:4472` and the skills call site is `internal/core/skill_db.go:730`. The import owns the transaction and writes the projection through it. `SaveSkillWithInvocation` is **not** the primitive: its new-row path opens and commits its own transaction (`:652`, `:735`) and its force path is a bare `db.Exec` with no transaction at all (`:624`), so it cannot be composed into a caller's transaction. A thin tx-aware skill writer may be extracted from it, but the transaction must belong to the importer (**R2**) |
-| **E6** | The force path is the one in-place content writer for a skills row in the whole tree (`internal/core/skill_db.go:625`), so the package-immutability guard is a single branch in a single function, plus its CLI and MCP surfaces (**R1**) |
+| **E6** | The force path is **one** in-place content writer for a skills row (`internal/core/skill_db.go:625`), so the package-immutability guard is a branch in one function, plus its CLI and MCP surfaces (**R1**) — and the guard must be applied to **every** in-place writer, not only this one (§17.5) |
 | **E7** | `DirectiveExclusionClause` is the precedent for a collection-scoped exemption in a hard delete; the skills exemption follows the same shape (**R7**) |
 
 ---
@@ -946,7 +946,7 @@ content writer for a skills row in the whole tree.
 > into each `UPDATE`'s own `WHERE` clause. The legacy metadata patch path
 > could rewrite the package's `version` and `content_hash` — the row's own
 > version identity and projection hash — and is now refused too, with the
-> distinct `package_metadata_immutable` code. **§17.4** records the finding and
+> distinct `package_metadata_immutable` code. **§17.5** records the finding and
 > what it means for this document's premises.
 >
 > This document's own **R1** disposition row (§15) had already identified the
@@ -2171,7 +2171,7 @@ repository contradicts, and each was verified against the code at
 
 | correction | what was measured | where |
 |---|---|---|
-| **R1** | The force branch replaces `memories.content` **in place** under the same id — `UPDATE memories SET content = ? … WHERE id = ?` — and it is the only in-place content writer for a skills row in the tree. `force` reaches it straight from the MCP payload. | `internal/core/skill_db.go:624-631`, `internal/core/tools/handlers.go:3758` |
+| **R1** | The force branch replaces `memories.content` **in place** under the same id — `UPDATE memories SET content = ? … WHERE id = ?` — and it is **one** in-place content writer for a skills row in the tree. `force` reaches it straight from the MCP payload. **§17.5 records that this enumeration was incomplete, and that the mitigation this row prescribed — "the guard must also be applied to *every* future in-place writer … a code comment should point at the package tables so a later writer does not add a second" — was not carried out.** | `internal/core/skill_db.go:624-631`, `internal/core/tools/handlers.go:3758`; corrected in §17.5 |
 | **R2** | `SaveSkillWithInvocation` cannot be composed into a caller's transaction: the new-row path owns its own `db.Begin()`/`tx.Commit()`, and the force path is a bare `db.Exec` with no transaction at all. The tx-aware primitive that *is* composable is `saveMemoryRow`, reached through the `txNode` adapter. | `internal/core/skill_db.go:652`, `735`, `624`, `730`; `internal/core/db.go:4472` |
 | **R3** | `semver.IsValid("v1.0.0-unversioned")` is `true`; `semver.Compare` against `v1.0.0` is **-1** and against `v0.9.0` is **+1**. The id `skill:system-prompt-writer-v1.0.0-unversioned` round-trips to name `system-prompt-writer`, version `1.0.0-unversioned`. | `internal/core/skill.go:174-202`; §2.5, §5.2 |
 | **R4** | The MCP registry contains **exactly one** path-shaped parameter in the whole tool surface — `filepath` on `mpm_references`, which names a *file* with an extension allow-list. `mpm_skills` has none. There is no path-confinement helper in the tool layer: no `confine`, `safePath`, `resolveWithin`, `ensureUnder`, and no `filepath.EvalSymlinks`. | `internal/core/tools/registry_list.go:217`, `337-376` |
@@ -2613,7 +2613,7 @@ that was not in `main`. §17.4 records that gap and its closure.
 | **D3** | **P9** gives the blob collector a package **reference check**. | **Satisfied by construction, not by a check.** The package bytes live in `skill_package_blobs`, a table of their own. The blobstore hard rule (§3.2, §4.4) means **no package byte ever enters the blobstore**, so `mpm blob gc` cannot reach one. | The outcome this document wants holds. The mechanism is different — and the stronger one this document also specifies makes the check unnecessary. The design's "the collector never deletes a referenced blob" is true by a route it did not predict. |
 | **D4** | **P9** promotes this document out of `docs/dev/`. | **Not done, and deliberately not done.** The shipped code cites this document **by path**; moving it would break eleven source files' citations. | The document stays at the path the code names. This is the one item of **P9** that is *deferred by constraint* rather than *omitted*. |
 | **D5** | **P3**'s acceptance requires the operator's confirmation of the prune exemption's form (**O17**), and §6.4 states the cost. | The **blanket** form shipped, and the cost was accepted with it. | `mpm prune --older-than` can no longer remove **any** skill. That is a behaviour change for every existing skill, and it is silent — exactly as §6.4 warns. The SPEC publishes the blast radius. |
-| **D6** | §5.8.1's **R1** premise: the force path is "the **only** in-place content writer for a skills row in the whole tree". | **The premise was false.** `MemoryStore.UpdateMemory` and `DatabaseManager.UpdateMemory` are also in-place content writers, and neither carried the guard; the legacy metadata patch path could also rewrite the package's `version` and `content_hash`. | **The most consequential finding of this reconciliation.** The guard was correct as written and incomplete as scoped. It is now complete — see §17.4. |
+| **D6** | §5.8.1's **R1** premise: the force path is "the **only** in-place content writer for a skills row in the whole tree". | **The premise was false.** `MemoryStore.UpdateMemory` and `DatabaseManager.UpdateMemory` are also in-place content writers, and neither carried the guard; the legacy metadata patch path could also rewrite the package's `version` and `content_hash`. | **The most consequential finding of this reconciliation.** The guard was correct as written and incomplete as scoped. It is now complete — see §17.5. |
 | **D7** | §8.5 pins the wire shapes of `files`, `read_file` and `verify`. | **Not implemented** — they are internal operations whose response types carry no JSON tags, deliberately, so that the transport encoding of a binary payload is explicit rather than decided by `encoding/json`'s default. | The design's wire shapes are a **P8** concern, and P8 did not ship. The internal types are transport-agnostic by construction, which is the property §8.5 requires. |
 
 ### 17.4 The gap this reconciliation found: the design of record was not in `main`
@@ -2677,9 +2677,24 @@ Both are now closed:
 | `MemoryStore.UpdateMemory`, `DatabaseManager.UpdateMemory` | `package_immutable` | conflict — the same code as the force path |
 | the legacy metadata patch path, for `version` and `content_hash` | `package_metadata_immutable` | conflict — a distinct code, so the two refusals are countable apart |
 
-Both are **fail closed** and **atomic with the write**: the guard's condition
-is folded into the `UPDATE`'s own `WHERE` clause, so a package row that
-appears between the check and the write cannot let the mutation through.
+Both are **fail closed**, and each is **atomic with its write** — by the
+mechanism that path can actually offer:
+
+* the **content** path folds the guard's condition into the `UPDATE`'s own
+  `WHERE` clause (`AND NOT EXISTS (SELECT 1 FROM skill_packages WHERE
+  skill_id = ?)`), so the check and the write are one atomic statement and
+  a package row that appears between them cannot let the overwrite through;
+* the **metadata** path shares ONE transaction with the `UPDATE`, so the
+  check and the write see ONE snapshot. A package row that appears after
+  the check cannot be seen by the write either: SQLite refuses to promote
+  a stale snapshot to a write (`SQLITE_BUSY_SNAPSHOT`), so the write
+  cannot land on a state the check did not see.
+
+The distinction is recorded here because the first version of this section
+claimed the `WHERE`-clause mechanism for **both**. That claim was true of
+the content path and false of the metadata path, and a document that
+attributes a mechanism to a path that does not have it is a document whose
+readers cannot reason about it.
 
 The metadata guard is deliberately **narrow**, and the narrowness is part of
 the contract: it applies only to a row that owns a package, only to the two
@@ -2721,3 +2736,48 @@ shipped behaviour:
 * package promotion flipping the package row's `is_global` (**D2**, **P9**);
 * the `files` / `read_file` / `verify` wire shapes (**D7**, **P8**);
 * an agent-facing import (**O14**) — deferred by decision, not by omission.
+
+### 17.7 The independent review of this reconciliation, and what it found
+
+The reconciliation above was itself reviewed independently. The review
+returned **REQUEST CHANGES** with eleven findings. **Six were real
+defects**; they are closed, and each has a regression test that fails
+without the fix.
+
+| | finding | status |
+|---|---|---|
+| **R1** | `MemoryStore.InitSQLite` did not install the local-only `SkillPackageTables` slice, so the guard's own `WHERE` clause made an **ordinary** update against a standalone store fail with "no such table: `skill_packages`" — the guard broke a write it was never meant to touch. | **CLOSED.** The standalone path installs the same slice the managed path does. |
+| **R2** | A store with `DM` set and `DB` nil — a real shape, because `InitSQLite` returns early when the store has a manager — dereferenced a nil handle in the guard's pre-check. The pre-change code executed its `UPDATE` through the manager's pool, so that shape worked before. | **CLOSED.** The guard's read follows the same handle routing the write does. |
+| **R3** | The metadata comparison decoded the **whole** metadata document into a Go map. A document that is valid JSON but holds a number outside float64's range fails that decode, the comparison discarded the map, and a real rewrite of a packaged skill's `version` was **allowed**. | **CLOSED.** The comparison is SQLite's: it reads the one key it cares about with `json_type` and `json_extract`, and computes the "after" value with the same `json_patch` the `UPDATE` applies. |
+| **R4** | The zero-row outcome was explained by a read in a **separate** statement, which could see a different snapshot than the write. | **CLOSED.** The explanation is ONE statement that reads the row's existence and the package's ownership together. |
+| **R5** | The predicate test re-typed the guarded `UPDATE`, so it would still have passed after the guard's condition was deleted from the code. | **CLOSED.** The four statements are named constants, and the test executes **the constants**. |
+| **R6** | The ownership-change test was not a race. | **CLOSED.** It is a race now: writers update the skill continuously while the package is published underneath them. |
+| **R7** | The protected-key list was an exported, mutable slice. | **CLOSED.** It is unexported. |
+| **R8** | The change's own description understated a negative-control count. | **CLOSED.** The counts are measured and stated. |
+| **R9** | `DatabaseManager.UpdateMemory` does not write the embedding's provenance columns, while `MemoryStore.UpdateMemory` does. | **NOT FIXED — disclosed.** It is a **pre-existing** asymmetry between two independent implementations, not something this work introduced, and it is outside the scope of the immutability contract. It is recorded here so that it is not mistaken for part of this change. |
+| **R10** | This document's §15 R1 row still stated the false premise. | **CLOSED.** Corrected in place, with a pointer here. |
+| **R11** | This document's §5.8.1 correction pointed at §17.4 rather than §17.5. | **CLOSED.** The cross-reference is corrected. |
+
+**What the review's R3 finding says about this document's own method.** The
+comparison that was wrong was the one that tried to be cleverer than the
+engine: it decoded the document into a Go value to reason about it, and a
+Go value cannot represent every document SQLite can hold. The guard now
+asks the engine the one question it needs answered, in the engine's own
+terms. That is the same principle §5.8.1 states for the write path — *ask
+the substrate, do not model it* — applied to the read.
+
+**The negative controls, measured.** Each fix's regression test was checked
+by reverting the fix and confirming that the test fails:
+
+| control | core tests that fail |
+|---|---|
+| revert the content guard (`web_db.go` + `memory.go`) | **13** |
+| revert the metadata guard call (`db.go`) | **8** (plus **2** CLI/MCP surface tests) |
+| remove the standalone store's package tables | **3** |
+| restore the unconditional handle routing | **1** |
+| restore the Go-map metadata comparison | **1** |
+| stop detecting the impossible zero-row outcome | **1** |
+| delete the guard's condition from the production statements | **3** (including the race test) |
+
+Every one of them fails **for the reason it is supposed to fail**, which is
+the only thing that makes a regression test worth having.
