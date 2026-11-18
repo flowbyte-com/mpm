@@ -54,12 +54,14 @@
 // The DDL statements are themselves CREATE ... IF NOT EXISTS, so a re-run is
 // a no-op even if the sentinel were lost.
 //
-// WHAT THE SECOND INDEPENDENT REVIEW FOUND, AND WHAT CHANGED HERE
+// WHAT THE INDEPENDENT REVIEWS FOUND, AND WHAT CHANGED HERE
 // ----------------------------------------------------------------
-// The first version of this file was reviewed independently and came back
-// with eleven blocking findings. Every one of them was a real defect, and
-// every one is closed here. The findings were, in the reviewer's words:
+// Three independent reviews have looked at this file. The first returned
+// eleven blocking findings, the second two, and the third five. Every one
+// of them was a real defect, and every one is closed here.
 //
+// The FIRST review's findings were, in the reviewer's words:
+
 //   - the implementer could reach `awaiting_operator` from `completed`,
 //     SKIPPING the required independent review;
 //   - the transition path used `OLD.role`, but `role` was MUTABLE, so a
@@ -111,27 +113,34 @@ import (
 // ------------------------------------
 // The contract's invariants are not expressible as column CHECK constraints,
 // and each of them is the difference between a coordination substrate and a
-// convention. There are THIRTEEN rules, carried by TWENTY triggers — five
+// convention. There are NINETEEN rules, carried by TWENTY-FIVE triggers — six
 // of the rules are split across several triggers, so that a test can
 // isolate one clause from another. The rules are:
 //
 //   1  an assignment is created in the 'enqueued' state
 //   2  an assignment is created UNCLAIMED: epoch 0, no owner, no lease
-//   3  the delegation tree is a tree: the root is a root, the parent is in
-//      the same tree, and nobody is their own parent — on the INSERT path
-//      and on the UPDATE path
-//   4  a root's own recipient is among its eligible recipients
-//   5  a permitted operation is a non-null string (on INSERT and on UPDATE)
-//   6  the state machine is ROLE-AWARE, and 'cancelled' is universal
-//   7  the claim epoch advances by exactly one, and only a claim changes
-//      the owner
-//   8  the role is IMMUTABLE
-//   9  the operator's gate names its action, a recorded approval names its
-//      action, its revision and its source, and neither record is rewritten
-//  10  a claimed assignment cannot be DELETED
-//  11  the ledger's event index is MONOTONIC
-//  12  the ledger is append-only (no UPDATE)
-//  13  the ledger is append-only (no DELETE)
+//   3  an assignment's id and its idempotency key are NEVER reused
+//   4  the delegation tree is a tree: the root is a root, the parent is in
+//      the same tree at one level above, and nobody is their own parent —
+//      on the INSERT path and on the UPDATE path
+//   5  the depth is IMMUTABLE
+//   6  a root's own recipient is among its eligible recipients
+//   7  a permitted operation is a non-null, non-empty string
+//   8  an eligible recipient is a non-null, non-empty string
+//   9  the state machine is ROLE-AWARE, and 'cancelled' is universal
+//  10  the claim epoch advances by exactly one
+//  11  a claim sets an owner and a lease
+//  12  only a claim changes the owner
+//  13  the role is IMMUTABLE
+//  14  the operator's gate names its action, a recorded approval names its
+//      action, its revision and its source, the approval names the SAME
+//      action the gate awaited, and neither record is rewritten once the
+//      gate is reached
+//  15  a claimed assignment, or one that has a ledger, cannot be DELETED
+//  16  the ledger's event index is MONOTONIC
+//  17  a ledger entry's id and its index are NEVER reused
+//  18  the ledger is append-only (no UPDATE)
+//  19  the ledger is append-only (no DELETE)
 //
 // The fencing of a STALE owner is deliberately NOT a trigger. A trigger
 // cannot see the epoch a caller presented — it only sees the row before and
@@ -318,8 +327,14 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
                         CHECK (approval_evidence IS NULL OR typeof(approval_evidence) = 'text'),
     approved_at         INTEGER
                         CHECK (approved_at IS NULL OR typeof(approved_at) = 'integer'),
-    created_at          INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-    updated_at          INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    -- The timestamps are GUARDED like every other number. A TEXT
+    -- updated_at sorts after every INTEGER in the three indexes that
+    -- order by it, so a corrupted timestamp would make its row look
+    -- like the newest one.
+    created_at          INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+                        CHECK (typeof(created_at) = 'integer'),
+    updated_at          INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+                        CHECK (typeof(updated_at) = 'integer'),
     completed_at        INTEGER
                         CHECK (completed_at IS NULL OR typeof(completed_at) = 'integer'),
     -- The containment boundary. An assignment belongs to a project, and the
@@ -442,13 +457,14 @@ CREATE TABLE IF NOT EXISTS agent_task_events (
     actor_kind      TEXT
                     CHECK (actor_kind IS NULL OR typeof(actor_kind) = 'text'),
     claim_epoch     INTEGER
-                    CHECK (claim_epoch IS NULL OR typeof(claim_epoch) = 'integer'),
+                    CHECK (claim_epoch IS NULL OR (typeof(claim_epoch) = 'integer' AND claim_epoch >= 0)),
     note            TEXT
                     CHECK (note IS NULL OR typeof(note) = 'text'),
     payload         JSON NOT NULL DEFAULT '{}'
                       CHECK (typeof(payload) = 'text'
                              AND json_valid(payload) AND json_type(payload) = 'object'),
-    created_at      INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+    created_at      INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+                    CHECK (typeof(created_at) = 'integer'),
     UNIQUE(task_id, event_index),
     FOREIGN KEY (task_id) REFERENCES agent_tasks(id) ON DELETE RESTRICT
 );
@@ -478,7 +494,39 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: an assignment is created unclaimed — epoch 0, no owner, no lease');
 END;
 
--- ── Rule 3: the delegation tree is a TREE ─────────────────────────────────
+-- ── Rule 3: an assignment's id and its idempotency key are NEVER reused ───
+--
+-- An INSERT OR REPLACE is DELETE + INSERT. SQLite does NOT fire the DELETE
+-- triggers for REPLACE's implicit delete unless the recursive_triggers
+-- pragma is ON, and it never fires the UPDATE triggers at all.
+-- So every rule enforced by a BEFORE UPDATE or a BEFORE DELETE trigger is
+-- defeated by a REPLACE — and MPM does not enable recursive_triggers (the
+-- DSN sets foreign_keys, journal_mode, busy_timeout, synchronous and
+-- cache_size, and nothing else), so that is the DEFAULT behaviour here.
+--
+-- The defence is a BEFORE INSERT trigger that refuses an INSERT whose id or
+-- whose idempotency key ALREADY EXISTS. SQLite runs the BEFORE INSERT
+-- trigger BEFORE the conflict resolution, so the conflicting row is still
+-- there and the REPLACE is refused as a whole: the existing row survives,
+-- with its role, its state, its lease, its claim epoch and its approval
+-- record intact.
+--
+-- A plain INSERT with a duplicate id or key is refused by the PRIMARY KEY
+-- and by the unique index anyway, so this trigger changes no legitimate
+-- behaviour. It closes the REPLACE path, which the constraints alone do
+-- not cover.
+CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_id_is_not_reused
+BEFORE INSERT ON agent_tasks
+FOR EACH ROW WHEN EXISTS (
+    SELECT 1 FROM agent_tasks t
+     WHERE t.id = NEW.id
+        OR t.idempotency_key = NEW.idempotency_key
+)
+BEGIN
+    SELECT RAISE(ABORT, 'agent_tasks: an assignment''s id and its idempotency key are never reused');
+END;
+
+-- ── Rule 4: the delegation tree is a TREE ─────────────────────────────────
 --
 -- The composite foreign keys keep the tree inside ONE project, but they do
 -- not make it a tree: a child could parent ITSELF, could cite a non-root
@@ -499,13 +547,17 @@ FOR EACH ROW WHEN NEW.depth > 0 AND (
         -- The parent must be in the SAME tree as the root, AND it must sit
         -- exactly one level above.
         --
-        -- The depth condition is what excludes a CYCLE. Following the
-        -- parent chain must strictly DECREASE the depth, so the chain
-        -- cannot come back to where it started: a cycle would need the
-        -- depth to be both one more and one less than itself. Without it,
-        -- two UPDATEs could point two children at each other and every
-        -- other condition would hold — a "tree" with a loop in it, and an
-        -- ancestor walk over it that never terminates.
+        -- The depth condition is what excludes a CYCLE, and it is only
+        -- SOUND because the depth is immutable (see the depth trigger
+        -- below). Following the parent chain must strictly DECREASE the
+        -- depth, so the chain cannot come back to where it started.
+        --
+        -- The condition alone is NOT enough, and that was a real defect:
+        -- a BEFORE trigger sees only the row being written, so two
+        -- statements that each change a depth could satisfy it and leave
+        -- two children pointing at each other with mutually inconsistent
+        -- depths. The depth's immutability makes the chain strictly
+        -- decreasing by construction.
         OR NOT EXISTS (
             SELECT 1 FROM agent_tasks p
              WHERE p.id = NEW.parent_id
@@ -547,7 +599,25 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: the delegation tree is malformed — the root must be a root of this project, and the parent must be in the same tree, one level above');
 END;
 
--- ── Rule 4: a root's own recipient is among its eligible recipients ──────
+-- ── Rule 5: the depth is IMMUTABLE ────────────────────────────────────────
+--
+-- The depth is a structural property of the delegation tree: it is computed
+-- when the assignment is created, and nothing in the contract ever changes
+-- it. Making it immutable is what makes the depth condition in the
+-- tree-shape triggers SOUND — see the comment there.
+--
+-- It also closes the promotion hole: a child cannot be promoted to a root,
+-- because a root's depth is zero and the depth never changes. Without it, a
+-- child could be rewritten into a root while its own descendants kept their
+-- old parents, and no trigger re-checks a row it did not write.
+CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_depth_is_immutable
+BEFORE UPDATE OF depth ON agent_tasks
+FOR EACH ROW WHEN NEW.depth IS NOT OLD.depth
+BEGIN
+    SELECT RAISE(ABORT, 'agent_tasks: the depth is immutable — it is a property of the delegation tree');
+END;
+
+-- ── Rule 6: a root's own recipient is among its eligible recipients ──────
 --
 -- The DDL's own comment says it: "A root's own recipient must be among
 -- them". Without the check, a root addressed to 'alpha' could carry an
@@ -581,7 +651,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: a root''s own recipient must be among its eligible recipients');
 END;
 
--- ── Rule 5: a permitted operation is a non-null string (INSERT) ───────────
+-- ── Rule 7: a permitted operation is a non-null, non-empty string ─────────
 --
 -- The root/child CHECK requires a root to name at least one permitted
 -- operation, and '["read"]' and '[null]' both satisfy that test. A CHECK
@@ -593,25 +663,56 @@ END;
 -- string. The TYPE column is the element's actual JSON type, so
 -- 'object', 'array', 'integer', 'real', 'true', 'false' and 'null' are all
 -- refused, and only a text element is accepted.
+--
+-- The EMPTY STRING is refused too. A root that may do nothing is a silent
+-- misconfiguration rather than a safe default, and an operation named ''
+-- is that same misconfiguration one level down.
 CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_permitted_operations_insert
 BEFORE INSERT ON agent_tasks
 FOR EACH ROW WHEN EXISTS (
     SELECT 1 FROM json_each(NEW.permitted_operations)
-     WHERE type <> 'text'
+     WHERE type <> 'text' OR value = ''
 )
 BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: a permitted operation must be a non-null string');
 END;
 
--- ── Rule 5: a permitted operation is a non-null string (UPDATE) ───────────
+-- ── Rule 7: a permitted operation is a non-null, non-empty string (UPDATE) ─
 CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_permitted_operations_update
 BEFORE UPDATE OF permitted_operations ON agent_tasks
 FOR EACH ROW WHEN EXISTS (
     SELECT 1 FROM json_each(NEW.permitted_operations)
-     WHERE type <> 'text'
+     WHERE type <> 'text' OR value = ''
 )
 BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: a permitted operation must be a non-null string');
+END;
+
+-- ── Rule 8: an eligible recipient is a non-null, non-empty string ─────────
+--
+-- The allow-list is a list of ADDRESSES. An object, an array, a boolean, a
+-- number or a null is not an address; the empty string is not an address
+-- either. The same json_each TYPE discriminator applies, for the same
+-- reason.
+CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_eligible_recipients_insert
+BEFORE INSERT ON agent_tasks
+FOR EACH ROW WHEN EXISTS (
+    SELECT 1 FROM json_each(NEW.eligible_recipients)
+     WHERE type <> 'text' OR value = ''
+)
+BEGIN
+    SELECT RAISE(ABORT, 'agent_tasks: an eligible recipient must be a non-null string');
+END;
+
+-- ── Rule 8: an eligible recipient is a non-null, non-empty string (UPDATE) ─
+CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_eligible_recipients_update
+BEFORE UPDATE OF eligible_recipients ON agent_tasks
+FOR EACH ROW WHEN EXISTS (
+    SELECT 1 FROM json_each(NEW.eligible_recipients)
+     WHERE type <> 'text' OR value = ''
+)
+BEGIN
+    SELECT RAISE(ABORT, 'agent_tasks: an eligible recipient must be a non-null string');
 END;
 
 -- ── Rule 6: the state machine is ROLE-AWARE ───────────────────────────────
@@ -667,8 +768,34 @@ BEGIN
             ))
      );
 
-    -- THEN THE GATE'S OWN FIELD RULES. A transition that is ON the path
-    -- still has to carry the fields that path requires.
+    -- THEN THE GATE'S OWN IMMUTABILITY. Once the gate is reached, the
+    -- record of what was asked for and of what was approved is EVIDENCE,
+    -- and evidence is not rewritten — not to a different value and not to
+    -- nothing.
+    --
+    -- These clauses live HERE, inside the state machine's trigger, and
+    -- not in their own triggers, because a write that both moves the
+    -- state and touches the record must be governed by ONE ordered set of
+    -- rules. A separate trigger would race the state machine: the order
+    -- in which SQLite fires SEPARATE triggers on the same event is not
+    -- specified, so the message a write got would be arbitrary. The
+    -- standalone triggers below cover the writes that do NOT move the
+    -- state, and they fire only while the state is unchanged, so they
+    -- cannot preempt this one.
+    SELECT RAISE(ABORT, 'agent_tasks: the action the operator''s gate awaits is fixed once the gate is reached')
+     WHERE OLD.state IN ('awaiting_operator','operator_approved')
+       AND NEW.awaiting_action IS NOT OLD.awaiting_action;
+
+    SELECT RAISE(ABORT, 'agent_tasks: a recorded approval is evidence, and evidence is not rewritten')
+     WHERE OLD.state = 'operator_approved'
+       AND (NEW.approval_action IS NOT OLD.approval_action
+            OR NEW.approval_revision IS NOT OLD.approval_revision
+            OR NEW.approval_source IS NOT OLD.approval_source
+            OR NEW.approval_evidence IS NOT OLD.approval_evidence
+            OR NEW.approved_at IS NOT OLD.approved_at);
+
+    -- AND FINALLY THE GATE'S FIELD RULES. A transition that is ON the
+    -- path still has to carry the fields that path requires.
     SELECT RAISE(ABORT, 'agent_tasks: the operator''s gate must name the exact action it awaits')
      WHERE NEW.state = 'awaiting_operator'
        AND (NEW.awaiting_action IS NULL OR length(CAST(NEW.awaiting_action AS BLOB)) = 0);
@@ -678,6 +805,15 @@ BEGIN
        AND (NEW.approval_action IS NULL OR length(CAST(NEW.approval_action AS BLOB)) = 0
             OR NEW.approval_revision IS NULL OR length(CAST(NEW.approval_revision AS BLOB)) = 0
             OR NEW.approval_source IS NULL OR length(CAST(NEW.approval_source AS BLOB)) = 0);
+
+    -- The approval must name the SAME action the gate awaited. The gate
+    -- names the exact action the operator is being asked to authorise;
+    -- the approval names the exact action that was authorised. If the two
+    -- differ, the row does not say what was approved relative to what was
+    -- asked, and the staleness comparison has nothing to compare.
+    SELECT RAISE(ABORT, 'agent_tasks: a recorded approval must name the SAME action the gate awaited')
+     WHERE NEW.state = 'operator_approved'
+       AND NEW.approval_action IS NOT NEW.awaiting_action;
 END;
 
 -- ── Rule 7: the claim discipline ──────────────────────────────────────────
@@ -762,10 +898,15 @@ END;
 -- refusal for an illegal transition an ILLEGAL TRANSITION, whatever
 -- another trigger happens to do first.
 --
--- The same holds for a recorded approval, which is EVIDENCE. There the
--- trigger fires on ANY change at all, including one that moves the state:
--- the approval record is not rewritten, not even while the assignment is
--- being withdrawn.
+-- The same holds for a recorded approval, which is EVIDENCE. Every column
+-- of the approval record is covered — the action, the revision, the
+-- source, the evidence POINTER and the moment it was recorded. An
+-- approval whose evidence pointer can be swapped is not evidence.
+--
+-- These two triggers cover the writes that do NOT move the state. They
+-- fire only while the state is UNCHANGED, so they cannot preempt the
+-- state machine: a write that moves the state is governed by the
+-- state-transition trigger above, whose PATH is checked FIRST.
 CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_awaiting_action_is_immutable
 BEFORE UPDATE OF awaiting_action ON agent_tasks
 FOR EACH ROW
@@ -777,17 +918,21 @@ BEGIN
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_approval_is_immutable
-BEFORE UPDATE OF approval_action, approval_revision, approval_source ON agent_tasks
+BEFORE UPDATE OF approval_action, approval_revision, approval_source,
+               approval_evidence, approved_at ON agent_tasks
 FOR EACH ROW
-WHEN OLD.state = 'operator_approved'
+WHEN OLD.state = NEW.state
+     AND OLD.state = 'operator_approved'
      AND (NEW.approval_action IS NOT OLD.approval_action
           OR NEW.approval_revision IS NOT OLD.approval_revision
-          OR NEW.approval_source IS NOT OLD.approval_source)
+          OR NEW.approval_source IS NOT OLD.approval_source
+          OR NEW.approval_evidence IS NOT OLD.approval_evidence
+          OR NEW.approved_at IS NOT OLD.approved_at)
 BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: a recorded approval is evidence, and evidence is not rewritten');
 END;
 
--- ── Rule 10: a claimed assignment cannot be DELETED ───────────────────────
+-- ── Rule 15: a claimed assignment, or one with a ledger, cannot be DELETED ─
 --
 -- An assignment is CANCELLED, never deleted. And the rule is stated in
 -- terms of the claim epoch, because that is what closes the hole: an
@@ -795,14 +940,39 @@ END;
 -- holds an epoch cannot be deleted, so its id cannot be reused — and a
 -- reused id would restart the epoch at zero, which is exactly how a STALE
 -- token could become current again.
+--
+-- The same rule covers an assignment that has a LEDGER. The ledger is
+-- evidence, and evidence must not be orphaned: with the foreign-key pragma
+-- off, deleting a task with ledger entries left those entries dangling,
+-- pointing at an assignment that no longer exists. This trigger does not
+-- depend on the pragma, so the guarantee holds either way.
 CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_not_deletable
 BEFORE DELETE ON agent_tasks
 FOR EACH ROW WHEN OLD.claim_epoch > 0
+     OR EXISTS (SELECT 1 FROM agent_task_events WHERE task_id = OLD.id)
 BEGIN
-    SELECT RAISE(ABORT, 'agent_tasks: a claimed assignment is cancelled, never deleted');
+    SELECT RAISE(ABORT, 'agent_tasks: an assignment that was claimed or that has a ledger is cancelled, never deleted');
 END;
 
--- ── Rule 11: the ledger's event index is MONOTONIC ───────────────────────
+-- ── Rule 17: a ledger entry's id and its index are NEVER reused ──────────
+--
+-- The same REPLACE hole as the assignment's own id: a REPLACE is
+-- DELETE + INSERT, so it would destroy the ledger entry it conflicts with
+-- and the append-only triggers below would never fire. The BEFORE INSERT
+-- trigger runs BEFORE the conflict resolution, so the conflicting entry
+-- is still there and the REPLACE is refused as a whole.
+CREATE TRIGGER IF NOT EXISTS trg_agent_task_events_id_is_not_reused
+BEFORE INSERT ON agent_task_events
+FOR EACH ROW WHEN EXISTS (
+    SELECT 1 FROM agent_task_events e
+     WHERE e.id = NEW.id
+        OR (e.task_id = NEW.task_id AND e.event_index = NEW.event_index)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'agent_task_events: a ledger entry''s id and its index are never reused');
+END;
+
+-- ── Rule 16: the ledger's event index is MONOTONIC ───────────────────────
 CREATE TRIGGER IF NOT EXISTS trg_agent_task_events_monotonic
 BEFORE INSERT ON agent_task_events
 FOR EACH ROW WHEN NEW.event_index <= (

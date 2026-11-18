@@ -82,11 +82,12 @@ var agentAssignmentIndexes = []string{
 
 // agentAssignmentTriggers are the triggers the DDL creates.
 //
-// The twenty triggers carry THIRTEEN rules: five rules are split across
+// The twenty-five triggers carry NINETEEN rules: six rules are split across
 // several triggers so that a test can isolate one clause from another
-// (the tree shape, the root's recipient, the permitted operations, the
-// claim discipline and the operator's gate).
+// (the tree shape, the root's recipient, the two lists, the claim
+// discipline and the operator's gate).
 var agentAssignmentTriggers = []string{
+	"trg_agent_task_events_id_is_not_reused",
 	"trg_agent_task_events_monotonic",
 	"trg_agent_task_events_no_delete",
 	"trg_agent_task_events_no_update",
@@ -95,6 +96,10 @@ var agentAssignmentTriggers = []string{
 	"trg_agent_tasks_claim_discipline",
 	"trg_agent_tasks_claim_sets_lease",
 	"trg_agent_tasks_claim_sets_owner",
+	"trg_agent_tasks_depth_is_immutable",
+	"trg_agent_tasks_eligible_recipients_insert",
+	"trg_agent_tasks_eligible_recipients_update",
+	"trg_agent_tasks_id_is_not_reused",
 	"trg_agent_tasks_initial_state",
 	"trg_agent_tasks_not_deletable",
 	"trg_agent_tasks_owner_changes_only_on_claim",
@@ -383,7 +388,7 @@ func TestAgentAssignmentDDLIsPinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(agentAssignmentDDL))
 	got := hex.EncodeToString(sum[:])
 
-	const want = "c079375d4a222fcc5f9d56cfdc0a5bb5a8058dd26806f81608b23ef93405d0fe"
+	const want = "8bcf86cf5c3dca36e40d035539e30a3dc77df68cd2cfb53e4af34ffb00014603"
 	if got != want {
 		t.Errorf("the DDL's SHA-256 is %s but the pin says %s. If the DDL changed on purpose, "+
 			"recompute the hash and say so in the commit message; if it did not, the storage has "+
@@ -423,7 +428,7 @@ func TestAgentAssignmentDDLIsTheOnlyDefinition(t *testing.T) {
 // A disposable file-backed WAL database is built, a representative row is
 // written into `memories`, and the assignment objects are REMOVED so the
 // migration has real work to do. The migration is then run against it: the
-// two tables, the seven indexes and the twenty triggers exist BY NAME,
+// two tables, the seven indexes and the twenty-five triggers exist BY NAME,
 // the sentinel is recorded exactly once, the pre-existing row is untouched,
 // and the set of schema objects changed by the migration is EXACTLY the
 // assignment objects.
@@ -929,14 +934,26 @@ func TestAgentAssignmentAT8RestoreAllowList(t *testing.T) {
 		}
 	}
 
-	// 2. the REAL dump is accepted.
+	// 2. a dump carrying the REAL assignment schema is accepted.
 	//
 	// The dump carries the REAL DDL of every assignment object — the two
-	// tables, the seven indexes and the twenty triggers, exactly as
-	// `sqlite3 .dump` would emit them — and a REAL row rather than a
-	// placeholder. The second review found that the first version of this
-	// fixture declared only the tables and used `DEFAULT VALUES`, which
-	// would not even execute against the NOT NULL columns.
+	// tables, the seven indexes and the twenty-five triggers, exactly as
+	// `sqlite3 .dump` would emit them.
+	//
+	// What this test does NOT do is prove that the dump RESTORES. The
+	// third review found that the earlier version of this fixture
+	// carried a row that would not even execute — the INSERT omitted the
+	// budgets and the allow-list, so the defaults applied and the row
+	// was refused by the schema's own rules — and the test passed
+	// anyway, because the validator ACCEPTS text without executing it.
+	//
+	// So the restore itself is proved where it can be: by the COMMAND,
+	// in cmd/mpm/handlers_restore_assignment_test.go, which drives the
+	// real `mpm restore-db` over a dump generated from the live schema
+	// and requires the restored database to carry the tables, the
+	// indexes, the triggers AND the rows. This test keeps the
+	// allow-list's half of the contract: the validator accepts the
+	// schema.
 	objects := assignmentSchemaObjects(t, db)
 	var dump strings.Builder
 	for _, name := range agentAssignmentObjectNames {
@@ -946,25 +963,6 @@ func TestAgentAssignmentAT8RestoreAllowList(t *testing.T) {
 		}
 		dump.WriteString(sqlText + ";\n")
 	}
-	projectID := seedProject(t, dm, "")
-	assignmentMustExec(t, db, `
-		INSERT INTO agent_tasks (
-			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units,
-			permitted_operations, eligible_recipients
-		) VALUES ('at-dump', ?, 'at-dump', NULL, 0, 'the title', 'the objective',
-			'alpha', 'implementer', 'enqueued', 'idem:dump',
-			1, 4, 2, 100, '["read"]', '["alpha"]')`, projectID)
-	assignmentMustExec(t, db, `
-		INSERT INTO agent_task_events (id, task_id, event_index, event_type)
-		VALUES ('ate-dump', 'at-dump', 0, 'created')`)
-	dump.WriteString("INSERT INTO agent_tasks (id, project_id, root_id, depth, title, " +
-		"objective, recipient, role, state, idempotency_key) VALUES " +
-		"('at-dump', '" + projectID + "', 'at-dump', 0, 'the title', 'the objective', " +
-		"'alpha', 'implementer', 'enqueued', 'idem:dump');\n")
-	dump.WriteString("INSERT INTO agent_task_events (id, task_id, event_index, event_type) " +
-		"VALUES ('ate-dump', 'at-dump', 0, 'created');\n")
 
 	v := NewCanonicalDumpValidator()
 	if err := v.Validate(dump.String()); err != nil {
@@ -1781,10 +1779,22 @@ func TestAssignmentTreeShapeIsATree(t *testing.T) {
 
 	// And a child's depth must be its parent's depth plus one. A child
 	// that claims a depth of five under a parent at depth zero is not in
-	// the tree at all.
+	// the tree at all — and the depth is IMMUTABLE, so the write is
+	// refused by the depth rule rather than by the tree rule.
 	assignmentMustRefuseWith(t, db, "a child claiming a depth its parent does not have",
-		"the delegation tree is malformed", `
+		"the depth is immutable", `
 		UPDATE agent_tasks SET depth = 5 WHERE id = ?`, child)
+
+	// On the INSERT path there is no depth to change, so the tree rule
+	// is what refuses it.
+	assignmentMustRefuseWith(t, db, "a child INSERTED with a depth its parent does not have",
+		"the delegation tree is malformed", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key
+		) VALUES ('at-wrongdepth', ?, ?, ?, 5, 't', 'o', 'delta', 'implementer',
+			'enqueued', 'idem:wrongdepth')
+	`, projectID, root, root)
 
 	// And the child's own tree is intact after both refusals: a refused
 	// write must leave the row exactly as it was.
@@ -1914,7 +1924,7 @@ func TestAssignmentClaimedTaskCannotBeDeleted(t *testing.T) {
 		WHERE id = ?`, claimed)
 
 	assignmentMustRefuseWith(t, db, "deleting a claimed assignment",
-		"a claimed assignment is cancelled, never deleted", `
+		"is cancelled, never deleted", `
 		DELETE FROM agent_tasks WHERE id = ?`, claimed)
 
 	// An UNCLAIMED task may still be removed — it never issued a token,
@@ -2395,6 +2405,511 @@ func TestAssignmentPermittedOperationsMustBeStrings(t *testing.T) {
 		UPDATE agent_tasks SET permitted_operations = '["read","write"]' WHERE id = ?`, id)
 }
 
+// TestAssignmentTreeCannotBeMadeIntoACycle pins the tree against a cycle.
+//
+// The second review's finding was that a cycle could be built by two
+// UPDATEs that each changed a depth, and the third review found that the
+// fix — "the parent's depth must be exactly one less" — did NOT close it,
+// because a BEFORE trigger sees only the row being written. Two statements
+// could each satisfy the condition against the other statement's new
+// depth, and the parent chain would never terminate.
+//
+// The fix is the depth's IMMUTABILITY: a depth that never changes makes
+// the chain strictly decreasing by construction.
+//
+// The test covers the exact construction the third review used.
+func TestAssignmentTreeCannotBeMadeIntoACycle(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	root := insertRootAssignment(t, dm, projectID, "at-cycroot", "alpha", "implementer", "idem:cycroot")
+	c1 := insertChildAssignment(t, dm, projectID, "at-cyc1", root, root, "charlie", "idem:cyc1")
+	c2 := insertChildAssignment(t, dm, projectID, "at-cyc2", root, root, "delta", "idem:cyc2")
+
+	// The third review's construction: each statement raises a child's
+	// depth AND points it at the other child.
+	assignmentMustRefuse(t, db, "the first half of a depth-shifting cycle", `
+		UPDATE agent_tasks SET depth = 2, parent_id = ? WHERE id = ?`, c2, c1)
+	assignmentMustRefuse(t, db, "the second half of a depth-shifting cycle", `
+		UPDATE agent_tasks SET depth = 3, parent_id = ? WHERE id = ?`, c1, c2)
+
+	// And the depth cannot be changed at all, on its own.
+	assignmentMustRefuseWith(t, db, "a child's depth raised on its own",
+		"the depth is immutable", `
+		UPDATE agent_tasks SET depth = 5 WHERE id = ?`, c1)
+
+	// The tree is intact: the two children still hang from the root.
+	var parent1, parent2 string
+	var depth1, depth2 int64
+	if err := db.QueryRow(
+		`SELECT parent_id, depth FROM agent_tasks WHERE id = ?`, c1,
+	).Scan(&parent1, &depth1); err != nil {
+		t.Fatalf("read the first child: %v", err)
+	}
+	if err := db.QueryRow(
+		`SELECT parent_id, depth FROM agent_tasks WHERE id = ?`, c2,
+	).Scan(&parent2, &depth2); err != nil {
+		t.Fatalf("read the second child: %v", err)
+	}
+	if parent1 != root || parent2 != root || depth1 != 1 || depth2 != 1 {
+		t.Errorf("the children are (%q,%d) and (%q,%d) after the refusals, want (%q,1) and (%q,1)",
+			parent1, depth1, parent2, depth2, root, root)
+	}
+}
+
+// TestAssignmentChildCannotBePromotedToARoot pins the promotion hole.
+//
+// The third review found that both tree-shape triggers carry
+// `WHEN NEW.depth > 0`, so a write that set the depth to zero was checked
+// by NEITHER of them: a child could be rewritten into a root, and its own
+// descendants would be left with a parent whose root and depth no longer
+// matched theirs — with no trigger re-checking a row it did not write.
+//
+// The depth's immutability closes it.
+func TestAssignmentChildCannotBePromotedToARoot(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	root := insertRootAssignment(t, dm, projectID, "at-promroot", "alpha", "implementer", "idem:promroot")
+	child := insertChildAssignment(t, dm, projectID, "at-promchild", root, root, "charlie", "idem:promchild")
+	// The grandchild sits one level below the child, so it is written
+	// with the depth its parent implies.
+	assignmentMustExec(t, db, `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key
+		) VALUES ('at-promgrand', ?, ?, ?, 2, 't', 'o', 'delta', 'implementer',
+			'enqueued', 'idem:promgrand')
+	`, projectID, root, child)
+
+	// The third review's construction: promote the child to a root,
+	// carrying the budgets a root needs.
+	assignmentMustRefuse(t, db, "a child promoted to a root", `
+		UPDATE agent_tasks
+		SET depth = 0, parent_id = NULL, root_id = ?,
+		    max_depth = 3, max_tasks = 10, max_concurrency = 2, max_resource_units = 100,
+		    permitted_operations = '["read"]', eligible_recipients = '["alpha"]'
+		WHERE id = ?`, child, child)
+
+	// And the depth alone.
+	assignmentMustRefuse(t, db, "a child's depth lowered to zero", `
+		UPDATE agent_tasks SET depth = 0 WHERE id = ?`, child)
+
+	// The tree is intact.
+	var depth int64
+	var parent sql.NullString
+	if err := db.QueryRow(
+		`SELECT parent_id, depth FROM agent_tasks WHERE id = ?`, child,
+	).Scan(&parent, &depth); err != nil {
+		t.Fatalf("read the child: %v", err)
+	}
+	if !parent.Valid || parent.String != root || depth != 1 {
+		t.Errorf("the child carries (parent=%v, depth=%d) after the refusals, want (%q, 1)",
+			parent, depth, root)
+	}
+	var grandDepth int64
+	if err := db.QueryRow(
+		`SELECT depth FROM agent_tasks WHERE id = ?`, "at-promgrand",
+	).Scan(&grandDepth); err != nil {
+		t.Fatalf("read the grandchild: %v", err)
+	}
+	if grandDepth != 2 {
+		t.Errorf("the grandchild is at depth %d, want 2", grandDepth)
+	}
+}
+
+// TestAssignmentCannotBeReplaced pins the INSERT OR REPLACE hole.
+//
+// The third review found that EVERY rule enforced by a BEFORE UPDATE or a
+// BEFORE DELETE trigger was defeated by `INSERT OR REPLACE`, because
+// REPLACE is DELETE + INSERT: the UPDATE triggers never fire, and SQLite
+// does not fire the DELETE triggers for REPLACE's implicit delete unless
+// the recursive_triggers pragma is on — which MPM does not set.
+//
+// So a claimed task could be re-inserted with its epoch reset to zero,
+// and a ledger entry could be destroyed outright.
+//
+// The defence is a BEFORE INSERT trigger that refuses an INSERT whose id
+// or whose idempotency key already exists: SQLite runs the trigger
+// BEFORE the conflict resolution, so the conflicting row is still there
+// and the REPLACE is refused as a whole.
+func TestAssignmentCannotBeReplaced(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	// A CLAIMED task. Replacing it would reset the epoch to zero and
+	// make a stale token current again.
+	claimed := insertRootAssignment(t, dm, projectID, "at-replace", "alpha", "implementer", "idem:replace")
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET claim_epoch = claim_epoch + 1, owner = 'alpha', lease_expires_at = 1900000000
+		WHERE id = ?`, claimed)
+
+	assignmentMustRefuse(t, db, "a claimed task replaced by a fresh row", `
+		INSERT OR REPLACE INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES (?, ?, ?, NULL, 0, 't', 'o', 'alpha', 'reviewer', 'enqueued', ?,
+			1, 4, 2, 100, '["read"]', '["alpha"]')
+	`, claimed, projectID, claimed, "idem:replace")
+
+	// The claimed task is untouched.
+	var role, state string
+	var epoch int64
+	var owner sql.NullString
+	if err := db.QueryRow(
+		`SELECT role, state, claim_epoch, owner FROM agent_tasks WHERE id = ?`, claimed,
+	).Scan(&role, &state, &epoch, &owner); err != nil {
+		t.Fatalf("read the assignment: %v", err)
+	}
+	if role != "implementer" || state != "enqueued" || epoch != 1 || !owner.Valid {
+		t.Errorf("the task carries (role=%q, state=%q, epoch=%d, owner=%v) after the refused "+
+			"REPLACE, want (implementer, enqueued, 1, set)", role, state, epoch, owner)
+	}
+
+	// A replacement that conflicts on the IDEMPOTENCY KEY rather than
+	// the id would destroy the OTHER row, so the key is guarded too.
+	assignmentMustRefuse(t, db, "a task replaced through the idempotency key", `
+		INSERT OR REPLACE INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES ('at-replace-other', ?, 'at-replace-other', NULL, 0, 't', 'o', 'alpha',
+			'implementer', 'enqueued', ?,
+			1, 4, 2, 100, '["read"]', '["alpha"]')
+	`, projectID, "idem:replace")
+
+	// And the LEDGER. A replaced ledger entry would be destroyed, and
+	// the append-only triggers would never fire.
+	assignmentMustExec(t, db, `
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type)
+		VALUES ('ate-replace', ?, 0, 'created')`, claimed)
+	assignmentMustRefuse(t, db, "a ledger entry replaced", `
+		INSERT OR REPLACE INTO agent_task_events (id, task_id, event_index, event_type, note)
+		VALUES ('ate-replace', ?, 1, 'note', 'REWRITTEN')`, claimed)
+
+	// The original entry is intact.
+	var eventType string
+	if err := db.QueryRow(
+		`SELECT event_type FROM agent_task_events WHERE id = ?`, "ate-replace",
+	).Scan(&eventType); err != nil {
+		t.Fatalf("read the ledger entry: %v", err)
+	}
+	if eventType != "created" {
+		t.Errorf("the ledger entry is %q after the refused REPLACE, want created", eventType)
+	}
+}
+
+// TestAssignmentGateRecordIsImmutableWhileLeavingTheGate pins the gate's
+// record against the statement that LEAVES the gate.
+//
+// The second review closed the case of a write that does not move the
+// state. The third review found the other case: the trigger fired only
+// `WHEN OLD.state = NEW.state`, so the very statement that moves the
+// assignment out of the gate could rewrite or clear the awaited action —
+// and the operator would be asked to authorise "merge PR #259" while the
+// row said "merge PR #999".
+//
+// The rule now lives inside the state machine's trigger, where the PATH
+// is checked first, so an illegal transition is still reported as an
+// illegal transition.
+func TestAssignmentGateRecordIsImmutableWhileLeavingTheGate(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-leavegate", "alpha", "implementer", "idem:leavegate")
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
+	}
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
+		WHERE id = ?`, id)
+
+	// The awaited action cannot be CLEARED on the way out.
+	assignmentMustRefuseWith(t, db, "the awaited action cleared while approving",
+		"is fixed once the gate is reached", `
+		UPDATE agent_tasks
+		SET state = 'operator_approved', awaiting_action = NULL,
+		    approval_action = 'merge PR #259', approval_revision = 'abc123', approval_source = 'operator'
+		WHERE id = ?`, id)
+
+	// Nor REWRITTEN.
+	assignmentMustRefuseWith(t, db, "the awaited action rewritten while approving",
+		"is fixed once the gate is reached", `
+		UPDATE agent_tasks
+		SET state = 'operator_approved', awaiting_action = 'merge PR #999',
+		    approval_action = 'merge PR #259', approval_revision = 'abc123', approval_source = 'operator'
+		WHERE id = ?`, id)
+
+	// Nor on the way to cancellation.
+	assignmentMustRefuseWith(t, db, "the awaited action rewritten while cancelling",
+		"is fixed once the gate is reached", `
+		UPDATE agent_tasks SET state = 'cancelled', awaiting_action = 'merge PR #999' WHERE id = ?`, id)
+
+	// The record is intact.
+	var awaited string
+	if err := db.QueryRow(
+		`SELECT awaiting_action FROM agent_tasks WHERE id = ?`, id).Scan(&awaited); err != nil {
+		t.Fatalf("read the assignment: %v", err)
+	}
+	if awaited != "merge PR #259" {
+		t.Errorf("the awaited action is %q after the refusals, want %q", awaited, "merge PR #259")
+	}
+}
+
+// TestAssignmentApprovalRecordIsImmutable covers every column of the
+// approval.
+//
+// The second review closed the action, the revision and the source. The
+// third review found that the evidence POINTER and the moment the
+// approval was recorded were still freely rewritable — and the evidence
+// pointer is the thing the published staleness and attribution check will
+// be built on. An approval whose evidence can be swapped is not evidence.
+func TestAssignmentApprovalRecordIsImmutable(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-approvev", "alpha", "implementer", "idem:approvev")
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
+	}
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
+		WHERE id = ?`, id)
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET state = 'operator_approved',
+		    approval_action = 'merge PR #259',
+		    approval_revision = 'abc123',
+		    approval_source = 'operator',
+		    approval_evidence = 'docs/evidence/at-approvev/manifest.json',
+		    approved_at = 1700000000
+		WHERE id = ?`, id)
+
+	for _, tc := range []struct{ what, column, value string }{
+		{"the evidence pointer rewritten", "approval_evidence", "'ev://TAMPERED'"},
+		{"the evidence pointer cleared", "approval_evidence", "NULL"},
+		{"the recorded moment rewritten", "approved_at", "999999"},
+		{"the recorded moment cleared", "approved_at", "NULL"},
+	} {
+		assignmentMustRefuseWith(t, db, tc.what, "evidence is not rewritten", `
+			UPDATE agent_tasks SET `+tc.column+` = `+tc.value+` WHERE id = ?`, id)
+	}
+
+	// The record is intact.
+	var evidence string
+	var approvedAt int64
+	if err := db.QueryRow(
+		`SELECT approval_evidence, approved_at FROM agent_tasks WHERE id = ?`, id,
+	).Scan(&evidence, &approvedAt); err != nil {
+		t.Fatalf("read the approval: %v", err)
+	}
+	if evidence != "docs/evidence/at-approvev/manifest.json" || approvedAt != 1700000000 {
+		t.Errorf("the approval carries (%q, %d) after the refusals, want the recorded values",
+			evidence, approvedAt)
+	}
+}
+
+// TestAssignmentApprovalMustNameTheSameAction pins the equality rule.
+//
+// The gate names the exact action the operator is asked to authorise; the
+// approval names the exact action that was authorised. If the two differ,
+// the row does not say what was approved relative to what was asked — and
+// the staleness comparison has nothing to compare.
+func TestAssignmentApprovalMustNameTheSameAction(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-sameaction", "alpha", "implementer", "idem:sameaction")
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
+	}
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
+		WHERE id = ?`, id)
+
+	assignmentMustRefuseWith(t, db, "an approval for a different action",
+		"must name the SAME action the gate awaited", `
+		UPDATE agent_tasks
+		SET state = 'operator_approved', approval_action = 'DEPLOY TO PRODUCTION',
+		    approval_revision = 'abc123', approval_source = 'operator'
+		WHERE id = ?`, id)
+
+	// And the matching one is accepted.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET state = 'operator_approved', approval_action = 'merge PR #259',
+		    approval_revision = 'abc123', approval_source = 'operator'
+		WHERE id = ?`, id)
+}
+
+// TestAssignmentTimestampsAreTyped pins the timestamps' type.
+//
+// The third review found that the three timestamp columns carried no
+// typeof() guard, while the DDL's own header claimed that every column's
+// type is guarded. A TEXT updated_at sorts after every INTEGER in the
+// three indexes that order by it, so a corrupted timestamp makes its row
+// look like the newest one.
+func TestAssignmentTimestampsAreTyped(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-stamps", "alpha", "implementer", "idem:stamps")
+
+	for _, tc := range []struct{ what, column, value string }{
+		{"a TEXT created_at", "created_at", "'not-a-time'"},
+		{"a REAL created_at", "created_at", "1.5"},
+		{"a TEXT updated_at", "updated_at", "'not-a-time'"},
+		{"a REAL updated_at", "updated_at", "1e300"},
+		{"a BLOB updated_at", "updated_at", "x'00'"},
+	} {
+		assignmentMustRefuse(t, db, tc.what,
+			`UPDATE agent_tasks SET `+tc.column+` = `+tc.value+` WHERE id = ?`, id)
+	}
+
+	// And the ledger's timestamp.
+	assignmentMustRefuse(t, db, "a TEXT ledger timestamp", `
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type, created_at)
+		VALUES ('ate-stamp', ?, 0, 'created', 'not-a-time')`, id)
+}
+
+// TestAssignmentEligibleRecipientsMustBeStrings pins the allow-list's
+// elements.
+//
+// The permitted operations had an element guard; the eligible recipients
+// did not, so a root could carry an allow-list holding an object, a
+// boolean, a number or a null — and PR 2's membership check will consult
+// that list.
+func TestAssignmentEligibleRecipientsMustBeStrings(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	for _, list := range []string{
+		`[{"a":1},"alpha"]`,  // an object
+		`[["alpha"]]`,        // an array
+		`[true,"alpha"]`,     // a boolean
+		`[42,"alpha"]`,       // a number
+		`[null,"alpha"]`,     // a null
+		`["","alpha"]`,       // an empty address
+	} {
+		assignmentMustRefuseWith(t, db, "an eligible recipient that is not an address ("+list+")",
+			"an eligible recipient must be a non-null string", `
+			INSERT INTO agent_tasks (
+				id, project_id, root_id, parent_id, depth, title, objective,
+				recipient, role, state, idempotency_key,
+				max_depth, max_tasks, max_concurrency, max_resource_units,
+				permitted_operations, eligible_recipients
+			) VALUES ('at-badelig', ?, 'at-badelig', NULL, 0, 't', 'o', 'alpha', 'implementer',
+				'enqueued', 'idem:badelig', 1, 4, 2, 100, '["read"]', ?)
+		`, projectID, list)
+	}
+
+	// The UPDATE path.
+	id := insertRootAssignment(t, dm, projectID, "at-eligupd", "alpha", "implementer", "idem:eligupd")
+	assignmentMustRefuseWith(t, db, "an allow-list holding an object",
+		"an eligible recipient must be a non-null string", `
+		UPDATE agent_tasks SET eligible_recipients = '[{"a":1},"alpha"]' WHERE id = ?`, id)
+
+	// And a plain list of addresses is accepted.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET eligible_recipients = '["alpha","beta"]' WHERE id = ?`, id)
+}
+
+// TestAssignmentEmptyPermittedOperationIsRefused pins the empty operation.
+//
+// A root that may do nothing is a silent misconfiguration rather than a
+// safe default, and an operation named '' is that same misconfiguration
+// one level down.
+func TestAssignmentEmptyPermittedOperationIsRefused(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	assignmentMustRefuseWith(t, db, "a root whose only permitted operation is empty",
+		"a permitted operation must be a non-null string", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES ('at-emptyop', ?, 'at-emptyop', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:emptyop', 1, 4, 2, 100, '[""]', '["alpha"]')
+	`, projectID)
+
+	id := insertRootAssignment(t, dm, projectID, "at-emptyopupd", "alpha", "implementer", "idem:emptyopupd")
+	assignmentMustRefuseWith(t, db, "a permitted operation replaced by an empty one",
+		"a permitted operation must be a non-null string", `
+		UPDATE agent_tasks SET permitted_operations = '["read",""]' WHERE id = ?`, id)
+}
+
+// TestAssignmentLedgerEpochMustBeNonNegative pins the ledger's epoch.
+//
+// The assignment's own epoch has a `>= 0` bound; the ledger's did not, so
+// a ledger entry could record a negative epoch.
+func TestAssignmentLedgerEpochMustBeNonNegative(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-negepoch", "alpha", "implementer", "idem:negepoch")
+
+	assignmentMustRefuse(t, db, "a ledger entry recording a negative epoch", `
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type, claim_epoch)
+		VALUES ('ate-neg', ?, 0, 'note', -5)`, id)
+
+	// And a non-integer one.
+	assignmentMustRefuse(t, db, "a ledger entry recording a REAL epoch", `
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type, claim_epoch)
+		VALUES ('ate-neg2', ?, 0, 'note', 1.5)`, id)
+}
+
+// TestAssignmentWithALedgerCannotBeDeleted pins the dangling-ledger hole.
+//
+// The not-deletable trigger used to fire only when the task had been
+// claimed. A task with a ledger entry but no claim could be deleted —
+// with the foreign-key pragma off, leaving the ledger entries pointing at
+// an assignment that no longer existed.
+//
+// The trigger now covers a task that has a ledger, and it does not depend
+// on the pragma.
+func TestAssignmentWithALedgerCannotBeDeleted(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-ledgerdel", "alpha", "implementer", "idem:ledgerdel")
+	assignmentMustExec(t, db, `
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type)
+		VALUES ('ate-ledgerdel', ?, 0, 'created')`, id)
+
+	assignmentMustRefuseWith(t, db, "a task with a ledger deleted",
+		"is cancelled, never deleted", `
+		DELETE FROM agent_tasks WHERE id = ?`, id)
+
+	// The row is intact.
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM agent_tasks WHERE id = ?`, id).Scan(&n); err != nil {
+		t.Fatalf("count the assignment: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("the assignment survived the refused delete with count %d, want 1", n)
+	}
+}
+
 // TestAssignmentForeignKeysAreEnforced guards the fixtures.
 //
 // Every negative case above is only meaningful if the foreign-key pragma is
@@ -2543,7 +3058,14 @@ func TestAssignmentIdempotencyControlIsLoadBearing(t *testing.T) {
 	db := dm.SQLDB()
 	projectID := seedProject(t, dm, "")
 
+	// The idempotency key is enforced by TWO layers: the unique index
+	// and the id-not-reused trigger (which exists to close the
+	// INSERT OR REPLACE hole). The control removes BOTH, because the
+	// question this control answers is "does the suite depend on the
+	// rule at all", and removing one layer would leave the other to
+	// refuse the write.
 	assignmentMustExec(t, db, `DROP INDEX idx_agent_tasks_idempotency_key`)
+	assignmentMustExec(t, db, `DROP TRIGGER trg_agent_tasks_id_is_not_reused`)
 
 	insertRootAssignment(t, dm, projectID, "at-ctrl3", "alpha", "implementer", "github:issue:253")
 
@@ -2554,8 +3076,9 @@ func TestAssignmentIdempotencyControlIsLoadBearing(t *testing.T) {
 			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-ctrl3b', ?, 'at-ctrl3b', NULL, 0, 't', 'o', 'alpha', 'implementer',
 			'enqueued', 'github:issue:253', 1, 4, 2, 100, '["read"]', '["alpha"]')
 	`, projectID); err != nil {
-		t.Fatalf("with the unique index dropped, the duplicate was still refused (%v) — the "+
-			"suite's idempotency assertion is not testing the index", err)
+		t.Fatalf("with the unique index and the id-not-reused trigger both dropped, the "+
+			"duplicate was still refused (%v) — the suite's idempotency assertion is not "+
+			"testing the rule", err)
 	}
 }
 

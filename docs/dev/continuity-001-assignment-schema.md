@@ -2,7 +2,7 @@
 
 **Status:** implemented (PR 1 of the six-PR partition; tracking issue #258).
 **Design of record for the storage:** `internal/core/migration_agent_assignments.go`.
-**DDL pin:** SHA-256 `c079375d4a222fcc5f9d56cfdc0a5bb5a8058dd26806f81608b23ef93405d0fe`, asserted by
+**DDL pin:** SHA-256 `8bcf86cf5c3dca36e40d035539e30a3dc77df68cd2cfb53e4af34ffb00014603`, asserted by
 `TestAgentAssignmentDDLIsPinned`.
 
 This note is the design the storage implements. The **published** behaviour is
@@ -13,7 +13,7 @@ deferrals.
 
 ## 1. What PR 1 is, and what it is not
 
-PR 1 is **storage**. It creates two tables, seven indexes and twenty
+PR 1 is **storage**. It creates two tables, seven indexes and twenty-five
 triggers, and it makes the contract's hardest invariants true *in the
 database*, so a wrong write is refused by the engine rather than by the
 convention of whichever code path happened to make it.
@@ -145,20 +145,25 @@ own root (`root_id = id`), it has no parent, and it **carries the budgets**:
 `permitted_operations` and `eligible_recipients`.
 
 A **child** (`depth > 0`) is an agent's delegation. It names its root and its
-parent, and it carries **no budgets at all** — including no allow-list of its
-own.
+parent, and it carries **none** of the root's budgets — there is no column in
+which a child could widen `max_depth`, `max_tasks`, `max_concurrency`,
+`max_resource_units`, `permitted_operations` or `eligible_recipients`.
+Inheritance of those is **structural**.
 
-That is the important part, and it is **structural**: there is no column in
-which a child could widen what it was given. Inheritance is a property of the
-schema, not a rule the code is trusted to apply. One CHECK constraint
-enforces both halves — a root must carry the budgets and must name at least
-one permitted operation; a child must carry none.
+One column is deliberately outside that set: `resource_units`, which is the
+child's **own** consumption against the root's cumulative budget. A child
+therefore does carry a resource figure, and it may name any figure it likes —
+the budget it must respect is the **root's** `max_resource_units`, and
+enforcing that is the dispatcher's job (§5, N4), not the schema's. No
+**budget limit** is carried by a child; a **consumption figure** is.
 
 A root with an **empty** `permitted_operations` is refused, and so is a root
 with an **empty** `eligible_recipients`: a root that may do nothing, or that
 may address nobody, is a silent misconfiguration rather than a safe default.
 A root's own `recipient` must be among its `eligible_recipients` — a root
 addressed to an agent the tree may not target is the same misconfiguration.
+And every element of both lists must be a **non-null, non-empty string**: an
+object, an array, a boolean, a number, a null and `""` are all refused.
 
 The tree is a **tree**, and that means four things:
 
@@ -170,17 +175,33 @@ The tree is a **tree**, and that means four things:
   the depth, so the chain cannot come back to where it started;
 * nobody is their **own parent**.
 
-The first three hold on the INSERT path and on the UPDATE path. Without the
-depth condition, two UPDATEs could point two children at each other and every
-other condition would hold — a "tree" with a loop in it, and an ancestor walk
-over it that never terminates.
+The first three hold on the INSERT path and on the UPDATE path.
+
+**And the depth is immutable.** That is what makes the depth condition
+*sound*, and it was the subject of the third review's first blocking
+finding. A BEFORE trigger sees only the row being written, so the condition
+"the parent's depth is exactly one less than the child's" can be satisfied
+by two statements that each change a depth — the second statement sees the
+first one's new depth. Two children could then be pointed at each other
+with mutually inconsistent depths, and an ancestor walk over that "tree"
+would never terminate. A depth that **never changes** makes the chain
+strictly decreasing by construction.
+
+The immutability also closes the promotion hole: a child cannot be promoted
+to a root, because a root's depth is zero and the depth never changes.
+Without it, both tree-shape triggers — which carry `WHEN NEW.depth > 0` —
+skipped the write entirely, and the promoted child's own descendants were
+left with a parent whose root and depth no longer matched theirs, with no
+trigger re-checking a row it did not write.
 
 ### 3.4 The idempotency key
 
 `idempotency_key` is `UNIQUE` across the table, so an accidental duplicate
 dispatch cannot create a second logical assignment. The API (PR 2) turns the
 conflict into "return the existing assignment", which is what makes a
-duplicate dispatch **idempotent** rather than merely **refused**.
+duplicate dispatch **idempotent** rather than merely **refused** — and that
+is what the **unique index** is for: a trigger can refuse a duplicate, but
+only an index can resolve one with `ON CONFLICT`.
 
 The key's **type** is part of its identity: a `BLOB` and a `TEXT` with the
 identical bytes are different values to SQLite, and a UNIQUE index holds
@@ -227,38 +248,45 @@ is stated in terms of the epoch because it is what closes the reuse hole: a
 task that was ever claimed holds an epoch, and a task that holds an epoch
 cannot be deleted, so its id cannot be reused — and a reused id would restart
 the epoch at zero, which is exactly how a stale token could become current
-again. An **unclaimed** task may still be removed: it never issued a token.
+again. An assignment that has a **ledger** cannot be deleted either, for the
+same reason from the other end: the ledger is evidence, and evidence must not
+be orphaned. An **unclaimed** task with no ledger may still be removed: it
+never issued a token and nothing refers to it.
 
 ---
 
 ## 5. The invariants the database enforces, and the ones it does not
 
-Twenty-one properties are enforced by the schema itself rather than by
+Twenty-five properties are enforced by the schema itself rather than by
 convention.
 
 | # | invariant | enforced by |
 |---|---|---|
 | I1 | an assignment is created `enqueued` | the initial-state trigger |
 | I2 | an assignment is created **unclaimed** (epoch 0, no owner, no lease) | the unclaimed-at-creation trigger |
-| I3 | the state machine is role-aware | the state-transition trigger |
-| I4 | `cancelled` is the universal withdrawal | the state-transition trigger |
-| I5 | the role is **immutable** | the role-immutability trigger |
-| I6 | the operator's gate **names its action** | the state-transition trigger |
-| I7 | a recorded approval names its action, revision and source | the state-transition trigger |
-| I8 | the gate's action is **immutable** once the gate is reached | the awaiting-action trigger |
-| I9 | a recorded approval is **immutable** — it is evidence | the approval trigger |
-| I10 | the claim epoch advances by exactly one | the claim-discipline trigger |
-| I11 | only a claim changes the owner | the owner trigger |
-| I12 | a claim sets an owner and a lease | the claim-owner and claim-lease triggers |
-| I13 | a root carries the budgets; a child carries none | the root/child `CHECK` |
-| I14 | a root must name at least one permitted operation, every permitted operation is a non-null string, and a root's own recipient is among its eligible recipients | the root/child `CHECK` + the permitted-operations and root-recipient triggers |
-| I15 | the delegation tree is a **tree** — the root is a root, the parent is in the same tree at depth one less, and nobody is their own parent | the tree-shape triggers (INSERT **and** UPDATE) |
-| I16 | the tree is contained in **one project** | the composite foreign keys + the tree-shape triggers |
-| I17 | the idempotency key identifies one logical assignment, and it is `TEXT` | the unique index + the `typeof()` guards |
-| I18 | the ledger is ordered, **monotonic**, append-only, and cannot outlive its assignment; the ledger's `from_state` and `to_state` come from the ten-state vocabulary | the ledger triggers, the `UNIQUE` constraint, the vocabulary `CHECK`s, the foreign keys and the `ON DELETE RESTRICT`s |
-| I19 | nothing with children can be deleted, and a claimed assignment cannot be deleted | the `ON DELETE RESTRICT`s and the not-deletable trigger |
-| I20 | every identifier, key and number has its **type** — a `TEXT` column cannot hold a `BLOB`, and a numeric column cannot hold a `REAL` or a numeric string | the `typeof()` guards |
-| I21 | a lease implies an owner | the column `CHECK` |
+| I3 | an assignment's id and its idempotency key are **never reused** | the id-not-reused trigger |
+| I4 | the delegation tree is a **tree** — the root is a root, the parent is in the same tree at depth one less, and nobody is their own parent | the tree-shape triggers (INSERT **and** UPDATE) |
+| I5 | the depth is **immutable** | the depth-immutability trigger |
+| I6 | a root's own recipient is among its eligible recipients | the root-recipient triggers |
+| I7 | every permitted operation is a non-null, non-empty string | the permitted-operations triggers |
+| I8 | every eligible recipient is a non-null, non-empty string | the eligible-recipients triggers |
+| I9 | the state machine is role-aware | the state-transition trigger |
+| I10 | `cancelled` is the universal withdrawal | the state-transition trigger |
+| I11 | the operator's gate **names its action** | the state-transition trigger |
+| I12 | a recorded approval names its action, its revision and its source | the state-transition trigger |
+| I13 | the approval names the **same** action the gate awaited | the state-transition trigger |
+| I14 | the gate's action is **immutable** once the gate is reached | the state-transition trigger + the awaiting-action trigger |
+| I15 | a recorded approval is **immutable** — it is evidence | the state-transition trigger + the approval trigger |
+| I16 | the claim epoch advances by exactly one | the claim-discipline trigger |
+| I17 | a claim sets an owner and a lease | the claim-owner and claim-lease triggers |
+| I18 | only a claim changes the owner | the owner trigger |
+| I19 | the role is **immutable** | the role-immutability trigger |
+| I20 | a claimed assignment, or one that has a ledger, cannot be **deleted** | the not-deletable trigger |
+| I21 | the ledger's event index is **monotonic** | the monotonic trigger |
+| I22 | a ledger entry's id and its index are **never reused** | the ledger's id-not-reused trigger |
+| I23 | the ledger is **append-only** | the ledger's no-UPDATE and no-DELETE triggers |
+| I24 | the ledger's `from_state` and `to_state` come from the ten-state vocabulary | the column `CHECK`s |
+| I25 | every identifier, key, number, pointer and JSON column has its **type** — a `TEXT` column cannot hold a `BLOB`, and a numeric column cannot hold a `REAL` or a numeric string | the `typeof()` guards |
 
 The invariants that are **not** in the database, because a `CHECK` constraint
 cannot contain a subquery and a trigger cannot see a caller's presented value:
@@ -268,19 +296,13 @@ cannot contain a subquery and a trigger cannot see a caller's presented value:
 | N1 | the target of a write presents the **current** claim epoch (the fence) | the `WHERE` clause of the writing statement | PR 2 |
 | N2 | a **child's** recipient is among the root's `eligible_recipients` | the API | PR 2 |
 | N3 | a child's depth is within the root's `max_depth` | the API | PR 2 |
-| N4 | the tree's task count, concurrency and resource consumption are within the root's budgets | the dispatcher | PR 4 |
+| N4 | the tree's task count, concurrency and **resource consumption** are within the root's budgets | the dispatcher | PR 4 |
 | N5 | a reviewer's findings are captured by a host-controlled handoff and published with their digest | the adapter | PR 3, PR 5 |
 | N6 | an assignment is only created from an operator-authorised root | the API's authorisation | PR 2 |
 
 Those are named here rather than left implicit, because "the schema enforces
 it" and "the API enforces it" are different claims and only one of them is
 true of each row.
-
-**One limit worth stating plainly:** I18's "the ledger cannot outlive its
-assignment" is enforced by a **foreign key**, so it holds **while foreign
-keys are enforced**. With the pragma off, an unclaimed task could be deleted
-and its ledger entries would dangle. A **claimed** task is still protected,
-because the not-deletable trigger does not depend on the pragma.
 
 ### 5.1 The ledger is monotonic, not gap-free
 
@@ -293,6 +315,28 @@ happened rather than promising what did not.
 The ledger is **append-only**, and that is enforced: triggers refuse an
 `UPDATE` and a `DELETE` on it. A provenance ledger that can be rewritten is
 not a provenance ledger.
+
+The ledger's `event_type` vocabulary carries the transitions plus three
+observations that are not transitions: `claimed` (a lease was taken),
+`lease_expired` (a lease lapsed and the assignment became re-claimable) and
+`note` (a free-text annotation that changes no state). Two of those names
+differ from the state they record — `created` for `enqueued` and `started`
+for `in_progress` — because the event says **what happened** and the state
+says **where it is**. `from_state` and `to_state` carry the ten-state
+vocabulary unchanged.
+
+### 5.2 The two vocabularies that cannot be widened
+
+`agent_tasks.role` and `agent_task_events.event_type` are closed `CHECK`
+vocabularies, and `agent_tasks.state` is a third. Widening a `CHECK` on a
+live table means rebuilding that table in SQLite. That is the same argument
+that keeps `works.status` separate from this contract — and it applies here
+too, with the difference that `agent_tasks` will hold **live leases**.
+
+Nothing in the design note, the Gate A inventory or `docs/SPEC.md` §6.14
+requires a third role; only `implementer` and `reviewer` are ever named. But
+a later PR that needs a third role is a **migration that rebuilds a live
+table**, and it should know that before it designs the row, not after.
 
 ---
 
@@ -312,14 +356,16 @@ The DDL is owned by a **migration**, not by a schema slice:
 
 ---
 
-## 7. What the two independent reviews found
+## 7. What the three independent reviews found
 
-The first version of this PR was reviewed independently, in the installed
-sandboxed reviewer (`mpm-reviewer`, default-deny, `sandbox_exec` only), and
-came back with **eleven blocking findings and thirteen non-blocking ones**.
-Every blocking finding was a real defect, and every one was closed.
+The change was reviewed independently three times, in the installed sandboxed
+reviewer (`mpm-reviewer`, default-deny, `sandbox_exec` only). The first
+returned **eleven blocking and thirteen non-blocking** findings, the second
+**two blocking and fourteen non-blocking**, and the third **five blocking
+and thirteen non-blocking**. Every blocking finding was a real defect, and
+every one is closed.
 
-The first review's eleven blocking findings were:
+### 7.1 The first review's eleven blocking findings
 
 1. `completed → awaiting_operator` skipped the implementer's required
    independent review;
@@ -356,14 +402,12 @@ TEXT budget passes `> 0`, a BLOB and a TEXT key coexist in a UNIQUE index, a
 self-referencing composite FK accepts the self-parent row, `'[null]'` passes
 `json_array_length > 0`, and a `CHECK` cannot contain a subquery.
 
-The second review, of the revision that closed those eleven, returned **two
-blocking findings and fourteen non-blocking ones**, and both blocking ones
-were real:
+### 7.2 The second review's two blocking findings
 
 1. **the delegation tree could be made into a CYCLE.** The tree-shape
    triggers closed the three named cases, but nothing excluded an ancestor
    cycle: two `UPDATE`s pointing two children at each other satisfied every
-   stated condition. The fix is the parent's **depth** — the chain must
+   stated condition. The fix was the parent's **depth** — the chain must
    strictly decrease — which excludes a cycle and enforces the depth
    consistency at the same time;
 2. **a recorded approval could be REWRITTEN, not merely cleared.** The
@@ -371,27 +415,69 @@ were real:
    re-pointed at a different one — which defeats the staleness comparison
    against the head revision. The trigger now fires on **any** change.
 
-The second review's non-blocking findings were about the tests, the
-documents and three more unenumerated holes, and they are closed too: the
+### 7.3 The third review's five blocking findings
+
+1. **the depth condition did NOT exclude a cycle.** The second review's fix
+   was right about the intent and wrong about the mechanism: a BEFORE trigger
+   sees only the row being written, so two statements that each change a
+   depth could each satisfy the condition against the other's new depth, and
+   the parent chain would never terminate. The fix is the depth's
+   **immutability**;
+2. **a child could be promoted to a root.** Both tree-shape triggers carry
+   `WHEN NEW.depth > 0`, so a write that set the depth to zero was checked by
+   neither of them, and the promoted child's descendants were left with a
+   parent whose root and depth no longer matched theirs. The depth's
+   immutability closes it;
+3. **every UPDATE- and DELETE-triggered rule was defeated by
+   `INSERT OR REPLACE`.** REPLACE is DELETE + INSERT: the UPDATE triggers
+   never fire, and SQLite does not fire the DELETE triggers for REPLACE's
+   implicit delete unless the `recursive_triggers` pragma is on — which MPM
+   does not set. So a claimed task could be re-inserted with its epoch reset
+   to zero, and a ledger entry could be destroyed outright. The defence is a
+   BEFORE INSERT trigger that refuses an INSERT whose id or idempotency key
+   already exists: SQLite runs the trigger **before** the conflict
+   resolution, so the conflicting row is still there and the REPLACE is
+   refused as a whole;
+4. **the gate's record was rewritable by the statement that LEAVES the gate.**
+   The trigger fired only `WHEN OLD.state = NEW.state`, so the very statement
+   that moved the assignment out of the gate could rewrite or clear the
+   awaited action. The rule now lives inside the state machine's trigger,
+   where the path is checked first;
+5. **`approval_evidence` and `approved_at` were rewritable and clearable**
+   while the approval stood. The trigger covered three of the five approval
+   columns. All five are covered now — an approval whose evidence pointer
+   can be swapped is not evidence.
+
+### 7.4 The third review's non-blocking findings
+
+Three were unenumerated holes, and they are now either enforced or named: the
 permitted-operations guard tested `typeof(value)`, which is always TEXT for a
 non-scalar element, so an **object** or an **array** passed as a permitted
-operation — the discriminator is json_each's `type` column; the awaited action
-could be rewritten at the gate; the "the path is checked first" claim was
-false, because two separate triggers competed with the state machine — they
-now fire only while the state is unchanged, so an illegal transition is
-always reported as an illegal transition; a child's **depth** was unrelated
-to its parent's; a root's own recipient need not be among its eligible
-recipients, and an empty eligible list was accepted while an empty
-permitted list was refused; the ledger's `from_state` and `to_state` carried
-no vocabulary; the `typeof()` guards did not cover the evidence pointers and
-the gate's record; the containment probe's comment claimed to isolate one
-foreign key when it violated both; the negative-control counts were
-understated, and the harness had three controls that mutated **nothing**
-because they were wired to a function that was never called; the trigger
-count was stale in two places; the AT8 "real dump" carried neither the
-indexes nor the triggers and used a placeholder row that would not execute;
-and the combined "relabel and transition in one statement" case was not
-covered by any test.
+operation — the discriminator is json_each's `type` column; a child's depth
+was unrelated to its parent's; and a root's own recipient need not have been
+among its eligible recipients, while an empty eligible list was accepted and
+an empty permitted list was refused.
+
+The rest were about the tests, the documents and the harness: the "the path is
+checked first" claim was false, because two separate triggers competed with
+the state machine — they now fire only while the state is unchanged, so an
+illegal transition is always reported as an illegal transition; the ledger's
+`from_state` and `to_state` carried no vocabulary; the `typeof()` guards did
+not cover the timestamps, the evidence pointers, the gate's record, the JSON
+columns or the ledger's attribution; the containment probe's comment claimed
+to isolate one foreign key when it violated both; the negative-control counts
+were unverifiable, because the harness that produced them was not part of the
+change — it is now, at `scripts/continuity-001-controls.py`; the trigger
+count was stale in two places; the AT8 "real dump" carried a row that would
+not even execute, and the test passed anyway because the validator accepts
+text without executing it — the restore is now proved through the **command**,
+in `cmd/mpm/handlers_restore_assignment_test.go`; and the combined "relabel
+and transition in one statement" case was not covered by any test.
+
+The third review also made two honest observations that this note now carries
+as prose rather than as silence: a child **does** carry a `resource_units`
+figure (§3.3), and the two closed vocabularies are a limitation that a later
+PR must plan for (§5.2).
 
 ---
 
@@ -402,62 +488,85 @@ Each invariant was removed and the suite re-run. The counts below are the
 fail for a reason **other** than the DDL having changed.
 
 The **structural** failures are the ones that follow from the DDL's *text*
-changing, whatever invariant is under test: the hash pin, the four
-migration probes that enumerate the objects by name (AT1, AT2, AT6-recovery
-and AT8), the object inventory, and the three control tests that drop an
-object by name. They are listed here so that the second column can be read
-as "the tests that fail because the **behaviour** changed".
+changing, whatever invariant is under test: the hash pin, the four migration
+probes that enumerate the objects by name (AT1, AT2, AT6-recovery and AT8),
+the object inventory, and the three control tests that drop an object by
+name. They are listed in the harness so that the second column can be read as
+"the tests that fail because the **behaviour** changed".
+
+The counts are **measured**, not asserted: `scripts/continuity-001-controls.py`
+runs every control and prints them.
 
 | control | tests that fail | invariant-specific |
 |---|---|---|
-| the state-machine trigger is removed | 11 | 4 |
+| the state-machine trigger is removed | 13 | 6 |
 | the initial-state trigger is removed | 7 | 1 |
 | the unclaimed-at-creation trigger is removed | 7 | 1 |
+| the id-not-reused trigger is removed | 8 | 1 |
 | the tree-shape trigger is removed | 7 | 1 |
 | the tree-shape-on-UPDATE trigger is removed | 7 | 1 |
+| the depth-immutability trigger is removed | 8 | 2 |
 | the role-immutability trigger is removed | 7 | 1 |
-| the permitted-operations INSERT trigger is removed | 8 | 2 |
-| the not-deletable trigger is removed | 7 | 1 |
-| the awaiting-action-is-immutable trigger is removed | 8 | 2 |
-| the approval-is-immutable trigger is removed | 8 | 2 |
 | the root-recipient-is-eligible trigger is removed | 7 | 1 |
 | the root-recipient-is-eligible-on-UPDATE trigger is removed | 7 | 1 |
+| the permitted-operations INSERT trigger is removed | 9 | 3 |
+| the permitted-operations UPDATE trigger is removed | 8 | 2 |
+| the eligible-recipients INSERT trigger is removed | 7 | 1 |
+| the eligible-recipients UPDATE trigger is removed | 7 | 1 |
+| the not-deletable trigger is removed | 8 | 2 |
+| the awaiting-action-is-immutable trigger is removed | 8 | 2 |
+| the approval-is-immutable trigger is removed | 9 | 3 |
+| the ledger's id-not-reused trigger is removed | 7 | 1 |
 | the ledger's monotonic-index trigger is removed | 7 | 1 |
 | the ledger's no-UPDATE trigger is removed | 7 | 1 |
 | the ledger's no-DELETE trigger is removed | 7 | 1 |
 | **all four** claim-discipline triggers are removed | 8 | 1 |
-| the unique idempotency index is removed | 7 | 1 |
+| the unique idempotency index is removed | 6 | **0** |
+| the idempotency rule's index **and** its trigger are removed | 9 | 2 |
 | the composite containment foreign keys are removed | 2 | 1 |
 | the root/child budget `CHECK` is removed | 2 | 1 |
 | the state vocabulary `CHECK` is removed | 2 | 1 |
-| the `typeof()` type guards are removed | 4 | 3 |
-| the whole migration is not called | 31 | 26 |
+| the `typeof()` type guards are removed | 6 | 5 |
+| the whole migration is not called | 42 | 36 |
 
-Three of these are worth reading closely, because they are the places where
-the counts are easy to misread:
+Four of these are worth reading closely, because they are the places where the
+counts are easy to misread:
 
+* the **unique idempotency index alone** has **zero** invariant-specific
+  failures. That is honest, and it is a deliberate redundancy: the
+  id-not-reused trigger refuses a duplicate key on its own, so the index is
+  not independently load-bearing. The index is still needed — it is what lets
+  PR 2 resolve a duplicate with `ON CONFLICT` rather than with a trigger —
+  so the control that measures the **rule** removes both layers;
 * the **composite containment foreign keys** are load-bearing for the
   **delete** path (a root with a child cannot be deleted), while the
   **tree-shape trigger** is load-bearing for the **insert and update** paths
   (a child cannot name a foreign root, a non-root, a parent from another
   tree, or a cycle). Removing the foreign keys alone changes the delete
-  behaviour and nothing else, which is why one test is specific to them;
+  behaviour and nothing else;
 * the **state vocabulary `CHECK`** sits *behind* the triggers — the
   initial-state trigger refuses every state that is not `enqueued` — so the
   test pins the vocabulary **statically** as well, and the control fails it;
-* the **`typeof()` guards** cover three different defects — a REAL epoch
-  that does not advance, a BLOB idempotency key that shadows a TEXT one, and
-  a BLOB in an evidence pointer — so three tests are specific to them.
+* the **`typeof()` guards** cover five different defects — a REAL epoch that
+  does not advance, a BLOB idempotency key that shadows a TEXT one, a BLOB in
+  an evidence pointer, a BLOB in the gate's action, and a TEXT timestamp that
+  sorts after every integer — so five tests are specific to them.
 
-The harness itself was hardened twice, and both hardenings were necessary:
+The harness itself was hardened three times, and each hardening was
+necessary:
 
 * a control that mutates **nothing** reports a count of zero that reads like
   "the suite does not depend on this invariant" — the most dangerous
-  possible outcome — so the harness now **refuses** a mutation that does
-  not change the file;
+  possible outcome — so the harness now **refuses** a mutation that does not
+  change the file;
 * the type-guard control used to delete the guard outright, which left
-  `CHECK ()` behind and broke the schema; it now **neuters** each
-  comparison instead, so the control measures the guard and not the schema.
+  `CHECK ()` behind and broke the schema; it now **neuters** each comparison
+  instead, so the control measures the guard and not the schema;
+* a mutator written as a plain function and invoked while the control list
+  was being **built** mutated the tree at import time — before the pristine
+  copy was taken — so every measurement was made against a corrupted tree.
+  The mutators are now closures, and the harness refuses to run if the DDL
+  changed while it was loading.
 
 ---
 
