@@ -4,25 +4,74 @@
     "issue": 258,
     "pull_request": 259,
     "branch": "feat/continuity-001-assignment-schema",
-    "part": "PR 1 of six — the durable assignment storage"
+    "part": "PR 1 of six — the durable assignment storage",
+    "scope": "storage only — no API, no CLI, no tool, no dispatcher, no adapter"
   },
-  "reviewed_revision": "PENDING",
-  "ddl": {
-    "file": "internal/core/migration_agent_assignments.go",
-    "sha256": "08ad122592a2133a9c55fa35ddf9d12ce4e5b33cd580b5d37949fcb94656bc74",
-    "pinned_by": "TestAgentAssignmentDDLIsPinned"
+  "reviewed_revision": "3e83130fa5ecdb996c81373d28cfa57dfdcb0ca5",
+  "artifact": {
+    "ddl_file": "internal/core/migration_agent_assignments.go",
+    "ddl_sha256": "41f55ebbf41d18060684eb5f31ced3f5ea2d660fd465cc675fd20494dd7728bd",
+    "ddl_pin_asserted_by": "TestAgentAssignmentDDLIsPinned",
+    "pin_agrees_in": [
+      "internal/core/migration_agent_assignments_test.go",
+      "docs/dev/continuity-001-assignment-schema.md",
+      "docs/evidence/continuity-001-pr1/manifest.json"
+    ],
+    "tables": 2,
+    "indexes": 7,
+    "triggers": 30,
+    "ddl_rules": 24,
+    "invariants_enforced_by_the_schema": 34,
+    "invariants_deliberately_not_enforced": 6
   },
   "tests": {
-    "acceptance_tests": 60,
+    "acceptance_tests_internal_core": 62,
     "command_level_restore_tests": 2,
-    "negative_controls": 33,
-    "gate": "make build && make test && mpm-lint --gate && scripts/docs_check"
+    "negative_controls": 34,
+    "negative_controls_with_an_invariant_specific_failure": 33,
+    "gates": [
+      "make build",
+      "make test",
+      "go run ./cmd/mpm-lint --gate",
+      "python3 scripts/docs_check --base 712064c3334ee33035bac747f841857f3221b910"
+    ],
+    "gate_result": "pass — 146 packages"
   },
   "adversarial": {
-    "independent_reviews": 6,
-    "blocking_findings": 21,
-    "blockers": []
+    "independent_reviews": 8,
+    "reviewer": "mpm-reviewer (installed, default-deny, sandbox_exec only)",
+    "reviewer_model": "minimax-coding-plan/MiniMax-M3.1-Flash",
+    "reviewer_model_deviation": "the reviewer's configured default model returned a provider quota error, so rounds 2-8 were run with --model minimax-coding-plan/MiniMax-M3.1-Flash; the sandbox and the permission set were unchanged",
+    "blocking_findings_by_round": [11, 2, 5, 1, 2, 0, 1, 0],
+    "blocking_findings_total": 22,
+    "verdicts_by_round": [
+      "REQUEST CHANGES",
+      "REQUEST CHANGES",
+      "REQUEST CHANGES",
+      "REQUEST CHANGES",
+      "REQUEST CHANGES",
+      "APPROVE WITH MINOR/NIT FINDINGS",
+      "REQUEST CHANGES",
+      "APPROVE WITH MINOR/NIT FINDINGS"
+    ]
   },
-  "ci": {"runs": []},
-  "blockers": []
+  "ci": {
+    "runs": [
+      {"run": 44263362702, "revision": "7032ffb5", "conclusion": "success"},
+      {"run": 44269400027, "revision": "7c29ccb2", "conclusion": "success"},
+      {"run": 44282611630, "revision": "cfd2d41a", "conclusion": "success"},
+      {"run": 44293006872, "revision": "1230b062", "conclusion": "success"},
+      {"run": 44301192470, "revision": "962eea39", "conclusion": "success"},
+      {"run": 44317831158, "revision": "b24d4125", "conclusion": "success"},
+      {"run": 44335313151, "revision": "6c462633", "conclusion": "success"},
+      {"run": 44355178537, "revision": "a31cd6e3", "conclusion": "success"},
+      {"run": 44374424756, "revision": "3e83130f", "conclusion": "success"}
+    ]
+  },
+  "blockers": [],
+  "notes": [
+    "This manifest is published in a documentation-only commit that follows the reviewed revision. It does not name its own commit, and it does not change the DDL: the hash pin in the reviewed revision and the hash pin at the branch head are the same value.",
+    "The reviewed revision is the head of the code. The evidence commit that carries this file changes no Go file, no DDL and no test.",
+    "A placeholder version of this manifest was committed at 6c462633 during the campaign, with PENDING in place of the revision and a stale DDL hash. It carried no findings, no CI and no verdict. This manifest replaces it; the reviewed revision's own pins were correct before and after."
+  ]
 }
