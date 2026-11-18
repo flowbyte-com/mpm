@@ -2900,7 +2900,7 @@ This section describes **PR 1 of six**: the storage only. No API, no CLI, no age
 
 #### What PR 1 adds
 
-Two **additive** tables, seven indexes and twenty-nine triggers. No existing table, row, index or trigger is modified.
+Two **additive** tables, seven indexes and thirty triggers. No existing table, row, index or trigger is modified.
 
 | table | what it holds |
 |---|---|
@@ -2930,6 +2930,8 @@ The gate is a **hand-off, not a claim**: an assignment at `awaiting_operator` ca
 
 The transitions must **supply** those fields, not merely carry them: the awaited action is set by the transition into the gate and by nothing else, and the approval's fields are set by the transition that records it. Without that, a row could be given the whole gate and approval record in an earlier write and then walk the path without naming anything, and the record would not be attributable to the event that claims it.
 
+And the records are **born empty**: an assignment is created with no gate and no approval. A row created carrying them would be permanently wedged — the immutability rules would refuse every attempt to supply the value the transition needs, and the "must supply" rules would refuse a transition that re-stated it.
+
 Once the gate is reached, **neither record changes** — not to a different value and not to nothing. That covers the action the operator is asked to authorise and every column of the approval: its action, its revision, its source, its evidence pointer and the moment it was recorded. The rule holds on the statement that **leaves** the gate as well, so an assignment cannot be approved for one action while the row says it was asked for another, and it cannot be approved with its awaited action erased. And it holds on the assignment's **later** states: the protection is scoped to the record rather than to the row's current state, so a cancelled assignment's gate and approval records are still fixed.
 
 #### The delegation tree, and the budgets it inherits
@@ -2944,7 +2946,11 @@ A child **does** carry a `resource_units` figure — its own consumption against
 
 #### The lease and the fence
 
-`claim_epoch` is the fencing token. It advances by **exactly one** on every claim, and a claim sets both the owner and a lease; the owner changes **only** on a claim. So the epoch cannot be skipped or reset, and an owner cannot be reassigned without the row ceasing to be a lease. Only a **live** assignment can be claimed — the two terminal states are refused on both sides of the statement — and the lease changes only on a claim, so a claimed assignment keeps its lease and an unclaimed one cannot be given one. An assignment is born **unclaimed** — epoch 0, no owner, no lease — and an assignment that was claimed, or that has a ledger, is cancelled and never deleted, so its id cannot be reused and a stale token cannot become current again.
+`claim_epoch` is the fencing token. It advances by **exactly one** on every claim; a claim leaves the row with an owner and a lease; the owner changes **only** on a claim. So the epoch cannot be skipped or reset, and an owner cannot be reassigned without the row ceasing to be a lease. Only a **live** assignment can be claimed — the terminal states and the gate are refused on both sides of the statement.
+
+The lease is **new** on every claim: the lease is the claim's window, and a claim that inherited the last claim's window would have no window at all. A claimed assignment keeps its lease, and an unclaimed one cannot be given one.
+
+The owner is required to be **present** after a claim, but the schema cannot require it to have *changed*: a claim that renews the same holder's lease leaves the owner unchanged, and a trigger cannot tell that from a takeover that forgot to write the new owner. So the guarantee is the one the database can make — the owner is present, and only a claim changes it — and the API carries the rest. An assignment is born **unclaimed** — epoch 0, no owner, no lease — and an assignment that was claimed, or that has a ledger, is cancelled and never deleted, so its id cannot be reused and a stale token cannot become current again.
 
 The fence against a **stale** owner is the `WHERE` clause of the writing statement — `WHERE id = ? AND claim_epoch = ?` — because that comparison is atomic with the write. It is deliberately not a trigger: a trigger cannot see the epoch a caller *presented*. A lease that expires without a transition is recoverable; the next claim takes it and advances the epoch, which invalidates the previous holder.
 
@@ -2960,7 +2966,9 @@ The ledger's ids and indexes are guarded the same way, so a ledger entry cannot 
 
 #### What the database enforces
 
-Thirty-three properties are enforced by the schema itself rather than by convention — the creation state, the unclaimed creation, the refusal to reuse an id or a key, the immutability of both, the tree's shape on both write paths, the depth's immutability, the role-aware state machine, the universal cancellation, the operator's gate and its approval record and the rule that each is written only by its own transition, the epoch discipline, the owner discipline, the refusal to claim anything terminal or at the gate, the lease's tie to the claim, the root/child budget shape, the one-project containment, the two lists' element types, the ledger's monotonicity, append-only nature and state vocabulary, the refusal to delete anything with children or a ledger, and the type of every identifier, key, number, pointer and JSON column.
+Thirty-four properties are enforced by the schema itself rather than by convention — the creation state, the unclaimed creation, the refusal to reuse an id or a key, the immutability of both, the tree's shape on both write paths, the depth's immutability, the role-aware state machine, the universal cancellation, the operator's gate and its approval record, the rule that each is written only by its own transition, the rule that both are born empty, the epoch discipline, the owner discipline, the refusal to claim anything terminal or at the gate, the lease's tie to the claim, the root/child budget shape, the one-project containment, the two lists' element types, the ledger's monotonicity, append-only nature and state vocabulary, the refusal to delete anything with children or a ledger by a DELETE statement, and the type of every identifier, key, number, pointer and JSON column.
+
+The guarantees above are the ones a **database file** can make. A `DROP TABLE` destroys every row without any trigger firing, and `PRAGMA writable_schema` can remove the triggers themselves; a file under an adversary's control is not the threat model, and the substrate is not the boundary.
 
 `docs/dev/continuity-001-assignment-schema.md` lists them one by one, **and names the six that the schema does not enforce** — the fence, the recipient membership, the depth limit, the tree budgets, the findings capture and the authorisation of a root — so that "the schema enforces it" and "the API enforces it" are never confused. It also records the two closed vocabularies — the role and the event type — and the fact that widening a `CHECK` on a live table in SQLite means rebuilding that table, so a later PR that needs a third role must plan for a rebuild.
 

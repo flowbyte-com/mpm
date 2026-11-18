@@ -51,6 +51,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -87,7 +88,7 @@ var assignmentRestoreIndexes = []string{
 	"idx_agent_tasks_state_updated",
 }
 
-// assignmentRestoreTriggers are the twenty-nine triggers the approved
+// assignmentRestoreTriggers are the thirty triggers the approved
 // DDL creates. They are named explicitly so a missing trigger fails by
 // name.
 //
@@ -121,6 +122,7 @@ var assignmentRestoreTriggers = []string{
 	"trg_agent_tasks_owner_changes_only_on_claim",
 	"trg_agent_tasks_permitted_operations_insert",
 	"trg_agent_tasks_permitted_operations_update",
+	"trg_agent_tasks_records_are_born_empty",
 	"trg_agent_tasks_role_is_immutable",
 	"trg_agent_tasks_root_recipient_is_eligible",
 	"trg_agent_tasks_root_recipient_is_eligible_on_update",
@@ -279,7 +281,7 @@ func assignmentDumpColumns(t *testing.T, db *sql.DB, table string) []string {
 // their real indexes, their real triggers and real rows — is fed to
 // `mpm restore-db`. The command must ACCEPT it (exit 0), and the
 // restored database must carry all two tables, all seven indexes and
-// all twenty-nine triggers, AND the rows.
+// all thirty triggers, AND the rows.
 //
 // The trigger list is the whole inventory, and this test also compares
 // it against the LIVE schema: a trigger the DDL creates and the list
@@ -295,6 +297,31 @@ func TestHandleRestoreDB_AcceptsAssignmentDump(t *testing.T) {
 	seedAssignmentRows(t, dm.SQLDB())
 
 	dump := buildAssignmentDump(t, dm.SQLDB())
+
+	// The MARKER: a row that exists in the live database and NOT in
+	// the dump.
+	//
+	// Without it, the test could pass VACUOUSLY: every assertion it
+	// makes is also true of the PRE-restore database, because the dump
+	// is built from the live schema and the rows are seeded before it.
+	// A handler that validated the dump, returned 0 and wrote nothing
+	// would satisfy every assertion. The seventh review found that, and
+	// it is the same class of defect the third review found once in this
+	// file.
+	//
+	// The marker is written AFTER the dump is built, so the dump does
+	// not carry it. A restore that really restores must therefore NOT
+	// find it — and a restore that does nothing must still find it.
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type)
+		VALUES ('ate-not-in-the-dump', 'at-0123456789abcdef', 1, 'note')`)
+	require.NoError(t, err)
+
+	// The file's identity BEFORE the restore, so the test can prove the
+	// restore REPLACED it.
+	before, err := os.Stat(dbPath)
+	require.NoError(t, err)
+
 	dumpPath := filepath.Join(t.TempDir(), "assignment.sql")
 	require.NoError(t, os.WriteFile(dumpPath, []byte(dump), 0o600))
 
@@ -370,7 +397,7 @@ func TestHandleRestoreDB_AcceptsAssignmentDump(t *testing.T) {
 			"restore-db validates against")
 
 	// The restored database carries the two tables, the seven indexes
-	// and the twenty-nine triggers. The restore replaces the file, so
+	// and the thirty triggers. The restore replaces the file, so
 	// this reads the NEW inode at dbPath.
 	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000")
 	require.NoError(t, err)
@@ -424,6 +451,30 @@ func TestHandleRestoreDB_AcceptsAssignmentDump(t *testing.T) {
 	)
 	require.NoError(t, row.Scan(&eventType))
 	require.Equal(t, "created", eventType)
+
+	// AND THE MARKER IS GONE.
+	//
+	// The marker was in the live database and not in the dump, so a
+	// restore that really restores does not find it. This is the
+	// assertion that makes the test non-vacuous: without it, every
+	// assertion above is also true of the database as it was BEFORE the
+	// restore.
+	var markerCount int
+	row = db.QueryRow(
+		`SELECT COUNT(*) FROM agent_task_events WHERE id = ?`, "ate-not-in-the-dump",
+	)
+	require.NoError(t, row.Scan(&markerCount))
+	require.Equal(t, 0, markerCount,
+		"the restored database still carries a row that was NOT in the dump — the "+
+			"restore did not replace the file, so every other assertion in this test "+
+			"was about the pre-restore database")
+
+	// And the file was REPLACED, not written in place.
+	after, err := os.Stat(dbPath)
+	require.NoError(t, err)
+	require.NotEqual(t, before.Sys().(*syscall.Stat_t).Ino, after.Sys().(*syscall.Stat_t).Ino,
+		"the database file was not replaced — the restore wrote into the old file, so "+
+			"the row the dump did not carry would have survived")
 }
 
 // buildAssignmentDumpInDumpOrder renders the dump in the shape
@@ -538,6 +589,14 @@ func TestHandleRestoreDB_AcceptsAssignmentDumpInDumpOrder(t *testing.T) {
 	seedAssignmentRows(t, dm.SQLDB())
 
 	dump := buildAssignmentDumpInDumpOrder(t, dm.SQLDB())
+
+	// The MARKER: a row that exists in the live database and NOT in
+	// the dump — the same non-vacuity guard as the first test.
+	_, err := dm.SQLDB().Exec(`
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type)
+		VALUES ('ate-not-in-the-dump', 'at-0123456789abcdef', 1, 'note')`)
+	require.NoError(t, err)
+
 	dumpPath := filepath.Join(t.TempDir(), "assignment-dump-order.sql")
 	require.NoError(t, os.WriteFile(dumpPath, []byte(dump), 0o600))
 
@@ -577,4 +636,12 @@ func TestHandleRestoreDB_AcceptsAssignmentDumpInDumpOrder(t *testing.T) {
 	row = db.QueryRow(`SELECT COUNT(*) FROM agent_task_events WHERE id = ?`, "ate-0123456789abcdef")
 	require.NoError(t, row.Scan(&n))
 	require.Equal(t, 1, n, "the restored database must carry the ledger entry")
+
+	// AND THE MARKER IS GONE.
+	row = db.QueryRow(`SELECT COUNT(*) FROM agent_task_events WHERE id = ?`, "ate-not-in-the-dump")
+	require.NoError(t, row.Scan(&n))
+	require.Equal(t, 0, n,
+		"the restored database still carries a row that was NOT in the dump — the "+
+			"restore did not replace the file, so every other assertion in this test "+
+			"was about the pre-restore database")
 }

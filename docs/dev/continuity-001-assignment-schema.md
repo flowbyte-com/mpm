@@ -2,7 +2,7 @@
 
 **Status:** implemented (PR 1 of the six-PR partition; tracking issue #258).
 **Design of record for the storage:** `internal/core/migration_agent_assignments.go`.
-**DDL pin:** SHA-256 `08ad122592a2133a9c55fa35ddf9d12ce4e5b33cd580b5d37949fcb94656bc74`, asserted by
+**DDL pin:** SHA-256 `b1e606b7cc3e10ea50b9d0676f25c6f694562c0d09f7cba0359d112720cb9709`, asserted by
 `TestAgentAssignmentDDLIsPinned`.
 
 This note is the design the storage implements. The **published** behaviour is
@@ -13,7 +13,7 @@ deferrals.
 
 ## 1. What PR 1 is, and what it is not
 
-PR 1 is **storage**. It creates two tables, seven indexes and twenty-nine
+PR 1 is **storage**. It creates two tables, seven indexes and thirty
 triggers, and it makes the contract's hardest invariants true *in the
 database*, so a wrong write is refused by the engine rather than by the
 convention of whichever code path happened to make it.
@@ -126,6 +126,14 @@ into the gate and by nothing else. Without that, a row could be given the
 whole gate and approval record in one early write and then walk the path
 without naming anything, and the record would not be attributable to the
 event that claims it.
+
+**And they are born empty.** The rule holds on the INSERT path as well: an
+assignment is created with no gate and no approval, and a row created
+carrying them would be **permanently wedged** — the immutability rules
+would refuse every attempt to supply the value the transition needs, the
+"must supply" rules would refuse a transition that re-stated it, and a row
+with a ledger entry could no longer be deleted. So the assignment could
+neither complete its path nor be removed.
 
 ### 3.2 The role-aware state machine
 
@@ -316,7 +324,16 @@ The trigger enforces:
 * the lease changes **only on a claim** — a claimed row keeps its lease,
   and an unclaimed row cannot be given one. The lease belongs to the
   claim, and the next claim replaces it;
-* a claim sets an owner and a lease;
+* a claim leaves the row with an **owner** and a **lease** — and the
+  lease is always **new**. The owner is required to be present, but the
+  schema cannot require it to have *changed*: a claim that renews the same
+  holder's lease leaves the owner unchanged, and a trigger cannot tell that
+  from a takeover that forgot to write the new owner. So the rule is
+  stated as it is enforced — the owner is present, and only a claim
+  changes it — and **PR 2's claim always writes the owner**, so a takeover
+  is explicit. The lease has no such ambiguity: it belongs to the claim,
+  so a claim that inherited the last claim's window would have no window
+  at all;
 * a task is born **unclaimed** — epoch 0, no owner, no lease.
 
 The trigger deliberately does **not** enforce the fence. A trigger cannot see
@@ -354,7 +371,7 @@ never issued a token and nothing refers to it.
 
 ## 5. The invariants the database enforces, and the ones it does not
 
-Thirty-three properties are enforced by the schema itself rather than by
+Thirty-four properties are enforced by the schema itself rather than by
 convention.
 
 | # | invariant | enforced by |
@@ -375,10 +392,10 @@ convention.
 | I14 | the gate's action is **immutable** once the gate is reached — and the immutability does not expire with the row's state | the state-transition trigger + the awaiting-action trigger |
 | I15 | a recorded approval is **immutable** — it is evidence, and the immutability does not expire with the row's state | the state-transition trigger + the approval trigger |
 | I16 | the claim epoch advances by exactly one | the claim-discipline trigger |
-| I17 | a claim sets an owner and a lease | the claim-owner and claim-lease triggers |
+| I17 | a claim leaves the row with an owner, and sets a **new** lease | the claim-owner and claim-lease triggers |
 | I18 | only a claim changes the owner | the owner trigger |
 | I19 | the role is **immutable** | the role-immutability trigger |
-| I20 | a claimed assignment, or one that has a ledger, cannot be **deleted** | the not-deletable trigger |
+| I20 | a claimed assignment, or one that has a ledger, cannot be **deleted** by a DELETE statement | the not-deletable trigger |
 | I21 | the ledger's event index is **monotonic** | the monotonic trigger |
 | I22 | a ledger entry's id and its index are **never reused** | the ledger's id-not-reused trigger |
 | I23 | the ledger is **append-only** | the ledger's no-UPDATE and no-DELETE triggers |
@@ -389,9 +406,10 @@ convention.
 | I28 | the id is **immutable** | the id-immutability trigger |
 | I29 | the idempotency key is **immutable** | the key-immutability trigger |
 | I30 | only a **live** assignment can be claimed | the claim-needs-a-live-assignment trigger |
-| I31 | the lease changes **only on a claim** | the lease-changes-only-on-a-claim trigger |
+| I31 | the lease changes **only on a claim**, and a claim sets a **new** one | the lease-changes-only-on-a-claim trigger |
 | I32 | the gate's action is **set only by** the transition into the gate | the state-transition trigger + the awaiting-action trigger |
 | I33 | the approval's fields are **set only by** the transition that records it | the state-transition trigger + the approval trigger |
+| I34 | the gate's record and the approval are **born empty** | the born-empty trigger |
 
 The invariants that are **not** in the database. Each one is deferred for
 its own reason, and the reason is **not** the same for all of them: a
@@ -465,20 +483,25 @@ The DDL is owned by a **migration**, not by a schema slice:
 
 ---
 
-## 7. What the six independent reviews found
+## 7. What the seven independent reviews found
 
-The change was reviewed independently six times, in the installed sandboxed
-reviewer (`mpm-reviewer`, default-deny, `sandbox_exec` only). The first
-returned **eleven blocking and thirteen non-blocking** findings, the second
-**two blocking and fourteen non-blocking**, the third **five blocking and
-thirteen non-blocking**, the fourth **one blocking and ten non-blocking**,
-the fifth **two blocking and eight non-blocking**, and the sixth **no
-blocking findings and five minor and three nit findings**. Every blocking
-finding was a real defect, and every one is closed.
+The change was reviewed independently seven times, in the installed
+sandboxed reviewer (`mpm-reviewer`, default-deny, `sandbox_exec` only). The
+first returned **eleven blocking and thirteen non-blocking** findings, the
+second **two blocking and fourteen non-blocking**, the third **five blocking
+and thirteen non-blocking**, the fourth **one blocking and ten non-blocking**,
+the fifth **two blocking and eight non-blocking**, the sixth **no blocking
+findings and five minor and three nit findings**, and the seventh **one
+blocking, three minor and two nit findings**. Every blocking finding was a
+real defect, and every one is closed.
 
 The sixth review was the one that returned **no** blocking finding. Its
 minor findings were not dismissed: three of them were real defects and two
 were claims in this note that were simply wrong. They are closed below.
+
+The seventh review then found a blocking defect in the **fix** for the
+sixth — which is the reason a review round is not the same thing as a
+sign-off.
 
 ### 7.1 The first review's eleven blocking findings
 
@@ -737,7 +760,67 @@ all of them are closed.
   gate is a **hand-off to the operator**, not a claim, and the refusal
   covers both sides of the statement.
 
-### 7.9 The fifth review's non-blocking findings
+### 7.9 The seventh review's findings
+
+The seventh review returned **one blocking finding** — and it was in the
+sixth review's own fix, which is the reason this campaign needed a seventh
+round rather than a sixth.
+
+**The blocking finding: the sixth review's fix was on the UPDATE path
+only.** The rule that the gate's record and the approval are written only
+by their own transitions was enforced by the state machine and by the two
+standalone triggers — all of them UPDATE triggers. There was no
+before-insert trigger, so an assignment could be **created** already
+carrying the awaited action, or a complete forged approval.
+
+That is worse than a missing rule, and the review was right to call it
+blocking: the row is **permanently wedged**. The immutability rules refuse
+every attempt to supply the value the transition needs; the "must supply"
+rules refuse a transition that re-states the value it already has; and once
+the row has a ledger entry it can no longer be deleted, so the assignment
+can neither complete its path nor be removed. Two of the thirty-four
+published properties were false, and so was the SPEC's wording.
+
+The fix is a before-insert trigger refusing a row whose awaited action or
+whose approval is non-null: the records are **born empty**.
+
+The three minor findings were:
+
+* **"a claim sets an owner and a lease" was not what the DDL enforced.**
+  The two clauses required the owner and the lease to be *present* on a
+  claim, not to be *set* by it, so a re-claim could carry the previous
+  holder's lease forward — an expired one, even. The lease is now required
+  to be **new** on a claim. The owner is stated as it is enforced: a claim
+  leaves the row with an owner, and only a claim changes it. The schema
+  cannot require the owner to have *changed*, because a renewal by the same
+  holder leaves it unchanged and a trigger cannot tell that from a takeover
+  that forgot to write the new owner — so **PR 2's claim always writes the
+  owner**, and the note says so instead of claiming the database does it;
+* **both command-level restore tests could pass vacuously.** Every
+  assertion they made was also true of the database as it was *before* the
+  restore, because the dump is built from the live schema and the rows are
+  seeded before it: a handler that validated the dump, returned 0 and wrote
+  nothing would have satisfied every one of them. Both tests now write a
+  **marker** row after the dump is built, and require it to be **absent**
+  from the restored database — and the first also requires the file to have
+  been **replaced**, not written in place;
+* **§8's opening sentence was wrong.** It said "each invariant was
+  removed", but the controls and the invariants do not correspond one for
+  one: the ledger's state vocabulary has no control, and two controls
+  correspond to no invariant. The sentence names the exceptions now.
+
+The two nits were:
+
+* the DDL's header listed twenty-three rules and did not include the one
+  the sixth review's fix added, and two of the in-file rule labels were out
+  of numeric order. The list is twenty-four rules and the labels ascend;
+* I20's wording — "cannot be deleted" — held only for the DELETE
+  statement. A `DROP TABLE` destroys every row with no trigger firing, and
+  `PRAGMA writable_schema` can remove the triggers themselves. The
+  invariant is now stated with its scope, because a database file is not
+  the threat model and the claim was wider than the guarantee.
+
+### 7.10 The fifth review's non-blocking findings
 
 * **the idempotency key was mutable**, and the acceptance suite even
   blessed the move ("an ordinary key change still works"). A key that could
@@ -773,9 +856,17 @@ all of them are closed.
 
 ## 8. The negative controls
 
-Each invariant was removed and the suite re-run. The counts below are the
-**total** number of tests that fail; the second column is the number that
-fail for a reason **other** than the DDL having changed.
+Each invariant that a control can remove was removed and the suite re-run.
+The controls and the invariants do **not** correspond one for one, and the
+exceptions are named rather than glossed: the ledger's `from_state` and
+`to_state` vocabulary has no control (it is a column `CHECK`, and the
+state vocabulary's own control removes the assignment's `CHECK` beside it),
+and two controls correspond to no invariant — the unique idempotency index
+alone, and the control that removes the whole migration.
+
+The counts below are the **total** number of tests that fail; the second
+column is the number that fail for a reason **other** than the DDL having
+changed.
 
 The **structural** failures are the ones that follow from the DDL's *text*
 changing, whatever invariant is under test: the hash pin, the four migration
@@ -784,7 +875,7 @@ the object inventory, and the three control tests that drop an object by
 name. They are listed in the harness so that the second column can be read as
 "the tests that fail because the **behaviour** changed".
 
-**Thirty-three** controls, and **thirty-two** of them have at least one
+**Thirty-four** controls, and **thirty-three** of them have at least one
 invariant-specific failure. The counts are **measured**, not asserted:
 `scripts/continuity-001-controls.py` runs every control and prints them, and
 it refuses to measure anything at all unless the **baseline is green** — a
@@ -796,10 +887,11 @@ control run against a broken tree reports nothing rather than a number.
 | the initial-state trigger is removed | 7 | 1 |
 | the unclaimed-at-creation trigger is removed | 7 | 1 |
 | the id-not-reused trigger is removed | 8 | 1 |
+| the born-empty trigger is removed | 7 | 1 |
 | the id-immutability trigger is removed | 8 | 2 |
 | the key-immutability trigger is removed | 8 | 2 |
 | the claim-needs-a-live-assignment trigger is removed | 8 | 2 |
-| the lease-changes-only-on-a-claim trigger is removed | 7 | 1 |
+| the lease-changes-only-on-a-claim trigger is removed | 8 | 2 |
 | the tree-shape trigger is removed | 7 | 1 |
 | the tree-shape-on-UPDATE trigger is removed | 7 | 1 |
 | the depth-immutability trigger is removed | 8 | 2 |
@@ -824,7 +916,7 @@ control run against a broken tree reports nothing rather than a number.
 | the root/child budget `CHECK` is removed | 2 | 1 |
 | the state vocabulary `CHECK` is removed | 2 | 1 |
 | the `typeof()` type guards are removed | 6 | 5 |
-| the whole migration is not called | 51 | 45 |
+| the whole migration is not called | 53 | 47 |
 
 Four of these are worth reading closely, because they are the places where the
 counts are easy to misread:

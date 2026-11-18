@@ -106,6 +106,21 @@
 // command-level restore test's trigger inventory was one short, so the
 // restored database was quietly missing a rule.
 //
+// The SEVENTH review found that the sixth review's fix — the gate's record
+// and the approval are written only by their own transitions — was
+// enforced on the UPDATE path ONLY: there was no before-insert trigger, so
+// an assignment could be CREATED already carrying them. That is worse
+// than a missing rule, because the row is then PERMANENTLY WEDGED: the
+// immutability rules refuse every attempt to supply the value the
+// transition needs, the "must supply" rules refuse a transition that
+// re-states it, and a row with a ledger entry can no longer be deleted.
+//
+// It also found that the lease rule said only that the lease changes on a
+// claim, so a re-claim could CARRY the previous holder's lease forward —
+// an expired one, even — and that the command-level restore tests could
+// pass VACUOUSLY, because every assertion they made was also true of the
+// database as it was BEFORE the restore.
+//
 // The fixes are in the DDL below, and each has a regression test that fails
 // without it.
 package internal
@@ -128,38 +143,40 @@ import (
 // ------------------------------------
 // The contract's invariants are not expressible as column CHECK constraints,
 // and each of them is the difference between a coordination substrate and a
-// convention. There are TWENTY-THREE rules, carried by TWENTY-NINE triggers —
+// convention. There are TWENTY-FOUR rules, carried by THIRTY triggers —
 // six of the rules are split across several triggers, so that a test can
 // isolate one clause from another. The rules are:
 //
 //   1  an assignment is created in the 'enqueued' state
 //   2  an assignment is created UNCLAIMED: epoch 0, no owner, no lease
-//   3  an assignment's id and its idempotency key are NEVER reused
-//   4  the id is IMMUTABLE
-//   5  the idempotency key is IMMUTABLE
-//   6  the delegation tree is a tree: the root is a root, the parent is in
+//   3  the gate's record and the approval are BORN EMPTY
+//   4  an assignment's id and its idempotency key are NEVER reused
+//   5  the id is IMMUTABLE
+//   6  the idempotency key is IMMUTABLE
+//   7  the delegation tree is a tree: the root is a root, the parent is in
 //      the same tree at one level above, and nobody is their own parent —
 //      on the INSERT path and on the UPDATE path
-//   7  the depth is IMMUTABLE
-//   8  a root's own recipient is among its eligible recipients
-//   9  a permitted operation is a non-null, non-empty string
-//  10  an eligible recipient is a non-null, non-empty string
-//  11  the state machine is ROLE-AWARE, and 'cancelled' is universal
-//  12  the claim epoch advances by exactly one
-//  13  a claim sets an owner and a lease
-//  14  only a claim changes the owner
-//  15  only a LIVE assignment can be claimed
-//  16  the lease changes only on a claim, and a claimed assignment keeps it
-//  17  the role is IMMUTABLE
-//  18  the operator's gate names its action, a recorded approval names its
+//   8  the depth is IMMUTABLE
+//   9  a root's own recipient is among its eligible recipients
+//  10  a permitted operation is a non-null, non-empty string
+//  11  an eligible recipient is a non-null, non-empty string
+//  12  the state machine is ROLE-AWARE, and 'cancelled' is universal
+//  13  the claim epoch advances by exactly one
+//  14  a claim leaves the row with an owner, and sets a NEW lease
+//  15  only a claim changes the owner
+//  16  only a LIVE assignment can be claimed
+//  17  the lease changes only on a claim, and a claim sets a NEW lease
+//  18  the role is IMMUTABLE
+//  19  the operator's gate names its action, a recorded approval names its
 //      action, its revision, its source and its evidence pointer, the
-//      approval names the SAME action the gate awaited, and neither record
-//      is rewritten once the gate is reached
-//  19  a claimed assignment, or one that has a ledger, cannot be DELETED
-//  20  the ledger's event index is MONOTONIC
+//      approval names the SAME action the gate awaited, the records are
+//      written ONLY by their own transitions, and neither record is
+//      rewritten once the gate is reached
+//  20  a claimed assignment, or one that has a ledger, cannot be DELETED
 //  21  a ledger entry's id and its index are NEVER reused
-//  22  the ledger is append-only (no UPDATE)
-//  23  the ledger is append-only (no DELETE)
+//  22  the ledger's event index is MONOTONIC
+//  23  the ledger is append-only (no UPDATE)
+//  24  the ledger is append-only (no DELETE)
 //
 // The fencing of a STALE owner is deliberately NOT a trigger. A trigger
 // cannot see the epoch a caller presented — it only sees the row before and
@@ -513,7 +530,32 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: an assignment is created unclaimed — epoch 0, no owner, no lease');
 END;
 
--- ── Rule 3: an assignment's id and its idempotency key are NEVER reused ───
+-- ── Rule 3: the gate's and the approval's records are BORN EMPTY ─────────
+--
+-- The gate's action and the approval's fields are written by their own
+-- transitions, and by nothing else. That rule has to hold on the INSERT
+-- path as well as on the UPDATE path: a row CREATED carrying the record
+-- would carry a statement that no transition ever made -- "the operator
+-- was asked to authorise X" with nothing asking for it -- and it would
+-- be PERMANENTLY WEDGED, because the immutability rules would then
+-- refuse every attempt to supply the value the transition needs, and the
+-- "must supply" rules would refuse a transition that re-states it.
+--
+-- The rule is stated once here, and the UPDATE path is stated where the
+-- transitions live.
+CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_records_are_born_empty
+BEFORE INSERT ON agent_tasks
+FOR EACH ROW WHEN NEW.awaiting_action IS NOT NULL
+     OR NEW.approval_action IS NOT NULL
+     OR NEW.approval_revision IS NOT NULL
+     OR NEW.approval_source IS NOT NULL
+     OR NEW.approval_evidence IS NOT NULL
+     OR NEW.approved_at IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'agent_tasks: the gate''s record and the approval are born empty — they are written by their own transition');
+END;
+
+-- ── Rule 4: an assignment's id and its idempotency key are NEVER reused ───
 --
 -- While the assignment EXISTS. An assignment that was never claimed and
 -- has no ledger may be REMOVED (rule 19 says so), and its id and its key
@@ -550,7 +592,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: an assignment''s id and its idempotency key are never reused');
 END;
 
--- ── Rules 4 and 5: the id and the idempotency key are IMMUTABLE ──────────
+-- ── Rules 5 and 6: the id and the idempotency key are IMMUTABLE ──────────
 --
 -- The id and the key identify the assignment. A row that could be
 -- RENAMED would defeat every "never reused" guarantee at once: the old
@@ -581,7 +623,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: the idempotency key is immutable — it identifies the logical assignment');
 END;
 
--- ── Rule 6: the delegation tree is a TREE ─────────────────────────────────
+-- ── Rule 7: the delegation tree is a TREE ─────────────────────────────────
 --
 -- The composite foreign keys keep the tree inside ONE project, but they do
 -- not make it a tree: a child could parent ITSELF, could cite a non-root
@@ -654,7 +696,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: the delegation tree is malformed — the root must be a root of this project, and the parent must be in the same tree, one level above');
 END;
 
--- ── Rule 7: the depth is IMMUTABLE ────────────────────────────────────────
+-- ── Rule 8: the depth is IMMUTABLE ────────────────────────────────────────
 --
 -- The depth is a structural property of the delegation tree: it is computed
 -- when the assignment is created, and nothing in the contract ever changes
@@ -672,7 +714,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: the depth is immutable — it is a property of the delegation tree');
 END;
 
--- ── Rule 8: a root's own recipient is among its eligible recipients ──────
+-- ── Rule 9: a root's own recipient is among its eligible recipients ──────
 --
 -- The DDL's own comment says it: "A root's own recipient must be among
 -- them". Without the check, a root addressed to 'alpha' could carry an
@@ -706,7 +748,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: a root''s own recipient must be among its eligible recipients');
 END;
 
--- ── Rule 9: a permitted operation is a non-null, non-empty string ─────────
+-- ── Rule 10: a permitted operation is a non-null, non-empty string ─────────
 --
 -- The root/child CHECK requires a root to name at least one permitted
 -- operation, and '["read"]' and '[null]' both satisfy that test. A CHECK
@@ -732,7 +774,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: a permitted operation must be a non-null string');
 END;
 
--- ── Rule 9: a permitted operation is a non-null, non-empty string (UPDATE) ─
+-- ── Rule 10: a permitted operation is a non-null, non-empty string (UPDATE) ─
 CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_permitted_operations_update
 BEFORE UPDATE OF permitted_operations ON agent_tasks
 FOR EACH ROW WHEN EXISTS (
@@ -743,7 +785,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: a permitted operation must be a non-null string');
 END;
 
--- ── Rule 10: an eligible recipient is a non-null, non-empty string ─────────
+-- ── Rule 11: an eligible recipient is a non-null, non-empty string ─────────
 --
 -- The allow-list is a list of ADDRESSES. An object, an array, a boolean, a
 -- number or a null is not an address; the empty string is not an address
@@ -759,7 +801,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: an eligible recipient must be a non-null string');
 END;
 
--- ── Rule 10: an eligible recipient is a non-null, non-empty string (UPDATE) ─
+-- ── Rule 11: an eligible recipient is a non-null, non-empty string (UPDATE) ─
 CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_eligible_recipients_update
 BEFORE UPDATE OF eligible_recipients ON agent_tasks
 FOR EACH ROW WHEN EXISTS (
@@ -770,7 +812,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: an eligible recipient must be a non-null string');
 END;
 
--- ── Rule 11: the state machine is ROLE-AWARE ───────────────────────────────
+-- ── Rule 12: the state machine is ROLE-AWARE ───────────────────────────────
 --
 -- An assignment moves forward through a fixed path, and the path differs by
 -- role: an implementer's assignment reaches 'review_passed' — and only
@@ -933,12 +975,24 @@ BEGIN
        AND NEW.approval_action IS NOT NEW.awaiting_action;
 END;
 
--- ── Rules 12, 13 and 14: the claim discipline ─────────────────────────────
+-- ── Rules 13, 14 and 15: the claim discipline ─────────────────────────────
 --
--- The claim epoch advances by EXACTLY ONE, a claim sets an owner and a
--- lease, and the owner changes only on a claim. So the epoch cannot be
--- skipped or reset, and an owner cannot be reassigned without the row
--- ceasing to be a lease.
+-- The claim epoch advances by EXACTLY ONE, a claim leaves the row with an
+-- owner and a lease, and the owner changes only on a claim. So the epoch
+-- cannot be skipped or reset, and an owner cannot be reassigned without
+-- the row ceasing to be a lease.
+--
+-- The owner, precisely. The schema requires the row to HAVE an owner after
+-- a claim; it cannot require the owner to have CHANGED, because a claim
+-- that renews the SAME holder's lease leaves the owner unchanged, and a
+-- trigger cannot tell that from a takeover that forgot to write the new
+-- owner. So the rule is stated as it is enforced — the owner is present,
+-- and only a claim changes it — and the API carries the rest: PR 2's
+-- claim ALWAYS writes the owner, so a takeover is explicit.
+--
+-- The lease, by contrast, IS required to change: the lease is the claim's
+-- window, and a claim that inherited the last claim's window would have
+-- no window at all — an expired lease carried forward is not a lease.
 --
 -- Each clause raises its OWN message, so a test can isolate one clause from
 -- the others: the "a claim must set an owner" clause is otherwise
@@ -981,7 +1035,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: only a claim may change the owner');
 END;
 
--- ── Rule 15: only a LIVE assignment can be claimed ───────────────────────
+-- ── Rule 16: only a LIVE assignment can be claimed ───────────────────────
 --
 -- A claim needs a LIVE assignment.
 --
@@ -1011,7 +1065,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: only a live assignment can be claimed');
 END;
 
--- ── Rule 16: the lease changes ONLY on a claim ───────────────────────────
+-- ── Rule 17: the lease changes ONLY on a claim ───────────────────────────
 --
 -- A claim sets an owner and a lease, and the two go together: a row that
 -- holds an epoch and an owner but no lease is a row that says "someone
@@ -1025,15 +1079,24 @@ END;
 -- unclaimed row cannot be given one (which would be a lease on
 -- nothing, belonging to no claim).
 CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_lease_changes_only_on_a_claim
-BEFORE UPDATE OF lease_expires_at ON agent_tasks
+BEFORE UPDATE OF claim_epoch, lease_expires_at ON agent_tasks
 FOR EACH ROW
-WHEN NEW.lease_expires_at IS NOT OLD.lease_expires_at
-     AND NEW.claim_epoch = OLD.claim_epoch
 BEGIN
-    SELECT RAISE(ABORT, 'agent_tasks: the lease changes only on a claim');
+    -- The lease changes ONLY on a claim.
+    SELECT RAISE(ABORT, 'agent_tasks: the lease changes only on a claim')
+     WHERE NEW.lease_expires_at IS NOT OLD.lease_expires_at
+       AND NEW.claim_epoch = OLD.claim_epoch;
+
+    -- And a claim sets a NEW lease: the lease belongs to the claim, and
+    -- the next claim replaces it. Without this, a re-claim could carry
+    -- the previous holder's lease forward -- an expired one, even -- and
+    -- the lease would no longer say how long the claim is good for.
+    SELECT RAISE(ABORT, 'agent_tasks: a claim sets a new lease')
+     WHERE NEW.lease_expires_at IS OLD.lease_expires_at
+       AND NEW.claim_epoch <> OLD.claim_epoch;
 END;
 
--- ── Rule 17: the role is IMMUTABLE ────────────────────────────────────────
+-- ── Rule 18: the role is IMMUTABLE ────────────────────────────────────────
 --
 -- The transition path is selected by OLD.role. If the role were mutable, a
 -- relabel would select a DIFFERENT path — and a role-only write would
@@ -1046,7 +1109,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: the role is immutable');
 END;
 
--- ── Rule 18: the gate's record is IMMUTABLE once the gate is reached ──────
+-- ── Rule 19: the gate's record is IMMUTABLE once the gate is reached ──────
 --
 -- The transition INTO the gate must name the exact action, and the
 -- transition INTO the approval must name the action, the revision and the
@@ -1124,7 +1187,7 @@ BEGIN
      WHERE NOT (OLD.state <> 'operator_approved' AND NEW.state = 'operator_approved');
 END;
 
--- ── Rule 19: a claimed assignment, or one with a ledger, cannot be DELETED ─
+-- ── Rule 20: a claimed assignment, or one with a ledger, cannot be DELETED ─
 --
 -- An assignment is CANCELLED, never deleted. And the rule is stated in
 -- terms of the claim epoch, because that is what closes the hole: an
@@ -1164,7 +1227,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_task_events: a ledger entry''s id and its index are never reused');
 END;
 
--- ── Rule 20: the ledger's event index is MONOTONIC ───────────────────────
+-- ── Rule 22: the ledger's event index is MONOTONIC ───────────────────────
 CREATE TRIGGER IF NOT EXISTS trg_agent_task_events_monotonic
 BEFORE INSERT ON agent_task_events
 FOR EACH ROW WHEN NEW.event_index <= (
@@ -1174,7 +1237,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_task_events: the event index must be strictly greater than the current maximum');
 END;
 
--- ── Rules 22 and 23: the ledger is APPEND-ONLY ────────────────────────────
+-- ── Rules 23 and 24: the ledger is APPEND-ONLY ────────────────────────────
 CREATE TRIGGER IF NOT EXISTS trg_agent_task_events_no_update
 BEFORE UPDATE ON agent_task_events
 BEGIN

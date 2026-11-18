@@ -332,6 +332,8 @@ CONTROLS = [
     ("the unclaimed-at-creation trigger is removed",
      drop_trigger("trg_agent_tasks_unclaimed_at_creation")),
     ("the id-not-reused trigger is removed", drop_trigger("trg_agent_tasks_id_is_not_reused")),
+    ("the born-empty trigger is removed",
+     drop_trigger("trg_agent_tasks_records_are_born_empty")),
     ("the id-immutability trigger is removed",
      drop_trigger("trg_agent_tasks_id_is_immutable")),
     ("the key-immutability trigger is removed",

@@ -82,10 +82,10 @@ var agentAssignmentIndexes = []string{
 
 // agentAssignmentTriggers are the triggers the DDL creates.
 //
-// The twenty-nine triggers carry TWENTY-THREE rules: six rules are split
-// across several triggers so that a test can isolate one clause from
-// another (the tree shape, the root's recipient, the two lists, the claim
-// discipline and the operator's gate).
+// The thirty triggers carry TWENTY-FOUR rules: six rules are split across
+// several triggers so that a test can isolate one clause from another (the
+// tree shape, the root's recipient, the two lists, the claim discipline and
+// the operator's gate).
 var agentAssignmentTriggers = []string{
 	"trg_agent_task_events_id_is_not_reused",
 	"trg_agent_task_events_monotonic",
@@ -109,6 +109,7 @@ var agentAssignmentTriggers = []string{
 	"trg_agent_tasks_owner_changes_only_on_claim",
 	"trg_agent_tasks_permitted_operations_insert",
 	"trg_agent_tasks_permitted_operations_update",
+	"trg_agent_tasks_records_are_born_empty",
 	"trg_agent_tasks_role_is_immutable",
 	"trg_agent_tasks_root_recipient_is_eligible",
 	"trg_agent_tasks_root_recipient_is_eligible_on_update",
@@ -392,7 +393,7 @@ func TestAgentAssignmentDDLIsPinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(agentAssignmentDDL))
 	got := hex.EncodeToString(sum[:])
 
-	const want = "08ad122592a2133a9c55fa35ddf9d12ce4e5b33cd580b5d37949fcb94656bc74"
+	const want = "b1e606b7cc3e10ea50b9d0676f25c6f694562c0d09f7cba0359d112720cb9709"
 	if got != want {
 		t.Errorf("the DDL's SHA-256 is %s but the pin says %s. If the DDL changed on purpose, "+
 			"recompute the hash and say so in the commit message; if it did not, the storage has "+
@@ -432,7 +433,7 @@ func TestAgentAssignmentDDLIsTheOnlyDefinition(t *testing.T) {
 // A disposable file-backed WAL database is built, a representative row is
 // written into `memories`, and the assignment objects are REMOVED so the
 // migration has real work to do. The migration is then run against it: the
-// two tables, the seven indexes and the twenty-nine triggers exist BY NAME,
+// two tables, the seven indexes and the thirty triggers exist BY NAME,
 // the sentinel is recorded exactly once, the pre-existing row is untouched,
 // and the set of schema objects changed by the migration is EXACTLY the
 // assignment objects.
@@ -941,7 +942,7 @@ func TestAgentAssignmentAT8RestoreAllowList(t *testing.T) {
 	// 2. a dump carrying the REAL assignment schema is accepted.
 	//
 	// The dump carries the REAL DDL of every assignment object — the two
-	// tables, the seven indexes and the twenty-nine triggers, exactly as
+	// tables, the seven indexes and the thirty triggers, exactly as
 	// `sqlite3 .dump` would emit them.
 	//
 	// What this test does NOT do is prove that the dump RESTORES. The
@@ -1451,14 +1452,14 @@ func TestAssignmentClaimDiscipline(t *testing.T) {
 	assignmentMustRefuseWith(t, db, "a claim epoch that jumps by two",
 		"the claim epoch advances by exactly one", `
 		UPDATE agent_tasks
-		SET claim_epoch = claim_epoch + 2, owner = 'alpha', lease_expires_at = 1900000000
+		SET claim_epoch = claim_epoch + 2, owner = 'alpha', lease_expires_at = 1900000001
 		WHERE id = ?`, id)
 
 	// The epoch cannot be reset.
 	assignmentMustRefuseWith(t, db, "a claim epoch that is reset to zero",
 		"the claim epoch advances by exactly one", `
 		UPDATE agent_tasks
-		SET claim_epoch = 0, owner = 'alpha', lease_expires_at = 1900000000
+		SET claim_epoch = 0, owner = 'alpha', lease_expires_at = 1900000002
 		WHERE id = ?`, id)
 
 	// The owner cannot change without a claim.
@@ -1471,7 +1472,7 @@ func TestAssignmentClaimDiscipline(t *testing.T) {
 	assignmentMustRefuseWith(t, db, "a claim with no owner",
 		"a claim must set an owner", `
 		UPDATE agent_tasks
-		SET claim_epoch = claim_epoch + 1, owner = NULL, lease_expires_at = 1900000000
+		SET claim_epoch = claim_epoch + 1, owner = NULL, lease_expires_at = 1900000003
 		WHERE id = ?`, id)
 
 	// A claim must set a lease.
@@ -3022,6 +3023,109 @@ func TestAssignmentGateRecordSurvivesCancellation(t *testing.T) {
 		evidence != "ev://x" || approvedAt != 1700000000 {
 		t.Errorf("the record reads (%q, %q, %q, %q, %d) after the refusals, want the recorded values",
 			awaited, action, revision, evidence, approvedAt)
+	}
+}
+
+// TestAssignmentRecordsAreBornEmpty pins the INSERT path.
+//
+// The seventh review found that the sixth review's fix — the gate's record
+// and the approval are written only by their own transitions — was
+// enforced on the UPDATE path ONLY. There was no before-insert trigger, so
+// an assignment could be CREATED already carrying them.
+//
+// That is worse than a missing rule: the row would be PERMANENTLY WEDGED.
+// The immutability rules would refuse every attempt to supply the value the
+// transition needs, and the "must supply" rules would refuse a transition
+// that re-stated it. And once the row had a ledger entry it could no
+// longer be deleted, so the assignment could neither complete its path nor
+// be removed.
+func TestAssignmentRecordsAreBornEmpty(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	assignmentMustRefuseWith(t, db, "an assignment born with the awaited action",
+		"are born empty", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key, awaiting_action,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES ('at-born-gate', ?, 'at-born-gate', NULL, 0, 't', 'o', 'alpha',
+			'implementer', 'enqueued', 'idem:born-gate', 'merge PR #259',
+			1, 4, 2, 100, '["read"]', '["alpha"]')
+	`, projectID)
+
+	assignmentMustRefuseWith(t, db, "an assignment born with an approval record",
+		"are born empty", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			approval_action, approval_revision, approval_source, approval_evidence,
+			approved_at,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES ('at-born-approval', ?, 'at-born-approval', NULL, 0, 't', 'o', 'alpha',
+			'implementer', 'enqueued', 'idem:born-approval',
+			'merge PR #259', 'rev1', 'src', 'ev1', 1,
+			1, 4, 2, 100, '["read"]', '["alpha"]')
+	`, projectID)
+
+	// And a row born clean is accepted.
+	assignmentMustExec(t, db, `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES ('at-born-clean', ?, 'at-born-clean', NULL, 0, 't', 'o', 'alpha',
+			'implementer', 'enqueued', 'idem:born-clean',
+			1, 4, 2, 100, '["read"]', '["alpha"]')
+	`, projectID)
+}
+
+// TestAssignmentClaimSetsANewLease pins the lease's ownership by the claim.
+//
+// The seventh review found that the lease rule said only that the lease
+// changes on a claim — so a re-claim could CARRY the previous holder's
+// lease forward, and the lease it carried could already be expired. The
+// lease is the claim's window: "how long is this claim good for", and a
+// claim that inherits the last claim's window has no window at all.
+func TestAssignmentClaimSetsANewLease(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-newlease", "alpha", "implementer", "idem:newlease")
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET claim_epoch = claim_epoch + 1, owner = 'w1', lease_expires_at = 1900000000
+		WHERE id = ?`, id)
+
+	// A re-claim that inherits the lease is refused.
+	assignmentMustRefuseWith(t, db, "a re-claim that inherits the lease",
+		"a claim sets a new lease", `
+		UPDATE agent_tasks SET claim_epoch = claim_epoch + 1 WHERE id = ?`, id)
+
+	// And a re-claim that sets an already-expired lease is accepted —
+	// the schema cannot tell a bad lease from a good one — but the lease
+	// is the claim's own.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET claim_epoch = claim_epoch + 1, owner = 'w2', lease_expires_at = 1
+		WHERE id = ?`, id)
+
+	var owner string
+	var epoch int64
+	var lease int64
+	if err := db.QueryRow(
+		`SELECT owner, claim_epoch, lease_expires_at FROM agent_tasks WHERE id = ?`, id,
+	).Scan(&owner, &epoch, &lease); err != nil {
+		t.Fatalf("read the assignment: %v", err)
+	}
+	if owner != "w2" || epoch != 2 || lease != 1 {
+		t.Errorf("the assignment carries (%q, %d, %d) after the re-claim, want (w2, 2, 1)",
+			owner, epoch, lease)
 	}
 }
 
