@@ -2,7 +2,7 @@
 
 **Status:** implemented (PR 1 of the six-PR partition; tracking issue #258).
 **Design of record for the storage:** `internal/core/migration_agent_assignments.go`.
-**DDL pin:** SHA-256 `f760d233724e39278cbaca2ec548e9c5736a56f7c7c514338aa881d3c045d5c8`, asserted by
+**DDL pin:** SHA-256 `08ad122592a2133a9c55fa35ddf9d12ce4e5b33cd580b5d37949fcb94656bc74`, asserted by
 `TestAgentAssignmentDDLIsPinned`.
 
 This note is the design the storage implements. The **published** behaviour is
@@ -120,6 +120,13 @@ pointer. An approval with no pointer behind it is a claim about what was
 authorised with nothing to check it against, and the pointer is what a
 later reader follows.
 
+And the transition must **supply** them — they cannot be written earlier.
+The same holds for the action the gate awaits: it is set by the transition
+into the gate and by nothing else. Without that, a row could be given the
+whole gate and approval record in one early write and then walk the path
+without naming anything, and the record would not be attributable to the
+event that claims it.
+
 ### 3.2 The role-aware state machine
 
 The transition path depends on the assignment's `role`, and the trigger knows
@@ -140,6 +147,16 @@ an operator may withdraw an approved assignment, and including a reviewer's
 `completed`. It is stated **once**, as its own clause in the trigger, so that
 "universal" is a property of the trigger rather than a promise that every
 branch remembered to include it.
+
+The gate is a **hand-off, not a claim**. `awaiting_operator` is the
+automation's terminal state: the work is finished and the operator holds the
+decision, so an assignment at the gate cannot be claimed. A lease there
+would be a lease on a pause — it would expire against nobody, and it would
+advance the epoch of a row that the state machine will not let anything
+else work on. The two states the state machine calls terminal are refused
+for the same reason, and the refusal covers both sides of the statement: a
+claim that arrives with the cancellation in the same write is a claim on a
+row that is being withdrawn.
 
 `operator_approved` and `cancelled` are otherwise terminal.
 
@@ -226,7 +243,19 @@ old one, and re-dispatching the same logical assignment with it would
 succeed — leaving two logical assignments for one dispatch, which is the
 duplicate suppression the rule exists for, defeated at the storage level.
 
-### 3.5 Nothing is replaced, and nothing is reused
+### 3.5 The gate's record is fixed, whatever happens next
+
+Once the gate is reached, the record of what was asked for and of what was
+approved is **evidence**, and evidence is not rewritten — not to a different
+value and not to nothing.
+
+The scope is the **record**, not the row's current state. A row that has
+carried the gate's action keeps it, whatever the row's state is afterwards —
+including after the assignment is cancelled. The sixth review found the
+rule scoped to the state, so the protection evaporated on cancellation: the
+cancellation itself was refused, and the statement *after* it was not.
+
+### 3.6 Nothing is replaced, and nothing is reused
 
 `INSERT OR REPLACE` is DELETE + INSERT, so it defeats every rule that is
 enforced by a `BEFORE UPDATE` or a `BEFORE DELETE` trigger: the update
@@ -325,7 +354,7 @@ never issued a token and nothing refers to it.
 
 ## 5. The invariants the database enforces, and the ones it does not
 
-Thirty-one properties are enforced by the schema itself rather than by
+Thirty-three properties are enforced by the schema itself rather than by
 convention.
 
 | # | invariant | enforced by |
@@ -343,8 +372,8 @@ convention.
 | I11 | the operator's gate **names its action** | the state-transition trigger |
 | I12 | a recorded approval names its action, its revision, its source and its evidence pointer | the state-transition trigger |
 | I13 | the approval names the **same** action the gate awaited | the state-transition trigger |
-| I14 | the gate's action is **immutable** once the gate is reached | the state-transition trigger + the awaiting-action trigger |
-| I15 | a recorded approval is **immutable** — it is evidence | the state-transition trigger + the approval trigger |
+| I14 | the gate's action is **immutable** once the gate is reached — and the immutability does not expire with the row's state | the state-transition trigger + the awaiting-action trigger |
+| I15 | a recorded approval is **immutable** — it is evidence, and the immutability does not expire with the row's state | the state-transition trigger + the approval trigger |
 | I16 | the claim epoch advances by exactly one | the claim-discipline trigger |
 | I17 | a claim sets an owner and a lease | the claim-owner and claim-lease triggers |
 | I18 | only a claim changes the owner | the owner trigger |
@@ -361,18 +390,24 @@ convention.
 | I29 | the idempotency key is **immutable** | the key-immutability trigger |
 | I30 | only a **live** assignment can be claimed | the claim-needs-a-live-assignment trigger |
 | I31 | the lease changes **only on a claim** | the lease-changes-only-on-a-claim trigger |
+| I32 | the gate's action is **set only by** the transition into the gate | the state-transition trigger + the awaiting-action trigger |
+| I33 | the approval's fields are **set only by** the transition that records it | the state-transition trigger + the approval trigger |
 
-The invariants that are **not** in the database, because a `CHECK` constraint
-cannot contain a subquery and a trigger cannot see a caller's presented value:
+The invariants that are **not** in the database. Each one is deferred for
+its own reason, and the reason is **not** the same for all of them: a
+`CHECK` constraint cannot contain a subquery, and a trigger cannot see a
+caller's presented value — but three of the six are subqueries a trigger
+*could* write, and they are deferred because the rule belongs to the API's
+**authorisation**, not to the storage's shape.
 
 | # | invariant | enforced by | lands in |
 |---|---|---|---|
 | N1 | the target of a write presents the **current** claim epoch (the fence) | the `WHERE` clause of the writing statement | PR 2 |
-| N2 | a **child's** recipient is among the root's `eligible_recipients` | the API | PR 2 |
-| N3 | a child's depth is within the root's `max_depth` | the API | PR 2 |
+| N2 | a **child's** recipient is among the root's `eligible_recipients` | the API's authorisation — a trigger could write the subquery, but the rule is about who may be addressed, and that is the API's business | PR 2 |
+| N3 | a child's depth is within the root's `max_depth` | the API's authorisation — the same subquery a trigger could write, deferred for the same reason | PR 2 |
 | N4 | the tree's task count, concurrency and **resource consumption** are within the root's budgets | the dispatcher | PR 4 |
 | N5 | a reviewer's findings are captured by a host-controlled handoff and published with their digest | the adapter | PR 3, PR 5 |
-| N6 | an assignment is only created from an operator-authorised root | the API's authorisation | PR 2 |
+| N6 | an assignment is only created from an operator-authorised root | the API's authorisation — nothing in the row says who authorised it | PR 2 |
 
 Those are named here rather than left implicit, because "the schema enforces
 it" and "the API enforces it" are different claims and only one of them is
@@ -430,15 +465,20 @@ The DDL is owned by a **migration**, not by a schema slice:
 
 ---
 
-## 7. What the five independent reviews found
+## 7. What the six independent reviews found
 
-The change was reviewed independently five times, in the installed sandboxed
+The change was reviewed independently six times, in the installed sandboxed
 reviewer (`mpm-reviewer`, default-deny, `sandbox_exec` only). The first
 returned **eleven blocking and thirteen non-blocking** findings, the second
 **two blocking and fourteen non-blocking**, the third **five blocking and
 thirteen non-blocking**, the fourth **one blocking and ten non-blocking**,
-and the fifth **two blocking and eight non-blocking**. Every blocking
+the fifth **two blocking and eight non-blocking**, and the sixth **no
+blocking findings and five minor and three nit findings**. Every blocking
 finding was a real defect, and every one is closed.
+
+The sixth review was the one that returned **no** blocking finding. Its
+minor findings were not dismissed: three of them were real defects and two
+were claims in this note that were simply wrong. They are closed below.
 
 ### 7.1 The first review's eleven blocking findings
 
@@ -639,7 +679,65 @@ The inventory is now the whole set, and the test **compares it against the
 live schema**, so a trigger the DDL creates and the list does not name
 fails the test rather than being restored away.
 
-### 7.8 The fifth review's non-blocking findings
+### 7.8 The sixth review's findings
+
+The sixth review returned **no blocking finding**: it could not find a way
+to destroy, duplicate, rename or re-key a row, to forge a claim, to break
+the tree, to bypass the state machine, or to resurrect a stale token on a
+different assignment. Its five minor and three nit findings were about
+precision and about two narrow gaps between the contract and the DDL, and
+all of them are closed.
+
+**The two gaps between the contract and the DDL** are the substantive ones:
+
+* **the gate's record was protected only while the row was AT the gate.**
+  The immutability triggers were scoped to the row's current state, so the
+  protection evaporated on cancellation: the cancellation itself was
+  refused, and the statement *after* it was not — so a cancelled
+  assignment's awaited action could be rewritten, and its approval could
+  be rewritten too. The scope is now the **record**, not the state;
+* **the records did not have to be SET by their transitions.** The field
+  rules required the fields to be *present* at the transition, not to be
+  written by it, so a row could be given the whole gate and approval
+  record in one early write and then walk the path without naming
+  anything — and the record was not attributable to the event that claims
+  it. The records are now set only by their transitions.
+
+**The three that were wrong in this note** were:
+
+* the published **DDL pin** was stale — the note carried the previous
+  revision's hash, so the design of record and the code disagreed about
+  the value that prevents the DDL from drifting;
+* the published **control counts** were one too high in both numbers;
+* the blanket justification for the six deferred invariants was wrong for
+  three of them: N2, N3 and N6 contain no caller's presented value and
+  **are** expressible as a trigger. They are deferred because the rule
+  belongs to the API's authorisation, not to the storage's shape, and the
+  note now says that.
+
+**The two that were the same bug class in a different place** were:
+
+* the command-level restore test compared its **trigger** inventory
+  against the live schema but not its **table** or **index** inventory —
+  and the dump is built from the named inventories, so an object the DDL
+  creates and a list does not name was silently left out of the dump. All
+  three inventories are compared now;
+* the harness counted a control whose mutation **broke the build** as one
+  invariant-specific failure. It is reported as INCONCLUSIVE now.
+
+**The three nits** were about wording and one open boundary:
+
+* the phrase "never reused" overstated the rule for an assignment that was
+  never claimed and has no ledger: that one may be removed, which frees
+  its id and its key again. The rule is about a second assignment taking a
+  live one's identity;
+* the claim rule refused the two states the state machine calls terminal
+  but not the **gate**, which is described as the automation's terminal
+  state elsewhere. That was an open question, and it is decided now: the
+  gate is a **hand-off to the operator**, not a claim, and the refusal
+  covers both sides of the statement.
+
+### 7.9 The fifth review's non-blocking findings
 
 * **the idempotency key was mutable**, and the acceptance suite even
   blessed the move ("an ordinary key change still works"). A key that could
@@ -686,7 +784,7 @@ the object inventory, and the three control tests that drop an object by
 name. They are listed in the harness so that the second column can be read as
 "the tests that fail because the **behaviour** changed".
 
-**Thirty-four** controls, and **thirty-three** of them have at least one
+**Thirty-three** controls, and **thirty-two** of them have at least one
 invariant-specific failure. The counts are **measured**, not asserted:
 `scripts/continuity-001-controls.py` runs every control and prints them, and
 it refuses to measure anything at all unless the **baseline is green** — a
@@ -694,13 +792,13 @@ control run against a broken tree reports nothing rather than a number.
 
 | control | tests that fail | invariant-specific |
 |---|---|---|
-| the state-machine trigger is removed | 14 | 7 |
+| the state-machine trigger is removed | 15 | 8 |
 | the initial-state trigger is removed | 7 | 1 |
 | the unclaimed-at-creation trigger is removed | 7 | 1 |
 | the id-not-reused trigger is removed | 8 | 1 |
 | the id-immutability trigger is removed | 8 | 2 |
 | the key-immutability trigger is removed | 8 | 2 |
-| the claim-needs-a-live-assignment trigger is removed | 7 | 1 |
+| the claim-needs-a-live-assignment trigger is removed | 8 | 2 |
 | the lease-changes-only-on-a-claim trigger is removed | 7 | 1 |
 | the tree-shape trigger is removed | 7 | 1 |
 | the tree-shape-on-UPDATE trigger is removed | 7 | 1 |
@@ -713,8 +811,8 @@ control run against a broken tree reports nothing rather than a number.
 | the eligible-recipients INSERT trigger is removed | 7 | 1 |
 | the eligible-recipients UPDATE trigger is removed | 7 | 1 |
 | the not-deletable trigger is removed | 8 | 2 |
-| the awaiting-action-is-immutable trigger is removed | 8 | 2 |
-| the approval-is-immutable trigger is removed | 9 | 3 |
+| the awaiting-action-is-immutable trigger is removed | 10 | 4 |
+| the approval-is-immutable trigger is removed | 11 | 5 |
 | the ledger's id-not-reused trigger is removed | 7 | 1 |
 | the ledger's monotonic-index trigger is removed | 7 | 1 |
 | the ledger's no-UPDATE trigger is removed | 7 | 1 |
@@ -726,7 +824,7 @@ control run against a broken tree reports nothing rather than a number.
 | the root/child budget `CHECK` is removed | 2 | 1 |
 | the state vocabulary `CHECK` is removed | 2 | 1 |
 | the `typeof()` type guards are removed | 6 | 5 |
-| the whole migration is not called | 48 | 42 |
+| the whole migration is not called | 51 | 45 |
 
 Four of these are worth reading closely, because they are the places where the
 counts are easy to misread:

@@ -58,8 +58,19 @@ import (
 
 // assignmentRestoreTables are the tables the dump carries: the two
 // assignment tables and the project they belong to.
+//
+// 'projects' is NOT part of this change — it is PR #224's table, and the
+// dump carries it because the assignment references it. The two tables
+// this change owns are named separately below, so the inventory check
+// compares the right set.
 var assignmentRestoreTables = []string{
 	"projects",
+	"agent_tasks",
+	"agent_task_events",
+}
+
+// assignmentOwnedTables are the tables this change creates.
+var assignmentOwnedTables = []string{
 	"agent_tasks",
 	"agent_task_events",
 }
@@ -294,36 +305,53 @@ func TestHandleRestoreDB_AcceptsAssignmentDump(t *testing.T) {
 			"the generated dump must declare %s", table)
 	}
 
-	// The trigger inventory must be the WHOLE inventory.
+	// All THREE inventories must be the WHOLE inventory.
 	//
-	// The fifth review found that the list named twenty-five of the
-	// twenty-six triggers the DDL creates, so the dump restored a
-	// database without the fourth review's update-path guard — and
-	// every assertion below still passed, because the assertions only
-	// looked for the LISTED names. Comparing the list against the live
-	// schema is what makes a stale inventory visible.
-	live := map[string]bool{}
-	rows, err := dm.SQLDB().Query(
-		`SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_agent_task%'`,
-	)
-	require.NoError(t, err)
-	for rows.Next() {
-		var name string
-		require.NoError(t, rows.Scan(&name))
-		live[name] = true
-	}
-	require.NoError(t, rows.Err())
-	rows.Close()
+	// The fifth review found that the trigger list named twenty-five of
+	// the twenty-six triggers the DDL creates, so the dump this file
+	// builds restored a database without the fourth review's
+	// update-path guard — and every assertion below still passed,
+	// because the assertions only looked for the LISTED names. The
+	// sixth review found the same gap left open for the tables and the
+	// indexes: the dump is built from the named inventories, so an
+	// object the DDL creates and a list does not name is silently left
+	// out of the dump.
+	//
+	// Comparing each list against the live schema is what makes a stale
+	// inventory visible.
+	for _, tc := range []struct {
+		what    string
+		kind    string
+		pattern string
+		listed  []string
+	}{
+		{"table", "table", "agent_task%", assignmentOwnedTables},
+		{"index", "index", "idx_agent_task%", assignmentRestoreIndexes},
+		{"trigger", "trigger", "trg_agent_task%", assignmentRestoreTriggers},
+	} {
+		live := map[string]bool{}
+		rows, err := dm.SQLDB().Query(
+			`SELECT name FROM sqlite_master WHERE type=? AND name LIKE ?`, tc.kind, tc.pattern,
+		)
+		require.NoError(t, err)
+		for rows.Next() {
+			var name string
+			require.NoError(t, rows.Scan(&name))
+			live[name] = true
+		}
+		require.NoError(t, rows.Err())
+		rows.Close()
 
-	for name := range live {
-		require.Contains(t, assignmentRestoreTriggers, name,
-			"the live schema has the trigger %s and the restore inventory does not, "+
-				"so the restored database would be missing a rule", name)
+		for name := range live {
+			require.Contains(t, tc.listed, name,
+				"the live schema has the %s %s and the restore inventory does not, "+
+					"so the restored database would be missing it", tc.what, name)
+		}
+		require.Len(t, tc.listed, len(live),
+			"the restore inventory names %d %ss and the live schema has %d — "+
+				"the two inventories must be the same set",
+			len(tc.listed), tc.what, len(live))
 	}
-	require.Len(t, assignmentRestoreTriggers, len(live),
-		"the restore inventory names %d triggers and the live schema has %d — "+
-			"the two inventories must be the same set",
-		len(assignmentRestoreTriggers), len(live))
 
 	// H-4 contract: the test-process DM holds LOCK_SH on
 	// `<dbPath>.lock`. Release it before the handler asks for LOCK_EX,

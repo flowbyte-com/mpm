@@ -392,7 +392,7 @@ func TestAgentAssignmentDDLIsPinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(agentAssignmentDDL))
 	got := hex.EncodeToString(sum[:])
 
-	const want = "c109c397722d8a6f1df19631643bd8a0882668ad3fb7a967f887f18cd8739169"
+	const want = "08ad122592a2133a9c55fa35ddf9d12ce4e5b33cd580b5d37949fcb94656bc74"
 	if got != want {
 		t.Errorf("the DDL's SHA-256 is %s but the pin says %s. If the DDL changed on purpose, "+
 			"recompute the hash and say so in the commit message; if it did not, the storage has "+
@@ -2959,6 +2959,179 @@ func TestAssignmentApprovalRequiresEvidence(t *testing.T) {
 		    approval_revision = 'abc123', approval_source = 'operator',
 		    approval_evidence = 'docs/evidence/at-evidence/manifest.json'
 		WHERE id = ?`, id)
+}
+
+// TestAssignmentGateRecordSurvivesCancellation pins the scope of the
+// gate's record.
+//
+// The sixth review found that the immutability triggers were scoped to the
+// row's CURRENT state, so the protection evaporated on cancellation: the
+// cancellation itself was refused, and the statement AFTER it was not —
+// so a cancelled assignment's awaited action could be rewritten, and its
+// approval could be rewritten too.
+//
+// The scope is the RECORD: a row that has carried the gate's action keeps
+// it, whatever state the row is in afterwards.
+func TestAssignmentGateRecordSurvivesCancellation(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-cancelrec", "alpha", "implementer", "idem:cancelrec")
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
+	}
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
+		WHERE id = ?`, id)
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET state = 'operator_approved', approval_action = 'merge PR #259',
+		    approval_revision = 'abc123', approval_source = 'operator',
+		    approval_evidence = 'ev://x', approved_at = 1700000000
+		WHERE id = ?`, id)
+	assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'cancelled' WHERE id = ?`, id)
+
+	// The awaited action is still fixed.
+	assignmentMustRefuseWith(t, db, "the awaited action rewritten on a cancelled row",
+		"is fixed once the gate is reached", `
+		UPDATE agent_tasks SET awaiting_action = 'merge PR #999' WHERE id = ?`, id)
+	assignmentMustRefuseWith(t, db, "the awaited action cleared on a cancelled row",
+		"is fixed once the gate is reached", `
+		UPDATE agent_tasks SET awaiting_action = NULL WHERE id = ?`, id)
+
+	// And the approval is still evidence.
+	assignmentMustRefuseWith(t, db, "the approval rewritten on a cancelled row",
+		"evidence is not rewritten", `
+		UPDATE agent_tasks
+		SET approval_action = 'other', approval_revision = 'r2',
+		    approval_evidence = 'e2', approved_at = NULL
+		WHERE id = ?`, id)
+
+	// The record is intact.
+	var awaited, action, revision, evidence string
+	var approvedAt int64
+	if err := db.QueryRow(
+		`SELECT awaiting_action, approval_action, approval_revision, approval_evidence, approved_at
+		 FROM agent_tasks WHERE id = ?`, id,
+	).Scan(&awaited, &action, &revision, &evidence, &approvedAt); err != nil {
+		t.Fatalf("read the assignment: %v", err)
+	}
+	if awaited != "merge PR #259" || action != "merge PR #259" || revision != "abc123" ||
+		evidence != "ev://x" || approvedAt != 1700000000 {
+		t.Errorf("the record reads (%q, %q, %q, %q, %d) after the refusals, want the recorded values",
+			awaited, action, revision, evidence, approvedAt)
+	}
+}
+
+// TestAssignmentRecordsAreSetOnlyByTheirTransition pins the attribution of
+// the gate's and the approval's records.
+//
+// The sixth review found that the field rules required the fields to be
+// PRESENT at the transition, not to be SET by it: a row could be given
+// the whole gate and approval record in one early write, and then walk
+// the path without naming anything — so the record was not attributable
+// to the event that claims it.
+//
+// The records are now set only by their transitions. The early write is
+// refused, and the transition must supply the values.
+func TestAssignmentRecordsAreSetOnlyByTheirTransition(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-attrib", "alpha", "implementer", "idem:attrib")
+
+	// The awaited action cannot be written before the gate is reached.
+	assignmentMustRefuseWith(t, db, "the awaited action written early",
+		"is set only when the assignment reaches the gate", `
+		UPDATE agent_tasks SET awaiting_action = 'merge PR #1' WHERE id = ?`, id)
+
+	// Nor the approval's record.
+	assignmentMustRefuseWith(t, db, "the approval written early",
+		"are set only by the transition that records it", `
+		UPDATE agent_tasks
+		SET approval_action = 'merge PR #1', approval_revision = 'deadbeef',
+		    approval_source = 'a-fabricated-source', approval_evidence = 'a-fabricated-pointer',
+		    approved_at = 1
+		WHERE id = ?`, id)
+
+	// And not in the same statement as some other state change either.
+	assignmentMustRefuseWith(t, db, "the awaited action written with another transition",
+		"is set only when the assignment reaches the gate", `
+		UPDATE agent_tasks SET state = 'delivered', awaiting_action = 'merge PR #1' WHERE id = ?`, id)
+
+	// The row is clean: it carries no record.
+	var awaited, action sql.NullString
+	if err := db.QueryRow(
+		`SELECT awaiting_action, approval_action FROM agent_tasks WHERE id = ?`, id,
+	).Scan(&awaited, &action); err != nil {
+		t.Fatalf("read the assignment: %v", err)
+	}
+	if awaited.Valid || action.Valid {
+		t.Errorf("the assignment carries (%v, %v) after the refusals, want (NULL, NULL)",
+			awaited, action)
+	}
+
+	// The legal path still works: the transition supplies the record.
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
+	}
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
+		WHERE id = ?`, id)
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET state = 'operator_approved', approval_action = 'merge PR #259',
+		    approval_revision = 'abc123', approval_source = 'operator',
+		    approval_evidence = 'ev://x', approved_at = 1700000000
+		WHERE id = ?`, id)
+}
+
+// TestAssignmentCannotBeClaimedAtTheGate pins the claim's boundary.
+//
+// The sixth review raised the boundary as an open question: the gate is
+// described as the automation's terminal state, but the claim rule only
+// refused the two states that are terminal in the state machine's sense.
+//
+// The decision is that the gate is a HAND-OFF to the operator, not a
+// claim: the work is finished, the operator holds the decision, and a
+// lease there would be a lease on a pause.
+func TestAssignmentCannotBeClaimedAtTheGate(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-gateclaim", "alpha", "implementer", "idem:gateclaim")
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
+	}
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
+		WHERE id = ?`, id)
+
+	assignmentMustRefuseWith(t, db, "an assignment at the gate claimed",
+		"only a live assignment can be claimed", `
+		UPDATE agent_tasks
+		SET claim_epoch = claim_epoch + 1, owner = 'beta', lease_expires_at = 1900000000
+		WHERE id = ?`, id)
+
+	// And the claim that arrives with the gate in the same statement is
+	// refused too.
+	live := insertRootAssignment(t, dm, projectID, "at-liveclaim", "alpha", "implementer", "idem:liveclaim")
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, live)
+	}
+	assignmentMustRefuseWith(t, db, "a claim and the gate in one statement",
+		"only a live assignment can be claimed", `
+		UPDATE agent_tasks
+		SET state = 'awaiting_operator', awaiting_action = 'merge PR #259',
+		    claim_epoch = claim_epoch + 1, owner = 'beta', lease_expires_at = 1900000000
+		WHERE id = ?`, live)
 }
 
 // TestAssignmentGateRecordIsImmutableWhileLeavingTheGate pins the gate's

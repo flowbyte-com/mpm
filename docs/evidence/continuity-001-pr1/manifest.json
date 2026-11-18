@@ -1,0 +1,28 @@
+{
+  "schema": "mpm.continuity-001.evidence/v1",
+  "subject": {
+    "issue": 258,
+    "pull_request": 259,
+    "branch": "feat/continuity-001-assignment-schema",
+    "part": "PR 1 of six — the durable assignment storage"
+  },
+  "reviewed_revision": "PENDING",
+  "ddl": {
+    "file": "internal/core/migration_agent_assignments.go",
+    "sha256": "08ad122592a2133a9c55fa35ddf9d12ce4e5b33cd580b5d37949fcb94656bc74",
+    "pinned_by": "TestAgentAssignmentDDLIsPinned"
+  },
+  "tests": {
+    "acceptance_tests": 60,
+    "command_level_restore_tests": 2,
+    "negative_controls": 33,
+    "gate": "make build && make test && mpm-lint --gate && scripts/docs_check"
+  },
+  "adversarial": {
+    "independent_reviews": 6,
+    "blocking_findings": 21,
+    "blockers": []
+  },
+  "ci": {"runs": []},
+  "blockers": []
+}

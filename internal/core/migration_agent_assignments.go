@@ -515,6 +515,11 @@ END;
 
 -- ── Rule 3: an assignment's id and its idempotency key are NEVER reused ───
 --
+-- While the assignment EXISTS. An assignment that was never claimed and
+-- has no ledger may be REMOVED (rule 19 says so), and its id and its key
+-- are then free again — the rule is about a second assignment taking a
+-- live one's identity, not about a tombstone.
+--
 -- An INSERT OR REPLACE is DELETE + INSERT. SQLite does NOT fire the DELETE
 -- triggers for REPLACE's implicit delete unless the recursive_triggers
 -- pragma is ON, and it never fires the UPDATE triggers at all.
@@ -823,6 +828,14 @@ BEGIN
     -- and evidence is not rewritten — not to a different value and not to
     -- nothing.
     --
+    -- The scope is the RECORD, not the row's CURRENT state. A row that
+    -- has carried the gate's action keeps it, whatever state the row is
+    -- in afterwards. The sixth review found the rule scoped to the
+    -- state, so the protection evaporated on cancellation: the
+    -- cancellation itself was refused, and the statement AFTER it was
+    -- not — so a cancelled assignment's awaited action could be rewritten
+    -- to something else.
+    --
     -- These clauses live HERE, inside the state machine's trigger, and
     -- not in their own triggers, because a write that both moves the
     -- state and touches the record must be governed by ONE ordered set of
@@ -833,11 +846,11 @@ BEGIN
     -- state, and they fire only while the state is unchanged, so they
     -- cannot preempt this one.
     SELECT RAISE(ABORT, 'agent_tasks: the action the operator''s gate awaits is fixed once the gate is reached')
-     WHERE OLD.state IN ('awaiting_operator','operator_approved')
+     WHERE OLD.awaiting_action IS NOT NULL
        AND NEW.awaiting_action IS NOT OLD.awaiting_action;
 
     SELECT RAISE(ABORT, 'agent_tasks: a recorded approval is evidence, and evidence is not rewritten')
-     WHERE OLD.state = 'operator_approved'
+     WHERE OLD.approval_action IS NOT NULL
        AND (NEW.approval_action IS NOT OLD.approval_action
             OR NEW.approval_revision IS NOT OLD.approval_revision
             OR NEW.approval_source IS NOT OLD.approval_source
@@ -859,6 +872,56 @@ BEGIN
             OR NEW.approval_revision IS NULL OR length(CAST(NEW.approval_revision AS BLOB)) = 0
             OR NEW.approval_source IS NULL OR length(CAST(NEW.approval_source AS BLOB)) = 0
             OR NEW.approval_evidence IS NULL OR length(CAST(NEW.approval_evidence AS BLOB)) = 0);
+
+    -- AND THE TRANSITION MUST SUPPLY THEM, not merely carry them.
+    --
+    -- The rules above say the fields are PRESENT. They do not say the
+    -- transition is what SET them, and the sixth review found the
+    -- difference: a row could be given the whole gate and approval
+    -- record in one early write, and then walk the path without naming
+    -- anything — so the record would not be attributable to the event
+    -- that claims it.
+    --
+    -- So the transition must CHANGE the fields it requires. A row that
+    -- already carries the action cannot be walked into the gate with
+    -- that same action, and a row that already carries an approval
+    -- cannot be walked into the approval. The values that reach the
+    -- record are the ones the transition wrote.
+    SELECT RAISE(ABORT, 'agent_tasks: the transition into the operator''s gate must supply the action it awaits')
+     WHERE NEW.state = 'awaiting_operator'
+       AND NEW.awaiting_action IS OLD.awaiting_action;
+
+    SELECT RAISE(ABORT, 'agent_tasks: the transition into the approval must supply the approval it records')
+     WHERE NEW.state = 'operator_approved'
+       AND (NEW.approval_action IS OLD.approval_action
+            OR NEW.approval_revision IS OLD.approval_revision
+            OR NEW.approval_source IS OLD.approval_source
+            OR NEW.approval_evidence IS OLD.approval_evidence);
+
+    -- AND THE RECORDS ARE SET ONLY BY THEIR TRANSITION.
+    --
+    -- A write that moves the state and touches the record is governed
+    -- here, so the two rules below are the state-changing half of what
+    -- the two standalone triggers enforce for the writes that do NOT
+    -- move the state.
+    --
+    -- The awaited action is set by the transition into the gate, and the
+    -- approval's fields are set by the transition that records it. A
+    -- write that sets either of them on any other path is refused: the
+    -- record would exist before the event that claims it, and the
+    -- action the operator is asked to authorise would not be the one
+    -- the transition named.
+    SELECT RAISE(ABORT, 'agent_tasks: the action the operator''s gate awaits is set only when the assignment reaches the gate')
+     WHERE NEW.awaiting_action IS NOT OLD.awaiting_action
+       AND NOT (OLD.state <> 'awaiting_operator' AND NEW.state = 'awaiting_operator');
+
+    SELECT RAISE(ABORT, 'agent_tasks: the approval''s fields are set only by the transition that records it')
+     WHERE (NEW.approval_action IS NOT OLD.approval_action
+            OR NEW.approval_revision IS NOT OLD.approval_revision
+            OR NEW.approval_source IS NOT OLD.approval_source
+            OR NEW.approval_evidence IS NOT OLD.approval_evidence
+            OR NEW.approved_at IS NOT OLD.approved_at)
+       AND NOT (OLD.state <> 'operator_approved' AND NEW.state = 'operator_approved');
 
     -- The approval must name the SAME action the gate awaited. The gate
     -- names the exact action the operator is being asked to authorise;
@@ -927,6 +990,14 @@ END;
 -- nothing, and it would advance the epoch of a row that will never be
 -- worked on again — and that epoch is the fence.
 --
+-- The GATE is not live either. 'awaiting_operator' is the automation's
+-- terminal state: the work is finished and the operator holds the
+-- decision. A lease there is a lease on a pause — it would expire
+-- against nobody, and it would advance the epoch of a row that the
+-- state machine will not let anything else work on. The sixth review
+-- raised the boundary as an open question; it is decided here, and the
+-- answer is that the gate is a hand-off to the operator, not a claim.
+--
 -- BOTH sides of the statement are checked: a claim that arrives with the
 -- cancellation in the same statement is a claim on a row that is being
 -- withdrawn, and it is refused too.
@@ -934,8 +1005,8 @@ CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_claim_needs_a_live_assignment
 BEFORE UPDATE ON agent_tasks
 FOR EACH ROW
 WHEN NEW.claim_epoch <> OLD.claim_epoch
-     AND (OLD.state IN ('operator_approved','cancelled')
-          OR NEW.state IN ('operator_approved','cancelled'))
+     AND (OLD.state IN ('awaiting_operator','operator_approved','cancelled')
+          OR NEW.state IN ('awaiting_operator','operator_approved','cancelled'))
 BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: only a live assignment can be claimed');
 END;
@@ -1009,10 +1080,22 @@ CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_awaiting_action_is_immutable
 BEFORE UPDATE OF awaiting_action ON agent_tasks
 FOR EACH ROW
 WHEN OLD.state = NEW.state
-     AND OLD.state IN ('awaiting_operator','operator_approved')
      AND NEW.awaiting_action IS NOT OLD.awaiting_action
 BEGIN
-    SELECT RAISE(ABORT, 'agent_tasks: the action the operator''s gate awaits is fixed once the gate is reached');
+    -- It is not REWRITTEN once it is set: the gate's record is evidence,
+    -- and the scope is the record rather than the row's current state,
+    -- so a cancelled assignment's awaited action is still fixed.
+    SELECT RAISE(ABORT, 'agent_tasks: the action the operator''s gate awaits is fixed once the gate is reached')
+     WHERE OLD.awaiting_action IS NOT NULL;
+
+    -- And it is SET only by the transition into the gate.
+    --
+    -- Without this, a row could be given the awaited action in an early
+    -- write and then walk the path: the record would exist before the
+    -- event that claims it, and the action the operator is asked to
+    -- authorise would not be the one the transition named.
+    SELECT RAISE(ABORT, 'agent_tasks: the action the operator''s gate awaits is set only when the assignment reaches the gate')
+     WHERE NOT (OLD.state <> 'awaiting_operator' AND NEW.state = 'awaiting_operator');
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_approval_is_immutable
@@ -1020,14 +1103,25 @@ BEFORE UPDATE OF approval_action, approval_revision, approval_source,
                approval_evidence, approved_at ON agent_tasks
 FOR EACH ROW
 WHEN OLD.state = NEW.state
-     AND OLD.state = 'operator_approved'
      AND (NEW.approval_action IS NOT OLD.approval_action
           OR NEW.approval_revision IS NOT OLD.approval_revision
           OR NEW.approval_source IS NOT OLD.approval_source
           OR NEW.approval_evidence IS NOT OLD.approval_evidence
           OR NEW.approved_at IS NOT OLD.approved_at)
 BEGIN
-    SELECT RAISE(ABORT, 'agent_tasks: a recorded approval is evidence, and evidence is not rewritten');
+    -- A recorded approval is EVIDENCE: it is not rewritten, not to a
+    -- different value and not to nothing — and the scope is the record
+    -- rather than the row's current state, so a cancelled assignment's
+    -- approval is still fixed.
+    SELECT RAISE(ABORT, 'agent_tasks: a recorded approval is evidence, and evidence is not rewritten')
+     WHERE OLD.approval_action IS NOT NULL;
+
+    -- And the approval's fields are SET only by the transition that
+    -- records it. Without this, a row could be given the whole approval
+    -- in an early write and then walk the path, and the record would
+    -- not be attributable to the event that claims it.
+    SELECT RAISE(ABORT, 'agent_tasks: the approval''s fields are set only by the transition that records it')
+     WHERE NOT (OLD.state <> 'operator_approved' AND NEW.state = 'operator_approved');
 END;
 
 -- ── Rule 19: a claimed assignment, or one with a ledger, cannot be DELETED ─
