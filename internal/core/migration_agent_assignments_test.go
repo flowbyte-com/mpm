@@ -210,32 +210,6 @@ func assignmentMustRefuse(t *testing.T, db *sql.DB, what string, query string, a
 	return err
 }
 
-// assignmentObjectNames returns the sorted names of the sqlite_master objects
-// of the given type.
-func assignmentObjectNames(t *testing.T, db *sql.DB, typ string) []string {
-	t.Helper()
-	rows, err := db.Query(
-		"SELECT name FROM sqlite_master WHERE type = ? AND name NOT LIKE 'sqlite_%' ORDER BY name",
-		typ,
-	)
-	if err != nil {
-		t.Fatalf("read sqlite_master: %v", err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scan sqlite_master: %v", err)
-		}
-		out = append(out, name)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate sqlite_master: %v", err)
-	}
-	return out
-}
-
 // assignmentSchemaObjects returns every named sqlite_master object and its
 // SQL.
 func assignmentSchemaObjects(t *testing.T, db *sql.DB) map[string]string {
