@@ -65,13 +65,15 @@
       {"run": 44317831158, "revision": "b24d4125", "conclusion": "success"},
       {"run": 44335313151, "revision": "6c462633", "conclusion": "success"},
       {"run": 44355178537, "revision": "a31cd6e3", "conclusion": "success"},
-      {"run": 44374424756, "revision": "3e83130f", "conclusion": "success"}
+      {"run": 44374424756, "revision": "3e83130f", "conclusion": "success"},
+      {"run": 44382366028, "revision": "fc8c227f", "conclusion": "success"}
     ]
   },
   "blockers": [],
   "notes": [
     "This manifest is published in a documentation-only commit that follows the reviewed revision. It does not name its own commit, and it does not change the DDL: the hash pin in the reviewed revision and the hash pin at the branch head are the same value.",
     "The reviewed revision is the head of the code. The evidence commit that carries this file changes no Go file, no DDL and no test.",
-    "A placeholder version of this manifest was committed at 6c462633 during the campaign, with PENDING in place of the revision and a stale DDL hash. It carried no findings, no CI and no verdict. This manifest replaces it; the reviewed revision's own pins were correct before and after."
+    "A placeholder version of this manifest was committed at 6c462633 during the campaign, with PENDING in place of the revision and a stale DDL hash. It carried no findings, no CI and no verdict. This manifest replaces it; the reviewed revision's own pins were correct before and after.",
+    "The CI run of the documentation-only commit that records the evidence commit's own CI run cannot be recorded in this file, because that commit does not exist until the file is written. It is recorded on the comment published on issue 258, which is published after that commit and therefore after its CI run."
   ]
 }

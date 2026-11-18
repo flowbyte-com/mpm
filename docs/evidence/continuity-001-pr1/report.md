@@ -218,7 +218,13 @@ run of an earlier one.
 | [44335313151](https://github.com/flowbyte-com/mpm/actions/runs/44335313151) | `6c462633` | success |
 | [44355178537](https://github.com/flowbyte-com/mpm/actions/runs/44355178537) | `a31cd6e3` | success |
 | [44374424756](https://github.com/flowbyte-com/mpm/actions/runs/44374424756) | `3e83130f` — **the reviewed revision** | **success** |
-| — | the documentation-only evidence commit | PENDING |
+| [44382366028](https://github.com/flowbyte-com/mpm/actions/runs/44382366028) | `fc8c227f` — the documentation-only evidence commit | **success** |
+| — | the documentation-only commit that records the row above | see the comment on issue [#258](https://github.com/flowbyte-com/mpm/issues/258) |
+
+The last row is the one place where this file cannot record its own
+commit's CI, because the commit that records it does not exist until the
+file is written. The issue comment is published **after** that commit and
+therefore after its CI run, so it is the surface that carries it.
 
 ---
 
