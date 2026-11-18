@@ -2900,12 +2900,12 @@ This section describes **PR 1 of six**: the storage only. No API, no CLI, no age
 
 #### What PR 1 adds
 
-Two **additive** tables, seven indexes and three triggers. No existing table, row, index or trigger is modified.
+Two **additive** tables, seven indexes and eighteen triggers. No existing table, row, index or trigger is modified.
 
 | table | what it holds |
 |---|---|
 | `agent_tasks` | the assignment: its project, its place in the delegation tree, its recipient and role, its state, its idempotency key, its lease, the root's budgets, and the evidence pointers. |
-| `agent_task_events` | the append-only ledger of an assignment's transitions. The event index is `UNIQUE` per assignment, so the ledger is ordered and gap-free. |
+| `agent_task_events` | the append-only ledger of an assignment's transitions. The event index is `UNIQUE` per assignment and a trigger refuses an index that does not advance, so the ledger is ordered and **monotonic**. |
 
 The project axis is **reused, not duplicated**: PR #224's Stage 1 already shipped `projects` in `main` (commit `d8b373fb`), so an assignment references `projects(id)` and inherits Stage 1's containment idiom — the project id is denormalised onto the assignment and held honest by a **composite** foreign key, so a child cannot name a root or a parent of another project.
 
@@ -2915,30 +2915,38 @@ Ten states, and the separations are the point:
 
 `enqueued` → `delivered` → `acknowledged` → `accepted` → `in_progress` → `completed` → `review_passed` → `awaiting_operator` → `operator_approved`, with `cancelled` as the universal withdrawal.
 
-**Delivery is not acceptance, and completion is not approval.** An assignment that was delivered and never acknowledged is **re-deliverable**, not lost: delivery is a state transition with its own timestamp, never a side effect of the row having been read. This is deliberately *not* the wake path's semantics — `scheduled_wakes.fired` is set in the same transaction that surfaces the row, so a crash after the mark loses the wake permanently, and that at-most-once path is not promoted into a delivery queue here.
+**Delivery is not acceptance, and completion is not approval.** An assignment that was delivered and never acknowledged is **re-deliverable**, not lost: delivery is a state transition with its own **ledger entry** — the `delivered` event in `agent_task_events` — never a side effect of the row having been read. This is deliberately *not* the wake path's semantics: `scheduled_wakes.fired` is set in the same transaction that surfaces the row, so a crash after the mark loses the wake permanently, and that at-most-once path is not promoted into a delivery queue here.
 
 The transition path depends on the role, and the **database** knows it:
 
-- an **implementer** follows the path above;
+- an **implementer** follows the path above, and **cannot skip its independent review**: `completed → awaiting_operator` is refused;
 - a **reviewer** follows the path to `in_progress` and ends at either `review_passed` (the verdict was passing) or `completed` (the review asked for changes). A reviewer never reaches the operator's gate: a reviewer approves nothing.
 
-`operator_approved` is a **record, not a grant**. MPM records an approval that was verified **outside** MPM — its source, the exact revision it covers and a pointer to the evidence — and never manufactures or authenticates one. The approval names the exact action and the exact revision, so a change to the head revision after the approval was recorded leaves the approval **stale**, and staleness is observable rather than implied.
+`cancelled` is legal from **every** state except itself, for **every** role — including `operator_approved`, because an operator may withdraw an approved assignment. `operator_approved` and `cancelled` are otherwise terminal.
+
+`operator_approved` is a **record, not a grant**. MPM records an approval that was verified **outside** MPM — its source, the exact revision it covers and a pointer to the evidence — and never manufactures or authenticates one. The approval names the exact action and the exact revision, so a change to the head revision after the approval was recorded leaves the approval **stale**, and staleness is observable rather than implied. A transition into the gate must name the action it awaits, and a transition into the approval must name its action, its revision and its source; neither record can then be cleared.
 
 #### The delegation tree, and the budgets it inherits
 
 A **root** assignment is the operator-authorised one: it is its own root, it has no parent, and it **carries the budgets** — `max_depth`, `max_tasks`, `max_concurrency`, `max_resource_units`, `permitted_operations` and `eligible_recipients`.
 
-A **child** is an agent's delegation: it names its root and its parent, and it carries **no budgets at all**. That is the important part, and it is **structural** — there is no column in which a child could widen what it was given, so inheritance is a property of the schema rather than a rule the code is trusted to apply. A root must also name at least one permitted operation: a root that may do nothing is a silent misconfiguration, not a safe default.
+A **child** is an agent's delegation: it names its root and its parent, and it carries **no budgets at all** — including no allow-list of its own. That is the important part, and it is **structural** — there is no column in which a child could widen what it was given, so inheritance is a property of the schema rather than a rule the code is trusted to apply. A root must also name at least one permitted operation, and every permitted operation must be a non-null string: a root that may do nothing is a silent misconfiguration, not a safe default.
+
+The tree is a **tree**: the root must be a root of the same project, the parent must belong to the same tree, and nobody is their own parent — checked on the insert path and on the update path.
 
 #### The lease and the fence
 
-`claim_epoch` is the fencing token. It advances by **exactly one** on every claim, and a claim sets both the owner and a lease; the owner changes **only** on a claim. So the epoch cannot be skipped or reset, and an owner cannot be reassigned without the row ceasing to be a lease.
+`claim_epoch` is the fencing token. It advances by **exactly one** on every claim, and a claim sets both the owner and a lease; the owner changes **only** on a claim. So the epoch cannot be skipped or reset, and an owner cannot be reassigned without the row ceasing to be a lease. An assignment is born **unclaimed** — epoch 0, no owner, no lease — and a **claimed** assignment is cancelled, never deleted, so its id cannot be reused and a stale token cannot become current again.
 
 The fence against a **stale** owner is the `WHERE` clause of the writing statement — `WHERE id = ? AND claim_epoch = ?` — because that comparison is atomic with the write. It is deliberately not a trigger: a trigger cannot see the epoch a caller *presented*. A lease that expires without a transition is recoverable; the next claim takes it and advances the epoch, which invalidates the previous holder.
 
 #### What the database enforces
 
-Fifteen properties are enforced by the schema itself rather than by convention — the creation state, the role-aware state machine, the terminal states, the epoch discipline, the owner discipline, the root/child budget shape, the one-project containment, the idempotency key, the ledger's ordering, and the refusal to delete anything with children. `docs/dev/continuity-001-assignment-schema.md` lists them one by one, **and names the six that the schema does not enforce** — the fence, the recipient membership, the depth limit, the tree budgets, the findings capture and the authorisation of a root — so that "the schema enforces it" and "the API enforces it" are never confused.
+Eighteen properties are enforced by the schema itself rather than by convention — the creation state, the unclaimed creation, the role-aware state machine, the universal cancellation, the immutability of the role, the operator's gate and its approval record, the epoch discipline, the owner discipline, the root/child budget shape, the tree's shape on both write paths, the one-project containment, the idempotency key, the ledger's monotonicity and append-only nature, and the refusal to delete anything with children.
+
+`docs/dev/continuity-001-assignment-schema.md` lists them one by one, **and names the six that the schema does not enforce** — the fence, the recipient membership, the depth limit, the tree budgets, the findings capture and the authorisation of a root — so that "the schema enforces it" and "the API enforces it" are never confused.
+
+Two boundaries are enforced **twice**, on purpose: the composite foreign keys hold the tree inside one project on the delete path, and the tree-shape triggers hold it on the insert and update paths; and the state vocabulary's `CHECK` sits behind the state machine's triggers. Both layers are measured, and the design note records which test is load-bearing for which.
 
 #### The tables are local-only
 

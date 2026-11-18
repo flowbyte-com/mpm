@@ -106,11 +106,11 @@ Two consequences for this work:
 
 | # | the gap | why the existing thing cannot serve | the addition |
 |---|---|---|---|
-| **G1** | **the assignment itself** | `works` is a *commitment*, not an *assignment*: `works.status` is `CHECK (status IN ('open','done','cancelled'))` (`schema.go:1059`) and the contract needs **eight** distinct states — `enqueued, delivered, acknowledged, accepted, in-progress, completed, review-passed, operator-approved`. Widening that CHECK means rebuilding a **live** table in SQLite, and `works` has **no** recipient, **no** lease, **no** fencing token, **no** idempotency key, **no** dependencies and **no** project. | a new local-only table family: `agent_tasks` + `agent_task_events` |
+| **G1** | **the assignment itself** | `works` is a *commitment*, not an *assignment*: `works.status` is `CHECK (status IN ('open','done','cancelled'))` (`schema.go:1059`) and the contract needs **ten** distinct states — `enqueued, delivered, acknowledged, accepted, in_progress, completed, review_passed, awaiting_operator, operator_approved, cancelled`. Widening that CHECK means rebuilding a **live** table in SQLite, and `works` has **no** recipient, **no** lease, **no** fencing token, **no** idempotency key, **no** dependencies and **no** project. | a new local-only table family: `agent_tasks` + `agent_task_events` |
 | **G2** | **a lease with a fencing token** | nothing in the tree has one. `continuity_threads.revision` is an optimistic-concurrency counter, not a lease. | `agent_tasks.claim_epoch` — a monotonic fencing token, incremented on every claim; every owner-scoped write presents the epoch it claimed |
 | **G3** | **an idempotency key** | nothing in the tree has one at the item level. | `agent_tasks.idempotency_key`, `UNIQUE` — "accidental duplicate issue dispatch does not create duplicate logical tasks" |
 | **G4** | **a stable agent address** | `actor_kind` distinguishes `agent/human/import/system/unknown` — it is a **kind**, not a **who** (PR #224 §9 OD3: *"the substrate has no identity primitive"*). `broadcast.bcast_sessions.agent_id` is a **session-scoped** broadcast address with a heartbeat, not a durable address. | one `TEXT` column naming the intended recipient, plus the **capability** discipline in §4 — **not** an identity framework |
-| **G5** | **a delivery channel with at-least-once semantics** | **the wake path is at-most-once and must not be promoted.** `scheduled_wakes.fired` is set to 1 in the same transaction that surfaces the row (`wake_tools.go:1125`, `UPDATE … WHERE id = ? AND fired = 0`), so a crash **after** the mark and **before** the agent acts **loses the wake permanently**. The budget is a throttle, not a loss window — but the *crash* window is real and is why the issue forbids promoting it into a reliable queue. | the task table's own `delivered_at` / `acknowledged_at` / lease columns — delivery is a **state transition with its own timestamp**, never a side-effect of "the row was read" |
+| **G5** | **a delivery channel with at-least-once semantics** | **the wake path is at-most-once and must not be promoted.** `scheduled_wakes.fired` is set to 1 in the same transaction that surfaces the row (`wake_tools.go:1125`, `UPDATE … WHERE id = ? AND fired = 0`), so a crash **after** the mark and **before** the agent acts **loses the wake permanently**. The budget is a throttle, not a loss window — but the *crash* window is real and is why the issue forbids promoting it into a reliable queue. | the assignment's own **state** and **ledger**: delivery is a **state transition with its own ledger entry** (the `delivered` event in `agent_task_events`), never a side-effect of "the row was read" |
 | **G6** | **the GitHub evidence contract** | `mpm_log_to_changelog` binds a memory to a commit hash; it does not publish a manifest, and it cannot carry CI run IDs (which are known only after the push). | a committed, machine-readable manifest plus a human-readable report, and one GitHub issue comment that carries what is only knowable after the push |
 
 ### 2.3 Explicitly **not** reused, and why
@@ -151,6 +151,10 @@ enqueued ──deliver──▶ delivered ──acknowledge──▶ acknowledge
    awaiting_operator ◀──gate── review-passed ◀──review── completed
           │
           └──(an externally verified approval is RECORDED)──▶ operator-approved
+
+   cancelled is reachable from EVERY state, for every role — including
+   operator-approved, because an operator may withdraw an approved
+   assignment.
 ```
 
 * **`delivered` ≠ `acknowledged`.** Delivery means the adapter handed the
@@ -164,7 +168,7 @@ enqueued ──deliver──▶ delivered ──acknowledge──▶ acknowledge
   Completion is the implementer's claim; review is an **independent** party's
   verdict; `awaiting_operator` is the gate; `operator_approved` is a **recorded**
   external approval. **No agent can reach the gate, and MPM cannot grant the
-  approval.**
+  approval.** An implementer cannot skip its review to reach the gate.
 
 The transition path is **role-aware**, and the database knows it: a reviewer
 ends at `review_passed` (its verdict passed) or at `completed` (the review is
