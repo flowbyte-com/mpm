@@ -2,7 +2,7 @@
 
 **Status:** implemented (PR 1 of the six-PR partition; tracking issue #258).
 **Design of record for the storage:** `internal/core/migration_agent_assignments.go`.
-**DDL pin:** SHA-256 `b1e606b7cc3e10ea50b9d0676f25c6f694562c0d09f7cba0359d112720cb9709`, asserted by
+**DDL pin:** SHA-256 `41f55ebbf41d18060684eb5f31ced3f5ea2d660fd465cc675fd20494dd7728bd`, asserted by
 `TestAgentAssignmentDDLIsPinned`.
 
 This note is the design the storage implements. The **published** behaviour is
@@ -378,7 +378,7 @@ convention.
 |---|---|---|
 | I1 | an assignment is created `enqueued` | the initial-state trigger |
 | I2 | an assignment is created **unclaimed** (epoch 0, no owner, no lease) | the unclaimed-at-creation trigger |
-| I3 | an assignment's id and its idempotency key are **never reused** | the id-not-reused trigger |
+| I3 | an assignment's id and its idempotency key are **never reused** while the assignment exists | the id-not-reused trigger |
 | I4 | the delegation tree is a **tree** — the root is a root, the parent is in the same tree at depth one less, and nobody is their own parent | the tree-shape triggers (INSERT **and** UPDATE) |
 | I5 | the depth is **immutable** | the depth-immutability trigger |
 | I6 | a root's own recipient is among its eligible recipients | the root-recipient triggers |
@@ -400,7 +400,7 @@ convention.
 | I22 | a ledger entry's id and its index are **never reused** | the ledger's id-not-reused trigger |
 | I23 | the ledger is **append-only** | the ledger's no-UPDATE and no-DELETE triggers |
 | I24 | the ledger's `from_state` and `to_state` come from the ten-state vocabulary | the column `CHECK`s |
-| I25 | every identifier, key, number, pointer and JSON column has its **type** — a `TEXT` column cannot hold a `BLOB`, and a numeric column cannot hold a `REAL` or a numeric string | the `typeof()` guards |
+| I25 | every identifier, key, number, pointer and JSON column has its **type** — a `TEXT` column cannot hold a `BLOB`, and a numeric column cannot hold a `REAL` or a numeric string | the `typeof()` guards, and the three closed vocabularies' own `CHECK … IN (…)` |
 | I26 | a **root** carries the budgets; a **child** carries none of them | the root/child `CHECK` |
 | I27 | the delegation tree is contained in **one project** | the composite foreign keys |
 | I28 | the id is **immutable** | the id-immutability trigger |
@@ -483,17 +483,18 @@ The DDL is owned by a **migration**, not by a schema slice:
 
 ---
 
-## 7. What the seven independent reviews found
+## 7. What the eight independent reviews found
 
-The change was reviewed independently seven times, in the installed
+The change was reviewed independently eight times, in the installed
 sandboxed reviewer (`mpm-reviewer`, default-deny, `sandbox_exec` only). The
 first returned **eleven blocking and thirteen non-blocking** findings, the
 second **two blocking and fourteen non-blocking**, the third **five blocking
 and thirteen non-blocking**, the fourth **one blocking and ten non-blocking**,
 the fifth **two blocking and eight non-blocking**, the sixth **no blocking
-findings and five minor and three nit findings**, and the seventh **one
-blocking, three minor and two nit findings**. Every blocking finding was a
-real defect, and every one is closed.
+findings and five minor and three nit findings**, the seventh **one
+blocking, three minor and two nit findings**, and the eighth **no blocking
+findings and two minor and three nit findings**. Every blocking finding was
+a real defect, and every one is closed.
 
 The sixth review was the one that returned **no** blocking finding. Its
 minor findings were not dismissed: three of them were real defects and two
@@ -820,7 +821,47 @@ The two nits were:
   invariant is now stated with its scope, because a database file is not
   the threat model and the claim was wider than the guarantee.
 
-### 7.10 The fifth review's non-blocking findings
+### 7.10 The eighth review's findings
+
+The eighth review returned **no blocking finding** and **APPROVED** the
+change, with two minor findings and three nits. All five were closed.
+
+The two minor findings were:
+
+* **the harness's type-guard control under-measured its target.** The
+  regex that neuters every `typeof(x) = '…'` comparison was `[a-z_]+`, so
+  it did not match a column name carrying digits — `findings_sha256` — and
+  46 of the 47 guards were neutered. The published count was therefore a
+  measurement of 46 guards while the control claimed 47. The regex
+  matches digits now;
+* **the DDL's own `eligible_recipients` column comment over-claimed.** It
+  said that "a child that targets an address outside the list is refused",
+  and the schema does **not** refuse it: that is rule N2, deferred to PR
+  2's authorisation, and the design note and the SPEC both say so
+  correctly. The comment is now the only thing that tells the truth.
+
+The three nits were:
+
+* a wrong cross-reference in the DDL's comment — the removal rule is rule
+  20, not rule 19;
+* I3's wording over-claimed: the rule holds **while the assignment
+  exists**, because an assignment that was never claimed and has no ledger
+  may be removed, which frees its id and its key again. The row says so
+  now;
+* I25's "enforced by" column named only the `typeof()` guards, while three
+  columns — the role, the state and the event type — are guarded by their
+  own closed vocabularies. The property holds; the attribution is now
+  right.
+
+The eighth review also could not **reproduce** the published control
+counts: the reviewer's sandbox has no Go module, so the suite could not be
+built there. It verified the structural side — the control set, the
+STRUCTURAL set, and that every mutator removes exactly the object it names
+— and said plainly that the counts themselves remained asserted rather
+than measured **in that review**. They are measured here, by the harness in
+this change.
+
+### 7.11 The fifth review's non-blocking findings
 
 * **the idempotency key was mutable**, and the acceptance suite even
   blessed the move ("an ordinary key change still works"). A key that could

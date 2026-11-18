@@ -301,7 +301,11 @@ def drop_type_guards():
     """
     def mutate():
         t = DDL_FILE.read_text()
-        new, n = re.subn(r"typeof\([a-z_]+\) = '(?:text|integer)'", "1 = 1", t)
+        # The column name may carry digits -- 'findings_sha256' does --
+        # so the character class includes them. An earlier version of this
+        # regex was [a-z_]+ and silently left that guard standing, which
+        # the eighth review measured: 46 of the 47 guards were neutered.
+        new, n = re.subn(r"typeof\([a-z_0-9]+\) = '(?:text|integer)'", "1 = 1", t)
         if n < 10:
             raise SystemExit(f"the type-guard control only neutered {n} guards")
         _write_mutation(t, new, "the typeof() type guards")

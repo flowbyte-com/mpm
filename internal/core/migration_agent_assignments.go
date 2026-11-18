@@ -321,8 +321,12 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
                                  AND json_valid(permitted_operations)
                                  AND json_type(permitted_operations) = 'array'),
     -- The addresses an assignment in this tree may target. A root's own
-    -- recipient must be among them; a child that targets an address outside
-    -- the list is refused. A child carries none of its own.
+    -- recipient must be among them, and that IS enforced here. A CHILD
+    -- that targets an address outside the list is NOT refused by this
+    -- schema: the child's recipient is checked against the ROOT's list by
+    -- the API's authorisation, because the rule is about who may be
+    -- addressed rather than about the shape of the row. A child carries
+    -- none of its own.
     eligible_recipients  JSON NOT NULL DEFAULT '[]'
                           CHECK (typeof(eligible_recipients) = 'text'
                                  AND json_valid(eligible_recipients)
@@ -558,7 +562,7 @@ END;
 -- ── Rule 4: an assignment's id and its idempotency key are NEVER reused ───
 --
 -- While the assignment EXISTS. An assignment that was never claimed and
--- has no ledger may be REMOVED (rule 19 says so), and its id and its key
+-- has no ledger may be REMOVED (rule 20 says so), and its id and its key
 -- are then free again — the rule is about a second assignment taking a
 -- live one's identity, not about a tombstone.
 --

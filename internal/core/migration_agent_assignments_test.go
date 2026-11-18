@@ -393,7 +393,7 @@ func TestAgentAssignmentDDLIsPinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(agentAssignmentDDL))
 	got := hex.EncodeToString(sum[:])
 
-	const want = "b1e606b7cc3e10ea50b9d0676f25c6f694562c0d09f7cba0359d112720cb9709"
+	const want = "41f55ebbf41d18060684eb5f31ced3f5ea2d660fd465cc675fd20494dd7728bd"
 	if got != want {
 		t.Errorf("the DDL's SHA-256 is %s but the pin says %s. If the DDL changed on purpose, "+
 			"recompute the hash and say so in the commit message; if it did not, the storage has "+
