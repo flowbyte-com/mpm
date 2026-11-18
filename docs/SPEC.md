@@ -2900,7 +2900,7 @@ This section describes **PR 1 of six**: the storage only. No API, no CLI, no age
 
 #### What PR 1 adds
 
-Two **additive** tables, seven indexes and eighteen triggers. No existing table, row, index or trigger is modified.
+Two **additive** tables, seven indexes and twenty triggers. No existing table, row, index or trigger is modified.
 
 | table | what it holds |
 |---|---|
@@ -2924,15 +2924,15 @@ The transition path depends on the role, and the **database** knows it:
 
 `cancelled` is legal from **every** state except itself, for **every** role — including `operator_approved`, because an operator may withdraw an approved assignment. `operator_approved` and `cancelled` are otherwise terminal.
 
-`operator_approved` is a **record, not a grant**. MPM records an approval that was verified **outside** MPM — its source, the exact revision it covers and a pointer to the evidence — and never manufactures or authenticates one. The approval names the exact action and the exact revision, so a change to the head revision after the approval was recorded leaves the approval **stale**, and staleness is observable rather than implied. A transition into the gate must name the action it awaits, and a transition into the approval must name its action, its revision and its source; neither record can then be cleared.
+`operator_approved` is a **record, not a grant**. MPM records an approval that was verified **outside** MPM — its source, the exact revision it covers and a pointer to the evidence — and never manufactures or authenticates one. The approval names the exact action and the exact revision, so a change to the head revision after the approval was recorded leaves the approval **stale**, and staleness is observable rather than implied. A transition into the gate must name the action it awaits, and a transition into the approval must name its action, its revision and its source. Once the gate is reached, **neither record changes** — not to a different value and not to nothing: the action the operator is asked to authorise and the approval that was recorded are evidence, and evidence is not rewritten.
 
 #### The delegation tree, and the budgets it inherits
 
 A **root** assignment is the operator-authorised one: it is its own root, it has no parent, and it **carries the budgets** — `max_depth`, `max_tasks`, `max_concurrency`, `max_resource_units`, `permitted_operations` and `eligible_recipients`.
 
-A **child** is an agent's delegation: it names its root and its parent, and it carries **no budgets at all** — including no allow-list of its own. That is the important part, and it is **structural** — there is no column in which a child could widen what it was given, so inheritance is a property of the schema rather than a rule the code is trusted to apply. A root must also name at least one permitted operation, and every permitted operation must be a non-null string: a root that may do nothing is a silent misconfiguration, not a safe default.
+A **child** is an agent's delegation: it names its root and its parent, and it carries **no budgets at all** — including no allow-list of its own. That is the important part, and it is **structural** — there is no column in which a child could widen what it was given, so inheritance is a property of the schema rather than a rule the code is trusted to apply. A root must also name at least one permitted operation, every permitted operation must be a non-null string, and a root's own recipient must be among its eligible recipients: a root that may do nothing, or that is addressed to an agent the tree may not target, is a silent misconfiguration rather than a safe default.
 
-The tree is a **tree**: the root must be a root of the same project, the parent must belong to the same tree, and nobody is their own parent — checked on the insert path and on the update path.
+The tree is a **tree**: the root must be a root of the same project, the parent must belong to the same tree, the parent's depth must be exactly one less, and nobody is their own parent — checked on the insert path and on the update path. The depth condition is what excludes a **cycle**: following the parent chain must strictly decrease the depth, so the chain cannot come back to where it started.
 
 #### The lease and the fence
 
@@ -2942,11 +2942,11 @@ The fence against a **stale** owner is the `WHERE` clause of the writing stateme
 
 #### What the database enforces
 
-Eighteen properties are enforced by the schema itself rather than by convention — the creation state, the unclaimed creation, the role-aware state machine, the universal cancellation, the immutability of the role, the operator's gate and its approval record, the epoch discipline, the owner discipline, the root/child budget shape, the tree's shape on both write paths, the one-project containment, the idempotency key, the ledger's monotonicity and append-only nature, and the refusal to delete anything with children.
+Twenty-one properties are enforced by the schema itself rather than by convention — the creation state, the unclaimed creation, the role-aware state machine, the universal cancellation, the immutability of the role, the operator's gate and its approval record, the epoch discipline, the owner discipline, the root/child budget shape, the tree's shape on both write paths, the one-project containment, the idempotency key, the ledger's monotonicity, append-only nature and state vocabulary, the refusal to delete anything with children, and the type of every identifier, key and number.
 
-`docs/dev/continuity-001-assignment-schema.md` lists them one by one, **and names the six that the schema does not enforce** — the fence, the recipient membership, the depth limit, the tree budgets, the findings capture and the authorisation of a root — so that "the schema enforces it" and "the API enforces it" are never confused.
+`docs/dev/continuity-001-assignment-schema.md` lists them one by one, **and names the six that the schema does not enforce** — the fence, the recipient membership, the depth limit, the tree budgets, the findings capture and the authorisation of a root — so that "the schema enforces it" and "the API enforces it" are never confused. It also states the one limit that the schema cannot remove: the ledger's link to its assignment is a **foreign key**, so it holds while foreign keys are enforced.
 
-Two boundaries are enforced **twice**, on purpose: the composite foreign keys hold the tree inside one project on the delete path, and the tree-shape triggers hold it on the insert and update paths; and the state vocabulary's `CHECK` sits behind the state machine's triggers. Both layers are measured, and the design note records which test is load-bearing for which.
+Two boundaries are enforced **twice**, on purpose: the composite foreign keys hold the tree inside one project on the delete path, and the tree-shape triggers hold it on the insert and update paths; and the state vocabulary's `CHECK` sits behind the state machine's triggers. Both layers are measured by the negative controls, and the design note records which test is load-bearing for which.
 
 #### The tables are local-only
 

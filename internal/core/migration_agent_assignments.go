@@ -111,7 +111,7 @@ import (
 // ------------------------------------
 // The contract's invariants are not expressible as column CHECK constraints,
 // and each of them is the difference between a coordination substrate and a
-// convention. There are THIRTEEN rules, carried by EIGHTEEN triggers — three
+// convention. There are THIRTEEN rules, carried by TWENTY triggers — five
 // of the rules are split across several triggers, so that a test can
 // isolate one clause from another. The rules are:
 //
@@ -120,14 +120,14 @@ import (
 //   3  the delegation tree is a tree: the root is a root, the parent is in
 //      the same tree, and nobody is their own parent — on the INSERT path
 //      and on the UPDATE path
-//   4  a permitted operation is a non-null string (on INSERT)
-//   5  a permitted operation is a non-null string (on UPDATE)
+//   4  a root's own recipient is among its eligible recipients
+//   5  a permitted operation is a non-null string (on INSERT and on UPDATE)
 //   6  the state machine is ROLE-AWARE, and 'cancelled' is universal
 //   7  the claim epoch advances by exactly one, and only a claim changes
 //      the owner
 //   8  the role is IMMUTABLE
 //   9  the operator's gate names its action, a recorded approval names its
-//      action, its revision and its source, and neither is erasable
+//      action, its revision and its source, and neither record is rewritten
 //  10  a claimed assignment cannot be DELETED
 //  11  the ledger's event index is MONOTONIC
 //  12  the ledger is append-only (no UPDATE)
@@ -272,32 +272,50 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     -- are checked by a trigger, because a CHECK constraint cannot contain
     -- a subquery and '["read"]' and '[null]' both satisfy the length test.
     permitted_operations JSON NOT NULL DEFAULT '[]'
-                          CHECK (json_valid(permitted_operations)
+                          CHECK (typeof(permitted_operations) = 'text'
+                                 AND json_valid(permitted_operations)
                                  AND json_type(permitted_operations) = 'array'),
     -- The addresses an assignment in this tree may target. A root's own
     -- recipient must be among them; a child that targets an address outside
     -- the list is refused. A child carries none of its own.
     eligible_recipients  JSON NOT NULL DEFAULT '[]'
-                          CHECK (json_valid(eligible_recipients)
+                          CHECK (typeof(eligible_recipients) = 'text'
+                                 AND json_valid(eligible_recipients)
                                  AND json_type(eligible_recipients) = 'array'),
     -- Evidence pointers. The assignment carries POINTERS, never copies.
-    issue_ref           TEXT,
-    pr_ref              TEXT,
-    base_sha            TEXT,
-    head_sha            TEXT,
-    reviewed_sha        TEXT,
-    findings_sha256     TEXT,
-    evidence_ref        TEXT,
+    -- Every one of them is guarded: a pointer is TEXT, and a BLOB that
+    -- merely LOOKS like one would compare unequal to every real
+    -- revision, which is a staleness check that never fires.
+    issue_ref           TEXT
+                        CHECK (issue_ref IS NULL OR typeof(issue_ref) = 'text'),
+    pr_ref              TEXT
+                        CHECK (pr_ref IS NULL OR typeof(pr_ref) = 'text'),
+    base_sha            TEXT
+                        CHECK (base_sha IS NULL OR typeof(base_sha) = 'text'),
+    head_sha            TEXT
+                        CHECK (head_sha IS NULL OR typeof(head_sha) = 'text'),
+    reviewed_sha        TEXT
+                        CHECK (reviewed_sha IS NULL OR typeof(reviewed_sha) = 'text'),
+    findings_sha256     TEXT
+                        CHECK (findings_sha256 IS NULL OR typeof(findings_sha256) = 'text'),
+    evidence_ref        TEXT
+                        CHECK (evidence_ref IS NULL OR typeof(evidence_ref) = 'text'),
     payload             JSON NOT NULL DEFAULT '{}'
-                          CHECK (json_valid(payload) AND json_type(payload) = 'object'),
+                          CHECK (typeof(payload) = 'text'
+                                 AND json_valid(payload) AND json_type(payload) = 'object'),
     -- The operator's gate. awaiting_action is the exact action the
     -- operator is being asked to authorise; the approval_* columns record
     -- an approval that was verified OUTSIDE MPM.
-    awaiting_action     TEXT,
-    approval_action     TEXT,
-    approval_revision   TEXT,
-    approval_source     TEXT,
-    approval_evidence   TEXT,
+    awaiting_action     TEXT
+                        CHECK (awaiting_action IS NULL OR typeof(awaiting_action) = 'text'),
+    approval_action     TEXT
+                        CHECK (approval_action IS NULL OR typeof(approval_action) = 'text'),
+    approval_revision   TEXT
+                        CHECK (approval_revision IS NULL OR typeof(approval_revision) = 'text'),
+    approval_source     TEXT
+                        CHECK (approval_source IS NULL OR typeof(approval_source) = 'text'),
+    approval_evidence   TEXT
+                        CHECK (approval_evidence IS NULL OR typeof(approval_evidence) = 'text'),
     approved_at         INTEGER
                         CHECK (approved_at IS NULL OR typeof(approved_at) = 'integer'),
     created_at          INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
@@ -402,18 +420,34 @@ CREATE TABLE IF NOT EXISTS agent_task_events (
                         'completed','review_passed','awaiting_operator','operator_approved',
                         'cancelled','claimed','lease_expired','note'
                       )),
-    from_state      TEXT,
-    to_state        TEXT,
+    -- The states either side of the transition. They come from the SAME
+    -- ten-state vocabulary as the assignment's own state — a ledger that
+    -- can record a state the state machine does not have is a ledger that
+    -- can lie.
+    from_state      TEXT
+                    CHECK (from_state IS NULL OR (typeof(from_state) = 'text'
+                          AND from_state IN ('enqueued','delivered','acknowledged','accepted',
+                                             'in_progress','completed','review_passed',
+                                             'awaiting_operator','operator_approved','cancelled'))),
+    to_state        TEXT
+                    CHECK (to_state IS NULL OR (typeof(to_state) = 'text'
+                          AND to_state IN ('enqueued','delivered','acknowledged','accepted',
+                                           'in_progress','completed','review_passed',
+                                           'awaiting_operator','operator_approved','cancelled'))),
     -- ATTRIBUTION, NOT IDENTITY. These record who wrote the row. They do
     -- not authenticate it, and nothing in this schema treats them as
     -- authentication. See PR #224's OD3.
-    actor_address   TEXT,
-    actor_kind      TEXT,
+    actor_address   TEXT
+                    CHECK (actor_address IS NULL OR typeof(actor_address) = 'text'),
+    actor_kind      TEXT
+                    CHECK (actor_kind IS NULL OR typeof(actor_kind) = 'text'),
     claim_epoch     INTEGER
                     CHECK (claim_epoch IS NULL OR typeof(claim_epoch) = 'integer'),
-    note            TEXT,
+    note            TEXT
+                    CHECK (note IS NULL OR typeof(note) = 'text'),
     payload         JSON NOT NULL DEFAULT '{}'
-                      CHECK (json_valid(payload) AND json_type(payload) = 'object'),
+                      CHECK (typeof(payload) = 'text'
+                             AND json_valid(payload) AND json_type(payload) = 'object'),
     created_at      INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
     UNIQUE(task_id, event_index),
     FOREIGN KEY (task_id) REFERENCES agent_tasks(id) ON DELETE RESTRICT
@@ -462,16 +496,26 @@ FOR EACH ROW WHEN NEW.depth > 0 AND (
                AND r.project_id = NEW.project_id
                AND r.depth = 0
         )
-        -- The parent must be in the SAME tree as the root.
+        -- The parent must be in the SAME tree as the root, AND it must sit
+        -- exactly one level above.
+        --
+        -- The depth condition is what excludes a CYCLE. Following the
+        -- parent chain must strictly DECREASE the depth, so the chain
+        -- cannot come back to where it started: a cycle would need the
+        -- depth to be both one more and one less than itself. Without it,
+        -- two UPDATEs could point two children at each other and every
+        -- other condition would hold — a "tree" with a loop in it, and an
+        -- ancestor walk over it that never terminates.
         OR NOT EXISTS (
             SELECT 1 FROM agent_tasks p
              WHERE p.id = NEW.parent_id
                AND p.project_id = NEW.project_id
                AND p.root_id = NEW.root_id
+               AND p.depth = NEW.depth - 1
         )
 )
 BEGIN
-    SELECT RAISE(ABORT, 'agent_tasks: the delegation tree is malformed — the root must be a root of this project, and the parent must be in the same tree');
+    SELECT RAISE(ABORT, 'agent_tasks: the delegation tree is malformed — the root must be a root of this project, and the parent must be in the same tree, one level above');
 END;
 
 -- The same rule on the UPDATE path.
@@ -496,22 +540,64 @@ FOR EACH ROW WHEN NEW.depth > 0 AND (
              WHERE p.id = NEW.parent_id
                AND p.project_id = NEW.project_id
                AND p.root_id = NEW.root_id
+               AND p.depth = NEW.depth - 1
         )
 )
 BEGIN
-    SELECT RAISE(ABORT, 'agent_tasks: the delegation tree is malformed — the root must be a root of this project, and the parent must be in the same tree');
+    SELECT RAISE(ABORT, 'agent_tasks: the delegation tree is malformed — the root must be a root of this project, and the parent must be in the same tree, one level above');
 END;
 
--- ── Rule 4: a permitted operation is a non-null string (INSERT) ───────────
+-- ── Rule 4: a root's own recipient is among its eligible recipients ──────
+--
+-- The DDL's own comment says it: "A root's own recipient must be among
+-- them". Without the check, a root addressed to 'alpha' could carry an
+-- allow-list of ['bob'] — a root that is addressed to an agent the tree
+-- may not target — and every child of it would inherit an allow-list that
+-- excludes its own parent.
+--
+-- The check also closes the ASYMMETRY: an empty permitted_operations is
+-- refused for a root, and an empty eligible_recipients is refused for the
+-- same reason. A root that may do nothing, or that may address nobody,
+-- is a silent misconfiguration rather than a safe default.
+--
+-- A CHECK constraint cannot contain a subquery, so this is a trigger.
+CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_root_recipient_is_eligible
+BEFORE INSERT ON agent_tasks
+FOR EACH ROW WHEN NEW.depth = 0 AND NOT EXISTS (
+    SELECT 1 FROM json_each(NEW.eligible_recipients)
+     WHERE type = 'text' AND value = NEW.recipient
+)
+BEGIN
+    SELECT RAISE(ABORT, 'agent_tasks: a root''s own recipient must be among its eligible recipients');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_root_recipient_is_eligible_on_update
+BEFORE UPDATE OF recipient, eligible_recipients ON agent_tasks
+FOR EACH ROW WHEN NEW.depth = 0 AND NOT EXISTS (
+    SELECT 1 FROM json_each(NEW.eligible_recipients)
+     WHERE type = 'text' AND value = NEW.recipient
+)
+BEGIN
+    SELECT RAISE(ABORT, 'agent_tasks: a root''s own recipient must be among its eligible recipients');
+END;
+
+-- ── Rule 5: a permitted operation is a non-null string (INSERT) ───────────
 --
 -- The root/child CHECK requires a root to name at least one permitted
 -- operation, and '["read"]' and '[null]' both satisfy that test. A CHECK
 -- constraint cannot contain a subquery, so the ELEMENTS are checked here.
+--
+-- The discriminator is json_each's TYPE column, not typeof(value). For a
+-- non-scalar element, json_each's VALUE column is the element's JSON
+-- SERIALISATION — which is TEXT — so typeof(value) would call an object a
+-- string. The TYPE column is the element's actual JSON type, so
+-- 'object', 'array', 'integer', 'real', 'true', 'false' and 'null' are all
+-- refused, and only a text element is accepted.
 CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_permitted_operations_insert
 BEFORE INSERT ON agent_tasks
 FOR EACH ROW WHEN EXISTS (
     SELECT 1 FROM json_each(NEW.permitted_operations)
-     WHERE value IS NULL OR typeof(value) <> 'text'
+     WHERE type <> 'text'
 )
 BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: a permitted operation must be a non-null string');
@@ -522,7 +608,7 @@ CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_permitted_operations_update
 BEFORE UPDATE OF permitted_operations ON agent_tasks
 FOR EACH ROW WHEN EXISTS (
     SELECT 1 FROM json_each(NEW.permitted_operations)
-     WHERE value IS NULL OR typeof(value) <> 'text'
+     WHERE type <> 'text'
 )
 BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: a permitted operation must be a non-null string');
@@ -655,7 +741,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: the role is immutable');
 END;
 
--- ── Rule 9: the gate's record is not erasable ─────────────────────────────
+-- ── Rule 9: the gate's record is IMMUTABLE once the gate is reached ──────
 --
 -- The transition INTO the gate must name the exact action, and the
 -- transition INTO the approval must name the action, the revision and the
@@ -664,26 +750,39 @@ END;
 -- never reported as a missing field.
 --
 -- But a transition is not the only write. Once an assignment IS at the
--- gate, the action it awaits must not be quietly cleared: there would be
--- nothing left for a staleness check to compare against, and the gate
--- would become a bare state. The same holds for a recorded approval — it
--- is EVIDENCE, and evidence is not rewritten.
-CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_awaiting_action_is_not_cleared
+-- gate, the action it awaits must not be quietly cleared or REWRITTEN:
+-- there would be nothing left for a staleness check to compare against,
+-- and the operator would be asked to authorise "merge PR #259" while the
+-- row says "merge PR #999".
+--
+-- The trigger fires on ANY change, not merely on a clear — a rewrite to a
+-- DIFFERENT non-empty value is the same defect as a clear. And it fires
+-- only while the state is UNCHANGED, so that a write which also moves the
+-- state is governed by the state machine's rules alone: that keeps the
+-- refusal for an illegal transition an ILLEGAL TRANSITION, whatever
+-- another trigger happens to do first.
+--
+-- The same holds for a recorded approval, which is EVIDENCE. There the
+-- trigger fires on ANY change at all, including one that moves the state:
+-- the approval record is not rewritten, not even while the assignment is
+-- being withdrawn.
+CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_awaiting_action_is_immutable
 BEFORE UPDATE OF awaiting_action ON agent_tasks
 FOR EACH ROW
-WHEN OLD.state = 'awaiting_operator'
-     AND (NEW.awaiting_action IS NULL OR length(CAST(NEW.awaiting_action AS BLOB)) = 0)
+WHEN OLD.state = NEW.state
+     AND OLD.state IN ('awaiting_operator','operator_approved')
+     AND NEW.awaiting_action IS NOT OLD.awaiting_action
 BEGIN
-    SELECT RAISE(ABORT, 'agent_tasks: the action the operator''s gate awaits cannot be cleared');
+    SELECT RAISE(ABORT, 'agent_tasks: the action the operator''s gate awaits is fixed once the gate is reached');
 END;
 
-CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_approval_is_not_cleared
+CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_approval_is_immutable
 BEFORE UPDATE OF approval_action, approval_revision, approval_source ON agent_tasks
 FOR EACH ROW
 WHEN OLD.state = 'operator_approved'
-     AND (NEW.approval_action IS NULL OR length(CAST(NEW.approval_action AS BLOB)) = 0
-          OR NEW.approval_revision IS NULL OR length(CAST(NEW.approval_revision AS BLOB)) = 0
-          OR NEW.approval_source IS NULL OR length(CAST(NEW.approval_source AS BLOB)) = 0)
+     AND (NEW.approval_action IS NOT OLD.approval_action
+          OR NEW.approval_revision IS NOT OLD.approval_revision
+          OR NEW.approval_source IS NOT OLD.approval_source)
 BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: a recorded approval is evidence, and evidence is not rewritten');
 END;

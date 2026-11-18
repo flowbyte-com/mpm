@@ -2,7 +2,7 @@
 
 **Status:** implemented (PR 1 of the six-PR partition; tracking issue #258).
 **Design of record for the storage:** `internal/core/migration_agent_assignments.go`.
-**DDL pin:** SHA-256 `1e7875fe9a566c688fb4af4e0a4398fd04221ee89325114a17349298ff63fbb3`, asserted by
+**DDL pin:** SHA-256 `c079375d4a222fcc5f9d56cfdc0a5bb5a8058dd26806f81608b23ef93405d0fe`, asserted by
 `TestAgentAssignmentDDLIsPinned`.
 
 This note is the design the storage implements. The **published** behaviour is
@@ -13,7 +13,7 @@ deferrals.
 
 ## 1. What PR 1 is, and what it is not
 
-PR 1 is **storage**. It creates two tables, seven indexes and eighteen
+PR 1 is **storage**. It creates two tables, seven indexes and twenty
 triggers, and it makes the contract's hardest invariants true *in the
 database*, so a wrong write is refused by the engine rather than by the
 convention of whichever code path happened to make it.
@@ -154,11 +154,26 @@ schema, not a rule the code is trusted to apply. One CHECK constraint
 enforces both halves — a root must carry the budgets and must name at least
 one permitted operation; a child must carry none.
 
-A root with an **empty** `permitted_operations` is refused. A root that may
-do nothing is a silent misconfiguration, not a safe default. And a
-permitted operation must be a **non-null string**: `'["read"]'` and
-`'[null]'` both satisfy the length test, so the *elements* are checked by a
-trigger (a CHECK constraint cannot contain a subquery).
+A root with an **empty** `permitted_operations` is refused, and so is a root
+with an **empty** `eligible_recipients`: a root that may do nothing, or that
+may address nobody, is a silent misconfiguration rather than a safe default.
+A root's own `recipient` must be among its `eligible_recipients` — a root
+addressed to an agent the tree may not target is the same misconfiguration.
+
+The tree is a **tree**, and that means four things:
+
+* the root must be a **root** of the same project — a child may not cite a
+  non-root as its budget root;
+* the parent must be in the **same tree** — the same `root_id`;
+* the parent's depth must be **exactly one less** — and that is what
+  **excludes a cycle**: following the parent chain must strictly *decrease*
+  the depth, so the chain cannot come back to where it started;
+* nobody is their **own parent**.
+
+The first three hold on the INSERT path and on the UPDATE path. Without the
+depth condition, two UPDATEs could point two children at each other and every
+other condition would hold — a "tree" with a loop in it, and an ancestor walk
+over it that never terminates.
 
 ### 3.4 The idempotency key
 
@@ -218,7 +233,7 @@ again. An **unclaimed** task may still be removed: it never issued a token.
 
 ## 5. The invariants the database enforces, and the ones it does not
 
-Eighteen properties are enforced by the schema itself rather than by
+Twenty-one properties are enforced by the schema itself rather than by
 convention.
 
 | # | invariant | enforced by |
@@ -230,17 +245,20 @@ convention.
 | I5 | the role is **immutable** | the role-immutability trigger |
 | I6 | the operator's gate **names its action** | the state-transition trigger |
 | I7 | a recorded approval names its action, revision and source | the state-transition trigger |
-| I8 | the gate's action cannot be cleared | the awaiting-action trigger |
-| I9 | a recorded approval is not rewritten | the approval trigger |
+| I8 | the gate's action is **immutable** once the gate is reached | the awaiting-action trigger |
+| I9 | a recorded approval is **immutable** — it is evidence | the approval trigger |
 | I10 | the claim epoch advances by exactly one | the claim-discipline trigger |
 | I11 | only a claim changes the owner | the owner trigger |
 | I12 | a claim sets an owner and a lease | the claim-owner and claim-lease triggers |
 | I13 | a root carries the budgets; a child carries none | the root/child `CHECK` |
-| I14 | a root must name at least one permitted operation, and every permitted operation is a non-null string | the root/child `CHECK` + the permitted-operations triggers |
-| I15 | the delegation tree is a **tree** — the root is a root, the parent is in the same tree, nobody is their own parent | the tree-shape triggers (INSERT **and** UPDATE) |
+| I14 | a root must name at least one permitted operation, every permitted operation is a non-null string, and a root's own recipient is among its eligible recipients | the root/child `CHECK` + the permitted-operations and root-recipient triggers |
+| I15 | the delegation tree is a **tree** — the root is a root, the parent is in the same tree at depth one less, and nobody is their own parent | the tree-shape triggers (INSERT **and** UPDATE) |
 | I16 | the tree is contained in **one project** | the composite foreign keys + the tree-shape triggers |
 | I17 | the idempotency key identifies one logical assignment, and it is `TEXT` | the unique index + the `typeof()` guards |
-| I18 | the ledger is ordered, **monotonic**, append-only, and cannot outlive its assignment; nothing with children can be deleted; a claimed assignment cannot be deleted | the ledger triggers, the `UNIQUE` constraint, the foreign keys, the `ON DELETE RESTRICT`s and the not-deletable trigger |
+| I18 | the ledger is ordered, **monotonic**, append-only, and cannot outlive its assignment; the ledger's `from_state` and `to_state` come from the ten-state vocabulary | the ledger triggers, the `UNIQUE` constraint, the vocabulary `CHECK`s, the foreign keys and the `ON DELETE RESTRICT`s |
+| I19 | nothing with children can be deleted, and a claimed assignment cannot be deleted | the `ON DELETE RESTRICT`s and the not-deletable trigger |
+| I20 | every identifier, key and number has its **type** — a `TEXT` column cannot hold a `BLOB`, and a numeric column cannot hold a `REAL` or a numeric string | the `typeof()` guards |
+| I21 | a lease implies an owner | the column `CHECK` |
 
 The invariants that are **not** in the database, because a `CHECK` constraint
 cannot contain a subquery and a trigger cannot see a caller's presented value:
@@ -248,7 +266,7 @@ cannot contain a subquery and a trigger cannot see a caller's presented value:
 | # | invariant | enforced by | lands in |
 |---|---|---|---|
 | N1 | the target of a write presents the **current** claim epoch (the fence) | the `WHERE` clause of the writing statement | PR 2 |
-| N2 | a child's `recipient` is among the root's `eligible_recipients` | the API | PR 2 |
+| N2 | a **child's** recipient is among the root's `eligible_recipients` | the API | PR 2 |
 | N3 | a child's depth is within the root's `max_depth` | the API | PR 2 |
 | N4 | the tree's task count, concurrency and resource consumption are within the root's budgets | the dispatcher | PR 4 |
 | N5 | a reviewer's findings are captured by a host-controlled handoff and published with their digest | the adapter | PR 3, PR 5 |
@@ -257,6 +275,12 @@ cannot contain a subquery and a trigger cannot see a caller's presented value:
 Those are named here rather than left implicit, because "the schema enforces
 it" and "the API enforces it" are different claims and only one of them is
 true of each row.
+
+**One limit worth stating plainly:** I18's "the ledger cannot outlive its
+assignment" is enforced by a **foreign key**, so it holds **while foreign
+keys are enforced**. With the pragma off, an unclaimed task could be deleted
+and its ledger entries would dangle. A **claimed** task is still protected,
+because the not-deletable trigger does not depend on the pragma.
 
 ### 5.1 The ledger is monotonic, not gap-free
 
@@ -288,13 +312,14 @@ The DDL is owned by a **migration**, not by a schema slice:
 
 ---
 
-## 7. What the second independent review found
+## 7. What the two independent reviews found
 
 The first version of this PR was reviewed independently, in the installed
 sandboxed reviewer (`mpm-reviewer`, default-deny, `sandbox_exec` only), and
 came back with **eleven blocking findings and thirteen non-blocking ones**.
-Every blocking finding was a real defect, and every one is closed. The
-blocking findings were:
+Every blocking finding was a real defect, and every one was closed.
+
+The first review's eleven blocking findings were:
 
 1. `completed → awaiting_operator` skipped the implementer's required
    independent review;
@@ -331,23 +356,42 @@ TEXT budget passes `> 0`, a BLOB and a TEXT key coexist in a UNIQUE index, a
 self-referencing composite FK accepts the self-parent row, `'[null]'` passes
 `json_array_length > 0`, and a `CHECK` cannot contain a subquery.
 
-The non-blocking findings were about the **tests and the documents**, and
-they are closed too: the AT1 probe now strips the schema before it measures
-the migration (it used to snapshot after the boot path had already migrated,
-so the sentinel short-circuited the re-run); AT3/AT4 compares the **whole**
-row, field by field and type by type; AT6 requires the failure to be the
-*sentinel* failure and the recovery to record the sentinel; AT8 measures the
-**exact** allow-list delta and validates a dump carrying the **real** DDL;
-the role test now tries `completed → awaiting_operator` and a role change;
-the ownerless-claim probe isolates the trigger's own rule by its message;
-the good-child assertion covers **every** budget column; the containment
-probes move **one** reference across the boundary each; the ledger probe
-targets a childless task and covers a gap, a rewrite and a deletion; the
-claim control checks the **affected rows** and the resulting values; the
-inventory rejects extra tables and indexes as well as extra triggers; the
-vacuous no-backtick test is gone; and the documents were corrected on the
-state count, the cancellation rule, the delivery timestamp, the approval
-fields and the column names.
+The second review, of the revision that closed those eleven, returned **two
+blocking findings and fourteen non-blocking ones**, and both blocking ones
+were real:
+
+1. **the delegation tree could be made into a CYCLE.** The tree-shape
+   triggers closed the three named cases, but nothing excluded an ancestor
+   cycle: two `UPDATE`s pointing two children at each other satisfied every
+   stated condition. The fix is the parent's **depth** — the chain must
+   strictly decrease — which excludes a cycle and enforces the depth
+   consistency at the same time;
+2. **a recorded approval could be REWRITTEN, not merely cleared.** The
+   trigger fired only on a NULL or an empty value, so the revision could be
+   re-pointed at a different one — which defeats the staleness comparison
+   against the head revision. The trigger now fires on **any** change.
+
+The second review's non-blocking findings were about the tests, the
+documents and three more unenumerated holes, and they are closed too: the
+permitted-operations guard tested `typeof(value)`, which is always TEXT for a
+non-scalar element, so an **object** or an **array** passed as a permitted
+operation — the discriminator is json_each's `type` column; the awaited action
+could be rewritten at the gate; the "the path is checked first" claim was
+false, because two separate triggers competed with the state machine — they
+now fire only while the state is unchanged, so an illegal transition is
+always reported as an illegal transition; a child's **depth** was unrelated
+to its parent's; a root's own recipient need not be among its eligible
+recipients, and an empty eligible list was accepted while an empty
+permitted list was refused; the ledger's `from_state` and `to_state` carried
+no vocabulary; the `typeof()` guards did not cover the evidence pointers and
+the gate's record; the containment probe's comment claimed to isolate one
+foreign key when it violated both; the negative-control counts were
+understated, and the harness had three controls that mutated **nothing**
+because they were wired to a function that was never called; the trigger
+count was stale in two places; the AT8 "real dump" carried neither the
+indexes nor the triggers and used a placeholder row that would not execute;
+and the combined "relabel and transition in one statement" case was not
+covered by any test.
 
 ---
 
@@ -355,45 +399,65 @@ fields and the column names.
 
 Each invariant was removed and the suite re-run. The counts below are the
 **total** number of tests that fail; the second column is the number that
-fail for a reason **other** than the DDL having changed (the hash pin, the
-object inventory and the migration's own AT1/AT2/AT6 probes fail for any DDL
-change at all, so they are structural rather than specific).
+fail for a reason **other** than the DDL having changed.
+
+The **structural** failures are the ones that follow from the DDL's *text*
+changing, whatever invariant is under test: the hash pin, the four
+migration probes that enumerate the objects by name (AT1, AT2, AT6-recovery
+and AT8), the object inventory, and the three control tests that drop an
+object by name. They are listed here so that the second column can be read
+as "the tests that fail because the **behaviour** changed".
 
 | control | tests that fail | invariant-specific |
 |---|---|---|
-| the state-machine trigger is removed | 9 | 4 |
-| the initial-state trigger is removed | 6 | 1 |
-| the unclaimed-at-creation trigger is removed | 6 | 1 |
-| the tree-shape trigger is removed | 6 | 1 |
-| the tree-shape-on-UPDATE trigger is removed | 6 | 1 |
-| the role-immutability trigger is removed | 6 | 1 |
-| the permitted-operations INSERT trigger is removed | 6 | 1 |
-| the not-deletable trigger is removed | 6 | 1 |
-| the awaiting-action-is-not-cleared trigger is removed | 6 | 1 |
-| the approval-is-not-cleared trigger is removed | 6 | 1 |
-| the ledger's monotonic-index trigger is removed | 6 | 1 |
-| the ledger's no-UPDATE trigger is removed | 6 | 1 |
-| the ledger's no-DELETE trigger is removed | 6 | 1 |
-| **all four** claim-discipline triggers are removed | 7 | 2 |
-| the unique idempotency index is removed | 6 | 2 |
+| the state-machine trigger is removed | 11 | 4 |
+| the initial-state trigger is removed | 7 | 1 |
+| the unclaimed-at-creation trigger is removed | 7 | 1 |
+| the tree-shape trigger is removed | 7 | 1 |
+| the tree-shape-on-UPDATE trigger is removed | 7 | 1 |
+| the role-immutability trigger is removed | 7 | 1 |
+| the permitted-operations INSERT trigger is removed | 8 | 2 |
+| the not-deletable trigger is removed | 7 | 1 |
+| the awaiting-action-is-immutable trigger is removed | 8 | 2 |
+| the approval-is-immutable trigger is removed | 8 | 2 |
+| the root-recipient-is-eligible trigger is removed | 7 | 1 |
+| the root-recipient-is-eligible-on-UPDATE trigger is removed | 7 | 1 |
+| the ledger's monotonic-index trigger is removed | 7 | 1 |
+| the ledger's no-UPDATE trigger is removed | 7 | 1 |
+| the ledger's no-DELETE trigger is removed | 7 | 1 |
+| **all four** claim-discipline triggers are removed | 8 | 1 |
+| the unique idempotency index is removed | 7 | 1 |
 | the composite containment foreign keys are removed | 2 | 1 |
 | the root/child budget `CHECK` is removed | 2 | 1 |
 | the state vocabulary `CHECK` is removed | 2 | 1 |
-| the `typeof()` type guards are removed | 2 | 1 |
-| the whole migration is not called | 25 | 23 |
+| the `typeof()` type guards are removed | 4 | 3 |
+| the whole migration is not called | 31 | 26 |
 
-Two of these are worth reading closely, because they are the two places where
-**two** layers enforce the same boundary:
+Three of these are worth reading closely, because they are the places where
+the counts are easy to misread:
 
 * the **composite containment foreign keys** are load-bearing for the
   **delete** path (a root with a child cannot be deleted), while the
   **tree-shape trigger** is load-bearing for the **insert and update** paths
-  (a child cannot name a foreign root, a non-root or a parent from another
-  tree). Removing the foreign keys alone changes the delete behaviour and
-  nothing else, which is why only one test is specific to them;
+  (a child cannot name a foreign root, a non-root, a parent from another
+  tree, or a cycle). Removing the foreign keys alone changes the delete
+  behaviour and nothing else, which is why one test is specific to them;
 * the **state vocabulary `CHECK`** sits *behind* the triggers — the
   initial-state trigger refuses every state that is not `enqueued` — so the
-  test pins the vocabulary **statically** as well, and the control fails it.
+  test pins the vocabulary **statically** as well, and the control fails it;
+* the **`typeof()` guards** cover three different defects — a REAL epoch
+  that does not advance, a BLOB idempotency key that shadows a TEXT one, and
+  a BLOB in an evidence pointer — so three tests are specific to them.
+
+The harness itself was hardened twice, and both hardenings were necessary:
+
+* a control that mutates **nothing** reports a count of zero that reads like
+  "the suite does not depend on this invariant" — the most dangerous
+  possible outcome — so the harness now **refuses** a mutation that does
+  not change the file;
+* the type-guard control used to delete the guard outright, which left
+  `CHECK ()` behind and broke the schema; it now **neuters** each
+  comparison instead, so the control measures the guard and not the schema.
 
 ---
 

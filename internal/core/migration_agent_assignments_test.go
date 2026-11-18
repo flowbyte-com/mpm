@@ -82,15 +82,16 @@ var agentAssignmentIndexes = []string{
 
 // agentAssignmentTriggers are the triggers the DDL creates.
 //
-// The seventeen triggers carry THIRTEEN rules: two rules are split across
+// The twenty triggers carry THIRTEEN rules: five rules are split across
 // several triggers so that a test can isolate one clause from another
-// (the claim discipline and the operator's gate).
+// (the tree shape, the root's recipient, the permitted operations, the
+// claim discipline and the operator's gate).
 var agentAssignmentTriggers = []string{
 	"trg_agent_task_events_monotonic",
 	"trg_agent_task_events_no_delete",
 	"trg_agent_task_events_no_update",
-	"trg_agent_tasks_approval_is_not_cleared",
-	"trg_agent_tasks_awaiting_action_is_not_cleared",
+	"trg_agent_tasks_approval_is_immutable",
+	"trg_agent_tasks_awaiting_action_is_immutable",
 	"trg_agent_tasks_claim_discipline",
 	"trg_agent_tasks_claim_sets_lease",
 	"trg_agent_tasks_claim_sets_owner",
@@ -100,6 +101,8 @@ var agentAssignmentTriggers = []string{
 	"trg_agent_tasks_permitted_operations_insert",
 	"trg_agent_tasks_permitted_operations_update",
 	"trg_agent_tasks_role_is_immutable",
+	"trg_agent_tasks_root_recipient_is_eligible",
+	"trg_agent_tasks_root_recipient_is_eligible_on_update",
 	"trg_agent_tasks_state_transition",
 	"trg_agent_tasks_tree_shape",
 	"trg_agent_tasks_tree_shape_on_update",
@@ -221,8 +224,7 @@ func insertChildAssignment(t *testing.T, dm *DatabaseManager, projectID, id, roo
 	_, err := dm.SQLDB().Exec(`
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key
-		) VALUES (?, ?, ?, ?, 1, 'the title', 'the objective', ?, 'implementer', 'enqueued', ?)
+			recipient, role, state, idempotency_key) VALUES (?, ?, ?, ?, 1, 'the title', 'the objective', ?, 'implementer', 'enqueued', ?)
 	`, id, projectID, rootID, parentID, recipient, idem)
 	if err != nil {
 		t.Fatalf("insert the child assignment %q: %v", id, err)
@@ -381,7 +383,7 @@ func TestAgentAssignmentDDLIsPinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(agentAssignmentDDL))
 	got := hex.EncodeToString(sum[:])
 
-	const want = "1e7875fe9a566c688fb4af4e0a4398fd04221ee89325114a17349298ff63fbb3"
+	const want = "c079375d4a222fcc5f9d56cfdc0a5bb5a8058dd26806f81608b23ef93405d0fe"
 	if got != want {
 		t.Errorf("the DDL's SHA-256 is %s but the pin says %s. If the DDL changed on purpose, "+
 			"recompute the hash and say so in the commit message; if it did not, the storage has "+
@@ -421,7 +423,7 @@ func TestAgentAssignmentDDLIsTheOnlyDefinition(t *testing.T) {
 // A disposable file-backed WAL database is built, a representative row is
 // written into `memories`, and the assignment objects are REMOVED so the
 // migration has real work to do. The migration is then run against it: the
-// two tables, the seven indexes and the seventeen triggers exist BY NAME,
+// two tables, the seven indexes and the twenty triggers exist BY NAME,
 // the sentinel is recorded exactly once, the pre-existing row is untouched,
 // and the set of schema objects changed by the migration is EXACTLY the
 // assignment objects.
@@ -928,16 +930,42 @@ func TestAgentAssignmentAT8RestoreAllowList(t *testing.T) {
 	}
 
 	// 2. the REAL dump is accepted.
+	//
+	// The dump carries the REAL DDL of every assignment object — the two
+	// tables, the seven indexes and the twenty triggers, exactly as
+	// `sqlite3 .dump` would emit them — and a REAL row rather than a
+	// placeholder. The second review found that the first version of this
+	// fixture declared only the tables and used `DEFAULT VALUES`, which
+	// would not even execute against the NOT NULL columns.
 	objects := assignmentSchemaObjects(t, db)
 	var dump strings.Builder
-	for _, table := range agentAssignmentTables {
-		sqlText, ok := objects[table]
+	for _, name := range agentAssignmentObjectNames {
+		sqlText, ok := objects[name]
 		if !ok {
-			t.Fatalf("the table %q is missing from the migrated database", table)
+			t.Fatalf("the object %q is missing from the migrated database", name)
 		}
 		dump.WriteString(sqlText + ";\n")
-		dump.WriteString("INSERT INTO " + table + " DEFAULT VALUES;\n")
 	}
+	projectID := seedProject(t, dm, "")
+	assignmentMustExec(t, db, `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES ('at-dump', ?, 'at-dump', NULL, 0, 'the title', 'the objective',
+			'alpha', 'implementer', 'enqueued', 'idem:dump',
+			1, 4, 2, 100, '["read"]', '["alpha"]')`, projectID)
+	assignmentMustExec(t, db, `
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type)
+		VALUES ('ate-dump', 'at-dump', 0, 'created')`)
+	dump.WriteString("INSERT INTO agent_tasks (id, project_id, root_id, depth, title, " +
+		"objective, recipient, role, state, idempotency_key) VALUES " +
+		"('at-dump', '" + projectID + "', 'at-dump', 0, 'the title', 'the objective', " +
+		"'alpha', 'implementer', 'enqueued', 'idem:dump');\n")
+	dump.WriteString("INSERT INTO agent_task_events (id, task_id, event_index, event_type) " +
+		"VALUES ('ate-dump', 'at-dump', 0, 'created');\n")
+
 	v := NewCanonicalDumpValidator()
 	if err := v.Validate(dump.String()); err != nil {
 		t.Errorf("a dump carrying the REAL assignment schema was rejected: %v. MPM creates "+
@@ -1000,9 +1028,8 @@ func TestAssignmentIsCreatedUnclaimed(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key, claim_epoch,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-born-epoch', ?, 'at-born-epoch', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'idem:born-epoch', 87, 1, 4, 2, 100, '["read"]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-born-epoch', ?, 'at-born-epoch', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:born-epoch', 87, 1, 4, 2, 100, '["read"]', '["alpha"]')
 	`, projectID)
 
 	// Born with an owner.
@@ -1011,9 +1038,8 @@ func TestAssignmentIsCreatedUnclaimed(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key, owner,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-born-owner', ?, 'at-born-owner', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'idem:born-owner', 'alice', 1, 4, 2, 100, '["read"]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-born-owner', ?, 'at-born-owner', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:born-owner', 'alice', 1, 4, 2, 100, '["read"]', '["alpha"]')
 	`, projectID)
 
 	// Born with a lease.
@@ -1022,9 +1048,8 @@ func TestAssignmentIsCreatedUnclaimed(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key, lease_expires_at,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-born-lease', ?, 'at-born-lease', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'idem:born-lease', 1900000000, 1, 4, 2, 100, '["read"]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-born-lease', ?, 'at-born-lease', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:born-lease', 1900000000, 1, 4, 2, 100, '["read"]', '["alpha"]')
 	`, projectID)
 
 	// And the well-formed one IS born unclaimed.
@@ -1257,6 +1282,21 @@ func TestAssignmentRoleIsImmutable(t *testing.T) {
 	// a no-op is not one.
 	assignmentMustExec(t, db, `UPDATE agent_tasks SET role = 'implementer' WHERE id = ?`, id)
 
+	// The COMBINED case: a relabel and a state transition in ONE
+	// statement. The second review found that the first version covered
+	// only the role-only write, and the combined case is the one that
+	// actually matters — a single UPDATE that selects a different path.
+	assignmentMustRefuseWith(t, db, "a relabel and a transition in one statement",
+		"the role is immutable", `
+		UPDATE agent_tasks SET role = 'reviewer', state = 'delivered' WHERE id = ?`, id)
+
+	// And the same, expressed as a CASE so the new value is not a
+	// literal.
+	assignmentMustRefuseWith(t, db, "a relabel expressed as a CASE",
+		"the role is immutable", `
+		UPDATE agent_tasks SET role = CASE WHEN id = ? THEN 'reviewer' ELSE role END WHERE id = ?`,
+		id, id)
+
 	var role string
 	if err := db.QueryRow(`SELECT role FROM agent_tasks WHERE id = ?`, id).Scan(&role); err != nil {
 		t.Fatalf("read the assignment: %v", err)
@@ -1468,9 +1508,8 @@ func TestAssignmentFenceCannotBeForgedByANonIntegerEpoch(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key, claim_epoch,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-real-epoch', ?, 'at-real-epoch', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'idem:real-epoch', 1e30, 1, 4, 2, 100, '["read"]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-real-epoch', ?, 'at-real-epoch', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:real-epoch', 1e30, 1, 4, 2, 100, '["read"]', '["alpha"]')
 	`, projectID)
 
 	// And a REAL epoch cannot be written either.
@@ -1484,9 +1523,8 @@ func TestAssignmentFenceCannotBeForgedByANonIntegerEpoch(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-text-budget', ?, 'at-text-budget', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'idem:text-budget', 1, 'many', 2, 100, '["read"]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-text-budget', ?, 'at-text-budget', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:text-budget', 1, 'many', 2, 100, '["read"]', '["alpha"]')
 	`, projectID)
 }
 
@@ -1505,9 +1543,8 @@ func TestAssignmentIdempotencyKeyMustBeText(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-text-key', ?, 'at-text-key', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'github:issue:253', 1, 4, 2, 100, '["read"]')`, projectID)
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-text-key', ?, 'at-text-key', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'github:issue:253', 1, 4, 2, 100, '["read"]', '["alpha"]')`, projectID)
 
 	// The BLOB key with the identical bytes is refused: the key's TYPE is
 	// part of its identity.
@@ -1515,9 +1552,8 @@ func TestAssignmentIdempotencyKeyMustBeText(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-blob-key', ?, 'at-blob-key', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', x'6769746875623a69737375653a323533', 1, 4, 2, 100, '["read"]')`, projectID)
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-blob-key', ?, 'at-blob-key', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', x'6769746875623a69737375653a323533', 1, 4, 2, 100, '["read"]', '["alpha"]')`, projectID)
 }
 
 // TestAssignmentPrimaryKeyMustNotBeNull pins the identifier.
@@ -1535,9 +1571,8 @@ func TestAssignmentPrimaryKeyMustNotBeNull(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES (NULL, ?, NULL, NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'idem:null-id', 1, 4, 2, 100, '["read"]')`, projectID)
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES (NULL, ?, NULL, NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:null-id', 1, 4, 2, 100, '["read"]', '["alpha"]')`, projectID)
 
 	// And the ledger's identifier likewise.
 	assignmentMustRefuse(t, db, "a ledger entry with a NULL id", `
@@ -1565,9 +1600,8 @@ func TestAssignmentRootCarriesTheBudgetsAndAChildCarriesNone(t *testing.T) {
 	assignmentMustRefuse(t, db, "a root without the budget columns", `
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key, permitted_operations
-		) VALUES ('at-nobudget', ?, 'at-nobudget', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'idem:nobudget', '["read"]')
+			recipient, role, state, idempotency_key, permitted_operations, eligible_recipients) VALUES ('at-nobudget', ?, 'at-nobudget', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:nobudget', '["read"]', '["alpha"]')
 	`, projectID)
 
 	// A root with an EMPTY permitted_operations is refused: a root that
@@ -1576,9 +1610,8 @@ func TestAssignmentRootCarriesTheBudgetsAndAChildCarriesNone(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-noops', ?, 'at-noops', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'idem:noops', 1, 4, 2, 100, '[]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-noops', ?, 'at-noops', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:noops', 1, 4, 2, 100, '[]', '["alpha"]')
 	`, projectID)
 
 	// A root whose permitted_operations contains a NULL is refused: the
@@ -1588,9 +1621,8 @@ func TestAssignmentRootCarriesTheBudgetsAndAChildCarriesNone(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-nullop', ?, 'at-nullop', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'idem:nullop', 1, 4, 2, 100, '[null]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-nullop', ?, 'at-nullop', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:nullop', 1, 4, 2, 100, '[null]', '["alpha"]')
 	`, projectID)
 
 	// A root whose permitted_operations contains a NUMBER is refused.
@@ -1599,9 +1631,8 @@ func TestAssignmentRootCarriesTheBudgetsAndAChildCarriesNone(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-numop', ?, 'at-numop', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'idem:numop', 1, 4, 2, 100, '[7]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-numop', ?, 'at-numop', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:numop', 1, 4, 2, 100, '[7]', '["alpha"]')
 	`, projectID)
 
 	root := insertRootAssignment(t, dm, projectID, "at-budgetroot", "alpha", "implementer", "idem:budgetroot")
@@ -1611,8 +1642,7 @@ func TestAssignmentRootCarriesTheBudgetsAndAChildCarriesNone(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units
-		) VALUES ('at-childbudget', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
+			max_depth, max_tasks, max_concurrency, max_resource_units) VALUES ('at-childbudget', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
 			'enqueued', 'idem:childbudget', 5, 99, 9, 999)
 	`, projectID, root, root)
 
@@ -1621,7 +1651,7 @@ func TestAssignmentRootCarriesTheBudgetsAndAChildCarriesNone(t *testing.T) {
 	assignmentMustRefuse(t, db, "a child carrying its own eligible recipients", `
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key, eligible_recipients
+			recipient, role, state, idempotency_key
 		) VALUES ('at-childrecipients', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
 			'enqueued', 'idem:childrecipients', '["charlie","mallory"]')
 	`, projectID, root, root)
@@ -1630,8 +1660,7 @@ func TestAssignmentRootCarriesTheBudgetsAndAChildCarriesNone(t *testing.T) {
 	assignmentMustRefuse(t, db, "a child that is its own root", `
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key
-		) VALUES ('at-selfroot', ?, 'at-selfroot', ?, 1, 't', 'o', 'charlie', 'implementer',
+			recipient, role, state, idempotency_key) VALUES ('at-selfroot', ?, 'at-selfroot', ?, 1, 't', 'o', 'charlie', 'implementer',
 			'enqueued', 'idem:selfroot')
 	`, projectID, root)
 
@@ -1640,9 +1669,8 @@ func TestAssignmentRootCarriesTheBudgetsAndAChildCarriesNone(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-depth0parent', ?, ?, ?, 0, 't', 'o', 'charlie', 'implementer',
-			'enqueued', 'idem:depth0parent', 1, 4, 2, 100, '["read"]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-depth0parent', ?, ?, ?, 0, 't', 'o', 'charlie', 'implementer',
+			'enqueued', 'idem:depth0parent', 1, 4, 2, 100, '["read"]', '["alpha"]')
 	`, projectID, root, root)
 
 	// The well-formed child is accepted, and it carries NO budget at all.
@@ -1687,14 +1715,14 @@ func TestAssignmentTreeShapeIsATree(t *testing.T) {
 
 	root := insertRootAssignment(t, dm, projectID, "at-treeroot", "alpha", "implementer", "idem:treeroot")
 	child := insertChildAssignment(t, dm, projectID, "at-treechild", root, root, "charlie", "idem:treechild")
+	sibling := insertChildAssignment(t, dm, projectID, "at-treesibling", root, root, "delta", "idem:treesibling")
 
 	// A child that is its own parent.
 	assignmentMustRefuseWith(t, db, "a child that is its own parent",
 		"the delegation tree is malformed", `
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key
-		) VALUES ('at-selfparent', ?, 'at-selfparent', 'at-selfparent', 1, 't', 'o', 'charlie',
+			recipient, role, state, idempotency_key) VALUES ('at-selfparent', ?, 'at-selfparent', 'at-selfparent', 1, 't', 'o', 'charlie',
 			'implementer', 'enqueued', 'idem:selfparent')
 	`, projectID)
 
@@ -1703,8 +1731,7 @@ func TestAssignmentTreeShapeIsATree(t *testing.T) {
 		"the delegation tree is malformed", `
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key
-		) VALUES ('at-nonrootroot', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
+			recipient, role, state, idempotency_key) VALUES ('at-nonrootroot', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
 			'enqueued', 'idem:nonrootroot')
 	`, projectID, child, root)
 
@@ -1714,8 +1741,7 @@ func TestAssignmentTreeShapeIsATree(t *testing.T) {
 		"the delegation tree is malformed", `
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key
-		) VALUES ('at-mixedtree', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
+			recipient, role, state, idempotency_key) VALUES ('at-mixedtree', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
 			'enqueued', 'idem:mixedtree')
 	`, projectID, root, otherRoot)
 
@@ -1723,8 +1749,7 @@ func TestAssignmentTreeShapeIsATree(t *testing.T) {
 	assignmentMustExec(t, db, `
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key
-		) VALUES ('at-grandchild', ?, ?, ?, 2, 't', 'o', 'delta', 'implementer',
+			recipient, role, state, idempotency_key) VALUES ('at-grandchild', ?, ?, ?, 2, 't', 'o', 'delta', 'implementer',
 			'enqueued', 'idem:grandchild')
 	`, projectID, root, child)
 
@@ -1740,6 +1765,26 @@ func TestAssignmentTreeShapeIsATree(t *testing.T) {
 	otherProject := seedProject(t, dm, "cpj-"+strings.Repeat("e", 16))
 	assignmentMustRefuse(t, db, "a child moved to another project",
 		`UPDATE agent_tasks SET project_id = ? WHERE id = ?`, otherProject, child)
+
+	// A CYCLE. Two children pointed at each other would satisfy every
+	// other condition — the root is a root, the parent is in the same
+	// tree, and nobody is their own parent — and the "tree" would have a
+	// loop in it. The second review found this: the depth condition is
+	// what excludes it, because following the parent chain must strictly
+	// DECREASE the depth, so the chain cannot come back to its start.
+	assignmentMustRefuseWith(t, db, "the first half of a cycle",
+		"the delegation tree is malformed", `
+		UPDATE agent_tasks SET parent_id = ? WHERE id = ?`, sibling, child)
+	assignmentMustRefuseWith(t, db, "the second half of a cycle",
+		"the delegation tree is malformed", `
+		UPDATE agent_tasks SET parent_id = ? WHERE id = ?`, child, sibling)
+
+	// And a child's depth must be its parent's depth plus one. A child
+	// that claims a depth of five under a parent at depth zero is not in
+	// the tree at all.
+	assignmentMustRefuseWith(t, db, "a child claiming a depth its parent does not have",
+		"the delegation tree is malformed", `
+		UPDATE agent_tasks SET depth = 5 WHERE id = ?`, child)
 
 	// And the child's own tree is intact after both refusals: a refused
 	// write must leave the row exactly as it was.
@@ -1778,12 +1823,15 @@ func TestAssignmentTreeIsContainedInOneProject(t *testing.T) {
 	childA := insertChildAssignment(t, dm, projectA, "at-child-a", rootA, rootA, "charlie", "idem:child-a")
 
 	// A child in project B whose ROOT is in project A. The parent is in
-	// project A too, so this probe isolates the ROOT foreign key.
+	// project A too, so this probe violates BOTH composite foreign keys:
+	// it is the TREE-SHAPE TRIGGER that refuses it, and the composite
+	// keys are what refuse the DELETE of a root that has a child (see
+	// TestAssignmentDeletionIsRestricted). The two layers cover
+	// different paths, and the control harness measures both.
 	assignmentMustRefuse(t, db, "a child whose root is in another project", `
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key
-		) VALUES ('at-crossroot', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
+			recipient, role, state, idempotency_key) VALUES ('at-crossroot', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
 			'enqueued', 'idem:crossroot')
 	`, projectB, rootA, childA)
 
@@ -1797,8 +1845,7 @@ func TestAssignmentTreeIsContainedInOneProject(t *testing.T) {
 	assignmentMustRefuse(t, db, "a child whose parent is in another project", `
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
-			recipient, role, state, idempotency_key
-		) VALUES ('at-crossparent', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
+			recipient, role, state, idempotency_key) VALUES ('at-crossparent', ?, ?, ?, 1, 't', 'o', 'charlie', 'implementer',
 			'enqueued', 'idem:crossparent')
 	`, projectB, rootB, childA)
 
@@ -1807,9 +1854,8 @@ func TestAssignmentTreeIsContainedInOneProject(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-noproject', 'cpj-' || 'cccccccccccccccc', 'at-noproject', NULL, 0, 't', 'o',
-			'alpha', 'implementer', 'enqueued', 'idem:noproject', 1, 4, 2, 100, '["read"]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-noproject', 'cpj-' || 'cccccccccccccccc', 'at-noproject', NULL, 0, 't', 'o',
+			'alpha', 'implementer', 'enqueued', 'idem:noproject', 1, 4, 2, 100, '["read"]', '["alpha"]')
 	`)
 }
 
@@ -1899,9 +1945,8 @@ func TestAssignmentIdempotencyKeyIsUnique(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-idem-2', ?, 'at-idem-2', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'github:issue:253', 1, 4, 2, 100, '["read"]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-idem-2', ?, 'at-idem-2', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'github:issue:253', 1, 4, 2, 100, '["read"]', '["alpha"]')
 	`, projectID)
 
 	var n int
@@ -2050,7 +2095,7 @@ func TestAssignmentOperatorGateNamesItsAction(t *testing.T) {
 		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
 		WHERE id = ?`, gated)
 	assignmentMustRefuseWith(t, db, "the awaited action being cleared at the gate",
-		"cannot be cleared", `
+		"is fixed once the gate is reached", `
 		UPDATE agent_tasks SET awaiting_action = NULL WHERE id = ?`, gated)
 
 	// And a recorded approval cannot have its source cleared.
@@ -2060,6 +2105,294 @@ func TestAssignmentOperatorGateNamesItsAction(t *testing.T) {
 	assignmentMustRefuseWith(t, db, "a recorded approval having its revision cleared",
 		"evidence is not rewritten", `
 		UPDATE agent_tasks SET approval_revision = '' WHERE id = ?`, id)
+}
+
+// TestAssignmentRootRecipientMustBeEligible pins the root's allow-list.
+//
+// The DDL says it in so many words: "A root's own recipient must be among
+// them". Without the check, a root addressed to 'alpha' could carry an
+// allow-list of ['bob'] — a root that is addressed to an agent the tree
+// may not target — and every child of it would inherit an allow-list that
+// excludes its own parent.
+//
+// It also closes an ASYMMETRY the second review found: an empty
+// `permitted_operations` was refused for a root, and an empty
+// `eligible_recipients` was accepted. Both are the same misconfiguration.
+func TestAssignmentRootRecipientMustBeEligible(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	// A root whose recipient is not among its own eligible recipients.
+	assignmentMustRefuseWith(t, db, "a root whose recipient is not eligible",
+		"a root's own recipient must be among its eligible recipients", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES ('at-noteligible', ?, 'at-noteligible', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:noteligible', 1, 4, 2, 100, '["read"]', '["bob"]')
+	`, projectID)
+
+	// A root with an EMPTY eligible_recipients.
+	assignmentMustRefuseWith(t, db, "a root with no eligible recipients",
+		"a root's own recipient must be among its eligible recipients", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES ('at-norecipients', ?, 'at-norecipients', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:norecipients', 1, 4, 2, 100, '["read"]', '[]')
+	`, projectID)
+
+	// And the UPDATE path: the allow-list cannot be narrowed to exclude
+	// the root's own recipient.
+	id := insertRootAssignment(t, dm, projectID, "at-eligible", "alpha", "implementer", "idem:eligible")
+	assignmentMustRefuseWith(t, db, "a root's allow-list narrowed to exclude its recipient",
+		"a root's own recipient must be among its eligible recipients", `
+		UPDATE agent_tasks SET eligible_recipients = '["bob"]' WHERE id = ?`, id)
+
+	// Nor can the recipient be moved out of the allow-list.
+	assignmentMustRefuseWith(t, db, "a root's recipient moved out of its allow-list",
+		"a root's own recipient must be among its eligible recipients", `
+		UPDATE agent_tasks SET recipient = 'mallory' WHERE id = ?`, id)
+
+	// The well-formed root is still accepted, and its allow-list names
+	// its recipient.
+	var eligible string
+	if err := db.QueryRow(
+		`SELECT eligible_recipients FROM agent_tasks WHERE id = ?`, id).Scan(&eligible); err != nil {
+		t.Fatalf("read the root: %v", err)
+	}
+	if !strings.Contains(eligible, "alpha") {
+		t.Errorf("the root's eligible recipients are %s, want them to name its recipient", eligible)
+	}
+}
+
+// TestAssignmentGateRecordIsImmutable pins the gate's record.
+//
+// The second review found that the record was only protected against
+// being CLEARED, not against being REWRITTEN: the approval's revision
+// could be re-pointed at a different value, which defeats the staleness
+// comparison against the head revision, and the action the operator is
+// asked to authorise could be swapped for another one.
+//
+// So the rule is now: once the gate is reached, neither record changes —
+// not to a different value, not to nothing.
+func TestAssignmentGateRecordIsImmutable(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-immutable", "alpha", "implementer", "idem:immutable")
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
+	}
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
+		WHERE id = ?`, id)
+
+	// The awaited action cannot be REWRITTEN while the gate is reached.
+	assignmentMustRefuseWith(t, db, "the awaited action rewritten at the gate",
+		"is fixed once the gate is reached", `
+		UPDATE agent_tasks SET awaiting_action = 'merge PR #999' WHERE id = ?`, id)
+
+	// Nor cleared.
+	assignmentMustRefuseWith(t, db, "the awaited action cleared at the gate",
+		"is fixed once the gate is reached", `
+		UPDATE agent_tasks SET awaiting_action = NULL WHERE id = ?`, id)
+
+	// The approval is recorded, and from then on it is EVIDENCE.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET state = 'operator_approved',
+		    approval_action = 'merge PR #259',
+		    approval_revision = 'abc123',
+		    approval_source = 'operator'
+		WHERE id = ?`, id)
+
+	assignmentMustRefuseWith(t, db, "the recorded approval's revision rewritten",
+		"evidence is not rewritten", `
+		UPDATE agent_tasks SET approval_revision = 'totally-different' WHERE id = ?`, id)
+	assignmentMustRefuseWith(t, db, "the recorded approval's action rewritten",
+		"evidence is not rewritten", `
+		UPDATE agent_tasks SET approval_action = 'merge PR #999' WHERE id = ?`, id)
+	assignmentMustRefuseWith(t, db, "the recorded approval's source rewritten",
+		"evidence is not rewritten", `
+		UPDATE agent_tasks SET approval_source = 'mallory' WHERE id = ?`, id)
+
+	// And it cannot be cleared either.
+	assignmentMustRefuseWith(t, db, "the recorded approval's revision cleared",
+		"evidence is not rewritten", `
+		UPDATE agent_tasks SET approval_revision = NULL WHERE id = ?`, id)
+
+	// The action is still fixed after the gate has been passed.
+	assignmentMustRefuseWith(t, db, "the awaited action cleared after the gate",
+		"is fixed once the gate is reached", `
+		UPDATE agent_tasks SET awaiting_action = NULL WHERE id = ?`, id)
+
+	// And the record is intact.
+	var action, revision, source, awaited string
+	if err := db.QueryRow(`
+		SELECT approval_action, approval_revision, approval_source, awaiting_action
+		  FROM agent_tasks WHERE id = ?`, id).
+		Scan(&action, &revision, &source, &awaited); err != nil {
+		t.Fatalf("read the assignment: %v", err)
+	}
+	if action != "merge PR #259" || revision != "abc123" || source != "operator" ||
+		awaited != "merge PR #259" {
+		t.Errorf("the record carries (%q, %q, %q, %q) after the refusals, want the recorded values",
+			action, revision, source, awaited)
+	}
+}
+
+// TestAssignmentIllegalTransitionIsReportedAsSuch pins the ORDER of the
+// checks.
+//
+// The state machine's trigger carries the path check and the gate's field
+// rules, with the path checked FIRST — because the order in which SQLite
+// fires SEPARATE triggers on the same event is not specified. The second
+// review found that the rule was still not true: two SEPARATE triggers
+// (the gate's immutability rules) competed with it, and an illegal
+// transition was reported as a cleared gate.
+//
+// The fix is that the gate's immutability rules fire only while the state
+// is UNCHANGED. So a write that also moves the state is governed by the
+// state machine alone, and the refusal for an illegal transition is an
+// illegal transition.
+func TestAssignmentIllegalTransitionIsReportedAsSuch(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-order", "alpha", "implementer", "idem:order")
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
+	}
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
+		WHERE id = ?`, id)
+
+	// An illegal transition that ALSO touches the awaited action is
+	// reported as an illegal transition, not as a cleared gate.
+	assignmentMustRefuseWith(t, db, "an illegal transition that also clears the action",
+		"illegal state transition", `
+		UPDATE agent_tasks SET state = 'enqueued', awaiting_action = NULL WHERE id = ?`, id)
+}
+
+// TestAssignmentLedgerStatesComeFromTheVocabulary pins the ledger's states.
+//
+// The second review found that `from_state` and `to_state` carried no
+// vocabulary, so the ledger could record a state the state machine does
+// not have. A ledger that can record a state that does not exist is a
+// ledger that can lie.
+func TestAssignmentLedgerStatesComeFromTheVocabulary(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-ledgervocab", "alpha", "implementer", "idem:ledgervocab")
+
+	assignmentMustRefuse(t, db, "a ledger entry with a state outside the vocabulary", `
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type, from_state, to_state)
+		VALUES ('ate-bogus', ?, 0, 'created', 'bogus', 'also-bogus')`, id)
+
+	assignmentMustRefuse(t, db, "a ledger entry whose to_state is outside the vocabulary", `
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type, from_state, to_state)
+		VALUES ('ate-bogus2', ?, 0, 'created', 'enqueued', 'pondering')`, id)
+
+	// And the real states are accepted.
+	assignmentMustExec(t, db, `
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type, from_state, to_state)
+		VALUES ('ate-real', ?, 0, 'created', 'enqueued', 'delivered')`, id)
+}
+
+// TestAssignmentTextColumnsRejectBlobs pins the type of the evidence.
+//
+// The second review found that the `typeof()` guards covered the
+// identifiers and the keys but not the evidence POINTERS and the gate's
+// record — so a BLOB could be stored where a revision belongs. A BLOB
+// compares unequal to every real revision, which is a staleness check
+// that never fires.
+func TestAssignmentTextColumnsRejectBlobs(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	// A BLOB in the gate's action.
+	assignmentMustRefuse(t, db, "a BLOB awaiting action", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients, awaiting_action
+		) VALUES ('at-blobaction', ?, 'at-blobaction', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:blobaction', 1, 4, 2, 100, '["read"]', '["alpha"]', x'616263')
+	`, projectID)
+
+	// A BLOB in an evidence pointer.
+	assignmentMustRefuse(t, db, "a BLOB head revision", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients, head_sha
+		) VALUES ('at-blobsha', ?, 'at-blobsha', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'idem:blobsha', 1, 4, 2, 100, '["read"]', '["alpha"]', x'616263')
+	`, projectID)
+
+	// A BLOB in the ledger's attribution.
+	id := insertRootAssignment(t, dm, projectID, "at-blobactor", "alpha", "implementer", "idem:blobactor")
+	assignmentMustRefuse(t, db, "a BLOB actor address in the ledger", `
+		INSERT INTO agent_task_events (id, task_id, event_index, event_type, actor_address)
+		VALUES ('ate-blobactor', ?, 0, 'created', x'616263')`, id)
+}
+
+// TestAssignmentPermittedOperationsMustBeStrings pins the operation
+// vocabulary.
+//
+// The second review found that the element guard tested `typeof(value)`,
+// and that for a NON-SCALAR element json_each's `value` column is the
+// element's JSON SERIALISATION — which is TEXT. So an object or an array
+// passed as a "permitted operation". The discriminator has to be
+// json_each's TYPE column.
+func TestAssignmentPermittedOperationsMustBeStrings(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	for _, ops := range []string{
+		`["a",{"b":1}]`,  // an object
+		`[["read"]]`,     // an array
+		`[true]`,         // a boolean
+		`[7]`,            // a number
+		`[null]`,         // a null
+	} {
+		assignmentMustRefuseWith(t, db, "a permitted operation that is not a string ("+ops+")",
+			"a permitted operation must be a non-null string", `
+			INSERT INTO agent_tasks (
+				id, project_id, root_id, parent_id, depth, title, objective,
+				recipient, role, state, idempotency_key,
+				max_depth, max_tasks, max_concurrency, max_resource_units,
+				permitted_operations, eligible_recipients
+			) VALUES ('at-badop', ?, 'at-badop', NULL, 0, 't', 'o', 'alpha', 'implementer',
+				'enqueued', 'idem:badop', 1, 4, 2, 100, ?, '["alpha"]')
+		`, projectID, ops)
+	}
+
+	// And the UPDATE path.
+	id := insertRootAssignment(t, dm, projectID, "at-badopupd", "alpha", "implementer", "idem:badopupd")
+	assignmentMustRefuseWith(t, db, "a permitted operation replaced by an object",
+		"a permitted operation must be a non-null string", `
+		UPDATE agent_tasks SET permitted_operations = '["a",{"b":1}]' WHERE id = ?`, id)
+
+	// A plain list of strings is accepted.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET permitted_operations = '["read","write"]' WHERE id = ?`, id)
 }
 
 // TestAssignmentForeignKeysAreEnforced guards the fixtures.
@@ -2218,9 +2551,8 @@ func TestAssignmentIdempotencyControlIsLoadBearing(t *testing.T) {
 		INSERT INTO agent_tasks (
 			id, project_id, root_id, parent_id, depth, title, objective,
 			recipient, role, state, idempotency_key,
-			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations
-		) VALUES ('at-ctrl3b', ?, 'at-ctrl3b', NULL, 0, 't', 'o', 'alpha', 'implementer',
-			'enqueued', 'github:issue:253', 1, 4, 2, 100, '["read"]')
+			max_depth, max_tasks, max_concurrency, max_resource_units, permitted_operations, eligible_recipients) VALUES ('at-ctrl3b', ?, 'at-ctrl3b', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'github:issue:253', 1, 4, 2, 100, '["read"]', '["alpha"]')
 	`, projectID); err != nil {
 		t.Fatalf("with the unique index dropped, the duplicate was still refused (%v) — the "+
 			"suite's idempotency assertion is not testing the index", err)
