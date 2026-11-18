@@ -43,17 +43,19 @@ HOW TO RUN IT
 
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CORE = REPO / "internal/core"
 DDL_FILE = CORE / "migration_agent_assignments.go"
 DB_FILE = CORE / "db.go"
-BACKUP = Path("/tmp/opencode/continuity-001-controls-backup")
+BACKUP = Path(tempfile.gettempdir()) / f"mpm-continuity-001-controls-{os.getpid()}"
 
 # The two files a control may mutate. The migration file is untracked on
 # some revisions, so `git checkout --` cannot restore it; a copy is the
@@ -82,23 +84,31 @@ STRUCTURAL = {
 }
 
 
-def _assert_no_mutation_at_import():
-    """The mutators must not touch the tree until they are CALLED.
-
-    A mutator that is written as a plain function and invoked while the
-    control list is being BUILT mutates the working tree at import time,
-    before the pristine copy is taken — so every measurement is made
-    against a corrupted tree. That happened once, and it is why the
-    harness now checks that the tree is untouched when it loads.
-    """
-    digest = hashlib.sha256(DDL_FILE.read_bytes()).hexdigest()
-    expected = Path(REPO / FILES[0]).read_bytes()
-    if hashlib.sha256(expected).hexdigest() != digest:
-        raise SystemExit("the DDL changed while this harness was loading")
+# The digest of the DDL as it was when this module was LOADED. It is
+# taken here, ABOVE the control list, because the control list is where a
+# mutator written as a plain function would run — and one that ran there
+# would change the tree before the pristine copy was taken, so every
+# measurement would be made against a corrupted tree. That happened once.
+#
+# `snapshot()` compares the live file against this digest, so an
+# import-time mutation is caught rather than measured.
+_IMPORT_DIGEST = hashlib.sha256(DDL_FILE.read_bytes()).hexdigest()
 
 
 def snapshot():
-    """Take the pristine copy from the CURRENT tree."""
+    """Take the pristine copy from the CURRENT tree.
+
+    The copy goes into a FRESH temporary directory, so a run never
+    removes a directory another run put there, and so the tree is left
+    exactly as it was found.
+    """
+    live = hashlib.sha256(DDL_FILE.read_bytes()).hexdigest()
+    if live != _IMPORT_DIGEST:
+        raise SystemExit(
+            "the DDL changed while this harness was loading, so a control "
+            "mutated the tree before the pristine copy was taken — every "
+            "measurement would be against a corrupted tree"
+        )
     if BACKUP.exists():
         shutil.rmtree(BACKUP)
     BACKUP.mkdir(parents=True)
@@ -117,12 +127,9 @@ def restore():
 
 def run_tests():
     """Run the acceptance suite and return the tests that fail."""
-    env = {
-        "CGO_CFLAGS": "-DSQLITE_ENABLE_FTS5=1",
-        "CGO_LDFLAGS": "-lm",
-        "PATH": "/usr/local/go/bin:/usr/bin:/bin",
-        "HOME": "/home/v",
-    }
+    env = dict(os.environ)
+    env["CGO_CFLAGS"] = "-DSQLITE_ENABLE_FTS5=1"
+    env["CGO_LDFLAGS"] = "-lm"
     try:
         p = subprocess.run(
             ["go", "test", "-tags", "fts5", "-count=1", "-v", "-run", TEST_PATTERN, "."],
@@ -286,6 +293,8 @@ CONTROLS = [
     ("the unclaimed-at-creation trigger is removed",
      drop_trigger("trg_agent_tasks_unclaimed_at_creation")),
     ("the id-not-reused trigger is removed", drop_trigger("trg_agent_tasks_id_is_not_reused")),
+    ("the key-not-reused-on-UPDATE trigger is removed",
+     drop_trigger("trg_agent_tasks_key_is_not_reused")),
     ("the tree-shape trigger is removed", drop_trigger("trg_agent_tasks_tree_shape")),
     ("the tree-shape-on-UPDATE trigger is removed",
      drop_trigger("trg_agent_tasks_tree_shape_on_update")),
@@ -360,22 +369,27 @@ def main():
     snapshot()
     restore()
 
-    print("=== BASELINE (nothing removed) ===")
-    failed, notes = run_tests()
-    print(f"  tests that fail: {len(failed)}")
-    for f in failed:
-        print(f"    - {f}")
-    if notes:
-        print("  " + "\n  ".join(notes))
-    if failed:
-        raise SystemExit("the baseline must be GREEN before a control means anything")
+    try:
+        print("=== BASELINE (nothing removed) ===")
+        failed, notes = run_tests()
+        print(f"  tests that fail: {len(failed)}")
+        for f in failed:
+            print(f"    - {f}")
+        if notes:
+            print("  " + "\n  ".join(notes))
+        if failed:
+            raise SystemExit("the baseline must be GREEN before a control means anything")
 
-    for name, mutate in CONTROLS:
-        if args.only and args.only not in name:
-            continue
-        control(name, mutate)
-
-    restore()
+        for name, mutate in CONTROLS:
+            if args.only and args.only not in name:
+                continue
+            control(name, mutate)
+    finally:
+        # The tree is restored on EVERY path, including a failure or a
+        # Ctrl-C: a control run must never leave the checkout mutated.
+        restore()
+        if BACKUP.exists():
+            shutil.rmtree(BACKUP, ignore_errors=True)
     print("\n=== the tree is restored ===")
 
 

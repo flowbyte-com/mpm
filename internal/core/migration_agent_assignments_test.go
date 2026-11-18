@@ -82,10 +82,10 @@ var agentAssignmentIndexes = []string{
 
 // agentAssignmentTriggers are the triggers the DDL creates.
 //
-// The twenty-five triggers carry NINETEEN rules: six rules are split across
+// The twenty-six triggers carry NINETEEN rules: seven rules are split across
 // several triggers so that a test can isolate one clause from another
-// (the tree shape, the root's recipient, the two lists, the claim
-// discipline and the operator's gate).
+// (the id and the key, the tree shape, the root's recipient, the two lists,
+// the claim discipline and the operator's gate).
 var agentAssignmentTriggers = []string{
 	"trg_agent_task_events_id_is_not_reused",
 	"trg_agent_task_events_monotonic",
@@ -101,6 +101,7 @@ var agentAssignmentTriggers = []string{
 	"trg_agent_tasks_eligible_recipients_update",
 	"trg_agent_tasks_id_is_not_reused",
 	"trg_agent_tasks_initial_state",
+	"trg_agent_tasks_key_is_not_reused",
 	"trg_agent_tasks_not_deletable",
 	"trg_agent_tasks_owner_changes_only_on_claim",
 	"trg_agent_tasks_permitted_operations_insert",
@@ -388,7 +389,7 @@ func TestAgentAssignmentDDLIsPinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(agentAssignmentDDL))
 	got := hex.EncodeToString(sum[:])
 
-	const want = "8bcf86cf5c3dca36e40d035539e30a3dc77df68cd2cfb53e4af34ffb00014603"
+	const want = "f760d233724e39278cbaca2ec548e9c5736a56f7c7c514338aa881d3c045d5c8"
 	if got != want {
 		t.Errorf("the DDL's SHA-256 is %s but the pin says %s. If the DDL changed on purpose, "+
 			"recompute the hash and say so in the commit message; if it did not, the storage has "+
@@ -428,7 +429,7 @@ func TestAgentAssignmentDDLIsTheOnlyDefinition(t *testing.T) {
 // A disposable file-backed WAL database is built, a representative row is
 // written into `memories`, and the assignment objects are REMOVED so the
 // migration has real work to do. The migration is then run against it: the
-// two tables, the seven indexes and the twenty-five triggers exist BY NAME,
+// two tables, the seven indexes and the twenty-six triggers exist BY NAME,
 // the sentinel is recorded exactly once, the pre-existing row is untouched,
 // and the set of schema objects changed by the migration is EXACTLY the
 // assignment objects.
@@ -2604,6 +2605,74 @@ func TestAssignmentCannotBeReplaced(t *testing.T) {
 	if eventType != "created" {
 		t.Errorf("the ledger entry is %q after the refused REPLACE, want created", eventType)
 	}
+}
+
+// TestAssignmentCannotBeReplacedByAnUpdate pins the OTHER half of the
+// replacement hole.
+//
+// The fourth review found that the INSERT guard was not enough: an
+// `UPDATE OR REPLACE` resolves a uniqueness conflict by DELETING the
+// conflicting row, and SQLite does not fire the DELETE triggers for that
+// implicit delete either — unless the recursive_triggers pragma is on,
+// which MPM does not set.
+//
+// So a CLAIMED assignment could be destroyed by an UPDATE that merely set
+// a colliding idempotency key: its id was freed, and a stale token
+// became current again. That is exactly the hole the first review closed,
+// reachable by a different statement.
+//
+// The defence is a BEFORE UPDATE trigger that refuses a change that would
+// collide with another row's id or idempotency key: a BEFORE trigger can
+// see the collision before the statement runs, so the conflict is refused
+// rather than resolved.
+func TestAssignmentCannotBeReplacedByAnUpdate(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	// The victim: claimed, so it holds an epoch and an owner.
+	victim := insertRootAssignment(t, dm, projectID, "at-victim", "alpha", "implementer", "key-victim")
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET claim_epoch = claim_epoch + 1, owner = 'alpha', lease_expires_at = 1900000000
+		WHERE id = ?`, victim)
+
+	// The other row, which will try to take the victim's key.
+	other := insertRootAssignment(t, dm, projectID, "at-other", "alpha", "implementer", "key-other")
+
+	assignmentMustRefuse(t, db, "a claimed assignment destroyed by an UPDATE OR REPLACE", `
+		UPDATE OR REPLACE agent_tasks SET idempotency_key = 'key-victim' WHERE id = ?`, other)
+
+	// The victim is intact: its row, its epoch and its owner.
+	var epoch int64
+	var owner sql.NullString
+	if err := db.QueryRow(
+		`SELECT claim_epoch, owner FROM agent_tasks WHERE id = ?`, victim,
+	).Scan(&epoch, &owner); err != nil {
+		t.Fatalf("read the victim: %v", err)
+	}
+	if epoch != 1 || !owner.Valid || owner.String != "alpha" {
+		t.Errorf("the victim carries (epoch=%d, owner=%v) after the refused UPDATE, "+
+			"want (1, alpha)", epoch, owner)
+	}
+
+	// And the id cannot be reused afterwards.
+	assignmentMustRefuse(t, db, "the victim's id re-used after the refused UPDATE", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES (?, ?, ?, NULL, 0, 't', 'o', 'alpha', 'implementer', 'enqueued', ?,
+			1, 4, 2, 100, '["read"]', '["alpha"]')
+	`, victim, projectID, victim, "key-victim-2")
+
+	// An ordinary key change still works — the rule is about a COLLISION,
+	// not about changing a key.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET idempotency_key = 'key-other-2' WHERE id = ?`, other)
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET idempotency_key = 'key-other-2' WHERE id = ?`, other)
 }
 
 // TestAssignmentGateRecordIsImmutableWhileLeavingTheGate pins the gate's

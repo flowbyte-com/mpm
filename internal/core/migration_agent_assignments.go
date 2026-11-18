@@ -113,13 +113,14 @@ import (
 // ------------------------------------
 // The contract's invariants are not expressible as column CHECK constraints,
 // and each of them is the difference between a coordination substrate and a
-// convention. There are NINETEEN rules, carried by TWENTY-FIVE triggers — six
+// convention. There are NINETEEN rules, carried by TWENTY-SIX triggers — seven
 // of the rules are split across several triggers, so that a test can
 // isolate one clause from another. The rules are:
 //
 //   1  an assignment is created in the 'enqueued' state
 //   2  an assignment is created UNCLAIMED: epoch 0, no owner, no lease
-//   3  an assignment's id and its idempotency key are NEVER reused
+//   3  an assignment's id and its idempotency key are NEVER reused — on
+//      the INSERT path and on the UPDATE path
 //   4  the delegation tree is a tree: the root is a root, the parent is in
 //      the same tree at one level above, and nobody is their own parent —
 //      on the INSERT path and on the UPDATE path
@@ -495,6 +496,7 @@ BEGIN
 END;
 
 -- ── Rule 3: an assignment's id and its idempotency key are NEVER reused ───
+-- (the INSERT path; the UPDATE path is below)
 --
 -- An INSERT OR REPLACE is DELETE + INSERT. SQLite does NOT fire the DELETE
 -- triggers for REPLACE's implicit delete unless the recursive_triggers
@@ -521,6 +523,28 @@ FOR EACH ROW WHEN EXISTS (
     SELECT 1 FROM agent_tasks t
      WHERE t.id = NEW.id
         OR t.idempotency_key = NEW.idempotency_key
+)
+BEGIN
+    SELECT RAISE(ABORT, 'agent_tasks: an assignment''s id and its idempotency key are never reused');
+END;
+
+-- The same rule on the UPDATE path.
+--
+-- An UPDATE OR REPLACE is the other half of the hole the INSERT guard
+-- closes. An UPDATE OR REPLACE resolves a uniqueness conflict by
+-- DELETING the conflicting row, and SQLite does not fire the DELETE
+-- triggers for that implicit delete either — so without this trigger a
+-- claimed assignment could be destroyed by an UPDATE that merely set a
+-- colliding key, its id freed, and a stale token made current again.
+--
+-- A BEFORE UPDATE trigger can see the collision before the statement
+-- runs, so the conflict is refused rather than resolved.
+CREATE TRIGGER IF NOT EXISTS trg_agent_tasks_key_is_not_reused
+BEFORE UPDATE OF id, idempotency_key ON agent_tasks
+FOR EACH ROW WHEN EXISTS (
+    SELECT 1 FROM agent_tasks t
+     WHERE t.id <> OLD.id
+       AND (t.id = NEW.id OR t.idempotency_key = NEW.idempotency_key)
 )
 BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: an assignment''s id and its idempotency key are never reused');
@@ -715,7 +739,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: an eligible recipient must be a non-null string');
 END;
 
--- ── Rule 6: the state machine is ROLE-AWARE ───────────────────────────────
+-- ── Rule 9: the state machine is ROLE-AWARE ───────────────────────────────
 --
 -- An assignment moves forward through a fixed path, and the path differs by
 -- role: an implementer's assignment reaches 'review_passed' — and only
@@ -816,7 +840,7 @@ BEGIN
        AND NEW.approval_action IS NOT NEW.awaiting_action;
 END;
 
--- ── Rule 7: the claim discipline ──────────────────────────────────────────
+-- ── Rules 10, 11 and 12: the claim discipline ─────────────────────────────
 --
 -- The claim epoch advances by EXACTLY ONE, a claim sets an owner and a
 -- lease, and the owner changes only on a claim. So the epoch cannot be
@@ -864,7 +888,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: only a claim may change the owner');
 END;
 
--- ── Rule 8: the role is IMMUTABLE ─────────────────────────────────────────
+-- ── Rule 13: the role is IMMUTABLE ────────────────────────────────────────
 --
 -- The transition path is selected by OLD.role. If the role were mutable, a
 -- relabel would select a DIFFERENT path — and a role-only write would
@@ -877,7 +901,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_tasks: the role is immutable');
 END;
 
--- ── Rule 9: the gate's record is IMMUTABLE once the gate is reached ──────
+-- ── Rule 14: the gate's record is IMMUTABLE once the gate is reached ──────
 --
 -- The transition INTO the gate must name the exact action, and the
 -- transition INTO the approval must name the action, the revision and the
@@ -982,7 +1006,7 @@ BEGIN
     SELECT RAISE(ABORT, 'agent_task_events: the event index must be strictly greater than the current maximum');
 END;
 
--- ── Rules 12 and 13: the ledger is APPEND-ONLY ────────────────────────────
+-- ── Rules 18 and 19: the ledger is APPEND-ONLY ────────────────────────────
 CREATE TRIGGER IF NOT EXISTS trg_agent_task_events_no_update
 BEFORE UPDATE ON agent_task_events
 BEGIN

@@ -2900,7 +2900,7 @@ This section describes **PR 1 of six**: the storage only. No API, no CLI, no age
 
 #### What PR 1 adds
 
-Two **additive** tables, seven indexes and twenty-five triggers. No existing table, row, index or trigger is modified.
+Two **additive** tables, seven indexes and twenty-six triggers. No existing table, row, index or trigger is modified.
 
 | table | what it holds |
 |---|---|
@@ -2948,11 +2948,13 @@ The fence against a **stale** owner is the `WHERE` clause of the writing stateme
 
 `INSERT OR REPLACE` is DELETE + INSERT, so it defeats every rule that is enforced by a `BEFORE UPDATE` or a `BEFORE DELETE` trigger: the update triggers never fire, and SQLite does not fire the delete triggers for REPLACE's implicit delete unless the `recursive_triggers` pragma is enabled, which MPM does not enable. The storage therefore refuses an INSERT whose id or whose idempotency key already exists, and an INSERT into the ledger whose id or whose `(task, index)` pair already exists. SQLite runs the insert trigger **before** the conflict resolution, so the conflicting row is still there and the replacement is refused as a whole: the existing row survives with its role, its state, its lease, its claim epoch and its approval record intact.
 
-The ledger's ids and indexes are guarded the same way, so a ledger entry cannot be destroyed by a replacement, and the ledger's append-only property holds against an ordinary SQL statement and not only against an explicit `UPDATE` or `DELETE`.
+`UPDATE OR REPLACE` is the other half of the same hole: it resolves a uniqueness conflict by **deleting** the conflicting row, and the delete triggers do not fire for that implicit delete either — so without a guard a **claimed** assignment could be destroyed by an UPDATE that merely set a colliding idempotency key, its id freed and a stale token made current again. The storage therefore also refuses an UPDATE that would collide with another row's id or idempotency key. A BEFORE UPDATE trigger sees the collision before the statement runs, so the conflict is refused rather than resolved.
+
+The ledger's ids and indexes are guarded the same way, so a ledger entry cannot be destroyed by a replacement in either form, and the ledger's append-only property holds against an ordinary SQL statement and not only against an explicit `UPDATE` or `DELETE`.
 
 #### What the database enforces
 
-Twenty-five properties are enforced by the schema itself rather than by convention — the creation state, the unclaimed creation, the refusal to reuse an id or a key, the tree's shape on both write paths, the depth's immutability, the role-aware state machine, the universal cancellation, the operator's gate and its approval record, the epoch discipline, the owner discipline, the root/child budget shape, the two lists' element types, the ledger's monotonicity, append-only nature and state vocabulary, the refusal to delete anything with children or a ledger, and the type of every identifier, key, number, pointer and JSON column.
+Twenty-seven properties are enforced by the schema itself rather than by convention — the creation state, the unclaimed creation, the refusal to reuse an id or a key on either the insert or the update path, the tree's shape on both write paths, the depth's immutability, the role-aware state machine, the universal cancellation, the operator's gate and its approval record, the epoch discipline, the owner discipline, the root/child budget shape, the one-project containment, the two lists' element types, the ledger's monotonicity, append-only nature and state vocabulary, the refusal to delete anything with children or a ledger, and the type of every identifier, key, number, pointer and JSON column.
 
 `docs/dev/continuity-001-assignment-schema.md` lists them one by one, **and names the six that the schema does not enforce** — the fence, the recipient membership, the depth limit, the tree budgets, the findings capture and the authorisation of a root — so that "the schema enforces it" and "the API enforces it" are never confused. It also records the two closed vocabularies — the role and the event type — and the fact that widening a `CHECK` on a live table in SQLite means rebuilding that table, so a later PR that needs a third role must plan for a rebuild.
 
@@ -2964,7 +2966,7 @@ They are created by a **migration**, not by `BaseTables`, so `attachShared` neve
 
 #### The restore allow-list
 
-Both tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **accepts** a dump that contains them. Without that registration every backup taken after this change would be rejected — a loud, immediate failure. The acceptance is proved through the **command**: `cmd/mpm/handlers_restore_assignment_test.go` builds a dump from the live schema — the real DDL of every table, index and trigger, plus real rows — and requires `mpm restore-db` to accept it and to restore the tables, the indexes, the triggers and the rows. As with the Continuity tables, the registration also means an **old** binary refuses a dump taken by the new binary: the allow-list is not weakened to hide that.
+Both tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **accepts** a dump that contains them. Without that registration every backup taken after this change would be rejected — a loud, immediate failure. The acceptance is proved through the **command**: `cmd/mpm/handlers_restore_assignment_test.go` builds a dump from the live schema — the real DDL of every table, index and trigger, plus real rows — and requires `mpm restore-db` to accept it and to restore the tables, the indexes, the triggers and the rows. A second test in that file proves the other shape: the one the **backup** command writes, because `mpm backup` is `sqlite3 .dump` — the data before the indexes, with the foreign keys turned off for the duration. Both restore. As with the Continuity tables, the registration also means an **old** binary refuses a dump taken by the new binary: the allow-list is not weakened to hide that.
 
 ---
 

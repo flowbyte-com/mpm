@@ -147,8 +147,10 @@ func seedAssignmentRows(t *testing.T, db *sql.DB) {
 // and trigger, plus one INSERT per row.
 //
 // The INSERT statements are rendered by SQLite itself (quote() per
-// column, group_concat for the value list), so a NULL stays a NULL,
-// an integer stays an integer and a JSON string keeps its quotes.
+// column, group_concat for the value list), so a NULL stays a NULL and a
+// JSON string keeps its quotes. NOTE that quote() renders EVERY value as
+// TEXT — an integer comes back as '0' — and the column's affinity is
+// what restores the type when the row is inserted again.
 func buildAssignmentDump(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	var b strings.Builder
@@ -346,4 +348,157 @@ func TestHandleRestoreDB_AcceptsAssignmentDump(t *testing.T) {
 	)
 	require.NoError(t, row.Scan(&eventType))
 	require.Equal(t, "created", eventType)
+}
+
+// buildAssignmentDumpInDumpOrder renders the dump in the shape
+// `sqlite3 .dump` produces — which is the shape `mpm backup` writes,
+// because that command IS `sqlite3 .dump`.
+//
+// The differences from buildAssignmentDump are all in the ORDER:
+//
+//   - the dump opens with `PRAGMA foreign_keys=OFF;` and
+//     `BEGIN TRANSACTION;`;
+//   - each table's DATA follows its own CREATE TABLE, so the rows are
+//     inserted BEFORE the indexes and before the triggers;
+//   - the indexes and the triggers come at the end.
+//
+// That order matters, and the reason is the composite foreign key:
+// agent_tasks references agent_tasks(id, project_id), and SQLite checks a
+// composite foreign key against its parent-key UNIQUE index at DML time.
+// With the pragma off — as the real dump has it — the rows insert
+// cleanly; with the pragma on, the same order fails with "foreign key
+// mismatch".
+//
+// The first test in this file uses the ORDER that proves the rows satisfy
+// the schema (indexes and triggers first, then the rows). This one proves
+// the other thing: that a dump in the shape the backup command actually
+// writes restores.
+func buildAssignmentDumpInDumpOrder(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("PRAGMA foreign_keys=OFF;\n")
+	b.WriteString("BEGIN TRANSACTION;\n")
+
+	// The tables, each followed by its own rows.
+	for _, table := range assignmentRestoreTables {
+		var ddl string
+		row := db.QueryRow(
+			"SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table,
+		)
+		require.NoError(t, row.Scan(&ddl), "the table %s must exist", table)
+		require.NotEmpty(t, ddl)
+		b.WriteString(ddl)
+		b.WriteString(";\n")
+
+		cols := assignmentDumpColumns(t, db, table)
+		require.NotEmpty(t, cols, "the table %s must have columns", table)
+
+		quoted := make([]string, 0, len(cols))
+		values := make([]string, 0, len(cols))
+		for _, c := range cols {
+			quoted = append(quoted, `"`+c+`"`)
+			values = append(values, `quote("`+c+`")`)
+		}
+		q := fmt.Sprintf(
+			`SELECT 'INSERT INTO "%s" (%s) VALUES (' || group_concat(%s, ',') || ');' FROM "%s"`,
+			table, strings.Join(quoted, ", "), strings.Join(values, " || ',' || "), table,
+		)
+		rows, err := db.Query(q)
+		require.NoError(t, err, "render the rows of %s", table)
+		for rows.Next() {
+			var stmt string
+			require.NoError(t, rows.Scan(&stmt))
+			b.WriteString(stmt)
+			b.WriteString("\n")
+		}
+		require.NoError(t, rows.Err())
+		rows.Close()
+	}
+
+	// The indexes, then the triggers.
+	for _, index := range assignmentRestoreIndexes {
+		var ddl string
+		row := db.QueryRow(
+			"SELECT sql FROM sqlite_master WHERE type='index' AND name=?", index,
+		)
+		require.NoError(t, row.Scan(&ddl), "the index %s must exist", index)
+		require.NotEmpty(t, ddl)
+		b.WriteString(ddl)
+		b.WriteString(";\n")
+	}
+	for _, trigger := range assignmentRestoreTriggers {
+		var ddl string
+		row := db.QueryRow(
+			"SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", trigger,
+		)
+		require.NoError(t, row.Scan(&ddl), "the trigger %s must exist", trigger)
+		require.NotEmpty(t, ddl)
+		b.WriteString(ddl)
+		b.WriteString(";\n")
+	}
+
+	b.WriteString("COMMIT;\n")
+	return b.String()
+}
+
+// TestHandleRestoreDB_AcceptsAssignmentDumpInDumpOrder — AT8, in the
+// shape the backup command actually writes.
+//
+// `mpm backup` IS `sqlite3 .dump`, so the dump that has to restore is
+// the one `.dump` produces: the data before the indexes, and the foreign
+// keys turned off for the duration. This test builds exactly that shape
+// and requires `mpm restore-db` to accept it and to restore the rows.
+//
+// The fourth review found that the first test's dump was NOT that shape,
+// and that the shape it used would fail under the handler's conditions if
+// the foreign keys were on. Both statements are true, and the second one
+// is the reason this test exists: the storage has to survive the backup
+// the operator actually takes.
+func TestHandleRestoreDB_AcceptsAssignmentDumpInDumpOrder(t *testing.T) {
+	dm := setupRestoreSafetyTest(t)
+	dbPath := dm.DBPath()
+	require.NotEmpty(t, dbPath)
+
+	seedAssignmentRows(t, dm.SQLDB())
+
+	dump := buildAssignmentDumpInDumpOrder(t, dm.SQLDB())
+	dumpPath := filepath.Join(t.TempDir(), "assignment-dump-order.sql")
+	require.NoError(t, os.WriteFile(dumpPath, []byte(dump), 0o600))
+
+	// The dump must be in the shape the backup command writes.
+	require.Contains(t, dump, "PRAGMA foreign_keys=OFF;")
+	require.Contains(t, dump, "BEGIN TRANSACTION;")
+
+	_ = dm.Close()
+	dbManager = nil
+	dbManagerInitErr = nil
+	dbManagerOnce = sync.Once{}
+
+	driveStdinYes(t)
+
+	exit := handleRestoreDB([]string{"mpm", dumpPath})
+	require.Equal(t, 0, exit,
+		"mpm restore-db must accept a dump in the shape `sqlite3 .dump` "+
+			"produces, because that is the shape `mpm backup` writes")
+
+	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000")
+	require.NoError(t, err)
+	defer db.Close()
+
+	// The tables are there, and so are the rows.
+	for _, table := range []string{"agent_tasks", "agent_task_events"} {
+		var n int
+		row := db.QueryRow(
+			"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table,
+		)
+		require.NoError(t, row.Scan(&n))
+		require.Equal(t, 1, n, "the restored database must carry the table %s", table)
+	}
+	var n int
+	row := db.QueryRow(`SELECT COUNT(*) FROM agent_tasks WHERE id = ?`, "at-0123456789abcdef")
+	require.NoError(t, row.Scan(&n))
+	require.Equal(t, 1, n, "the restored database must carry the assignment's row")
+	row = db.QueryRow(`SELECT COUNT(*) FROM agent_task_events WHERE id = ?`, "ate-0123456789abcdef")
+	require.NoError(t, row.Scan(&n))
+	require.Equal(t, 1, n, "the restored database must carry the ledger entry")
 }
