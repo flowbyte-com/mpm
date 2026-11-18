@@ -82,10 +82,10 @@ var agentAssignmentIndexes = []string{
 
 // agentAssignmentTriggers are the triggers the DDL creates.
 //
-// The twenty-six triggers carry NINETEEN rules: seven rules are split across
-// several triggers so that a test can isolate one clause from another
-// (the id and the key, the tree shape, the root's recipient, the two lists,
-// the claim discipline and the operator's gate).
+// The twenty-nine triggers carry TWENTY-THREE rules: six rules are split
+// across several triggers so that a test can isolate one clause from
+// another (the tree shape, the root's recipient, the two lists, the claim
+// discipline and the operator's gate).
 var agentAssignmentTriggers = []string{
 	"trg_agent_task_events_id_is_not_reused",
 	"trg_agent_task_events_monotonic",
@@ -94,14 +94,17 @@ var agentAssignmentTriggers = []string{
 	"trg_agent_tasks_approval_is_immutable",
 	"trg_agent_tasks_awaiting_action_is_immutable",
 	"trg_agent_tasks_claim_discipline",
+	"trg_agent_tasks_claim_needs_a_live_assignment",
 	"trg_agent_tasks_claim_sets_lease",
 	"trg_agent_tasks_claim_sets_owner",
 	"trg_agent_tasks_depth_is_immutable",
 	"trg_agent_tasks_eligible_recipients_insert",
 	"trg_agent_tasks_eligible_recipients_update",
+	"trg_agent_tasks_id_is_immutable",
 	"trg_agent_tasks_id_is_not_reused",
 	"trg_agent_tasks_initial_state",
-	"trg_agent_tasks_key_is_not_reused",
+	"trg_agent_tasks_key_is_immutable",
+	"trg_agent_tasks_lease_changes_only_on_a_claim",
 	"trg_agent_tasks_not_deletable",
 	"trg_agent_tasks_owner_changes_only_on_claim",
 	"trg_agent_tasks_permitted_operations_insert",
@@ -389,7 +392,7 @@ func TestAgentAssignmentDDLIsPinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(agentAssignmentDDL))
 	got := hex.EncodeToString(sum[:])
 
-	const want = "f760d233724e39278cbaca2ec548e9c5736a56f7c7c514338aa881d3c045d5c8"
+	const want = "c109c397722d8a6f1df19631643bd8a0882668ad3fb7a967f887f18cd8739169"
 	if got != want {
 		t.Errorf("the DDL's SHA-256 is %s but the pin says %s. If the DDL changed on purpose, "+
 			"recompute the hash and say so in the commit message; if it did not, the storage has "+
@@ -429,7 +432,7 @@ func TestAgentAssignmentDDLIsTheOnlyDefinition(t *testing.T) {
 // A disposable file-backed WAL database is built, a representative row is
 // written into `memories`, and the assignment objects are REMOVED so the
 // migration has real work to do. The migration is then run against it: the
-// two tables, the seven indexes and the twenty-six triggers exist BY NAME,
+// two tables, the seven indexes and the twenty-nine triggers exist BY NAME,
 // the sentinel is recorded exactly once, the pre-existing row is untouched,
 // and the set of schema objects changed by the migration is EXACTLY the
 // assignment objects.
@@ -938,7 +941,7 @@ func TestAgentAssignmentAT8RestoreAllowList(t *testing.T) {
 	// 2. a dump carrying the REAL assignment schema is accepted.
 	//
 	// The dump carries the REAL DDL of every assignment object — the two
-	// tables, the seven indexes and the twenty-five triggers, exactly as
+	// tables, the seven indexes and the twenty-nine triggers, exactly as
 	// `sqlite3 .dump` would emit them.
 	//
 	// What this test does NOT do is prove that the dump RESTORES. The
@@ -1235,7 +1238,8 @@ func TestAssignmentCancellationIsUniversal(t *testing.T) {
 	assignmentMustExec(t, db, `
 		UPDATE agent_tasks
 		SET state = 'operator_approved', approval_action = 'merge PR #259',
-		    approval_revision = 'abc123', approval_source = 'operator'
+		    approval_revision = 'abc123', approval_source = 'operator',
+		    approval_evidence = 'ev://x'
 		WHERE id = ?`, approved)
 	assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'cancelled' WHERE id = ?`, approved)
 
@@ -2070,7 +2074,7 @@ func TestAssignmentOperatorGateNamesItsAction(t *testing.T) {
 	// The approval refuses a transition that names no action, revision or
 	// source.
 	assignmentMustRefuseWith(t, db, "an approval with no named action, revision or source",
-		"must name its action, its revision and its source", `
+		"must name its action, its revision, its source and its evidence", `
 		UPDATE agent_tasks SET state = 'operator_approved' WHERE id = ?`, id)
 
 	// With all three, and the evidence pointer, it lands.
@@ -2222,7 +2226,8 @@ func TestAssignmentGateRecordIsImmutable(t *testing.T) {
 		SET state = 'operator_approved',
 		    approval_action = 'merge PR #259',
 		    approval_revision = 'abc123',
-		    approval_source = 'operator'
+		    approval_source = 'operator',
+		    approval_evidence = 'ev://x'
 		WHERE id = ?`, id)
 
 	assignmentMustRefuseWith(t, db, "the recorded approval's revision rewritten",
@@ -2621,10 +2626,16 @@ func TestAssignmentCannotBeReplaced(t *testing.T) {
 // became current again. That is exactly the hole the first review closed,
 // reachable by a different statement.
 //
-// The defence is a BEFORE UPDATE trigger that refuses a change that would
-// collide with another row's id or idempotency key: a BEFORE trigger can
-// see the collision before the statement runs, so the conflict is refused
-// rather than resolved.
+// The fifth review found that a COLLISION guard is not enough, because the
+// id and the key were still MUTABLE: a row could be RENAMED, which frees
+// the old id without any collision at all — and a fresh row could take
+// that freed id, come back at epoch 0, and be claimed at epoch 1, so the
+// previous holder's stale token matched the NEW row.
+//
+// The defence is IMMUTABILITY: neither the id nor the key changes. That
+// closes the hole from both sides — a rename is refused, and a collision
+// cannot arise, because the only two columns a uniqueness conflict can be
+// resolved on are the two that no longer move.
 func TestAssignmentCannotBeReplacedByAnUpdate(t *testing.T) {
 	dm := NewTestLocalOnlyDM(t)
 	db := dm.SQLDB()
@@ -2667,12 +2678,287 @@ func TestAssignmentCannotBeReplacedByAnUpdate(t *testing.T) {
 			1, 4, 2, 100, '["read"]', '["alpha"]')
 	`, victim, projectID, victim, "key-victim-2")
 
-	// An ordinary key change still works — the rule is about a COLLISION,
-	// not about changing a key.
-	assignmentMustExec(t, db, `
+	// The key does not move either. A key that could be changed would
+	// free the old one, and re-dispatching the same logical assignment
+	// with it would SUCCEED — leaving two logical assignments for one
+	// dispatch, which is the duplicate suppression the whole rule
+	// exists for.
+	assignmentMustRefuseWith(t, db, "the key changed", "the idempotency key is immutable", `
 		UPDATE agent_tasks SET idempotency_key = 'key-other-2' WHERE id = ?`, other)
+
+	// And the id does not move — the fifth review's blocking finding.
+	assignmentMustRefuseWith(t, db, "the id changed", "the id is immutable", `
+		UPDATE agent_tasks SET id = 'at-renamed' WHERE id = ?`, other)
+
+	// A write of the SAME value is not a change, so it is allowed.
 	assignmentMustExec(t, db, `
-		UPDATE agent_tasks SET idempotency_key = 'key-other-2' WHERE id = ?`, other)
+		UPDATE agent_tasks SET idempotency_key = 'key-other' WHERE id = ?`, other)
+}
+
+// TestAssignmentIdIsImmutable pins the fifth review's blocking finding.
+//
+// The fourth review's fix refused a uniqueness COLLISION on the UPDATE
+// path, and the fifth review found the hole behind it: the id was still
+// MUTABLE, so a row could be RENAMED. A rename frees the old id without
+// any collision at all, and a fresh row can take that freed id, come back
+// at epoch 0, and be claimed at epoch 1 — so the previous holder's stale
+// token (`WHERE id = ? AND claim_epoch = ?`) matches the NEW row.
+//
+// The test executes that chain end to end.
+func TestAssignmentIdIsImmutable(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	root := insertRootAssignment(t, dm, projectID, "at-idroot", "alpha", "implementer", "idem:idroot")
+	child := insertChildAssignment(t, dm, projectID, "at-idchild", root, root, "charlie", "idem:idchild")
+
+	// The child is claimed by "charlie" at epoch 1.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET claim_epoch = claim_epoch + 1, owner = 'charlie', lease_expires_at = 1900000000
+		WHERE id = ?`, child)
+
+	// The RENAME is refused.
+	assignmentMustRefuseWith(t, db, "a claimed assignment renamed", "the id is immutable", `
+		UPDATE agent_tasks SET id = 'at-idchild-2' WHERE id = ?`, child)
+
+	// So the old id was never freed, and a second assignment cannot
+	// take it.
+	assignmentMustRefuse(t, db, "the id re-used", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key
+		) VALUES (?, ?, ?, ?, 1, 't', 'o', 'delta', 'implementer', 'enqueued', ?)
+	`, child, projectID, root, root, "idem:idchild-2")
+
+	// And the stale holder's fenced write still cannot land: the row it
+	// names is the same row it fenced, and the epoch has not moved.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'delivered'
+		WHERE id = ? AND claim_epoch = 1`, child)
+	var state string
+	var epoch int64
+	if err := db.QueryRow(
+		`SELECT state, claim_epoch FROM agent_tasks WHERE id = ?`, child,
+	).Scan(&state, &epoch); err != nil {
+		t.Fatalf("read the child: %v", err)
+	}
+	if state != "delivered" || epoch != 1 {
+		t.Errorf("the child carries (state=%q, epoch=%d), want (delivered, 1)", state, epoch)
+	}
+
+	// A stale write lands on NOTHING: the epoch has moved on, so the
+	// fence matches no row. This is not a refusal — a UPDATE that
+	// matches no row is a no-op — and it is the difference between a
+	// fence and an error.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET claim_epoch = claim_epoch + 1, owner = 'delta', lease_expires_at = 1900000001
+		WHERE id = ?`, child)
+	res, err := db.Exec(`
+		UPDATE agent_tasks SET state = 'acknowledged'
+		WHERE id = ? AND claim_epoch = 1`, child)
+	if err != nil {
+		t.Fatalf("the stale holder's fenced write failed outright: %v", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		t.Fatalf("read the affected rows: %v", err)
+	}
+	if affected != 0 {
+		t.Errorf("the stale holder's fenced write touched %d rows, want 0", affected)
+	}
+	if err := db.QueryRow(
+		`SELECT state FROM agent_tasks WHERE id = ?`, child).Scan(&state); err != nil {
+		t.Fatalf("read the child: %v", err)
+	}
+	if state != "delivered" {
+		t.Errorf("the child's state is %q after the stale write, want delivered", state)
+	}
+}
+
+// TestAssignmentKeyIsImmutable pins the duplicate suppression.
+//
+// The fifth review found the idempotency key MUTABLE, and the acceptance
+// suite even blessed the move. A key that could be changed would free the
+// old one — and re-dispatching the same logical assignment with it would
+// SUCCEED, leaving two logical assignments for one dispatch. That is the
+// duplicate suppression the rule exists for, defeated at the storage
+// level.
+func TestAssignmentKeyIsImmutable(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-key", "alpha", "implementer", "github:issue:253")
+
+	assignmentMustRefuseWith(t, db, "the key changed", "the idempotency key is immutable", `
+		UPDATE agent_tasks SET idempotency_key = 'github:issue:254' WHERE id = ?`, id)
+
+	// The original key still refuses a second dispatch.
+	assignmentMustRefuse(t, db, "the same dispatch twice", `
+		INSERT INTO agent_tasks (
+			id, project_id, root_id, parent_id, depth, title, objective,
+			recipient, role, state, idempotency_key,
+			max_depth, max_tasks, max_concurrency, max_resource_units,
+			permitted_operations, eligible_recipients
+		) VALUES ('at-key-2', ?, 'at-key-2', NULL, 0, 't', 'o', 'alpha', 'implementer',
+			'enqueued', 'github:issue:253', 1, 4, 2, 100, '["read"]', '["alpha"]')
+	`, projectID)
+
+	// A write of the SAME key is not a change.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET idempotency_key = 'github:issue:253' WHERE id = ?`, id)
+}
+
+// TestAssignmentTerminalStatesCannotBeClaimed pins the claim's liveness.
+//
+// The fifth review found that the claim discipline never looked at the
+// state, so a CANCELLED assignment — or one the operator had approved —
+// could be claimed: a lease on nothing, advancing the epoch of a row that
+// will never be worked on again, and that epoch is the fence.
+func TestAssignmentTerminalStatesCannotBeClaimed(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	// A cancelled assignment.
+	cancelled := insertRootAssignment(t, dm, projectID, "at-cancelled", "alpha", "implementer", "idem:cancelled")
+	assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'cancelled' WHERE id = ?`, cancelled)
+	assignmentMustRefuseWith(t, db, "a cancelled assignment claimed",
+		"only a live assignment can be claimed", `
+		UPDATE agent_tasks SET claim_epoch = claim_epoch + 1, owner = 'beta', lease_expires_at = 1900000000
+		WHERE id = ?`, cancelled)
+
+	// An approved assignment.
+	approved := insertRootAssignment(t, dm, projectID, "at-approved", "alpha", "implementer", "idem:approved")
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, approved)
+	}
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
+		WHERE id = ?`, approved)
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET state = 'operator_approved', approval_action = 'merge PR #259',
+		    approval_revision = 'abc123', approval_source = 'operator',
+		    approval_evidence = 'ev://approved'
+		WHERE id = ?`, approved)
+	assignmentMustRefuseWith(t, db, "an approved assignment claimed",
+		"only a live assignment can be claimed", `
+		UPDATE agent_tasks SET claim_epoch = claim_epoch + 1, owner = 'beta', lease_expires_at = 1900000000
+		WHERE id = ?`, approved)
+
+	// And a claim that arrives with the cancellation in the SAME
+	// statement is refused too: it is a claim on a row that is being
+	// withdrawn.
+	live := insertRootAssignment(t, dm, projectID, "at-live", "alpha", "implementer", "idem:live")
+	assignmentMustRefuseWith(t, db, "a claim and a cancellation in one statement",
+		"only a live assignment can be claimed", `
+		UPDATE agent_tasks
+		SET state = 'cancelled', claim_epoch = claim_epoch + 1, owner = 'beta', lease_expires_at = 1900000000
+		WHERE id = ?`, live)
+
+	// The live assignment still takes a claim.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET claim_epoch = claim_epoch + 1, owner = 'alpha', lease_expires_at = 1900000000
+		WHERE id = ?`, live)
+}
+
+// TestAssignmentLeaseChangesOnlyOnAClaim pins the lease.
+//
+// The fifth review found the lease covered by no trigger at all: a claimed
+// assignment could have its lease cleared, leaving a row that holds an
+// epoch and an owner but no lease — so it says "someone is working on
+// this" without saying for how long.
+//
+// The rule is stated once and covers both halves: the lease changes only
+// when the claim epoch advances. So a claimed row keeps its lease, and an
+// unclaimed row cannot be given one.
+func TestAssignmentLeaseChangesOnlyOnAClaim(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-lease", "alpha", "implementer", "idem:lease")
+
+	// An UNCLAIMED row cannot be given a lease.
+	assignmentMustRefuseWith(t, db, "an unclaimed assignment given a lease",
+		"the lease changes only on a claim", `
+		UPDATE agent_tasks SET lease_expires_at = 1900000000 WHERE id = ?`, id)
+
+	// The claim sets the lease.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET claim_epoch = claim_epoch + 1, owner = 'alpha', lease_expires_at = 1900000000
+		WHERE id = ?`, id)
+
+	// A CLAIMED row cannot have its lease cleared.
+	assignmentMustRefuseWith(t, db, "a claimed assignment's lease cleared",
+		"the lease changes only on a claim", `
+		UPDATE agent_tasks SET lease_expires_at = NULL WHERE id = ?`, id)
+
+	// Nor can the lease be extended without a new claim.
+	assignmentMustRefuseWith(t, db, "a claimed assignment's lease extended",
+		"the lease changes only on a claim", `
+		UPDATE agent_tasks SET lease_expires_at = 1900000001 WHERE id = ?`, id)
+
+	// The NEXT claim replaces it.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET claim_epoch = claim_epoch + 1, owner = 'beta', lease_expires_at = 1900000001
+		WHERE id = ?`, id)
+
+	var lease sql.NullInt64
+	if err := db.QueryRow(
+		`SELECT lease_expires_at FROM agent_tasks WHERE id = ?`, id).Scan(&lease); err != nil {
+		t.Fatalf("read the assignment: %v", err)
+	}
+	if !lease.Valid || lease.Int64 != 1900000001 {
+		t.Errorf("the lease is %v after the second claim, want 1900000001", lease)
+	}
+}
+
+// TestAssignmentApprovalRequiresEvidence pins the approval's fields.
+//
+// The fifth review found that the transition into `operator_approved`
+// required the action, the revision and the source but NOT the evidence
+// pointer — so an approval could be recorded with a NULL pointer, and an
+// approval with nothing behind it is a claim about what was authorised
+// with nothing to check it against.
+//
+// The design note and the SPEC both describe the recorded approval as
+// carrying a pointer to the evidence. The DDL now requires it.
+func TestAssignmentApprovalRequiresEvidence(t *testing.T) {
+	dm := NewTestLocalOnlyDM(t)
+	db := dm.SQLDB()
+	projectID := seedProject(t, dm, "")
+
+	id := insertRootAssignment(t, dm, projectID, "at-evidence", "alpha", "implementer", "idem:evidence")
+	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
+		"completed", "review_passed"} {
+		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
+	}
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks SET state = 'awaiting_operator', awaiting_action = 'merge PR #259'
+		WHERE id = ?`, id)
+
+	assignmentMustRefuseWith(t, db, "an approval with no evidence pointer",
+		"must name its action, its revision, its source and its evidence", `
+		UPDATE agent_tasks
+		SET state = 'operator_approved', approval_action = 'merge PR #259',
+		    approval_revision = 'abc123', approval_source = 'operator'
+		WHERE id = ?`, id)
+
+	// With the pointer it is accepted.
+	assignmentMustExec(t, db, `
+		UPDATE agent_tasks
+		SET state = 'operator_approved', approval_action = 'merge PR #259',
+		    approval_revision = 'abc123', approval_source = 'operator',
+		    approval_evidence = 'docs/evidence/at-evidence/manifest.json'
+		WHERE id = ?`, id)
 }
 
 // TestAssignmentGateRecordIsImmutableWhileLeavingTheGate pins the gate's
@@ -2707,7 +2993,8 @@ func TestAssignmentGateRecordIsImmutableWhileLeavingTheGate(t *testing.T) {
 		"is fixed once the gate is reached", `
 		UPDATE agent_tasks
 		SET state = 'operator_approved', awaiting_action = NULL,
-		    approval_action = 'merge PR #259', approval_revision = 'abc123', approval_source = 'operator'
+		    approval_action = 'merge PR #259', approval_revision = 'abc123', approval_source = 'operator',
+		    approval_evidence = 'ev://x'
 		WHERE id = ?`, id)
 
 	// Nor REWRITTEN.
@@ -2715,7 +3002,8 @@ func TestAssignmentGateRecordIsImmutableWhileLeavingTheGate(t *testing.T) {
 		"is fixed once the gate is reached", `
 		UPDATE agent_tasks
 		SET state = 'operator_approved', awaiting_action = 'merge PR #999',
-		    approval_action = 'merge PR #259', approval_revision = 'abc123', approval_source = 'operator'
+		    approval_action = 'merge PR #259', approval_revision = 'abc123', approval_source = 'operator',
+		    approval_evidence = 'ev://x'
 		WHERE id = ?`, id)
 
 	// Nor on the way to cancellation.
@@ -2813,14 +3101,16 @@ func TestAssignmentApprovalMustNameTheSameAction(t *testing.T) {
 		"must name the SAME action the gate awaited", `
 		UPDATE agent_tasks
 		SET state = 'operator_approved', approval_action = 'DEPLOY TO PRODUCTION',
-		    approval_revision = 'abc123', approval_source = 'operator'
+		    approval_revision = 'abc123', approval_source = 'operator',
+		    approval_evidence = 'ev://x'
 		WHERE id = ?`, id)
 
 	// And the matching one is accepted.
 	assignmentMustExec(t, db, `
 		UPDATE agent_tasks
 		SET state = 'operator_approved', approval_action = 'merge PR #259',
-		    approval_revision = 'abc123', approval_source = 'operator'
+		    approval_revision = 'abc123', approval_source = 'operator',
+		    approval_evidence = 'ev://x'
 		WHERE id = ?`, id)
 }
 

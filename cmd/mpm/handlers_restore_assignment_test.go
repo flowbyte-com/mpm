@@ -76,9 +76,17 @@ var assignmentRestoreIndexes = []string{
 	"idx_agent_tasks_state_updated",
 }
 
-// assignmentRestoreTriggers are the twenty-five triggers the approved
+// assignmentRestoreTriggers are the twenty-nine triggers the approved
 // DDL creates. They are named explicitly so a missing trigger fails by
 // name.
+//
+// The list is the WHOLE inventory, not a subset. The fifth review found
+// that it named twenty-five of the twenty-six the DDL created — the
+// fourth review's update-path guard was missing — so the dumps this file
+// builds restored a database WITHOUT that guard, and the assertions,
+// which only looked for the listed names, could not see the omission. A
+// stale inventory here is a silently weaker restore, so the test also
+// compares the list against the LIVE schema.
 var assignmentRestoreTriggers = []string{
 	"trg_agent_task_events_id_is_not_reused",
 	"trg_agent_task_events_monotonic",
@@ -87,13 +95,17 @@ var assignmentRestoreTriggers = []string{
 	"trg_agent_tasks_approval_is_immutable",
 	"trg_agent_tasks_awaiting_action_is_immutable",
 	"trg_agent_tasks_claim_discipline",
+	"trg_agent_tasks_claim_needs_a_live_assignment",
 	"trg_agent_tasks_claim_sets_lease",
 	"trg_agent_tasks_claim_sets_owner",
 	"trg_agent_tasks_depth_is_immutable",
 	"trg_agent_tasks_eligible_recipients_insert",
 	"trg_agent_tasks_eligible_recipients_update",
+	"trg_agent_tasks_id_is_immutable",
 	"trg_agent_tasks_id_is_not_reused",
 	"trg_agent_tasks_initial_state",
+	"trg_agent_tasks_key_is_immutable",
+	"trg_agent_tasks_lease_changes_only_on_a_claim",
 	"trg_agent_tasks_not_deletable",
 	"trg_agent_tasks_owner_changes_only_on_claim",
 	"trg_agent_tasks_permitted_operations_insert",
@@ -256,7 +268,12 @@ func assignmentDumpColumns(t *testing.T, db *sql.DB, table string) []string {
 // their real indexes, their real triggers and real rows — is fed to
 // `mpm restore-db`. The command must ACCEPT it (exit 0), and the
 // restored database must carry all two tables, all seven indexes and
-// all twenty-five triggers, AND the rows.
+// all twenty-nine triggers, AND the rows.
+//
+// The trigger list is the whole inventory, and this test also compares
+// it against the LIVE schema: a trigger the DDL creates and the list
+// does not name would restore a weaker schema, and only the comparison
+// can see it.
 func TestHandleRestoreDB_AcceptsAssignmentDump(t *testing.T) {
 	dm := setupRestoreSafetyTest(t)
 	dbPath := dm.DBPath()
@@ -277,6 +294,37 @@ func TestHandleRestoreDB_AcceptsAssignmentDump(t *testing.T) {
 			"the generated dump must declare %s", table)
 	}
 
+	// The trigger inventory must be the WHOLE inventory.
+	//
+	// The fifth review found that the list named twenty-five of the
+	// twenty-six triggers the DDL creates, so the dump restored a
+	// database without the fourth review's update-path guard — and
+	// every assertion below still passed, because the assertions only
+	// looked for the LISTED names. Comparing the list against the live
+	// schema is what makes a stale inventory visible.
+	live := map[string]bool{}
+	rows, err := dm.SQLDB().Query(
+		`SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_agent_task%'`,
+	)
+	require.NoError(t, err)
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		live[name] = true
+	}
+	require.NoError(t, rows.Err())
+	rows.Close()
+
+	for name := range live {
+		require.Contains(t, assignmentRestoreTriggers, name,
+			"the live schema has the trigger %s and the restore inventory does not, "+
+				"so the restored database would be missing a rule", name)
+	}
+	require.Len(t, assignmentRestoreTriggers, len(live),
+		"the restore inventory names %d triggers and the live schema has %d — "+
+			"the two inventories must be the same set",
+		len(assignmentRestoreTriggers), len(live))
+
 	// H-4 contract: the test-process DM holds LOCK_SH on
 	// `<dbPath>.lock`. Release it before the handler asks for LOCK_EX,
 	// exactly as TestHandleRestoreDB_SuccessOverwritesOriginal does.
@@ -294,7 +342,7 @@ func TestHandleRestoreDB_AcceptsAssignmentDump(t *testing.T) {
 			"restore-db validates against")
 
 	// The restored database carries the two tables, the seven indexes
-	// and the twenty-five triggers. The restore replaces the file, so
+	// and the twenty-nine triggers. The restore replaces the file, so
 	// this reads the NEW inode at dbPath.
 	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000")
 	require.NoError(t, err)

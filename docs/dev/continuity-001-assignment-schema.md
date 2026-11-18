@@ -13,7 +13,7 @@ deferrals.
 
 ## 1. What PR 1 is, and what it is not
 
-PR 1 is **storage**. It creates two tables, seven indexes and twenty-six
+PR 1 is **storage**. It creates two tables, seven indexes and twenty-nine
 triggers, and it makes the contract's hardest invariants true *in the
 database*, so a wrong write is refused by the engine rather than by the
 convention of whichever code path happened to make it.
@@ -114,6 +114,12 @@ revision (`approval_revision`); a change to the head revision after the
 approval was recorded leaves the approval **stale**, and staleness is
 observable rather than implied.
 
+All four of the approval's fields are **required** on the transition into
+`operator_approved`: the action, the revision, the source and the evidence
+pointer. An approval with no pointer behind it is a claim about what was
+authorised with nothing to check it against, and the pointer is what a
+later reader follows.
+
 ### 3.2 The role-aware state machine
 
 The transition path depends on the assignment's `role`, and the trigger knows
@@ -201,11 +207,24 @@ dispatch cannot create a second logical assignment. The API (PR 2) turns the
 conflict into "return the existing assignment", which is what makes a
 duplicate dispatch **idempotent** rather than merely **refused** — and that
 is what the **unique index** is for: a trigger can refuse a duplicate, but
-only an index can resolve one with `ON CONFLICT`.
+only an index can FIND one without refusing the write.
+
+**It is not what lets the API resolve one with `ON CONFLICT`.** The
+before-insert trigger fires *before* the conflict resolution, so the
+conflicting row is still there and `INSERT ... ON CONFLICT DO NOTHING`
+**aborts** with the trigger's message instead of resolving the duplicate.
+PR 2 must therefore **select** the existing assignment after the refusal,
+not rely on `ON CONFLICT` — and the design note says so, because the
+promise was checked by execution rather than by reading.
 
 The key's **type** is part of its identity: a `BLOB` and a `TEXT` with the
 identical bytes are different values to SQLite, and a UNIQUE index holds
 both — so the column is guarded with `typeof(...) = 'text'`.
+
+And the key is **immutable**. A key that could be changed would free the
+old one, and re-dispatching the same logical assignment with it would
+succeed — leaving two logical assignments for one dispatch, which is the
+duplicate suppression the rule exists for, defeated at the storage level.
 
 ### 3.5 Nothing is replaced, and nothing is reused
 
@@ -229,8 +248,19 @@ triggers do not fire for that implicit delete either. Without a guard, a
 **claimed** assignment could be destroyed by an UPDATE that merely set a
 colliding idempotency key: its id was freed, and a stale token could become
 current again — which is exactly the hole the first review closed, reached
-by a different statement. A `BEFORE UPDATE` trigger can see the collision
-before the statement runs, so the conflict is refused rather than resolved.
+by a different statement.
+
+And a **collision** is not the only way to free an id. A **rename** frees
+it without any conflict at all: `UPDATE agent_tasks SET id = 'other'`
+moves the row, the old id becomes free, and a fresh row can take it, come
+back at epoch 0, and be claimed at epoch 1 — so the previous holder's
+stale token (`WHERE id = ? AND claim_epoch = ?`) matches the **new** row.
+
+So the rule is not "no collision" but **immutability**: neither the id nor
+the idempotency key changes. That closes the hole from both sides — the
+rename is refused, and a collision cannot arise, because the only two
+columns a uniqueness conflict can be resolved on are the two that no
+longer move.
 
 The ledger is guarded the same way, on its id and on its `(task, index)`
 pair, so a ledger entry cannot be destroyed by a replacement in either
@@ -248,6 +278,15 @@ The trigger enforces:
 * the epoch advances by exactly one — it cannot be skipped or reset;
 * the owner changes **only** on a claim — an owner cannot be reassigned
   without the row ceasing to be a lease;
+* only a **live** assignment can be claimed — `operator_approved` and
+  `cancelled` are terminal, so a lease taken on either is a lease on
+  nothing, and it would advance the epoch of a row that will never be
+  worked on again. Both sides of the statement are checked, so a claim
+  that arrives with the cancellation in the same statement is refused
+  too;
+* the lease changes **only on a claim** — a claimed row keeps its lease,
+  and an unclaimed row cannot be given one. The lease belongs to the
+  claim, and the next claim replaces it;
 * a claim sets an owner and a lease;
 * a task is born **unclaimed** — epoch 0, no owner, no lease.
 
@@ -286,14 +325,14 @@ never issued a token and nothing refers to it.
 
 ## 5. The invariants the database enforces, and the ones it does not
 
-Twenty-seven properties are enforced by the schema itself rather than by
+Thirty-one properties are enforced by the schema itself rather than by
 convention.
 
 | # | invariant | enforced by |
 |---|---|---|
 | I1 | an assignment is created `enqueued` | the initial-state trigger |
 | I2 | an assignment is created **unclaimed** (epoch 0, no owner, no lease) | the unclaimed-at-creation trigger |
-| I3 | an assignment's id and its idempotency key are **never reused** — on the insert path and on the update path | the two id-not-reused triggers |
+| I3 | an assignment's id and its idempotency key are **never reused** | the id-not-reused trigger |
 | I4 | the delegation tree is a **tree** — the root is a root, the parent is in the same tree at depth one less, and nobody is their own parent | the tree-shape triggers (INSERT **and** UPDATE) |
 | I5 | the depth is **immutable** | the depth-immutability trigger |
 | I6 | a root's own recipient is among its eligible recipients | the root-recipient triggers |
@@ -302,7 +341,7 @@ convention.
 | I9 | the state machine is role-aware | the state-transition trigger |
 | I10 | `cancelled` is the universal withdrawal | the state-transition trigger |
 | I11 | the operator's gate **names its action** | the state-transition trigger |
-| I12 | a recorded approval names its action, its revision and its source | the state-transition trigger |
+| I12 | a recorded approval names its action, its revision, its source and its evidence pointer | the state-transition trigger |
 | I13 | the approval names the **same** action the gate awaited | the state-transition trigger |
 | I14 | the gate's action is **immutable** once the gate is reached | the state-transition trigger + the awaiting-action trigger |
 | I15 | a recorded approval is **immutable** — it is evidence | the state-transition trigger + the approval trigger |
@@ -318,6 +357,10 @@ convention.
 | I25 | every identifier, key, number, pointer and JSON column has its **type** — a `TEXT` column cannot hold a `BLOB`, and a numeric column cannot hold a `REAL` or a numeric string | the `typeof()` guards |
 | I26 | a **root** carries the budgets; a **child** carries none of them | the root/child `CHECK` |
 | I27 | the delegation tree is contained in **one project** | the composite foreign keys |
+| I28 | the id is **immutable** | the id-immutability trigger |
+| I29 | the idempotency key is **immutable** | the key-immutability trigger |
+| I30 | only a **live** assignment can be claimed | the claim-needs-a-live-assignment trigger |
+| I31 | the lease changes **only on a claim** | the lease-changes-only-on-a-claim trigger |
 
 The invariants that are **not** in the database, because a `CHECK` constraint
 cannot contain a subquery and a trigger cannot see a caller's presented value:
@@ -387,14 +430,15 @@ The DDL is owned by a **migration**, not by a schema slice:
 
 ---
 
-## 7. What the three independent reviews found
+## 7. What the five independent reviews found
 
-The change was reviewed independently three times, in the installed sandboxed
+The change was reviewed independently five times, in the installed sandboxed
 reviewer (`mpm-reviewer`, default-deny, `sandbox_exec` only). The first
 returned **eleven blocking and thirteen non-blocking** findings, the second
-**two blocking and fourteen non-blocking**, and the third **five blocking
-and thirteen non-blocking**. Every blocking finding was a real defect, and
-every one is closed.
+**two blocking and fourteen non-blocking**, the third **five blocking and
+thirteen non-blocking**, the fourth **one blocking and ten non-blocking**,
+and the fifth **two blocking and eight non-blocking**. Every blocking
+finding was a real defect, and every one is closed.
 
 ### 7.1 The first review's eleven blocking findings
 
@@ -479,61 +523,7 @@ self-referencing composite FK accepts the self-parent row, `'[null]'` passes
    columns. All five are covered now — an approval whose evidence pointer
    can be swapped is not evidence.
 
-### 7.4 The fourth review's one blocking finding
-
-**`UPDATE OR REPLACE` deleted a CLAIMED assignment, freed its id and reset
-its epoch.** The third fix closed the INSERT half of the replacement hole
-and left the UPDATE half open: an UPDATE OR REPLACE resolves a uniqueness
-conflict by deleting the conflicting row, and the delete triggers do not
-fire for that implicit delete either. So a claimed assignment could be
-destroyed by an UPDATE that merely set a colliding idempotency key, its id
-freed, and a stale token made current again — the first review's stale-token
-hole, reached by a different statement. The suite was green because it
-covered only the INSERT form.
-
-The fix is a `BEFORE UPDATE` trigger that refuses a change that would
-collide with another row's id or idempotency key.
-
-### 7.5 The fourth review's non-blocking findings
-
-* **the "an illegal transition is always reported as an illegal transition"
-  claim was false.** SQLite's order for firing SEPARATE triggers on the
-  same event is not specified, and it is measured to be the reverse of
-  creation order. A write that both moves the state illegally and changes
-  the role is therefore refused — the invariant holds — but the message may
-  be the role's rather than the transition's. The claim now says what is
-  true: the write is always **refused**, and the message is whichever rule
-  fired first.
-* **the note and the SPEC enumerated different property lists.** The note's
-  list omitted the root/child budget `CHECK` and the composite containment
-  foreign keys, both of which the note itself measures with a control. They
-  are I26 and I27 now, and both documents say twenty-seven.
-* **the in-DDL rule labels contradicted the header's rule list.** They agree
-  now, and the header's counts were checked against the triggers that
-  actually exist.
-* **the harness's import-time guard was dead code, and a tautology.** It
-  compared the file with itself. It now takes the DDL's digest when the
-  module is loaded — above the control list, which is where the mutation
-  happened — and `snapshot()` refuses to run if the file has changed since.
-* **the harness had no `try`/`finally`**, so a failure left the working
-  tree mutated. The tree is now restored on every path.
-* **the harness hard-coded `HOME`** and **`rmtree`d a fixed path.** It now
-  inherits the environment and takes its pristine copy in a fresh
-  temporary directory.
-* **the AT8 dump was not the shape `sqlite3 .dump` produces.** That is
-  true, and it is now proved both ways: the first command-level test uses
-  the order that proves the rows satisfy the schema (indexes and triggers
-  first, then the rows), and a second one uses the order the backup
-  command actually writes (the data before the indexes, with the foreign
-  keys turned off for the duration). Both restore. The fourth review
-  reported that the dump order fails under the handler's conditions — and
-  that is true only with the foreign keys ON; the real dump opens with
-  `PRAGMA foreign_keys=OFF;`, and a real `sqlite3 .dump` of a database
-  carrying these tables was executed and restored.
-* **"an integer stays an integer" was inaccurate**: `quote()` renders every
-  value as TEXT, and the column's affinity is what restores the type.
-
-### 7.6 The third review's non-blocking findings
+### 7.4 The third review's non-blocking findings
 
 Three were unenumerated holes, and they are now either enforced or named: the
 permitted-operations guard tested `typeof(value)`, which is always TEXT for a
@@ -567,6 +557,122 @@ PR must plan for (§5.2).
 
 ---
 
+### 7.5 The fourth review's one blocking finding
+
+**`UPDATE OR REPLACE` deleted a CLAIMED assignment, freed its id and reset
+its epoch.** The third fix closed the INSERT half of the replacement hole
+and left the UPDATE half open: an UPDATE OR REPLACE resolves a uniqueness
+conflict by deleting the conflicting row, and the delete triggers do not
+fire for that implicit delete either. So a claimed assignment could be
+destroyed by an UPDATE that merely set a colliding idempotency key, its id
+freed, and a stale token made current again — the first review's stale-token
+hole, reached by a different statement. The suite was green because it
+covered only the INSERT form.
+
+The fix is a `BEFORE UPDATE` trigger that refuses a change that would
+collide with another row's id or idempotency key.
+
+### 7.6 The fourth review's non-blocking findings
+
+* **the "an illegal transition is always reported as an illegal transition"
+  claim was false.** SQLite's order for firing SEPARATE triggers on the
+  same event is not specified, and it is measured to be the reverse of
+  creation order. A write that both moves the state illegally and changes
+  the role is therefore refused — the invariant holds — but the message may
+  be the role's rather than the transition's. The claim now says what is
+  true: the write is always **refused**, and the message is whichever rule
+  fired first.
+* **the note and the SPEC enumerated different property lists.** The note's
+  list omitted the root/child budget `CHECK` and the composite containment
+  foreign keys, both of which the note itself measures with a control. They
+  are I26 and I27 now, and both documents carry the same list.
+* **the in-DDL rule labels contradicted the header's rule list.** They agree
+  now, and the header's counts were checked against the triggers that
+  actually exist.
+* **the harness's import-time guard was dead code, and a tautology.** It
+  compared the file with itself. It now takes the DDL's digest when the
+  module is loaded — above the control list, which is where the mutation
+  happened — and `snapshot()` refuses to run if the file has changed since.
+* **the harness had no `try`/`finally`**, so a failure left the working
+  tree mutated. The tree is now restored on every path.
+* **the harness hard-coded `HOME`** and **`rmtree`d a fixed path.** It now
+  inherits the environment and takes its pristine copy in a fresh
+  temporary directory.
+* **the AT8 dump was not the shape `sqlite3 .dump` produces.** That is
+  true, and it is now proved both ways: the first command-level test uses
+  the order that proves the rows satisfy the schema (indexes and triggers
+  first, then the rows), and a second one uses the order the backup
+  command actually writes (the data before the indexes, with the foreign
+  keys turned off for the duration). Both restore. The fourth review
+  reported that the dump order fails under the handler's conditions — and
+  that is true only with the foreign keys ON; the real dump opens with
+  `PRAGMA foreign_keys=OFF;`, and a real `sqlite3 .dump` of a database
+  carrying these tables was executed and restored.
+* **"an integer stays an integer" was inaccurate**: `quote()` renders every
+  value as TEXT, and the column's affinity is what restores the type.
+
+### 7.7 The fifth review's two blocking findings
+
+**1. An assignment's id was MUTABLE, so the id WAS reused and the fence
+WAS broken.** The fourth review's fix refused a uniqueness *collision* on
+the update path, and the fifth review found the hole behind it: a row could
+be **renamed**, which frees the old id with no collision at all. The
+fifth review executed the whole chain — rename a claimed leaf child, insert
+a second assignment with the freed id, claim it at epoch 1, and the
+previous holder's `UPDATE ... WHERE id = ? AND claim_epoch = 1` **matched
+the new row**. The first review's "a stale token could become current
+again", reached by a third statement.
+
+The fix is **immutability**: the id does not change, and neither does the
+idempotency key. The rename is refused, and a collision cannot arise,
+because the only two columns a uniqueness conflict can be resolved on are
+the two that no longer move.
+
+**2. The command-level restore test's trigger inventory was one short.** It
+named twenty-five of the twenty-six triggers the DDL created, so the dump
+it built restored a database **without** the fourth review's update-path
+guard — and the assertions, which only looked for the *listed* names, could
+not see the omission. The test passed while the restored schema was weaker
+than the approved one.
+
+The inventory is now the whole set, and the test **compares it against the
+live schema**, so a trigger the DDL creates and the list does not name
+fails the test rather than being restored away.
+
+### 7.8 The fifth review's non-blocking findings
+
+* **the idempotency key was mutable**, and the acceptance suite even
+  blessed the move ("an ordinary key change still works"). A key that could
+  be changed would free the old one, and re-dispatching the same logical
+  assignment with it would succeed — two logical assignments for one
+  dispatch. The key is immutable now, and the suite asserts the refusal.
+* **"a trigger can refuse a duplicate, but only an index can resolve one
+  with `ON CONFLICT`" was false against the shipped DDL.** The before-insert
+  trigger fires *before* the conflict resolution, so `ON CONFLICT DO NOTHING`
+  aborts with the trigger's message instead of resolving the duplicate.
+  The index is what lets the API **find** one without refusing the write;
+  PR 2 must **select** the existing assignment after the refusal. §3.4 now
+  says that.
+* **the claim discipline never looked at the state**, so a cancelled or an
+  approved assignment could be claimed — a lease on nothing, advancing the
+  epoch of a row that will never be worked on again. Only a live assignment
+  can be claimed now, and both sides of the statement are checked.
+* **the lease was covered by no trigger at all**, so a claimed assignment
+  could have its lease cleared, leaving a row that holds an epoch and an
+  owner but no lease. The lease changes only on a claim now.
+* **the transition into `operator_approved` did not require the evidence
+  pointer**, although the note and the SPEC both describe the recorded
+  approval as carrying one. All four of the approval's fields are required
+  now.
+* **the headings counted three reviews** while §7.4 and §7.5 documented the
+  fourth. They count five now, in both the note and the DDL's own header.
+* **a control whose mutation broke the build was counted as ONE failing
+  test and ONE invariant-specific failure** — a number that reads like "the
+  suite depends on this rule" when the truth is that nothing was measured.
+  Such a control is reported as **INCONCLUSIVE** now.
+* **the harness's import-time digest guard covered only the DDL**, and
+  `db.go` is the other file a control mutates. It covers both now.
+
 ## 8. The negative controls
 
 Each invariant was removed and the suite re-run. The counts below are the
@@ -580,16 +686,22 @@ the object inventory, and the three control tests that drop an object by
 name. They are listed in the harness so that the second column can be read as
 "the tests that fail because the **behaviour** changed".
 
-The counts are **measured**, not asserted: `scripts/continuity-001-controls.py`
-runs every control and prints them.
+**Thirty-four** controls, and **thirty-three** of them have at least one
+invariant-specific failure. The counts are **measured**, not asserted:
+`scripts/continuity-001-controls.py` runs every control and prints them, and
+it refuses to measure anything at all unless the **baseline is green** — a
+control run against a broken tree reports nothing rather than a number.
 
 | control | tests that fail | invariant-specific |
 |---|---|---|
-| the state-machine trigger is removed | 13 | 6 |
+| the state-machine trigger is removed | 14 | 7 |
 | the initial-state trigger is removed | 7 | 1 |
 | the unclaimed-at-creation trigger is removed | 7 | 1 |
 | the id-not-reused trigger is removed | 8 | 1 |
-| the key-not-reused-on-UPDATE trigger is removed | 7 | 1 |
+| the id-immutability trigger is removed | 8 | 2 |
+| the key-immutability trigger is removed | 8 | 2 |
+| the claim-needs-a-live-assignment trigger is removed | 7 | 1 |
+| the lease-changes-only-on-a-claim trigger is removed | 7 | 1 |
 | the tree-shape trigger is removed | 7 | 1 |
 | the tree-shape-on-UPDATE trigger is removed | 7 | 1 |
 | the depth-immutability trigger is removed | 8 | 2 |
@@ -609,12 +721,12 @@ runs every control and prints them.
 | the ledger's no-DELETE trigger is removed | 7 | 1 |
 | **all four** claim-discipline triggers are removed | 8 | 1 |
 | the unique idempotency index is removed | 6 | **0** |
-| the idempotency rule's index **and** its trigger are removed | 9 | 2 |
+| the idempotency rule's index **and** its trigger are removed | 10 | 3 |
 | the composite containment foreign keys are removed | 2 | 1 |
 | the root/child budget `CHECK` is removed | 2 | 1 |
 | the state vocabulary `CHECK` is removed | 2 | 1 |
 | the `typeof()` type guards are removed | 6 | 5 |
-| the whole migration is not called | 43 | 37 |
+| the whole migration is not called | 48 | 42 |
 
 Four of these are worth reading closely, because they are the places where the
 counts are easy to misread:
@@ -623,8 +735,8 @@ counts are easy to misread:
   failures. That is honest, and it is a deliberate redundancy: the
   id-not-reused trigger refuses a duplicate key on its own, so the index is
   not independently load-bearing. The index is still needed — it is what lets
-  PR 2 resolve a duplicate with `ON CONFLICT` rather than with a trigger —
-  so the control that measures the **rule** removes both layers;
+  PR 2 **find** a duplicate without refusing the write — so the control that
+  measures the **rule** removes both layers;
 * the **composite containment foreign keys** are load-bearing for the
   **delete** path (a root with a child cannot be deleted), while the
   **tree-shape trigger** is load-bearing for the **insert and update** paths
@@ -659,7 +771,16 @@ necessary:
   `try`/`finally`; the tree is now restored on **every** path, including a
   failure and a Ctrl-C. The harness also inherits the environment rather
   than hard-coding `HOME`, and it takes its pristine copy in a fresh
-  temporary directory rather than removing a fixed path.
+  temporary directory rather than removing a fixed path;
+* a control whose mutation broke the build was counted as ONE failing test
+  and ONE invariant-specific failure — a number that reads like "the suite
+  depends on this rule" when the truth is that nothing was measured. Such a
+  control is reported as **INCONCLUSIVE** now, with a zero count;
+* the import-time digest guard covered only the DDL, and `db.go` is the
+  other file a control mutates. It covers **both** now — and the guard
+  earned its keep: a stale harness from an earlier run had left a mutation
+  in the tree, and the **baseline** caught it and refused to measure
+  anything.
 
 **Running it mutates the checkout.** The harness edits the working tree in
 place and restores it afterwards, so it must be run on a clean tree and

@@ -71,6 +71,16 @@ TEST_PATTERN = "TestAgentAssignment|TestAssignment"
 # is under test. They are listed so that the second column of the design
 # note's table can be read as "the tests that fail because the BEHAVIOUR
 # changed".
+# The failures that are not about the invariant under test at all. A
+# build failure or a timeout is INCONCLUSIVE: it says nothing about
+# whether the suite depends on the rule, and counting it as an
+# invariant-specific failure is exactly the misleading number this
+# harness exists to avoid.
+INCONCLUSIVE = {
+    "<BUILD FAILED>",
+    "<TIMEOUT>",
+}
+
 STRUCTURAL = {
     "TestAgentAssignmentDDLIsPinned",
     "TestAgentAssignmentAT1ExistingDatabaseMigration",
@@ -84,15 +94,23 @@ STRUCTURAL = {
 }
 
 
-# The digest of the DDL as it was when this module was LOADED. It is
-# taken here, ABOVE the control list, because the control list is where a
-# mutator written as a plain function would run — and one that ran there
-# would change the tree before the pristine copy was taken, so every
-# measurement would be made against a corrupted tree. That happened once.
+# The digest of EVERY file a control may mutate, as they were when this
+# module was LOADED. It is taken here, ABOVE the control list, because
+# the control list is where a mutator written as a plain function would
+# run — and one that ran there would change the tree before the pristine
+# copy was taken, so every measurement would be made against a corrupted
+# tree. That happened once.
 #
-# `snapshot()` compares the live file against this digest, so an
-# import-time mutation is caught rather than measured.
-_IMPORT_DIGEST = hashlib.sha256(DDL_FILE.read_bytes()).hexdigest()
+# `snapshot()` compares the live files against these digests, so an
+# import-time mutation is caught rather than measured. It covers BOTH
+# files: the DDL and the db.go the migration is called from. The fifth
+# review found that the guard covered only the DDL, so an import-time
+# mutation of db.go — which the "the whole migration is not called"
+# control makes — would have passed it.
+_IMPORT_DIGEST = {
+    rel: hashlib.sha256((REPO / rel).read_bytes()).hexdigest()
+    for rel in FILES
+}
 
 
 def snapshot():
@@ -102,13 +120,14 @@ def snapshot():
     removes a directory another run put there, and so the tree is left
     exactly as it was found.
     """
-    live = hashlib.sha256(DDL_FILE.read_bytes()).hexdigest()
-    if live != _IMPORT_DIGEST:
-        raise SystemExit(
-            "the DDL changed while this harness was loading, so a control "
-            "mutated the tree before the pristine copy was taken — every "
-            "measurement would be against a corrupted tree"
-        )
+    for rel in FILES:
+        live = hashlib.sha256((REPO / rel).read_bytes()).hexdigest()
+        if live != _IMPORT_DIGEST[rel]:
+            raise SystemExit(
+                f"{rel} changed while this harness was loading, so a control "
+                "mutated the tree before the pristine copy was taken — every "
+                "measurement would be against a corrupted tree"
+            )
     if BACKUP.exists():
         shutil.rmtree(BACKUP)
     BACKUP.mkdir(parents=True)
@@ -142,6 +161,19 @@ def run_tests():
         err = (p.stdout + p.stderr).strip().splitlines()
         return ["<BUILD FAILED>"], err[-3:]
     return failed, []
+
+
+def _inconclusive(failed):
+    """A build failure or a timeout is not an invariant-specific failure.
+
+    The fifth review found that a control whose mutation broke the build
+    was counted as ONE failing test and ONE invariant-specific failure —
+    a number that reads like "the suite depends on this invariant" when
+    the truth is that nothing was measured at all. So a control that
+    cannot build is reported as INCONCLUSIVE, and the invariant-specific
+    count for it is zero.
+    """
+    return [f for f in failed if f in INCONCLUSIVE]
 
 
 def _write_mutation(before, after, what):
@@ -193,9 +225,16 @@ def drop_idempotency_index():
     it is not independently load-bearing: the id-not-reused trigger
     refuses a duplicate key on its own, so removing the index changes
     nothing that a test notices. That is a deliberate redundancy — the
-    index is what lets the API resolve a duplicate with ON CONFLICT
-    rather than with a trigger — and it is published as measured rather
-    than hidden.
+    index is what lets the API FIND a duplicate without a trigger
+    refusing the write — and it is published as measured rather than
+    hidden.
+
+    It is NOT what lets the API resolve a duplicate with ON CONFLICT:
+    the BEFORE INSERT trigger fires BEFORE the conflict resolution, so
+    an INSERT ... ON CONFLICT DO NOTHING ABORTS with the trigger's
+    message rather than resolving the duplicate. PR 2 must therefore
+    SELECT the existing assignment after the refusal, not rely on
+    ON CONFLICT.
     """
     return drop_text(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_idempotency_key\n"
@@ -293,8 +332,14 @@ CONTROLS = [
     ("the unclaimed-at-creation trigger is removed",
      drop_trigger("trg_agent_tasks_unclaimed_at_creation")),
     ("the id-not-reused trigger is removed", drop_trigger("trg_agent_tasks_id_is_not_reused")),
-    ("the key-not-reused-on-UPDATE trigger is removed",
-     drop_trigger("trg_agent_tasks_key_is_not_reused")),
+    ("the id-immutability trigger is removed",
+     drop_trigger("trg_agent_tasks_id_is_immutable")),
+    ("the key-immutability trigger is removed",
+     drop_trigger("trg_agent_tasks_key_is_immutable")),
+    ("the claim-needs-a-live-assignment trigger is removed",
+     drop_trigger("trg_agent_tasks_claim_needs_a_live_assignment")),
+    ("the lease-changes-only-on-a-claim trigger is removed",
+     drop_trigger("trg_agent_tasks_lease_changes_only_on_a_claim")),
     ("the tree-shape trigger is removed", drop_trigger("trg_agent_tasks_tree_shape")),
     ("the tree-shape-on-UPDATE trigger is removed",
      drop_trigger("trg_agent_tasks_tree_shape_on_update")),
@@ -351,6 +396,16 @@ def control(name, mutate):
     failed, notes = run_tests()
     if notes:
         print("  " + "\n  ".join(notes))
+    inconclusive = _inconclusive(failed)
+    if inconclusive:
+        # The mutation broke the build, so nothing was measured. Saying
+        # so is the honest answer; counting it as an invariant-specific
+        # failure would read like "the suite depends on this rule".
+        print(f"  INCONCLUSIVE: {', '.join(inconclusive)} — nothing was measured")
+        print("  tests that fail: 0")
+        print("  invariant-specific: 0")
+        restore()
+        return
     specific = [f for f in failed if f not in STRUCTURAL]
     print(f"  tests that fail: {len(failed)}")
     print(f"  invariant-specific: {len(specific)}")
