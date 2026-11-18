@@ -71,6 +71,7 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.11 [Skill Package Archive Import (P5 — the `.skill` ZIP adapter)](#611-skill-package-archive-import-p5--the-skill-zip-adapter)
    - 6.12 [Skill Package Retrieval (P6 — the read-only retrieval and verification API)](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api)
    - 6.13 [Skill Package Export (P7 — the deterministic `.skill` writer and the complete skills export)](#613-skill-package-export-p7--the-deterministic-skill-writer-and-the-complete-skills-export)
+   - 6.14 [Durable Assignment Storage (Continuity 001, PR 1 — storage only)](#614-durable-assignment-storage-continuity-001-pr-1--storage-only)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -2888,6 +2889,64 @@ Archives and export metadata are written through **private staging paths**:
 **No change to the database schema, and no write to the database at all.** The exporter reads the three package tables §6.8 specifies, plus `memories`. It writes nothing.
 
 **No change to the importer.** The `.skill` archive the writer produces is accepted by the existing P5 importer **by construction** — the flat layout is what §5.3.1's root rule expects — and no importer change was needed to make it so.
+
+---
+
+### 6.14 Durable Assignment Storage (Continuity 001, PR 1 — storage only)
+
+A **work item** (`works`) is a commitment. A **thread** (`continuity_threads`) is a line of conversation. Neither is an **assignment**: a unit of work addressed to a named agent, with an owner, a lease, a state and an evidence trail. Continuity 001 adds that grain, in storage.
+
+This section describes **PR 1 of six**: the storage only. No API, no CLI, no agent-facing surface, no dispatcher and no OpenCode adapter exist for it yet — the tables are created empty and stay empty until PR 2. The design of record is `docs/dev/continuity-001-assignment-schema.md`; the DDL is authoritative in `internal/core/migration_agent_assignments.go`, where it is a single literal whose SHA-256 a test pins, so the shipped schema cannot drift from the design note without failing the build.
+
+#### What PR 1 adds
+
+Two **additive** tables, seven indexes and three triggers. No existing table, row, index or trigger is modified.
+
+| table | what it holds |
+|---|---|
+| `agent_tasks` | the assignment: its project, its place in the delegation tree, its recipient and role, its state, its idempotency key, its lease, the root's budgets, and the evidence pointers. |
+| `agent_task_events` | the append-only ledger of an assignment's transitions. The event index is `UNIQUE` per assignment, so the ledger is ordered and gap-free. |
+
+The project axis is **reused, not duplicated**: PR #224's Stage 1 already shipped `projects` in `main` (commit `d8b373fb`), so an assignment references `projects(id)` and inherits Stage 1's containment idiom — the project id is denormalised onto the assignment and held honest by a **composite** foreign key, so a child cannot name a root or a parent of another project.
+
+#### The state machine
+
+Ten states, and the separations are the point:
+
+`enqueued` → `delivered` → `acknowledged` → `accepted` → `in_progress` → `completed` → `review_passed` → `awaiting_operator` → `operator_approved`, with `cancelled` as the universal withdrawal.
+
+**Delivery is not acceptance, and completion is not approval.** An assignment that was delivered and never acknowledged is **re-deliverable**, not lost: delivery is a state transition with its own timestamp, never a side effect of the row having been read. This is deliberately *not* the wake path's semantics — `scheduled_wakes.fired` is set in the same transaction that surfaces the row, so a crash after the mark loses the wake permanently, and that at-most-once path is not promoted into a delivery queue here.
+
+The transition path depends on the role, and the **database** knows it:
+
+- an **implementer** follows the path above;
+- a **reviewer** follows the path to `in_progress` and ends at either `review_passed` (the verdict was passing) or `completed` (the review asked for changes). A reviewer never reaches the operator's gate: a reviewer approves nothing.
+
+`operator_approved` is a **record, not a grant**. MPM records an approval that was verified **outside** MPM — its source, the exact revision it covers and a pointer to the evidence — and never manufactures or authenticates one. The approval names the exact action and the exact revision, so a change to the head revision after the approval was recorded leaves the approval **stale**, and staleness is observable rather than implied.
+
+#### The delegation tree, and the budgets it inherits
+
+A **root** assignment is the operator-authorised one: it is its own root, it has no parent, and it **carries the budgets** — `max_depth`, `max_tasks`, `max_concurrency`, `max_resource_units`, `permitted_operations` and `eligible_recipients`.
+
+A **child** is an agent's delegation: it names its root and its parent, and it carries **no budgets at all**. That is the important part, and it is **structural** — there is no column in which a child could widen what it was given, so inheritance is a property of the schema rather than a rule the code is trusted to apply. A root must also name at least one permitted operation: a root that may do nothing is a silent misconfiguration, not a safe default.
+
+#### The lease and the fence
+
+`claim_epoch` is the fencing token. It advances by **exactly one** on every claim, and a claim sets both the owner and a lease; the owner changes **only** on a claim. So the epoch cannot be skipped or reset, and an owner cannot be reassigned without the row ceasing to be a lease.
+
+The fence against a **stale** owner is the `WHERE` clause of the writing statement — `WHERE id = ? AND claim_epoch = ?` — because that comparison is atomic with the write. It is deliberately not a trigger: a trigger cannot see the epoch a caller *presented*. A lease that expires without a transition is recoverable; the next claim takes it and advances the epoch, which invalidates the previous holder.
+
+#### What the database enforces
+
+Fifteen properties are enforced by the schema itself rather than by convention — the creation state, the role-aware state machine, the terminal states, the epoch discipline, the owner discipline, the root/child budget shape, the one-project containment, the idempotency key, the ledger's ordering, and the refusal to delete anything with children. `docs/dev/continuity-001-assignment-schema.md` lists them one by one, **and names the six that the schema does not enforce** — the fence, the recipient membership, the depth limit, the tree budgets, the findings capture and the authorisation of a root — so that "the schema enforces it" and "the API enforces it" are never confused.
+
+#### The tables are local-only
+
+They are created by a **migration**, not by `BaseTables`, so `attachShared` never propagates them into the cross-workspace `shared` schema. The migration runs inside the fatal migration transaction on every open, so a fresh database and an upgraded one take the same code path and the same DDL text, and the sentinel row is written **last** inside that transaction — a failure at the sentinel write rolls the DDL back with it.
+
+#### The restore allow-list
+
+Both tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **accepts** a dump that contains them. Without that registration every backup taken after this change would be rejected — a loud, immediate failure. As with the Continuity tables, the registration also means an **old** binary refuses a dump taken by the new binary: the allow-list is not weakened to hide that.
 
 ---
 

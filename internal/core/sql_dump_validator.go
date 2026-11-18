@@ -147,6 +147,17 @@ type DumpValidator struct {
 //  3. Run `go test -run TestCanonicalSchemaSync ./internal/core/`
 //     to verify the static guard passes
 var CanonicalMPMSchema = []string{
+	// Continuity 001, PR 1 — the durable assignment storage. Two tables
+	// created by the migration in
+	// internal/core/migration_agent_assignments.go — NOT by BaseTables,
+	// which is why they are here rather than in RuntimeCanonicalSchema:
+	// RuntimeCanonicalSchema's entries are the runtime-created tables that
+	// have no CREATE TABLE in source, and these two DO have their CREATE
+	// TABLE in source, so the canonical list is the list the source-scan
+	// guard can actually check. They are local-only: attachShared never
+	// propagates them into the cross-workspace `shared` schema.
+	"agent_task_events",
+	"agent_tasks",
 	"admission_log",
 	"artifact_provenance",
 	"audit_cluster_proposals",
