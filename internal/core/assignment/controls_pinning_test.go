@@ -293,7 +293,7 @@ func TestOnlyTheAssignmentPackageWritesTheAssignmentTables(t *testing.T) {
 // GATE.
 //
 // A harness whose exit code cannot fail is not evidence: it would still
-// print "13/13 controls are load-bearing" after every load-bearing
+// print "14/14 controls are load-bearing" after every load-bearing
 // control had stopped noticing anything, and the published count would
 // be unbacked by anything that could contradict it.
 //
