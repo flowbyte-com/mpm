@@ -54,6 +54,8 @@ import argparse
 import os
 import re
 import shutil
+import contextlib
+import io
 import subprocess
 import sys
 from collections import namedtuple
@@ -720,11 +722,36 @@ CONTROLS = [
 ]
 
 
+# baseline_verdict decides whether a baseline run can be the
+# denominator, and returns the denominator when it can.
+#
+# It is a FUNCTION rather than inline code in main() so that the
+# self-test can drive it. Two guards live here — the suite must be
+# GREEN, and it must not have SKIPPED anything — and an inline guard has
+# no case that fails when it is removed: the self-test drives
+# summarise(), which main() never reaches.
+#
+# A skipped test did not run, so it cannot be part of the denominator —
+# and because the total counts a skip as if it had run, a control whose
+# run skipped the same tests would match a skipping baseline EXACTLY
+# and be measured against a baseline that never measured anything.
+#
+# It returns (baseline, ok, reason).
+def baseline_verdict(base_failed, base_passed, base_skipped):
+    if base_failed:
+        return 0, False, (f"THE SUITE IS NOT GREEN BEFORE THE CONTROLS RUN: "
+                          f"{base_failed}")
+    if base_skipped:
+        return 0, False, (f"THE BASELINE SKIPPED {len(base_skipped)} TESTS, so "
+                          f"it cannot be the denominator: {base_skipped}")
+    return len(base_failed) + base_passed + len(base_skipped), True, ""
+
+
 # Result is one control's measurement. It is a named tuple because the
 # fields have to travel together and a bare tuple is easy to mis-read.
 #
 #   total    the number of tests the control's run produced
-#   skipped  the number of those that did not run at all
+#   skipped  the NAMES of those that did not run at all
 Result = namedtuple("Result", "control hit specific inconclusive total skipped")
 
 
@@ -754,22 +781,13 @@ def main():
         restore()
         print("\n=== the baseline ===")
         base_failed, base_detail, base_passed, base_skipped = run_tests()
-        if base_failed:
-            print(f"THE SUITE IS NOT GREEN BEFORE THE CONTROLS RUN: {base_failed}")
+        baseline, ok, reason = baseline_verdict(base_failed, base_passed,
+                                                base_skipped)
+        if not ok:
+            print(reason)
             if base_detail:
                 print(f"    {base_detail}")
             return 1
-        if base_skipped:
-            # N23: a baseline in which tests SKIP is not a baseline.
-            # A skipped test did not run, so it cannot be part of the
-            # denominator — and because the total counts a skip as if
-            # it had run, a control whose run skipped the same tests
-            # would match the baseline EXACTLY and be measured against
-            # a baseline that never measured anything.
-            print(f"THE BASELINE SKIPPED {len(base_skipped)} TESTS, so it cannot "
-                  f"be the denominator: {base_skipped}")
-            return 1
-        baseline = len(base_failed) + base_passed + len(base_skipped)
         baseline_skipped = set(base_skipped)
         print(f"the suite runs {baseline} tests and is green "
               f"({len(base_skipped)} of them skipped)")
@@ -939,7 +957,10 @@ SUITE_SIZE = 36
 
 def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
                        undeclared=False, broken_suite=False, aborted=False,
-                       skipped=False, more_tests=False, redundant_aborted=False):
+                       skipped=False, more_tests=False, redundant_aborted=False,
+                       detected_nothing=False, redundant_skipped=False,
+                       swapped_skip=False, redundant_swapped_skip=False,
+                       baseline_skips=None):
     """Build the results a run would produce, for the self-test.
 
     `broken_load_bearing` names a load-bearing control whose named test
@@ -951,6 +972,10 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
     """
     first_lb = next(c["name"] for c in CONTROLS if c["load_bearing"])
     first_rd = next(c["name"] for c in CONTROLS if not c["load_bearing"])
+    # The tests the BASELINE skipped. A control that skips exactly
+    # these is innocent — only the SAME test skipping is — so the
+    # defence-in-depth controls carry them and stay clean.
+    baseline_skips = list(baseline_skips or [])
     results = []
     for control in CONTROLS:
         if control["load_bearing"]:
@@ -974,7 +999,28 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
                 control = dict(control)
                 control["breaks"] = list(control.get("breaks", [])) + broken
             total = SUITE_SIZE
-            run_skipped = []
+            # EVERY control skips what the BASELINE skipped, unless the
+            # case puts it under test. That matters: the identity
+            # comparison refuses a control whose skip set differs from
+            # the baseline's, so a case that changes ONE control's skips
+            # must leave the others matching — otherwise every other
+            # control is refused for the same reason and the case
+            # proves nothing about the one under test.
+            run_skipped = list(baseline_skips)
+            if detected_nothing and control["name"] == first_lb:
+                # The mutation stopped breaking the named test AND
+                # broke nothing else. The `named` clause is the FIRST
+                # of the gate's three questions, and it must refuse
+                # this on its own: the "unexpected failures" clause
+                # cannot, because nothing unexpected happened.
+                hit = []
+                specific = []
+            if swapped_skip and control["name"] == first_lb:
+                # The run skipped a DIFFERENT test than the baseline
+                # did — the same COUNT, a different identity. The
+                # comparison is by identity, so this is refused; a
+                # count comparison would wave it through.
+                run_skipped = ["TestSomethingElse"]
             if skipped and control["name"] == first_lb:
                 # The mutation made a test SKIP. A skipped test did not
                 # run: it neither passed nor failed, so it says
@@ -999,13 +1045,26 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
             if control["name"] == broken_redundant:
                 specific = ["TestTheSuiteBroke"]
             redundant_total = SUITE_SIZE
+            run_redundant_skipped = list(baseline_skips)
+            if redundant_swapped_skip and control["name"] == first_rd:
+                # The defence-in-depth control's run skipped a
+                # DIFFERENT test than the baseline did — the same
+                # count, a different identity.
+                run_redundant_skipped = ["TestSomethingElse"]
+            if redundant_skipped and control["name"] == first_rd:
+                # The defence-in-depth control's run SKIPPED a test.
+                # Nothing failed, so the `not specific` clause cannot
+                # catch it — the skip clause is what must.
+                run_redundant_skipped = ["TestSomethingSkipped"]
+                baseline_skips = ["TestSomethingSkipped"]
             if redundant_aborted and control["name"] == first_rd:
                 # The defence-in-depth control's run ABORTED: it
                 # produced three tests and the rest never ran. The
                 # suite must be UNCHANGED by such a control, so a
                 # different number of tests is a broken measurement.
                 redundant_total = 3
-            results.append(Result(control, [], specific, [], redundant_total, []))
+            results.append(Result(control, [], specific, [], redundant_total,
+                                  run_redundant_skipped))
     return results
 
 
@@ -1013,7 +1072,7 @@ def selftest():
     """Prove that the gate can fail.
 
     The harness is EVIDENCE. Evidence that cannot fail is not evidence:
-    a gate that always returned 0 would still print "13/13 controls are
+    a gate that always returned 0 would still print "14/14 controls are
     load-bearing" after every load-bearing control had stopped noticing
     anything.
 
@@ -1075,15 +1134,87 @@ def selftest():
         {"name": "there is no baseline and no results at all",
          "results": [],
          "want": False, "mode": "zero_baseline"},
+        # M2: the gate's FIRST question — the named test must fail —
+        # had no case of its own. The "did not detect its removal"
+        # case ALSO trips the "unexpected failures" clause, so
+        # removing the `named` clause left the self-test green. This
+        # case detects nothing and breaks nothing, so only `named` can
+        # refuse it.
+        {"name": f"the load-bearing control {first_lb} detected NOTHING at all",
+         "results": _synthetic_results(detected_nothing=True),
+         "want": False, "mode": "normal"},
+        # M3(a): the comparison is by IDENTITY, not by count. The run
+        # skipped a DIFFERENT test than the baseline did — the same
+        # count — so a count comparison would wave it through.
+        {"name": f"the load-bearing control {first_lb} skipped a DIFFERENT test than the baseline",
+         "results": _synthetic_results(swapped_skip=True,
+                                       baseline_skips=["TestSomethingSkipped"]),
+         "want": False, "mode": "swapped_skip"},
+        # M3(b): the same identity question on the OTHER branch — the
+        # defence-in-depth branch's own comparison. The control's run
+        # skipped a different test than the baseline did, the same
+        # count, so a count comparison would call it clean.
+        {"name": f"the defence-in-depth control {first_rd} skipped a DIFFERENT test than the baseline",
+         "results": _synthetic_results(redundant_swapped_skip=True,
+                                       baseline_skips=["TestSomethingSkipped"]),
+         "want": False, "mode": "swapped_skip"},
+        # M3(b): the defence-in-depth branch's skip clause, on its own.
+        # Nothing failed, so the `not specific` clause cannot catch
+        # it — the skip clause is what must.
+        {"name": f"the defence-in-depth control {first_rd} made a test skip",
+         "results": _synthetic_results(redundant_skipped=True),
+         "want": False, "mode": "normal"},
     ]
 
     failures = 0
+
+    # M4: main()'s two baseline guards. The baseline decision is a
+    # function, and these two cases are what fail when a guard is
+    # removed — an inline guard has no case at all, which is how round
+    # six's N23 fix went unverified.
+    baseline_cases = [
+        ("a green baseline that skipped nothing",
+         baseline_verdict([], SUITE_SIZE, []), True),
+        ("a baseline that is not green",
+         baseline_verdict(["TestSomethingFailed"], SUITE_SIZE - 1, []), False),
+        ("a baseline that skipped a test",
+         baseline_verdict([], SUITE_SIZE - 1, ["TestSomethingSkipped"]), False),
+    ]
+    for label, (baseline, ok, reason), want in baseline_cases:
+        if ok != want:
+            failures += 1
+            print(f"\nSELF-TEST FAILED: {label} — the baseline was "
+                  f"{'accepted' if ok else 'refused'}, want "
+                  f"{'accepted' if want else 'refused'}")
+        else:
+            print(f"\nSELF-TEST OK: {label} — the baseline was "
+                  f"{'accepted' if ok else 'refused'}.")
+
     for case in cases:
         name, results, want = case["name"], case["results"], case["want"]
-        if case["mode"] == "zero_baseline":
-            ok = summarise(results, 0, ())
-        else:
-            ok = summarise(results, SUITE_SIZE, ())
+        # The output is CAPTURED, because a published MESSAGE is part of
+        # what the gate says — N8 was a message that no case pinned.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            if case["mode"] == "zero_baseline":
+                ok = summarise(results, 0, ())
+            elif case["mode"] == "swapped_skip":
+                # The baseline skipped a DIFFERENT test, so the
+                # identity comparison has something to compare.
+                ok = summarise(results, SUITE_SIZE, ("TestSomethingSkipped",))
+            else:
+                ok = summarise(results, SUITE_SIZE, ())
+        # N8: the "more tests" direction says what is actually wrong.
+        # The verdict is unchanged either way, so the case that pins it
+        # is the one that produces that direction.
+        if "produced MORE tests than the baseline" in name:
+            if "NOT a run of this suite" not in buf.getvalue():
+                failures += 1
+                print("\nSELF-TEST FAILED: the more-tests direction does not say "
+                      "that the run is not a run of this suite")
+            else:
+                print("\nSELF-TEST OK: the more-tests direction says that the run "
+                      "is not a run of this suite.")
         verdict = "REFUSED" if not ok else "ACCEPTED"
         if ok != want:
             failures += 1

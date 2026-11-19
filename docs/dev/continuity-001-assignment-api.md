@@ -784,7 +784,7 @@ suite, the skipped test, the run that produced more tests than the
 baseline, the defence-in-depth control that aborted, the zero baseline, the
 empty corner, and the call with no baseline at all.
 
-### 5.8a The CLI's list-valued flags, found by the operator's own smoke test
+### 5.8 The CLI's list-valued flags, found by the operator's own smoke test
 
 The final end-to-end smoke test — the operator's path, from `create-root`
 through the review, the handoff and the approval, against a disposable
@@ -817,7 +817,7 @@ the name as the **first** argument of every registration — which is true
 of `fs.String` and false of `fs.Var`, where the value comes first. The
 guard's collector now knows the difference.
 
-### 5.8 What the sixth review found
+### 5.9 What the sixth review found
 
 The sixth round confirmed that **every** one of the fifth round's findings
 was genuinely fixed, and it did not take the notes' word for it: it
@@ -834,6 +834,7 @@ found one more defect and five nits.
 | the INCONCLUSIVE message was wrong for one direction | it said "the mutation ABORTED the suite" for the **more**-tests direction, which is a different explanation | the two directions now have their own messages, and they say what is actually wrong |
 | the baseline's health was checked for failures but not for **skips** | a baseline in which most tests skipped would have been accepted as the denominator — and since the total counts a skip as if it had run, a control that skipped the same tests would have matched it exactly | a baseline that skips **anything** is refused: a skipped test cannot be part of the denominator |
 | the self-test dispatched on a case's **display string** | the name was both the label and the switch that decided how the gate was driven, so renaming a case would have silently changed what the self-test proves | each case carries a **mode**, and the name is only the label |
+| `skipped` was a **count**, not an identity | a control that swapped *which* test skipped would not have been flagged, and the defence-in-depth branch's `skipped <= baseline_skipped` would still have called it clean | the skip comparison is by **identity** on both branches: only the *same* test skipping is innocent |
 
 **THE SELF-TEST IS NOW TWELVE CASES**, and each new gate mechanism has a
 case that fails when the mechanism is removed. That was verified by
@@ -862,6 +863,35 @@ discovered.
 
 ---
 
+
+### 5.10 What the seventh review found
+
+The seventh round did the thing this review had been asking for: it
+**mutated the gate fifteen times** and asked which mutations the
+self-test catches. It found that **six mechanisms were still unpinned**,
+including the gate's own **first** question.
+
+| the finding | what it was | the fix |
+|---|---|---|
+| the `named` clause was **unpinned** | it is the gate's FIRST question — "the named test must fail" — and the self-test's "did not detect its removal" case ALSO trips the "unexpected failures" clause, so removing `named` left the self-test green. A direct drive showed the mutant reporting **14/14 load-bearing at exit 0** on a run where a control detected nothing | the self-test gained a case that detects **nothing and breaks nothing**, so only the `named` clause can refuse it |
+| the identity comparison could revert to a **count** | the SPEC and this note both make a point of the identity form, and the note says the count form "is the one that would fail silently" — which is exactly the regression nothing detected | the self-test gained a case where the run skipped a **different** test than the baseline did: the same count, a different identity |
+| the defence-in-depth branch's **skip clause** was unpinned on its own | removing only that clause left the self-test green, and it flipped a refusal into an acceptance | the self-test gained a case where the defence-in-depth control's run skipped a test — nothing failed, so the skip clause is all that can catch it |
+| `main()`'s two **baseline guards** had no test at all | the self-test drives `summarise()`, which `main()` never reaches — so removing either guard left it green. One of those guards **is** round six's N23 fix | the baseline decision is now a **function** (`baseline_verdict`), and the self-test drives it: a green baseline is accepted, a baseline that is not green is refused, and a baseline that skipped a test is refused |
+| the "more tests" INCONCLUSIVE **message** was unpinned | a message, not a verdict — but it is published, and it was M17's own fix | the self-test now **captures** the gate's output and asserts the message says the run is not a run of this suite |
+| the `Result` docstring still described the old count semantics | N25 changed `skipped` from a count to a list of names, and the field's own comment still said "the number of those" | the comment says what the field is |
+| two stale **"13/13"** strings | the sentence both files use to argue that the gate can fail understated the number of controls that would have to stop noticing | they say 14/14 |
+| the drift guard's option map named **`VarX`** | there is no `VarX` in Go's `flag` package, and the map's comment said "Both put the name first" — which the map itself exists to correct | the map is the stdlib's own set, the `*Var` family is included with the right argument position, and the comment says what is true |
+| the round-six table omitted **N25** | the table is the only record of what round six changed, and it listed five of six | the sixth row is there |
+
+**THE MUTATION MATRIX IS NOW THE EVIDENCE.** Sixteen behaviour-changing
+mutants of the gate, and **every one of them is caught** by the
+self-test — verified by applying each to a scratch copy and running the
+self-test against it. That is a stronger claim than "the self-test has
+many cases", because it is a claim about the cases that do not exist:
+the matrix says which mechanisms would break the gate silently, and
+the answer is now none of them.
+
+**THE CLI'S LIST-VALUED FLAGS, FOUND BY THE OPERATOR'S OWN SMOKE TEST.**
 
 ## 6. What PR 2 leaves to PRs 3–5
 

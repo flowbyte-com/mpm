@@ -132,10 +132,20 @@ func collectOptionVocabulary(f *ast.File, vocab sourceOptionVocabulary) {
 // The name is the FIRST argument, as a string literal — EXCEPT for the
 // `Var` family, where the first argument is the value and the name is
 // the second.
+//
+// The set is the stdlib's own: `String`, `Bool`, `Int`, `Int64`,
+// `Float64`, `Uint`, `Uint64`, `Duration` and `Func` name the option
+// first; `Var`, `TextVar` and the `*Var` family name it second. There
+// is no `VarX` in Go's `flag` package, and a map whose whole purpose is
+// to be right about the stdlib has no business naming one.
 var flagRegistrationMethods = map[string]bool{
 	"String": true, "Bool": true, "Int": true, "Int64": true,
 	"Float64": true, "Uint": true, "Uint64": true, "Duration": true,
-	"Var": true, "VarX": true, "TextVar": true,
+	"Func": true,
+	"Var": true, "TextVar": true,
+	"BoolVar": true, "StringVar": true, "IntVar": true, "Int64Var": true,
+	"Float64Var": true, "UintVar": true, "Uint64Var": true,
+	"DurationVar": true,
 }
 
 // flagRegistrationNameIndex is the argument position of the option's
@@ -143,13 +153,16 @@ var flagRegistrationMethods = map[string]bool{
 //
 // `fs.String("json", ...)` names the option first. `fs.Var(&v, "json",
 // ...)` names the VALUE first, because `Var` takes an already-built
-// value — so its name is the second argument.
+// value — so its name is the second argument. The same is true of the
+// `*Var` family.
 //
 // Getting this wrong makes the drift guard report a phantom: the
 // registry names an option that the source does not declare, and the
 // guard refuses the tree for a flag that is really there.
 var flagRegistrationNameIndex = map[string]int{
-	"Var": 1, "VarX": 1, "TextVar": 1,
+	"Var": 1, "TextVar": 1,
+	"BoolVar": 1, "StringVar": 1, "IntVar": 1, "Int64Var": 1,
+	"Float64Var": 1, "UintVar": 1, "Uint64Var": 1, "DurationVar": 1,
 }
 
 // collectFlagRegistration reads one FlagSet registration call.
@@ -157,8 +170,8 @@ var flagRegistrationNameIndex = map[string]int{
 //	fs.Int("max-iterations", 0, "...")
 //	fs.BoolVar(&o.json, "json", false, "...")
 //
-// The bare form registers a name; the Var form registers a name AND
-// binds a variable. Both put the name first.
+// The bare form registers a name and puts it FIRST; the Var form
+// registers a name AND binds a variable, and puts the name SECOND.
 func collectFlagRegistration(call *ast.CallExpr, vocab sourceOptionVocabulary) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
