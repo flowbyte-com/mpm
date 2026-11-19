@@ -31,6 +31,7 @@ package assignment
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -235,6 +236,33 @@ func TestOnlyTheAssignmentPackageWritesTheAssignmentTables(t *testing.T) {
 		}
 		t.Errorf("%s writes an assignment row; only internal/core/assignment/ may, "+
 			"or the authority boundary has a path no registry action names", rel)
+	}
+}
+
+// TestControls_TheHarnessGateCanFail pins that the harness's gate is a
+// GATE.
+//
+// A harness whose exit code cannot fail is not evidence: it would still
+// print "13/13 controls are load-bearing" after every load-bearing
+// control had stopped noticing anything, and the published count would
+// be unbacked by anything that could contradict it.
+//
+// The harness's own --selftest mode drives its summary with the results
+// such a run WOULD produce — a load-bearing control that did not detect
+// its removal, and a defence-in-depth control that broke the suite — and
+// requires the gate to REFUSE them. So a self-test that passes is a
+// proof that the gate fails when it should.
+func TestControls_TheHarnessGateCanFail(t *testing.T) {
+	root := repoRoot(t)
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not on PATH; the harness's self-test cannot be driven here")
+	}
+	cmd := exec.Command(python, filepath.Join(root, controlsScript), "--selftest")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the harness's self-test failed, so its gate cannot be trusted "+
+			"to fail when a control stops detecting: %v\n%s", err, out)
 	}
 }
 

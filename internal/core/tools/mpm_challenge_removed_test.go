@@ -37,8 +37,8 @@ func TestRegistry_mpm_challenge_Retired(t *testing.T) {
 // TestRegistry_CurrentToolCount pins the size of the surface so a
 // future tool add/remove can't drift silently. As of Continuity 001
 // PR 2 (2026-11-19), the registry holds exactly 22 substrate Registry
-// entries (plus `mpm_help` discovery closure = 23 MCP registrations
-// when `MPM_EXPOSE_ALL_TOOLS=1`):
+// entries (plus the `mpm_help` discovery closure and the `mpm_route`
+// router = 24 MCP registrations when `MPM_EXPOSE_ALL_TOOLS=1`):
 //
 //   - 14 domain tools (mpm_memory, mpm_theories, mpm_decisions,
 //     mpm_lessons, mpm_topics, mpm_references, mpm_evidence,

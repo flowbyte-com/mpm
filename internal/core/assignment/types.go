@@ -66,8 +66,18 @@ const (
 	EventOperatorApproved = "operator_approved"
 	EventCancelled        = "cancelled"
 	EventClaimed          = "claimed"
-	EventLeaseExpired     = "lease_expired"
-	EventNote             = "note"
+	// EventLeaseExpired is RESERVED.
+	//
+	// PR 1's schema fixes the ledger's vocabulary at thirteen event
+	// types and `lease_expired` is one of them, so the constant stays
+	// and the schema keeps accepting it. The service does not emit it:
+	// a lease that lapses is not an event of its own, it is a CLAIM
+	// that took over an expired lease, and that is recorded as
+	// `claimed` with `reclaimed: true` and the previous holder in the
+	// payload. Emitting a second event for the same lapse would put
+	// two entries in the ledger for one thing that happened.
+	EventLeaseExpired = "lease_expired"
+	EventNote         = "note"
 )
 
 // The two review verdicts.
@@ -371,13 +381,26 @@ type ReviewResultParams struct {
 //
 // Every field is REQUIRED. An approval with no evidence pointer behind it
 // is a claim about what was authorised with nothing to check it against.
+//
+// There is no Actor field: the attribution of an approval comes from the
+// OPERATOR AUTHORITY that performs it, not from a field the caller sets.
+// A caller that could choose its own attribution would be recording a
+// claim in a column that is supposed to record a fact.
 type ApprovalParams struct {
 	ID       string
 	Action   string
 	Revision string
 	Source   string
 	Evidence string
-	Actor    Actor
+
+	// Epoch is the claim epoch the operator READ when they decided to
+	// approve. The write is `WHERE id = ? AND claim_epoch = ?` with
+	// THIS value, so an approval made against a different revision of
+	// the assignment does not land: the operator approves what they
+	// read, and nothing else.
+	//
+	// The operator learns the epoch from `mpm assignment show`.
+	Epoch int64
 }
 
 // InboxQuery selects the assignments an addressee can see.

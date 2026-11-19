@@ -24,7 +24,7 @@ this design:
 | | invariant | where it is enforced here |
 |---|---|---|
 | **N1** | a claimed write presents the current `claim_epoch`, checked atomically | every state-changing operation takes the epoch and writes `WHERE id = ? AND claim_epoch = ?` |
-| **N2** | a child's recipient is among the root's `eligible_recipients` | `Delegate` validates it, and every operation that touches a child re-validates it |
+| **N2** | a child's recipient is among the root's `eligible_recipients` | `Delegate` validates it; the root's list is immutable, so no later operation can invalidate it |
 | **N3** | a child's depth is within the root's `max_depth` | `Delegate` validates it |
 | **N6** | a root is created only through an operator-controlled entry point | root creation is **absent from the tool registry**; only the CLI verb reaches it |
 
@@ -114,6 +114,32 @@ expiry, reclaim and the approval's recorded moment are all observed through
 the injected clock, so the semantics are deterministic rather than
 timing-dependent.
 
+### 3.2a Who may delegate — and what that question cannot be answered
+
+PR 2 does **not** require the delegator to hold the parent assignment,
+and the reason is worth stating rather than leaving implicit.
+
+MPM has no identity to check. It records who a caller *says* it is, and
+§2.1 says why that is not authentication: an agent under the operator's
+account can read the operator's files and run the operator's binaries.
+So a rule like "only the holder of the parent may delegate it" could
+not be enforced honestly — the service could only check that the caller
+knows the parent's *current* epoch, which anyone who has read the
+assignment also knows. That check would be theatre: it would LOOK like
+a possession check and enforce nothing.
+
+What PR 2 **does** enforce is the two bounds that are structural:
+
+* the child's recipient is among the **root's** eligible recipients
+  (N2), and
+* the child's depth is within the **root's** `max_depth` (N3).
+
+What bounds the **number** of children in a tree is the root's
+`max_tasks`, and PR 2 does **not** enforce it — **PR 4** does, together
+with the other aggregate budgets. Until then, the tree's size is bounded
+by the depth and by nothing else, and that is stated here rather than
+implied.
+
 ### 3.3 The operations
 
 | operation | transition | who |
@@ -123,7 +149,7 @@ timing-dependent.
 | `Deliver` | `enqueued → delivered` | runtime |
 | `Acknowledge` | `delivered → acknowledged` | recipient |
 | `Accept` | `acknowledged → accepted` | recipient |
-| `Refuse` | `acknowledged → cancelled` | recipient |
+| `Refuse` | any live state → `cancelled` | recipient |
 | `Claim` | — (a fenced lease) | worker |
 | `Renew` | — (a new epoch, a new lease) | the holder |
 | `Start` | `accepted → in_progress` | the holder |
@@ -167,6 +193,22 @@ epoch**, and the write is `WHERE id = ? AND claim_epoch = ?`. A stale
 holder's write therefore matches **no row**, atomically with the write
 itself. That is N1, and it is the fence PR 1 deliberately left to the
 `WHERE` clause — a trigger cannot see the epoch a caller *presented*.
+
+**THE TWO PLACES WHERE THE CALLER PRESENTS NO EPOCH.** There are two,
+and both are stated here rather than left to be discovered:
+
+* **The approval.** The operator is not a lease holder, so it presents
+  the epoch it *read* — `mpm assignment show` — and the approval lands
+  only on the revision of the assignment the operator actually read.
+  See §3.7.
+* **The reviewer's write on the SUBJECT.** The subject is moved because
+  the review passed, and the reviewer holds no epoch on the subject: it
+  is a different assignment, in a different row. That write binds the
+  subject's **own** current epoch, read in the same transaction, so the
+  clause says "the subject did not change under me" rather than fencing
+  a stale writer. The reviewer's **own** row is fenced properly — the
+  reviewer presents its epoch, and that is the fence the stale-reviewer
+  test observes.
 
 A **claim** is a compare-and-swap: the caller presents the epoch it
 believes is current, and the write is
@@ -266,10 +308,30 @@ supply the action, the revision, the source **and** the evidence pointer.
 The approval must name the **same action** the gate awaited, and PR 1's
 trigger refuses it otherwise.
 
+**THE APPROVAL IS A FENCED WRITE.** The operator presents the claim epoch
+it read, and the write is `WHERE id = ? AND claim_epoch = ?` with that
+value — the same rule every other state change follows, and the one
+place where following it mattered most, because the approval **is** the
+gate. An approval that does not match the assignment as it stands does
+not land, and it leaves nothing behind: no state change and no ledger
+entry.
+
+The operator learns the epoch from `mpm assignment show`. An approval
+that names the wrong epoch is refused with the epoch the assignment is
+actually at, so the refusal tells the operator what to re-read.
+
 **MPM records an approval it did not manufacture.** The revision and the
 evidence pointer are the operator's claims about what was authorised, and
 the row says so. A change to the head revision after the approval leaves
 the approval **stale**, and staleness is observable rather than implied.
+
+**What "observable" means here.** The row carries the revision the
+approval named, so a reader can compare it with the head revision and
+see that they differ. MPM does **not** make that comparison itself: it
+does not know what the head revision is, and asking it to would mean
+asking it to authenticate the approval — which is the thing it must not
+do. The comparison belongs to whoever reads the row, and PR 5's read-only
+`check` is where it becomes a first-class answer.
 
 ### 3.8 Idempotency
 
@@ -343,10 +405,12 @@ mpm assignment create-root       --project-id --title --objective --recipient
                                  --max-resource-units [--resource-units]
                                  [--issue-ref --pr-ref --base-sha --head-sha
                                  --reviewed-sha --findings-sha256 --evidence-ref]
+                                 [--payload '{"review_target":"at-…"}']
 mpm assignment delegate           --parent-id --title --objective --recipient
                                  [--role] --idempotency-key [--resource-units]
                                  [--issue-ref --pr-ref --base-sha --head-sha
                                  --reviewed-sha --findings-sha256 --evidence-ref]
+                                 [--payload '{"review_target":"at-…"}']
 mpm assignment inbox              [--recipient] [--state enqueued,delivered]
                                  [--project-id] [--limit]
 mpm assignment show               --id
@@ -367,6 +431,7 @@ mpm assignment record-review      --id --verdict passed|changes_requested
 mpm assignment handoff            --id --awaiting-action "<exact action>"
                                  [--epoch <n>] [--note]
 mpm assignment record-approval    --id --action --revision --source --evidence
+                                 --epoch <n>
 mpm assignment cancel             --id [--epoch <n>] [--note]
 mpm assignment note               --id --note
 ```
@@ -376,6 +441,16 @@ mpm assignment note               --id --note
 `create-root` and `record-approval` are **operator verbs**: they are not in
 the registry, so no MCP action and no `mpm call` action reaches them.
 
+**`--payload` CARRIES THE REVIEWER'S TARGET.** The reviewer's target is
+fixed by the delegation that creates it, and that delegation is the only
+place that can name it. Without a `--payload` flag the operator's own
+front door could not create a reviewer at all — the authority split
+would be inverted for the one part of the tree that must be created
+deliberately. The flag takes a JSON object; a malformed one is an
+**error**, not a silent empty object, because a caller that meant to name
+a review target and spelled it wrong must not end up with an assignment
+that reviews nothing.
+
 
 ### 4.2 The MCP / `mpm call` surface
 
@@ -383,9 +458,9 @@ One tool, `mpm_assignment`, with an `action` parameter — the shape the
 registry already uses for `mpm_work` and `mpm_memory`. The actions are the
 ones an agent may safely perform:
 
-`inbox`, `show`, `history`, `deliver`, `acknowledge`, `accept`, `refuse`,
-`claim`, `renew`, `start`, `complete`, `delegate`, `cancel`, `note`,
-`record-review`.
+`inbox`, `show`, `history`, `tree`, `deliver`, `acknowledge`, `accept`,
+`refuse`, `claim`, `renew`, `start`, `complete`, `delegate`, `cancel`,
+`note`, `record-review`, `handoff` — **seventeen**.
 
 **`create-root` and `record-approval` are absent.** A test enumerates the
 registry and fails if any action can create a root or record an approval.
@@ -408,15 +483,22 @@ that a hash or a string changed.
 | 4 | two simultaneous claims cannot both become the valid owner, and a claim presenting a stale epoch is refused as stale | `TestAPITwoSimultaneousClaimsProduceOneOwner`, `TestAPIClaimPresentingAStaleEpochIsRefused` |
 | 5 | an expired lease can be reclaimed, and the previous holder's epoch is fenced out | `TestAPIAnExpiredLeaseIsReclaimableAndThePreviousHolderIsFencedOut`, `TestAPIALiveLeaseIsNotStealable`, `TestAPIRenewalAdvancesTheEpoch`, `TestAPIOnlyTheHolderMayRenew`, `TestAPITerminalAssignmentsAreNotClaimable` |
 | 6 | every transition writes exactly one corresponding durable event atomically, **including injected failure and rollback** | `TestAPIEveryTransitionWritesExactlyOneEvent`, `TestAPIAFailedTransitionRollsBackItsEvent`, `TestAPIAFailedCreationRollsBackItsEvent` |
-| 7 | delivery, acknowledgement, acceptance and completion remain distinct | `TestAPIDeliveryAcknowledgementAcceptanceAndCompletionAreDistinct`, `TestAPIAnUndeliveredAssignmentCannotBeAcknowledged` |
+| 7 | delivery, acknowledgement, acceptance and completion remain distinct, and a redelivery does not lose the work | `TestAPIDeliveryAcknowledgementAcceptanceAndCompletionAreDistinct`, `TestAPIAnUndeliveredAssignmentCannotBeAcknowledged`, `TestAPIRedeliveryIsRefusedAndTheWorkStaysVisible` |
 | 8 | restarting the process preserves assignments, events, claims and recoverable work | `TestAPIRestartPreservesAssignmentsEventsAndClaims` |
-| 9 | invalid state transitions, forged approval fields and attempts to bypass review are refused | `TestAPIInvalidTransitionsAreRefused`, `TestAPIForgedApprovalFieldsAreRefused`, `TestAPITheApprovalMustNameTheGateAction` |
+| 9 | invalid state transitions, forged approval fields and attempts to bypass review are refused, and the approval is a fenced write | `TestAPIInvalidTransitionsAreRefused`, `TestAPIForgedApprovalFieldsAreRefused`, `TestAPITheApprovalMustNameTheGateAction`, `TestAPIAnApprovalPresentingAStaleEpochIsRefused` |
 | 10 | the independent review moves the subject, records the verdict on both ledgers, and refuses a reviewer that judges its own work | `TestAPIReviewVerdictMovesTheSubject`, `TestAPIChangesRequestedLeavesTheSubjectAndRecordsANote`, `TestAPIReviewerCannotReviewItsOwnWork`, `TestAPIReviewOfAnIncompleteSubjectIsRefused`, `TestAPIAStaleReviewerIsFencedOut` |
 
 Plus the reads (`TestAPIInboxListsTheAddressedWork`), the authority boundary
-(`internal/core/tools/assignment_operator_boundary_regression_test.go`) and
-the control harness's own pinning
-(`internal/core/assignment/controls_pinning_test.go`).
+(`internal/core/tools/assignment_operator_boundary_regression_test.go`), the
+operator's own CLI path (`cmd/mpm/assignment_cmds_test.go`) and the control
+harness's own pinning (`internal/core/assignment/controls_pinning_test.go`).
+
+**`TestAPIEveryTransitionWritesExactlyOneEvent` COVERS EVERY EVENT TYPE.**
+The thirteen event types the service can write are all exercised by it, each
+on its own fixture so that the count is about ONE transition rather than
+about a chain of them. A test that covered six of the thirteen and was called
+"every transition" would publish a claim the test does not make — and the
+event types it left out are exactly the ones the operator's gate is made of.
 
 ### 5.2 The negative controls
 
@@ -425,7 +507,7 @@ the control harness's own pinning
 PR 1's invariants live in the database; PR 2's invariants are code, so a
 control has to remove the code and observe that the suite notices.
 
-**Fifteen controls: thirteen are load-bearing, and two measure the defence
+**Sixteen controls: fourteen are load-bearing, and two measure the defence
 in depth.**
 
 | control | what it removes | the test that must then fail |
@@ -435,6 +517,7 @@ in depth.**
 | `recipient-allow-list` | N2 | `TestAPIChildOutsideTheRootAllowListIsRefused` |
 | `depth-budget` | N3 | `TestAPIChildBeyondTheRootDepthIsRefused` |
 | `operator-authority` | N6 | `TestAPIRootCreationRequiresTheOperatorAuthority` |
+| `approval-fence` | the approval's fence, both halves | `TestAPIAnApprovalPresentingAStaleEpochIsRefused` |
 | `approval-action` | the approval's action check | `TestAPITheApprovalMustNameTheGateAction` |
 | `reviewer-independence` | the review's independence check | `TestAPIReviewerCannotReviewItsOwnWork` |
 | `live-lease` | the live-lease refusal | `TestAPIALiveLeaseIsNotStealable` |
@@ -457,6 +540,17 @@ So the fence is enforced **twice**, in two independent places, and neither
 alone is load-bearing. That is the property worth having, and it is why the
 full removal is the control that must fail.
 
+**THE HARNESS'S GATE IS A GATE.** The harness's exit code decides whether
+the measurement holds, and it can fail: a load-bearing control that did not
+detect its removal, and a defence-in-depth control that broke the suite,
+are both refused. The harness carries its own `--selftest`, which drives its
+summary with the results such a run *would* produce and requires the gate to
+refuse them, and `TestControls_TheHarnessGateCanFail` runs that self-test.
+A harness whose exit code cannot fail would still print "14/14 controls are
+load-bearing" after every load-bearing control had stopped noticing
+anything, and the published count would be unbacked by anything that could
+contradict it.
+
 ### 5.3 What the controls found
 
 The controls are not decoration: the first run of the harness found two
@@ -477,6 +571,42 @@ defects in PR 2's own code and tests.
 A control that removes an invariant nobody's test notices is a control that
 says the suite does not test that invariant. Both of these were invisible
 before the harness ran.
+
+### 5.4 What the independent review found
+
+The first independent review found **no hole** in the four deferred
+invariants — N1, N2, N3 and N6 hold as implemented, the authority boundary
+is structural rather than flag-based, and the fence binds the *presented*
+epoch on every path the PR claims it fences. It found nine defects in the
+**evidence artefacts** and in the **published contract's accuracy**, and all
+nine are fixed here.
+
+| the finding | what it was | what changed |
+|---|---|---|
+| the harness's exit code was a tautology | `load_bearing == total - redundant` reduces to `load_bearing == load_bearing`, so the harness returned 0 whatever it observed | the gate compares the pass count against the number of controls it ran, and a defence-in-depth control that breaks the suite is a failed measurement |
+| four mutators corrupted the statement they edited | they removed `AND claim_epoch = ?` and left the bound argument behind, so the write became a bind error instead of an unfenced write | each mutator that removes the predicate removes the value it binds too, so `fence-sql-half` now measures the clause alone |
+| the approval's `WHERE` bound the row's **current** epoch | the same tautology the transition had, in the one write the note claimed was fenced | the approval presents the epoch the operator read, and binds that |
+| N2's "every operation re-validates it" did not exist | the root's allow-list is read in exactly one place | the note says what is true: the list is immutable, so the delegation's check cannot be invalidated later |
+| `TestAssignment_TheAgentSurfaceStillDoesItsWork` proved the opposite of its name | it delegated to a nonexistent parent and required an error, so a handler that refused everything would pass | it now delegates and records a review verdict **successfully** through the agent-facing handler |
+| the boundary test's header framed a registry boundary as a capability boundary | it omitted the limitation the note and the SPEC both state plainly | the header now says what the boundary is and what it is not |
+| the operator's CLI could not express the review mechanism | the reviewer's target is fixed by the delegation's payload, and the CLI had no `--payload` | `--payload` carries a JSON object, and a malformed one is an error |
+| the operations table published a narrower `Refuse` than the code implements | the note said `acknowledged → cancelled`; the code allows any live state, deliberately | the table matches the code |
+| the agent-facing action list named fifteen of the seventeen | `tree` and `handoff` were missing | the list names all seventeen |
+
+Two nits were also fixed: the `lease_expired` event type is now documented
+as **reserved** (the schema's vocabulary is frozen at thirteen, and a reclaim
+is recorded as `claimed` with `reclaimed: true` rather than as a second
+event), and `ApprovalParams.Actor` — a field nothing read — was removed
+rather than left as a field that silently does nothing.
+
+**THE UNRELATED REGENERATION DELTA.** `docs/SPEC.md`'s Command Catalogue is
+generated by `cmd/gen-cli` from `cmd/mpm/router.go`, and this PR's
+regeneration picked up one row that had gone stale on `main`: the `export`
+row now reads "Export memories to JSON (structured object with the package
+loss marker)", which is what the router has said for some time. It is
+correct, it is generated, and it has nothing to do with the assignment API —
+but it is in the diff, so it is named here rather than left to be
+discovered.
 
 ---
 

@@ -364,6 +364,17 @@ func (s *Store) HandoffToOperator(p HandoffParams) (*Assignment, error) {
 //
 // A change to the head revision after the approval was recorded leaves
 // the approval STALE, and staleness is observable rather than implied.
+//
+// THE APPROVAL IS A FENCED WRITE, like every other state change here.
+// The operator presents the claim epoch it read, and the write is
+// `WHERE id = ? AND claim_epoch = ?` with the PRESENTED epoch. An
+// approval therefore lands only on the revision of the assignment the
+// operator actually read: if the assignment moved under the operator
+// between the read and the write, the approval does not land and the
+// operator must read it again.
+//
+// This is the same rule the rest of the package follows, and it is the
+// one place where following it mattered most: the approval is the gate.
 func (s *Store) RecordApproval(auth OperatorAuthority, p ApprovalParams) (*Assignment, error) {
 	if auth == nil {
 		return nil, fmt.Errorf("%w: recording an approval is an operator operation", ErrNotAuthorised)
@@ -393,6 +404,12 @@ func (s *Store) RecordApproval(auth OperatorAuthority, p ApprovalParams) (*Assig
 			return fmt.Errorf("%w: %s is %s and is not at the operator's gate",
 				ErrIllegalTransition, p.ID, current.State)
 		}
+		// The fence. The operator presents the epoch it read; a
+		// mismatch means the assignment moved under it, so the
+		// approval was made against something else.
+		if p.Epoch != current.ClaimEpoch {
+			return fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, p.ID, current.ClaimEpoch)
+		}
 		if err := checkTransition(current.Role, current.State, StateOperatorApproved); err != nil {
 			return err
 		}
@@ -413,7 +430,7 @@ func (s *Store) RecordApproval(auth OperatorAuthority, p ApprovalParams) (*Assig
 			    approval_evidence = ?, approved_at = ?
 			WHERE id = ? AND claim_epoch = ?`,
 			5, now, p.Action, p.Revision, p.Source, p.Evidence, now,
-			p.ID, current.ClaimEpoch)
+			p.ID, p.Epoch)
 		if err != nil {
 			return storageRefusal(err)
 		}

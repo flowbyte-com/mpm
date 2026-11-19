@@ -423,6 +423,7 @@ func TestAPIChildBeyondTheRootDepthIsRefused(t *testing.T) {
 	child := mustDelegate(t, store, root, func(p *DelegateParams) { p.Recipient = "beta" })
 
 	before := countRows(t, dm, "agent_tasks")
+	eventsBefore := countRows(t, dm, "agent_task_events")
 
 	// The grandchild would be at depth 2, and the root allows 1.
 	if _, _, err := store.Delegate(DelegateParams{
@@ -434,8 +435,13 @@ func TestAPIChildBeyondTheRootDepthIsRefused(t *testing.T) {
 	}); !errors.Is(err, ErrConstraint) {
 		t.Fatalf("a child beyond the root's depth returned %v, want %v", err, ErrConstraint)
 	}
+
+	// NO PARTIAL WRITE — neither the row nor the ledger.
 	if n := countRows(t, dm, "agent_tasks"); n != before {
 		t.Errorf("the refused delegation left %d rows, want %d", n, before)
+	}
+	if n := countRows(t, dm, "agent_task_events"); n != eventsBefore {
+		t.Errorf("the refused delegation left %d events, want %d", n, eventsBefore)
 	}
 }
 
@@ -955,80 +961,148 @@ func TestAPITerminalAssignmentsAreNotClaimable(t *testing.T) {
 //
 // Every transition appends exactly one event to the transitioned
 // assignment's ledger, and the event names the state it moved to.
+//
+// EVERY event type the service can write is covered here. A test that
+// covered six of the thirteen and was called "every transition" would
+// publish a claim the test does not make — and the event types it left
+// out are exactly the ones the operator's gate is made of.
+//
+// The count is taken AROUND each operation, so it is about ONE
+// transition rather than about a chain of them: a test that counted the
+// events of a whole chain would prove that the chain wrote some number
+// of events, not that each transition wrote exactly one.
 func TestAPIEveryTransitionWritesExactlyOneEvent(t *testing.T) {
 	store, _, _, projectID := newTestStore(t)
-	root := mustCreateRoot(t, store, projectID)
+	root := mustCreateRoot(t, store, projectID, func(p *CreateRootParams) {
+		p.IdempotencyKey = "idem:one-event:chain"
+	})
 
-	steps := []struct {
-		name string
-		run  func(a *Assignment) *Assignment
-		want string
-	}{
-		{"delivered", func(a *Assignment) *Assignment {
-			return mustDo(t, func() (*Assignment, error) {
-				return store.Deliver(FencedParams{ID: a.ID, Epoch: a.ClaimEpoch,
-					Actor: agentActor(a.Recipient)})
-			})
-		}, EventDelivered},
-		{"acknowledged", func(a *Assignment) *Assignment {
-			return mustDo(t, func() (*Assignment, error) {
-				return store.Acknowledge(FencedParams{ID: a.ID, Epoch: a.ClaimEpoch,
-					Actor: agentActor(a.Recipient)})
-			})
-		}, EventAcknowledged},
-		{"accepted", func(a *Assignment) *Assignment {
-			return mustDo(t, func() (*Assignment, error) {
-				return store.Accept(FencedParams{ID: a.ID, Epoch: a.ClaimEpoch,
-					Actor: agentActor(a.Recipient)})
-			})
-		}, EventAccepted},
+	// oneEvent asserts that an operation appended EXACTLY ONE event to
+	// the assignment's ledger, and that the event is the expected one.
+	oneEvent := func(t *testing.T, a *Assignment, want string,
+		op func() (*Assignment, error)) *Assignment {
+		t.Helper()
+		before := len(eventTypes(t, store, a.ID))
+		out := mustDo(t, op)
+		got := eventTypes(t, store, out.ID)
+		if len(got) != before+1 {
+			t.Fatalf("the %s operation left the ledger at %d events, want %d",
+				want, len(got), before+1)
+		}
+		if got[len(got)-1] != want {
+			t.Errorf("the %s operation wrote %q, want %q", want, got[len(got)-1], want)
+		}
+		return out
 	}
 
-	current := root
-	for _, step := range steps {
-		before := len(eventTypes(t, store, current.ID))
-		current = step.run(current)
-		after := eventTypes(t, store, current.ID)
-		if len(after) != before+1 {
-			t.Fatalf("the %s transition left the ledger at %d events, want %d",
-				step.name, len(after), before+1)
-		}
-		if after[len(after)-1] != step.want {
-			t.Errorf("the %s transition wrote %q, want %q", step.name, after[len(after)-1], step.want)
-		}
-	}
+	// The implementer's chain.
+	current := oneEvent(t, root, EventDelivered, func() (*Assignment, error) {
+		return store.Deliver(FencedParams{ID: root.ID, Epoch: root.ClaimEpoch,
+			Actor: agentActor("alpha")})
+	})
+	current = oneEvent(t, current, EventAcknowledged, func() (*Assignment, error) {
+		return store.Acknowledge(FencedParams{ID: current.ID, Epoch: current.ClaimEpoch,
+			Actor: agentActor("alpha")})
+	})
+	current = oneEvent(t, current, EventAccepted, func() (*Assignment, error) {
+		return store.Accept(FencedParams{ID: current.ID, Epoch: current.ClaimEpoch,
+			Actor: agentActor("alpha")})
+	})
 
 	// A claim writes its own event, and the state does not move.
-	before := len(eventTypes(t, store, current.ID))
-	claimed := mustDo(t, func() (*Assignment, error) {
+	claimed := oneEvent(t, current, EventClaimed, func() (*Assignment, error) {
 		return store.Claim(ClaimParams{
 			ID: current.ID, ExpectedEpoch: current.ClaimEpoch, Owner: "alpha", LeaseSeconds: 600,
 			Actor: agentActor("alpha"),
 		})
 	})
-	after := eventTypes(t, store, claimed.ID)
-	if len(after) != before+1 {
-		t.Fatalf("the claim left the ledger at %d events, want %d", len(after), before+1)
-	}
-	if after[len(after)-1] != EventClaimed {
-		t.Errorf("the claim wrote %q, want %q", after[len(after)-1], EventClaimed)
-	}
-
-	// And the working transitions.
-	started := mustDo(t, func() (*Assignment, error) {
+	started := oneEvent(t, claimed, EventStarted, func() (*Assignment, error) {
 		return store.Start(FencedParams{ID: claimed.ID, Epoch: claimed.ClaimEpoch,
 			Actor: agentActor("alpha")})
 	})
-	if got := eventTypes(t, store, started.ID); got[len(got)-1] != EventStarted {
-		t.Errorf("the start transition wrote %q, want %q", got[len(got)-1], EventStarted)
-	}
-	completed := mustDo(t, func() (*Assignment, error) {
+	oneEvent(t, started, EventCompleted, func() (*Assignment, error) {
 		return store.Complete(FencedParams{ID: started.ID, Epoch: started.ClaimEpoch,
 			Actor: agentActor("alpha")})
 	})
-	if got := eventTypes(t, store, completed.ID); got[len(got)-1] != EventCompleted {
-		t.Errorf("the complete transition wrote %q, want %q", got[len(got)-1], EventCompleted)
+
+	// The REFUSAL and the CANCELLATION share a state and an event type:
+	// both land in `cancelled`, and the ledger tells them apart by the
+	// event's payload. So both write `cancelled`, and both are counted
+	// here.
+	refusedRoot := mustCreateRoot(t, store, projectID, func(p *CreateRootParams) {
+		p.IdempotencyKey = "idem:one-event:refused"
+	})
+	oneEvent(t, refusedRoot, EventCancelled, func() (*Assignment, error) {
+		return store.Refuse(FencedParams{ID: refusedRoot.ID, Epoch: refusedRoot.ClaimEpoch,
+			Actor: agentActor("alpha")})
+	})
+
+	cancelledRoot := mustCreateRoot(t, store, projectID, func(p *CreateRootParams) {
+		p.IdempotencyKey = "idem:one-event:cancelled"
+	})
+	oneEvent(t, cancelledRoot, EventCancelled, func() (*Assignment, error) {
+		return store.Cancel(CancelParams{
+			ID: cancelledRoot.ID, Epoch: cancelledRoot.ClaimEpoch, Actor: operatorActor(),
+		})
+	})
+
+	// A note is not a transition, but it IS a ledger entry.
+	notedRoot := mustCreateRoot(t, store, projectID, func(p *CreateRootParams) {
+		p.IdempotencyKey = "idem:one-event:note"
+	})
+	oneEvent(t, notedRoot, EventNote, func() (*Assignment, error) {
+		return store.Note(NoteParams{
+			ID: notedRoot.ID, Actor: agentActor("alpha"), Note: "a note",
+		})
+	})
+
+	// And the operator's gate: the review's verdict, the hand-off, and
+	// the approval. These are the events the whole gate is made of, so
+	// they are the ones a test that skipped them would leave unproven.
+	_, subject, reviewer := mustReviewSubject(t, store, projectID)
+	reviewing := mustStartReviewer(t, store, reviewer)
+
+	// The verdict moves the SUBJECT and records the verdict on the
+	// REVIEWER's own ledger too, so the two ledgers are counted
+	// separately: the operation returns the reviewer, and a count
+	// taken around it on one assignment would be a count of the other.
+	beforeSubject := len(eventTypes(t, store, subject.ID))
+	beforeReviewer := len(eventTypes(t, store, reviewing.ID))
+	mustDo(t, func() (*Assignment, error) {
+		return store.RecordReviewResult(ReviewResultParams{
+			ReviewerID: reviewing.ID,
+			Verdict:    VerdictPassed,
+			Epoch:      reviewing.ClaimEpoch,
+			Actor:      agentActor("charlie"),
+		})
+	})
+	subjectEvents := eventTypes(t, store, subject.ID)
+	if len(subjectEvents) != beforeSubject+1 {
+		t.Errorf("the verdict left the subject's ledger at %d events, want %d",
+			len(subjectEvents), beforeSubject+1)
 	}
+	if subjectEvents[len(subjectEvents)-1] != EventReviewPassed {
+		t.Errorf("the subject's last event is %q, want %q",
+			subjectEvents[len(subjectEvents)-1], EventReviewPassed)
+	}
+	if n := len(eventTypes(t, store, reviewing.ID)); n != beforeReviewer+1 {
+		t.Errorf("the verdict left the reviewer's ledger at %d events, want %d", n, beforeReviewer+1)
+	}
+
+	gated := oneEvent(t, mustGet(t, store, subject.ID), EventAwaitingOperator,
+		func() (*Assignment, error) {
+			cur := mustGet(t, store, subject.ID)
+			return store.HandoffToOperator(HandoffParams{
+				ID: cur.ID, Epoch: cur.ClaimEpoch, AwaitingAction: "merge PR #260",
+				Actor: agentActor("alpha"),
+			})
+		})
+	oneEvent(t, gated, EventOperatorApproved, func() (*Assignment, error) {
+		return store.RecordApproval(NewLocalOperatorAuthority("operator"), ApprovalParams{
+			ID: gated.ID, Action: "merge PR #260", Revision: "abc123", Source: "operator",
+			Evidence: "ev://x", Epoch: gated.ClaimEpoch,
+		})
+	})
 }
 
 // TestAPIAFailedTransitionRollsBackItsEvent proves the state change and
@@ -1377,7 +1451,8 @@ func TestAPIForgedApprovalFieldsAreRefused(t *testing.T) {
 	// An approval without the operator's authority is refused, and it
 	// never reaches the row.
 	if _, err := store.RecordApproval(nil, ApprovalParams{
-		ID: root.ID, Action: "merge PR #260", Revision: "abc", Source: "operator", Evidence: "ev://x",
+		ID: root.ID, Action: "merge PR #260", Revision: "abc", Source: "operator",
+		Evidence: "ev://x", Epoch: root.ClaimEpoch,
 	}); !errors.Is(err, ErrNotAuthorised) {
 		t.Fatalf("an approval without the operator's authority returned %v, want %v",
 			err, ErrNotAuthorised)
@@ -1385,7 +1460,8 @@ func TestAPIForgedApprovalFieldsAreRefused(t *testing.T) {
 
 	// An approval of an assignment that is not at the gate is refused.
 	if _, err := store.RecordApproval(NewLocalOperatorAuthority("operator"), ApprovalParams{
-		ID: root.ID, Action: "merge PR #260", Revision: "abc", Source: "operator", Evidence: "ev://x",
+		ID: root.ID, Action: "merge PR #260", Revision: "abc", Source: "operator",
+		Evidence: "ev://x", Epoch: root.ClaimEpoch,
 	}); !errors.Is(err, ErrIllegalTransition) {
 		t.Fatalf("an approval of an assignment that is not at the gate returned %v, want %v",
 			err, ErrIllegalTransition)
@@ -1393,7 +1469,8 @@ func TestAPIForgedApprovalFieldsAreRefused(t *testing.T) {
 
 	// Every field is required.
 	full := ApprovalParams{
-		ID: root.ID, Action: "merge PR #260", Revision: "abc", Source: "operator", Evidence: "ev://x",
+		ID: root.ID, Action: "merge PR #260", Revision: "abc", Source: "operator",
+		Evidence: "ev://x", Epoch: root.ClaimEpoch,
 	}
 	for _, tc := range []struct {
 		name string
@@ -1461,7 +1538,8 @@ func TestAPITheApprovalMustNameTheGateAction(t *testing.T) {
 
 	// A DIFFERENT action is refused.
 	if _, err := store.RecordApproval(NewLocalOperatorAuthority("operator"), ApprovalParams{
-		ID: gated.ID, Action: "merge PR #999", Revision: "abc", Source: "operator", Evidence: "ev://x",
+		ID: gated.ID, Action: "merge PR #999", Revision: "abc", Source: "operator",
+		Evidence: "ev://x", Epoch: gated.ClaimEpoch,
 	}); !errors.Is(err, ErrConstraint) {
 		t.Fatalf("an approval of a different action returned %v, want %v", err, ErrConstraint)
 	}
@@ -1471,6 +1549,7 @@ func TestAPITheApprovalMustNameTheGateAction(t *testing.T) {
 		return store.RecordApproval(NewLocalOperatorAuthority("operator"), ApprovalParams{
 			ID: gated.ID, Action: "merge PR #260", Revision: "abc123", Source: "operator",
 			Evidence: "docs/evidence/continuity-001-pr2/manifest.json",
+			Epoch:    gated.ClaimEpoch,
 		})
 	})
 	if approved.State != StateOperatorApproved {
@@ -1482,6 +1561,82 @@ func TestAPITheApprovalMustNameTheGateAction(t *testing.T) {
 	}
 	if approved.ApprovedAt == nil {
 		t.Errorf("the approval recorded no moment")
+	}
+}
+
+// TestAPIAnApprovalPresentingAStaleEpochIsRefused proves the approval is
+// a FENCED write.
+//
+// The operator reads the assignment, decides to approve it, and records
+// the approval. The approval names the epoch the operator read, and the
+// write is `WHERE id = ? AND claim_epoch = ?` with that value — so an
+// approval that does not match the assignment as it stands does not
+// land.
+//
+// This is the same rule every other state change follows, and the
+// approval is the place it matters most: the approval IS the gate.
+//
+// The refusal must also leave NOTHING behind. An approval that was
+// refused but still moved the row would be worse than no fence at all.
+func TestAPIAnApprovalPresentingAStaleEpochIsRefused(t *testing.T) {
+	store, dm, _, projectID := newTestStore(t)
+	_, subject, reviewer := mustReviewSubject(t, store, projectID)
+
+	// The subject passes its review and reaches the operator's gate.
+	reviewing := mustStartReviewer(t, store, reviewer)
+	mustDo(t, func() (*Assignment, error) {
+		return store.RecordReviewResult(ReviewResultParams{
+			ReviewerID: reviewing.ID,
+			Verdict:    VerdictPassed,
+			Epoch:      reviewing.ClaimEpoch,
+			Actor:      agentActor("charlie"),
+		})
+	})
+	cur := mustGet(t, store, subject.ID)
+	gated := mustDo(t, func() (*Assignment, error) {
+		return store.HandoffToOperator(HandoffParams{
+			ID: cur.ID, Epoch: cur.ClaimEpoch, AwaitingAction: "merge PR #260",
+			Actor: agentActor("alpha"),
+		})
+	})
+
+	eventsBefore := countRows(t, dm, "agent_task_events")
+
+	// The operator presents an epoch the assignment is not at.
+	if _, err := store.RecordApproval(NewLocalOperatorAuthority("operator"), ApprovalParams{
+		ID: gated.ID, Action: "merge PR #260", Revision: "abc123", Source: "operator",
+		Evidence: "ev://x", Epoch: gated.ClaimEpoch + 1,
+	}); !errors.Is(err, ErrStaleClaim) {
+		t.Fatalf("an approval presenting a stale epoch returned %v, want %v", err, ErrStaleClaim)
+	}
+
+	// NOTHING moved: the row is still at the gate and the ledger did
+	// not grow.
+	after := mustGet(t, store, gated.ID)
+	if after.State != StateAwaitingOperator {
+		t.Errorf("the assignment is %q after the refused approval, want %q",
+			after.State, StateAwaitingOperator)
+	}
+	if after.ApprovalRevision != "" || after.ApprovedAt != nil {
+		t.Errorf("the refused approval recorded (revision=%q approved_at=%v), want nothing",
+			after.ApprovalRevision, after.ApprovedAt)
+	}
+	if n := countRows(t, dm, "agent_task_events"); n != eventsBefore {
+		t.Errorf("the refused approval left %d events, want %d", n, eventsBefore)
+	}
+
+	// And the approval that presents the epoch the operator actually
+	// read DOES land, so the fence refuses the wrong epoch and not the
+	// approval itself.
+	approved := mustDo(t, func() (*Assignment, error) {
+		return store.RecordApproval(NewLocalOperatorAuthority("operator"), ApprovalParams{
+			ID: gated.ID, Action: "merge PR #260", Revision: "abc123", Source: "operator",
+			Evidence: "ev://x", Epoch: gated.ClaimEpoch,
+		})
+	})
+	if approved.State != StateOperatorApproved {
+		t.Errorf("the assignment is %q after the approval, want %q",
+			approved.State, StateOperatorApproved)
 	}
 }
 

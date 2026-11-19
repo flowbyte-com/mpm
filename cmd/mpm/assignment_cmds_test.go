@@ -1,0 +1,392 @@
+// assignment_cmds_test.go — the operator's own CLI path.
+//
+// # WHY THIS FILE EXISTS
+//
+// The boundary test in internal/core/tools proves that no AGENT-facing
+// action can create a root or record an approval. This file proves the
+// OTHER half of the same claim: the operator's own verbs WORK.
+//
+// A boundary that only has a "no" is not a boundary, it is a deletion.
+// The operator must still be able to create the root and record the
+// approval — through the CLI, end to end — or the capability has been
+// removed rather than separated.
+//
+// The tests here drive the real router against a DISPOSABLE workspace:
+// MPM_WORKSPACE points at a temp directory and the process-wide
+// database singleton is reset, so nothing here can reach a real
+// workspace.
+
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/assignment"
+	"github.com/flowbyte-com/mpm-core/usererror"
+)
+
+// runAssignmentCLI runs the CLI with the user-facing output captured.
+//
+// The usererror package binds os.Stderr once, at init, so swapping
+// os.Stderr at test time does NOT redirect it — the refusals would go to
+// the real stderr and the test would see nothing.
+//
+// It returns the exit code, the command's own output, and the
+// user-facing refusals.
+func runAssignmentCLI(t *testing.T, argv ...string) (int, string, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := usererror.GetWriter()
+	usererror.SetWriter(&buf)
+	t.Cleanup(func() { usererror.SetWriter(prev) })
+	code, out := runCLI(t, argv...)
+	return code, out, buf.String()
+}
+
+// assignmentCLIState is the shape of the CLI's --json output.
+type assignmentCLIState struct {
+	ID         string                 `json:"id"`
+	State      string                 `json:"state"`
+	ClaimEpoch int64                  `json:"claim_epoch"`
+	RootID     string                 `json:"root_id"`
+	ParentID   string                 `json:"parent_id"`
+	Depth      int                    `json:"depth"`
+	Payload    map[string]interface{} `json:"payload"`
+}
+
+// assignmentCLIFixture points the CLI at a disposable workspace and
+// returns its database.
+func assignmentCLIFixture(t *testing.T) *internal.DatabaseManager {
+	t.Helper()
+	t.Setenv("MPM_WORKSPACE", t.TempDir())
+	resetDBSingleton(t)
+	dm := getDBConcrete()
+	if dm == nil {
+		t.Fatal("the disposable workspace database did not open")
+	}
+	if _, err := dm.SQLDB().Exec(
+		`INSERT INTO projects (id, created_by) VALUES ('cpj-cli', 'cli-test')`); err != nil {
+		t.Fatalf("seed the project: %v", err)
+	}
+	return dm
+}
+
+// TestAssignmentCLITheOperatorCanCreateARoot proves the operator's own
+// front door creates a root, end to end through the router.
+func TestAssignmentCLITheOperatorCanCreateARoot(t *testing.T) {
+	assignmentCLIFixture(t)
+
+	code, out := runCLI(t, "assignment", "create-root",
+		"--project-id", "cpj-cli",
+		"--title", "the root",
+		"--objective", "the objective",
+		"--recipient", "alpha",
+		"--idempotency-key", "idem:cli:root",
+		"--permitted-operation", "read,write",
+		"--eligible-recipient", "alpha,beta",
+		"--max-depth", "2",
+		"--max-tasks", "8",
+		"--max-concurrency", "2",
+		"--max-resource-units", "100",
+		"--json",
+	)
+	if code != 0 {
+		t.Fatalf("the operator's create-root exited %d: %s", code, out)
+	}
+
+	var created assignmentCLIState
+	if err := json.Unmarshal([]byte(out), &created); err != nil {
+		t.Fatalf("the create-root output is not JSON: %v\n%s", err, out)
+	}
+	if created.ID == "" {
+		t.Fatalf("the create-root output names no assignment: %s", out)
+	}
+	if created.State != assignment.StateEnqueued {
+		t.Errorf("the root is %q, want %q", created.State, assignment.StateEnqueued)
+	}
+	if created.Depth != 0 {
+		t.Errorf("the root is at depth %d, want 0", created.Depth)
+	}
+	if created.ParentID != "" {
+		t.Errorf("the root names the parent %q, want none", created.ParentID)
+	}
+	if created.RootID != created.ID {
+		t.Errorf("the root's tree is %q, want its own id %q", created.RootID, created.ID)
+	}
+}
+
+// TestAssignmentCLITheOperatorCanRecordAnApproval proves the operator's
+// own front door records an approval, end to end through the router.
+//
+// The fixture — the work, the review and the hand-off — is built with
+// the service, because those are the AGENT's steps. The thing under
+// test is the operator's VERB.
+func TestAssignmentCLITheOperatorCanRecordAnApproval(t *testing.T) {
+	dm := assignmentCLIFixture(t)
+	store := assignment.NewStore(dm)
+
+	// The work: a root, a child that finishes, an independent reviewer
+	// that passes it, and the hand-off to the operator's gate.
+	root, created, err := store.CreateRoot(
+		assignment.NewLocalOperatorAuthority("operator"),
+		assignment.CreateRootParams{
+			ProjectID:           "cpj-cli",
+			Title:               "the root",
+			Objective:           "the objective",
+			Recipient:           "alpha",
+			IdempotencyKey:      "idem:cli:approval:root",
+			PermittedOperations: []string{"read", "write"},
+			EligibleRecipients:  []string{"alpha", "charlie"},
+			MaxDepth:            2,
+			MaxTasks:            8,
+			MaxConcurrency:      2,
+			MaxResourceUnits:    100,
+		})
+	if err != nil || !created {
+		t.Fatalf("create the root: %v (created=%v)", err, created)
+	}
+
+	subject, created, err := store.Delegate(assignment.DelegateParams{
+		ParentID:       root.ID,
+		Title:          "the subject",
+		Objective:      "the work",
+		Recipient:      "alpha",
+		Role:           assignment.RoleImplementer,
+		IdempotencyKey: "idem:cli:approval:subject",
+	})
+	if err != nil || !created {
+		t.Fatalf("delegate the subject: %v (created=%v)", err, created)
+	}
+	subject = cliAdvance(t, store, subject, assignment.StateCompleted)
+
+	reviewer, created, err := store.Delegate(assignment.DelegateParams{
+		ParentID:       root.ID,
+		Title:          "the reviewer",
+		Objective:      "review the work",
+		Recipient:      "charlie",
+		Role:           assignment.RoleReviewer,
+		IdempotencyKey: "idem:cli:approval:reviewer",
+		Payload:        map[string]interface{}{assignment.PayloadKeyReviewTarget: subject.ID},
+	})
+	if err != nil || !created {
+		t.Fatalf("delegate the reviewer: %v (created=%v)", err, created)
+	}
+	reviewing := cliAdvance(t, store, reviewer, assignment.StateInProgress)
+
+	if _, err := store.RecordReviewResult(assignment.ReviewResultParams{
+		ReviewerID: reviewing.ID,
+		Verdict:    assignment.VerdictPassed,
+		Epoch:      reviewing.ClaimEpoch,
+		Actor:      assignment.Actor{Address: "charlie", Kind: "agent"},
+	}); err != nil {
+		t.Fatalf("record the verdict: %v", err)
+	}
+	cur, err := store.Get(subject.ID)
+	if err != nil {
+		t.Fatalf("read the subject: %v", err)
+	}
+	gated, err := store.HandoffToOperator(assignment.HandoffParams{
+		ID: cur.ID, Epoch: cur.ClaimEpoch, AwaitingAction: "merge PR #260",
+		Actor: assignment.Actor{Address: "alpha", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("hand the work to the gate: %v", err)
+	}
+
+	// The operator's verb.
+	code, out := runCLI(t, "assignment", "record-approval",
+		"--id", gated.ID,
+		"--action", "merge PR #260",
+		"--revision", "abc123",
+		"--source", "operator",
+		"--evidence", "ev://the-approval",
+		"--epoch", "1",
+		"--json",
+	)
+	if code != 0 {
+		t.Fatalf("the operator's record-approval exited %d: %s", code, out)
+	}
+	var approved assignmentCLIState
+	if err := json.Unmarshal([]byte(out), &approved); err != nil {
+		t.Fatalf("the record-approval output is not JSON: %v\n%s", err, out)
+	}
+	if approved.State != assignment.StateOperatorApproved {
+		t.Errorf("the assignment is %q after the approval, want %q",
+			approved.State, assignment.StateOperatorApproved)
+	}
+
+	// And the row records the operator's claims.
+	after, err := store.Get(gated.ID)
+	if err != nil {
+		t.Fatalf("read the assignment: %v", err)
+	}
+	if after.ApprovalAction != "merge PR #260" {
+		t.Errorf("the approval names the action %q, want %q", after.ApprovalAction, "merge PR #260")
+	}
+	if after.ApprovalRevision != "abc123" {
+		t.Errorf("the approval names the revision %q, want %q", after.ApprovalRevision, "abc123")
+	}
+	if after.ApprovalEvidence != "ev://the-approval" {
+		t.Errorf("the approval names the evidence %q, want %q",
+			after.ApprovalEvidence, "ev://the-approval")
+	}
+}
+
+// TestAssignmentCLITheApprovalRefusesAStaleEpoch proves the operator's
+// verb is a FENCED write like every other one.
+//
+// The operator read the assignment at one epoch and records the
+// approval at another: the approval does not land.
+func TestAssignmentCLITheApprovalRefusesAStaleEpoch(t *testing.T) {
+	dm := assignmentCLIFixture(t)
+	store := assignment.NewStore(dm)
+
+	root, _, err := store.CreateRoot(
+		assignment.NewLocalOperatorAuthority("operator"),
+		assignment.CreateRootParams{
+			ProjectID:           "cpj-cli",
+			Title:               "the root",
+			Objective:           "the objective",
+			Recipient:           "alpha",
+			IdempotencyKey:      "idem:cli:stale:root",
+			PermittedOperations: []string{"read"},
+			EligibleRecipients:  []string{"alpha"},
+			MaxDepth:            1,
+			MaxTasks:            2,
+			MaxConcurrency:      1,
+			MaxResourceUnits:    10,
+		})
+	if err != nil {
+		t.Fatalf("create the root: %v", err)
+	}
+
+	// The operator names an epoch the assignment is not at. The verb
+	// refuses, and says so.
+	code, out, refusals := runAssignmentCLI(t, "assignment", "record-approval",
+		"--id", root.ID,
+		"--action", "merge PR #260",
+		"--revision", "abc123",
+		"--source", "operator",
+		"--evidence", "ev://the-approval",
+		"--epoch", "7",
+	)
+	if code == 0 {
+		t.Fatalf("the approval of an assignment that is not at the gate was accepted: %s", out)
+	}
+	if !strings.Contains(refusals, "assignment:") {
+		t.Errorf("the refusal did not come from the service: %s", refusals)
+	}
+}
+
+// TestAssignmentCLIPayloadCarriesTheReviewersTarget proves the
+// operator's CLI can build the reviewer its own design requires.
+//
+// The reviewer's target is fixed by the delegation that creates the
+// reviewer, and that delegation carries a PAYLOAD. Without a way to set
+// a payload, the operator's front door could not create a reviewer at
+// all — the authority split would be inverted for the one part of the
+// tree that must be created deliberately.
+func TestAssignmentCLIPayloadCarriesTheReviewersTarget(t *testing.T) {
+	assignmentCLIFixture(t)
+
+	code, out := runCLI(t, "assignment", "create-root",
+		"--project-id", "cpj-cli",
+		"--title", "the root",
+		"--objective", "the objective",
+		"--recipient", "alpha",
+		"--idempotency-key", "idem:cli:payload:root",
+		"--permitted-operation", "read",
+		"--eligible-recipient", "alpha",
+		"--max-depth", "1",
+		"--max-tasks", "2",
+		"--max-concurrency", "1",
+		"--max-resource-units", "10",
+		"--payload", `{"review_target":"at-0123456789abcdef"}`,
+		"--json",
+	)
+	if code != 0 {
+		t.Fatalf("the create-root with a payload exited %d: %s", code, out)
+	}
+	var created assignmentCLIState
+	if err := json.Unmarshal([]byte(out), &created); err != nil {
+		t.Fatalf("the create-root output is not JSON: %v\n%s", err, out)
+	}
+	if created.Payload["review_target"] != "at-0123456789abcdef" {
+		t.Errorf("the payload is %v, want the review target", created.Payload)
+	}
+}
+
+// TestAssignmentCLIMalformedPayloadIsRefused proves a payload the
+// operator got wrong is an ERROR, not a silent empty object.
+//
+// A caller that meant to name a review target and spelled it wrong
+// must not end up with an assignment that reviews nothing.
+func TestAssignmentCLIMalformedPayloadIsRefused(t *testing.T) {
+	assignmentCLIFixture(t)
+
+	code, out, refusals := runAssignmentCLI(t, "assignment", "create-root",
+		"--project-id", "cpj-cli",
+		"--title", "the root",
+		"--objective", "the objective",
+		"--recipient", "alpha",
+		"--idempotency-key", "idem:cli:bad-payload:root",
+		"--permitted-operation", "read",
+		"--eligible-recipient", "alpha",
+		"--max-depth", "1",
+		"--max-tasks", "2",
+		"--max-concurrency", "1",
+		"--max-resource-units", "10",
+		"--payload", "{not json",
+	)
+	if code == 0 {
+		t.Fatalf("a malformed payload was accepted: %s", out)
+	}
+	if !strings.Contains(refusals, "--payload") {
+		t.Errorf("the refusal does not name the flag at fault: %s", refusals)
+	}
+}
+
+// cliAdvance drives an assignment through the implementer's path to the
+// given state, through the service.
+func cliAdvance(t *testing.T, store *assignment.Store, a *assignment.Assignment, to string) *assignment.Assignment {
+	t.Helper()
+	actor := assignment.Actor{Address: a.Recipient, Kind: "agent"}
+	step := func(op func() (*assignment.Assignment, error)) *assignment.Assignment {
+		t.Helper()
+		out, err := op()
+		if err != nil {
+			t.Fatalf("advance %s: %v", a.ID, err)
+		}
+		return out
+	}
+	cur := step(func() (*assignment.Assignment, error) {
+		return store.Deliver(assignment.FencedParams{ID: a.ID, Epoch: a.ClaimEpoch, Actor: actor})
+	})
+	cur = step(func() (*assignment.Assignment, error) {
+		return store.Acknowledge(assignment.FencedParams{ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: actor})
+	})
+	cur = step(func() (*assignment.Assignment, error) {
+		return store.Accept(assignment.FencedParams{ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: actor})
+	})
+	cur = step(func() (*assignment.Assignment, error) {
+		return store.Claim(assignment.ClaimParams{
+			ID: cur.ID, ExpectedEpoch: cur.ClaimEpoch, Owner: cur.Recipient, LeaseSeconds: 600,
+			Actor: actor,
+		})
+	})
+	if to == assignment.StateInProgress {
+		return step(func() (*assignment.Assignment, error) {
+			return store.Start(assignment.FencedParams{ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: actor})
+		})
+	}
+	cur = step(func() (*assignment.Assignment, error) {
+		return store.Start(assignment.FencedParams{ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: actor})
+	})
+	return step(func() (*assignment.Assignment, error) {
+		return store.Complete(assignment.FencedParams{ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: actor})
+	})
+}

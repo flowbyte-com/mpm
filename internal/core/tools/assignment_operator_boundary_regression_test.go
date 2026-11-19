@@ -11,13 +11,40 @@
 //   - the OPERATOR's side: creating the ROOT assignment, and recording
 //     an OPERATOR APPROVAL.
 //
-// The operator's side is a genuine capability boundary, not a
-// convenience. A root is the work order that everything else inherits
-// its budgets from, and an approval is the operator's statement that
-// something was authorised. An agent that could create either could:
+// # The operator's side is a genuine capability boundary WITHIN THE
+// DISPATCH SURFACE
+//
+// A root is the work order that everything else inherits its budgets
+// from, and an approval is the operator's statement that something was
+// authorised. An agent that could reach either through the agent-facing
+// surface could:
 //
 //   - mint its own budget (a root with max_tasks = 1000), and
 //   - approve its own work.
+//
+// # WHAT THIS BOUNDARY IS NOT
+//
+// It is a boundary on the DISPATCH SURFACE, not on the account.
+//
+// MPM is a single-operator trust domain. An agent running under the
+// operator's own account can read the operator's files and run the
+// operator's binaries, so it can run `mpm assignment create-root`
+// itself. Nothing in this package, and nothing in the service, can tell
+// the two apart: MPM has no identity to check — it records who a caller
+// SAYS it is, and that is not authentication.
+//
+// What the boundary DOES guarantee is structural and checkable:
+//
+//   - no action of any registry tool creates a root or records an
+//     approval, under any payload shape;
+//   - the operator's verbs are a DIFFERENT entry point, so there is no
+//     action to dispatch to; and
+//   - the service's own defence is an interface with an UNEXPORTED
+//     method, so nothing outside the package can fabricate the
+//     authority.
+//
+// The boundary is not a substitute for an identity provider. PR 2
+// deliberately does not build one, and nothing here claims to.
 //
 // # Why "absent" and not "refused at call time"
 //
@@ -43,6 +70,9 @@
 //     do, so the boundary is not enforced by removing the capability.
 //   - The operator's own path still works, so the capability is
 //     preserved rather than deleted.
+//
+// The operator's own path is proved in cmd/mpm (assignment_cmds_test.go),
+// which drives the CLI verbs end to end.
 package tools
 
 import (
@@ -51,6 +81,7 @@ import (
 	"testing"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/assignment"
 )
 
 // operatorOnlyAssignmentActions are the two operations the agent-facing
@@ -246,7 +277,13 @@ func TestAssignment_NoToolSchemaMentionsTheOperatorActions(t *testing.T) {
 // from the agent's surface, NOT the agent's own capability.
 //
 // The agent must still be able to delegate bounded work, and to record
-// a review verdict.
+// a review verdict — and this test proves it by DOING both through the
+// agent-facing handler.
+//
+// A test that only checked that a delegation FAILED would pass with a
+// handler that refused everything: "the boundary holds" and "the tool is
+// broken" look the same from the outside. So the delegation here
+// SUCCEEDS, and the review verdict SUCCEEDS.
 func TestAssignment_TheAgentSurfaceStillDoesItsWork(t *testing.T) {
 	dm := newTestDMForTools(t)
 
@@ -255,26 +292,178 @@ func TestAssignment_TheAgentSurfaceStillDoesItsWork(t *testing.T) {
 		t.Fatalf("seed the project: %v", err)
 	}
 
-	// The agent-facing surface can delegate a bounded child...
+	// The operator's root, created through the SERVICE — which is what
+	// the operator's CLI verb calls. The agent-facing surface has no
+	// way to make this.
+	store := assignment.NewStore(dm)
+	root, created, err := store.CreateRoot(
+		assignment.NewLocalOperatorAuthority("operator"),
+		assignment.CreateRootParams{
+			ProjectID:           "cpj-agent-surface",
+			Title:               "the root",
+			Objective:           "the objective",
+			Recipient:           "alpha",
+			IdempotencyKey:      "idem:agent-surface:root",
+			PermittedOperations: []string{"read", "write"},
+			EligibleRecipients:  []string{"alpha", "beta", "charlie"},
+			MaxDepth:            2,
+			MaxTasks:            8,
+			MaxConcurrency:      2,
+			MaxResourceUnits:    100,
+		})
+	if err != nil || !created {
+		t.Fatalf("create the root: %v (created=%v)", err, created)
+	}
+
+	// The agent-facing surface delegates a bounded child, and it
+	// SUCCEEDS.
 	child, err := handleMpmAssignment(dm, mpminternal.ActiveContext{}, map[string]interface{}{
 		"action": "delegate",
 		"params": map[string]interface{}{
-			"parent_id":       "at-nosuchparent",
+			"parent_id":       root.ID,
 			"title":           "the child",
 			"objective":       "the work",
 			"recipient":       "beta",
-			"idempotency_key": "idem:boundary-delegate",
+			"role":            "implementer",
+			"idempotency_key": "idem:agent-surface:child",
 		},
 	})
-	if err == nil {
-		t.Errorf("the delegation to a nonexistent parent was accepted: %+v", child)
+	if err != nil {
+		t.Fatalf("the agent surface could not delegate a bounded child: %v", err)
+	}
+	childAssignment, ok := child.(*assignment.Assignment)
+	if !ok {
+		t.Fatalf("the delegation returned %T, want an assignment", child)
+	}
+	if childAssignment.ParentID != root.ID {
+		t.Errorf("the child names the parent %q, want %q", childAssignment.ParentID, root.ID)
+	}
+	if childAssignment.Depth != 1 {
+		t.Errorf("the child is at depth %d, want 1", childAssignment.Depth)
+	}
+	if childAssignment.RootID != root.ID {
+		t.Errorf("the child is in the tree %q, want %q", childAssignment.RootID, root.ID)
 	}
 
-	// ...and the failure is the service's own refusal, not a
-	// dispatch failure.
-	if err != nil && !strings.Contains(err.Error(), "assignment:") {
-		t.Errorf("the delegation failed with %v, want the service's own error", err)
+	// And the review's verdict, through the same surface, and it
+	// SUCCEEDS too. The reviewer is a SIBLING of the subject, and its
+	// target is fixed by the delegation that created it — so the
+	// reviewer cannot be re-pointed at something else afterwards.
+	completed := advanceToCompleted(t, store, childAssignment)
+
+	reviewer, created, err := store.Delegate(assignment.DelegateParams{
+		ParentID:       root.ID,
+		Title:          "the reviewer",
+		Objective:      "review the work",
+		Recipient:      "charlie",
+		Role:           assignment.RoleReviewer,
+		IdempotencyKey: "idem:agent-surface:reviewer",
+		Payload:        map[string]interface{}{assignment.PayloadKeyReviewTarget: completed.ID},
+	})
+	if err != nil || !created {
+		t.Fatalf("create the reviewer: %v (created=%v)", err, created)
 	}
+	reviewing := advanceToInProgress(t, store, reviewer)
+
+	verdict, err := handleMpmAssignment(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "record-review",
+		"params": map[string]interface{}{
+			"id":      reviewing.ID,
+			"verdict": "passed",
+			"epoch":   reviewing.ClaimEpoch,
+			"actor":   "charlie",
+		},
+	})
+	if err != nil {
+		t.Fatalf("the agent surface could not record the review verdict: %v", err)
+	}
+	reviewed, ok := verdict.(*assignment.Assignment)
+	if !ok {
+		t.Fatalf("the verdict returned %T, want an assignment", verdict)
+	}
+	if reviewed.State != assignment.StateReviewPassed {
+		t.Errorf("the reviewer is %q after the verdict, want %q",
+			reviewed.State, assignment.StateReviewPassed)
+	}
+
+	// The SUBJECT moved too, which is the whole point of the verdict.
+	after, err := store.Get(completed.ID)
+	if err != nil {
+		t.Fatalf("read the subject: %v", err)
+	}
+	if after.State != assignment.StateReviewPassed {
+		t.Errorf("the subject is %q after the verdict, want %q",
+			after.State, assignment.StateReviewPassed)
+	}
+}
+
+// advanceToCompleted drives an assignment through the implementer's path
+// to `completed`, through the service.
+func advanceToCompleted(t *testing.T, store *assignment.Store, a *assignment.Assignment) *assignment.Assignment {
+	t.Helper()
+	cur := advanceToAccepted(t, store, a)
+	cur = assignmentStep(t, cur, func() (*assignment.Assignment, error) {
+		return store.Claim(assignment.ClaimParams{
+			ID: cur.ID, ExpectedEpoch: cur.ClaimEpoch, Owner: cur.Recipient, LeaseSeconds: 600,
+			Actor: assignment.Actor{Address: cur.Recipient, Kind: "agent"},
+		})
+	})
+	cur = assignmentStep(t, cur, func() (*assignment.Assignment, error) {
+		return store.Start(assignment.FencedParams{
+			ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: assignment.Actor{Address: cur.Recipient, Kind: "agent"},
+		})
+	})
+	return assignmentStep(t, cur, func() (*assignment.Assignment, error) {
+		return store.Complete(assignment.FencedParams{
+			ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: assignment.Actor{Address: cur.Recipient, Kind: "agent"},
+		})
+	})
+}
+
+// advanceToInProgress drives an assignment through the implementer's path
+// to `in_progress`, which is where a reviewer must be to record a
+// verdict.
+func advanceToInProgress(t *testing.T, store *assignment.Store, a *assignment.Assignment) *assignment.Assignment {
+	t.Helper()
+	cur := advanceToAccepted(t, store, a)
+	cur = assignmentStep(t, cur, func() (*assignment.Assignment, error) {
+		return store.Claim(assignment.ClaimParams{
+			ID: cur.ID, ExpectedEpoch: cur.ClaimEpoch, Owner: cur.Recipient, LeaseSeconds: 600,
+			Actor: assignment.Actor{Address: cur.Recipient, Kind: "agent"},
+		})
+	})
+	return assignmentStep(t, cur, func() (*assignment.Assignment, error) {
+		return store.Start(assignment.FencedParams{
+			ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: assignment.Actor{Address: cur.Recipient, Kind: "agent"},
+		})
+	})
+}
+
+// advanceToAccepted drives an assignment to `accepted`.
+func advanceToAccepted(t *testing.T, store *assignment.Store, a *assignment.Assignment) *assignment.Assignment {
+	t.Helper()
+	actor := assignment.Actor{Address: a.Recipient, Kind: "agent"}
+	cur := assignmentStep(t, a, func() (*assignment.Assignment, error) {
+		return store.Deliver(assignment.FencedParams{ID: a.ID, Epoch: a.ClaimEpoch, Actor: actor})
+	})
+	cur = assignmentStep(t, cur, func() (*assignment.Assignment, error) {
+		return store.Acknowledge(assignment.FencedParams{ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: actor})
+	})
+	return assignmentStep(t, cur, func() (*assignment.Assignment, error) {
+		return store.Accept(assignment.FencedParams{ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: actor})
+	})
+}
+
+// assignmentStep runs one transition and fails the test if it does not
+// succeed.
+func assignmentStep(t *testing.T, a *assignment.Assignment,
+	op func() (*assignment.Assignment, error)) *assignment.Assignment {
+	t.Helper()
+	out, err := op()
+	if err != nil {
+		t.Fatalf("advance %s: %v", a.ID, err)
+	}
+	return out
 }
 
 // TestAssignment_TheRegistryActionSurfaceIsStable pins the advertised

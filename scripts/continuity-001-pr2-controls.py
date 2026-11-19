@@ -197,6 +197,16 @@ def control_fence():
 				` WHERE id = ?`,""",
         "the fence's WHERE clause",
     )
+    # The value the predicate binds goes with the predicate. Leaving it
+    # in place would make the statement a bind error, and every
+    # successful transition in the suite would fail for a reason that
+    # has nothing to do with the invariant under test.
+    replace_text(
+        "internal/core/assignment/lifecycle.go",
+        """		args = append(args, spec.id, spec.presentedEpoch)""",
+        """		args = append(args, spec.id)""",
+        "the fence's bound epoch",
+    )
 
 
 def control_fence_go_half():
@@ -220,6 +230,12 @@ def control_fence_sql_half():
         """			`UPDATE agent_tasks SET state = ?, updated_at = ?`+setClause+
 				` WHERE id = ?`,""",
         "the fence's WHERE clause",
+    )
+    replace_text(
+        "internal/core/assignment/lifecycle.go",
+        """		args = append(args, spec.id, spec.presentedEpoch)""",
+        """		args = append(args, spec.id)""",
+        "the fence's bound epoch",
     )
 
 
@@ -255,6 +271,12 @@ def control_fence_in_review():
         """		`UPDATE agent_tasks SET state = ?, updated_at = ?`+setClause+
 			` WHERE id = ?`,""",
         "the fence's WHERE clause on the review path",
+    )
+    replace_text(
+        "internal/core/assignment/review.go",
+        """	args = append(args, spec.id, spec.presentedEpoch)""",
+        """	args = append(args, spec.id)""",
+        "the fence's bound epoch on the review path",
     )
 
 
@@ -303,6 +325,34 @@ def control_operator_authority():
 		auth = NewLocalOperatorAuthority("operator")
 	}""",
         "the operator's authority",
+    )
+
+
+def control_approval_fence():
+    """The approval presents the epoch the operator read.
+
+    The approval is the operator's gate, and it is a fenced write like
+    every other state change: the operator presents the claim epoch it
+    read, and the write is `WHERE id = ? AND claim_epoch = ?` with the
+    PRESENTED epoch.
+
+    Both halves are removed — the check and the value the predicate
+    binds — because removing only one of them measures nothing: the
+    other still refuses the stale approval.
+    """
+    replace_text(
+        "internal/core/assignment/lifecycle.go",
+        """		if p.Epoch != current.ClaimEpoch {
+			return fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, p.ID, current.ClaimEpoch)
+		}""",
+        """		// THE APPROVAL'S FENCE REMOVED BY THE CONTROL.""",
+        "the approval's fence",
+    )
+    replace_text(
+        "internal/core/assignment/lifecycle.go",
+        """			p.ID, p.Epoch)""",
+        """			p.ID, current.ClaimEpoch)""",
+        "the approval's bound epoch",
     )
 
 
@@ -399,6 +449,12 @@ def control_claim_is_not_a_cas():
         """			SET claim_epoch = ?, owner = ?, lease_expires_at = ?, updated_at = ?
 			WHERE id = ?`,""",
         "the claim's WHERE clause",
+    )
+    replace_text(
+        "internal/core/assignment/claim.go",
+        """			5, newEpoch, p.Owner, newLease, now, p.ID, p.ExpectedEpoch)""",
+        """			5, newEpoch, p.Owner, newLease, now, p.ID)""",
+        "the claim's bound epoch",
     )
     drop_trigger("trg_agent_tasks_claim_discipline")
 
@@ -539,6 +595,13 @@ CONTROLS = [
         "load_bearing": True,
     },
     {
+        "name": "approval-fence",
+        "invariant": "the approval presents the epoch the operator read",
+        "mutate": control_approval_fence,
+        "expect": ["TestAPIAnApprovalPresentingAStaleEpochIsRefused"],
+        "load_bearing": True,
+    },
+    {
         "name": "approval-action",
         "invariant": "the approval names the action the gate awaited",
         "mutate": control_approval_action_check,
@@ -601,6 +664,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--only", help="run one control by name")
     args = ap.parse_args()
+    if args.only and args.only not in {c["name"] for c in CONTROLS}:
+        raise SystemExit(f"there is no control named {args.only!r}")
 
     snapshot()
     results = []
@@ -628,25 +693,116 @@ def main():
         restore()
         print("\nthe tree is restored")
 
+    ok = summarise(results)
+    return 0 if ok else 1
+
+
+def summarise(results):
+    """Print the summary and return whether the measurement holds.
+
+    The RETURN VALUE is the gate. It can fail, and it does.
+    """
     print("\n=== the summary ===")
-    load_bearing = 0
-    redundant = 0
+    load_bearing_passed = 0
+    load_bearing_total = 0
+    redundant_total = 0
+    redundant_clean = 0
     for control, hit, specific, inconclusive in results:
         if control["load_bearing"]:
+            load_bearing_total += 1
             ok = len(hit) == len(control["expect"])
-            load_bearing += 1 if ok else 0
+            if ok:
+                load_bearing_passed += 1
             print(f"{'OK ' if ok else 'NO '} {control['name']:22s} {control['invariant']}")
             if not ok:
                 print(f"     expected {control['expect']}, failing {specific}")
         else:
-            redundant += 1
-            print(f"OK  {control['name']:22s} {control['invariant']}")
+            redundant_total += 1
+            # A defence-in-depth control removes ONE half of an
+            # enforcement, so the suite must be UNCHANGED. An
+            # unexpected failure means the mutation broke more than
+            # it claimed — a broken measurement, not a pass.
+            clean = not specific
+            if clean:
+                redundant_clean += 1
+            print(f"{'OK ' if clean else 'NO '} {control['name']:22s} {control['invariant']}")
             print(f"     (redundant: {control['why']})")
-    total = load_bearing + redundant
-    print(f"\n{load_bearing}/{total} controls are load-bearing; "
-          f"{redundant} measure the defence in depth")
-    return 0 if load_bearing == total - redundant else 1
+            if not clean:
+                print(f"     UNEXPECTED failures: {specific}")
+    print(f"\n{load_bearing_passed}/{load_bearing_total} controls are load-bearing; "
+          f"{redundant_total} measure the defence in depth")
+    ok = (load_bearing_passed == load_bearing_total
+          and redundant_clean == redundant_total)
+    if not ok:
+        print("THE HARNESS FAILED: the measurement is not established.")
+    return ok
+
+
+def _synthetic_results(broken_load_bearing=None, broken_redundant=None):
+    """Build the results a run would produce, for the self-test.
+
+    `broken_load_bearing` names a load-bearing control whose named test
+    did NOT fail; `broken_redundant` names a defence-in-depth control
+    that DID break the suite.
+    """
+    results = []
+    for control in CONTROLS:
+        if control["load_bearing"]:
+            hit = list(control["expect"])
+            specific = []
+            if control["name"] == broken_load_bearing:
+                hit = []
+                specific = ["TestTheSuiteDidNotNotice"]
+            results.append((control, hit, specific, []))
+        else:
+            specific = []
+            if control["name"] == broken_redundant:
+                specific = ["TestTheSuiteBroke"]
+            results.append((control, [], specific, []))
+    return results
+
+
+def selftest():
+    """Prove that the gate can fail.
+
+    The harness is EVIDENCE. Evidence that cannot fail is not evidence:
+    a gate that always returned 0 would still print "13/13 controls are
+    load-bearing" after every load-bearing control had stopped noticing
+    anything.
+
+    So this drives the summary with the results such a run WOULD
+    produce, and requires the gate to REFUSE them.
+    """
+    first_lb = next(c["name"] for c in CONTROLS if c["load_bearing"])
+    first_rd = next(c["name"] for c in CONTROLS if not c["load_bearing"])
+
+    cases = [
+        ("every control behaved as published",
+         _synthetic_results(), True),
+        (f"the load-bearing control {first_lb} did not detect its removal",
+         _synthetic_results(broken_load_bearing=first_lb), False),
+        (f"the defence-in-depth control {first_rd} broke the suite",
+         _synthetic_results(broken_redundant=first_rd), False),
+    ]
+
+    failures = 0
+    for name, results, want in cases:
+        ok = summarise(results)
+        verdict = "REFUSED" if not ok else "ACCEPTED"
+        if ok != want:
+            failures += 1
+            print(f"\nSELF-TEST FAILED: {name} — the gate {verdict} it, want "
+                  f"{'REFUSED' if not want else 'ACCEPTED'}")
+        else:
+            print(f"\nSELF-TEST OK: {name} — the gate {verdict} it.")
+    if failures:
+        print(f"\nTHE SELF-TEST FAILED ({failures} case(s)).")
+        return 1
+    print("\nTHE SELF-TEST PASSED: the gate can fail.")
+    return 0
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
     sys.exit(main())

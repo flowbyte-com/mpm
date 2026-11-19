@@ -3007,6 +3007,8 @@ The service's own defence is an interface with an **unexported method**: `Operat
 
 Every state change presents the caller's **current claim epoch**, and the write is `WHERE id = ? AND claim_epoch = ?` with the **presented** epoch. A stale holder's write therefore matches **no row**, atomically with the write itself.
 
+There are **two** writes where the caller presents no epoch, and both are stated rather than left to be discovered: the **approval**, where the operator presents the epoch it *read* so that the approval lands only on the revision the operator actually read; and the reviewer's write on the **subject**, where the subject is a different assignment in a different row and the clause binds the subject's own current epoch — it says "the subject did not change under me" rather than fencing a stale writer. The reviewer's **own** row is fenced properly, and that is the fence the stale-reviewer test observes.
+
 The fence is enforced **twice**, in two independent places: the service's check and the `WHERE` clause of the writing statement. The negative controls measure both halves separately — removing either one alone changes nothing, and removing both makes the suite fail. A fence carried by one line of code is a fence that one careless edit removes.
 
 The **claim** is a compare-and-swap on the same principle: the caller presents the epoch it believes is current, the epoch advances by exactly one, and the write is conditioned on the presented epoch. Two simultaneous claims cannot both become the valid owner.
@@ -3026,6 +3028,8 @@ A **root** carries the budgets: `max_depth`, `max_tasks`, `max_concurrency`, `ma
 
 A refusal writes **nothing**: no row and no ledger entry.
 
+**PR 2 does not require the delegator to hold the parent**, and the reason is stated rather than implied. MPM has no identity to check — it records who a caller *says* it is, and that is not authentication — so a "only the holder may delegate" rule could only check that the caller knows the parent's current epoch, which anyone who has read the assignment also knows. That would be theatre. What PR 2 enforces is the two bounds that are structural (the recipient list and the depth); what bounds the **number** of children is the root's `max_tasks`, and **PR 4** enforces that.
+
 #### Idempotency, and the race it has to survive
 
 The idempotency key identifies one logical assignment. PR 1 found that the before-insert trigger fires **before** the conflict resolution, so `ON CONFLICT DO NOTHING` aborts rather than resolving the duplicate. The service therefore **selects** rather than relying on the conflict resolution, and falls back to a read-back when the insert is the statement that loses the race. A repeated key resolves to the **existing** assignment; a repeated key describing a **different** assignment is a **conflict**, because handing back a row that does not match the request is worse than an error.
@@ -3044,7 +3048,11 @@ A **passing** verdict moves the subject to `review_passed` and the reviewer to `
 
 `HandoffToOperator` moves `review_passed → awaiting_operator` and **supplies** the exact action the operator is being asked to authorise. `RecordApproval` moves `awaiting_operator → operator_approved` and supplies the action, the revision, the source **and** the evidence pointer — and the approval must name the **same** action the gate awaited.
 
+**The approval is a fenced write.** The operator presents the claim epoch it read, and the write is `WHERE id = ? AND claim_epoch = ?` with that value — the same rule every other state change follows, and the one place where following it mattered most, because the approval **is** the gate. An approval that does not match the assignment as it stands does not land, and it leaves nothing behind: no state change and no ledger entry.
+
 **MPM records an approval it did not manufacture.** The revision and the evidence pointer are the operator's claims about what was authorised, and the row says so. Nothing in PR 2 authenticates an approval, and no command in PR 2 merges a pull request, deploys, or changes any state outside the assignment ledger: the authority to merge and to deploy stays exactly where it was.
+
+The staleness of an approval is **observable** because the row carries the revision it named — a reader compares it with the head revision and sees that they differ. MPM does not make that comparison itself: it does not know what the head revision is, and asking it to would mean asking it to authenticate the approval, which is the thing it must not do.
 
 #### What PR 2 does not enforce
 
@@ -3054,7 +3062,9 @@ Nor does PR 2 supply an identity provider, an RBAC layer, a signing scheme or an
 
 #### The negative controls, and the two defects they found
 
-PR 2's controls live in `scripts/continuity-001-pr2-controls.py`. They mutate the **service's source** — PR 1's invariants lived in the database, PR 2's are code — and require the acceptance suite to notice. **Fifteen controls: thirteen are load-bearing, and two measure the defence in depth** by removing one half of the fence at a time and observing that nothing changes.
+PR 2's controls live in `scripts/continuity-001-pr2-controls.py`. They mutate the **service's source** — PR 1's invariants lived in the database, PR 2's are code — and require the acceptance suite to notice. **Sixteen controls: fourteen are load-bearing, and two measure the defence in depth** by removing one half of the fence at a time and observing that nothing changes.
+
+The harness's **exit code is the gate**, and it can fail: a load-bearing control that did not detect its removal, and a defence-in-depth control that broke the suite, are both refused. The harness carries its own `--selftest` for that, and a test runs it.
 
 The controls are not decoration. Their first run found two defects in PR 2's own code and tests:
 

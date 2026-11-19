@@ -100,6 +100,12 @@ type assignmentFlags struct {
 	source   string
 	evidence string
 
+	// payload is the structured instruction the assignment carries —
+	// a reviewer's target, for instance. It is set by the delegation
+	// that creates the assignment, because that is the only place
+	// that can fix it.
+	payload string
+
 	// output
 	jsonOutput bool
 }
@@ -246,6 +252,7 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 	revision := fs.String("revision", "", "the revision the authorisation names")
 	source := fs.String("source", "", "where the authorisation came from")
 	evidence := fs.String("evidence", "", "the evidence pointer behind the authorisation")
+	payload := fs.String("payload", "", "a JSON object stored on the assignment (e.g. the reviewer's target)")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
 
 	if err := fs.Parse(args); err != nil {
@@ -290,8 +297,34 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 		revision:         *revision,
 		source:           *source,
 		evidence:         *evidence,
+		payload:          *payload,
 		jsonOutput:       *jsonOutput,
 	}, nil
+}
+
+// assignmentParsePayload reads the --payload flag.
+//
+// The payload is the one part of an assignment that carries a STRUCTURED
+// instruction rather than a field: a reviewer's target, for instance, is
+// fixed by the delegation that creates the reviewer, and the delegation
+// is the only place that can name it.
+//
+// A malformed payload is an error, not a silent empty object: a caller
+// that meant to name a review target and spelled it wrong must not end
+// up with an assignment that reviews nothing.
+func assignmentParsePayload(raw string) (map[string]interface{}, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("--payload must be a JSON object: %v", err)
+	}
+	if out == nil {
+		return nil, fmt.Errorf("--payload must be a JSON object, not null")
+	}
+	return out, nil
 }
 
 // ── the verb runner ───────────────────────────────────────────────────────
@@ -470,6 +503,10 @@ func assignmentVerbRenew(store *assignment.Store, f *assignmentFlags) (interface
 }
 
 func assignmentVerbDelegate(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
+	payload, err := assignmentParsePayload(f.payload)
+	if err != nil {
+		return nil, err
+	}
 	a, _, err := store.Delegate(assignment.DelegateParams{
 		ParentID:       f.parentID,
 		Title:          f.title,
@@ -486,6 +523,7 @@ func assignmentVerbDelegate(store *assignment.Store, f *assignmentFlags) (interf
 		ReviewedSHA:    f.reviewedSHA,
 		FindingsSHA256: f.findingsSHA256,
 		EvidenceRef:    f.evidenceRef,
+		Payload:        payload,
 	})
 	if err != nil {
 		return nil, err
@@ -526,6 +564,10 @@ func assignmentVerbHandoff(store *assignment.Store, f *assignmentFlags) (interfa
 // It is here and not in the registry: the agent-facing surface has no
 // action that reaches it, so no dispatch path can reach it either.
 func assignmentVerbCreateRoot(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
+	payload, err := assignmentParsePayload(f.payload)
+	if err != nil {
+		return nil, err
+	}
 	a, _, err := store.CreateRoot(
 		assignment.NewLocalOperatorAuthority(assignmentOperatorName(f)),
 		assignment.CreateRootParams{
@@ -549,6 +591,7 @@ func assignmentVerbCreateRoot(store *assignment.Store, f *assignmentFlags) (inte
 			ReviewedSHA:         f.reviewedSHA,
 			FindingsSHA256:      f.findingsSHA256,
 			EvidenceRef:         f.evidenceRef,
+			Payload:             payload,
 		})
 	if err != nil {
 		return nil, err
@@ -570,6 +613,7 @@ func assignmentVerbRecordApproval(store *assignment.Store, f *assignmentFlags) (
 			Revision: f.revision,
 			Source:   f.source,
 			Evidence: f.evidence,
+			Epoch:    f.epoch,
 		})
 }
 
