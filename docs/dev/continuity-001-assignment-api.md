@@ -590,11 +590,19 @@ is accepted, and more than a third is refused.
 
 The comparison is **two-sided**: a run that produced FEWER tests than the
 baseline aborted the suite, and a run that produced MORE is not a run of
-this suite — neither reads as a measurement. The **skips** are watched on
-both sides too, because a skipped test did not run: it neither passed nor
-failed, so counting only PASS-or-FAIL would make a skip invisible to both
-sides of the bound. A control whose run skipped where the baseline did not
-is inconclusive.
+this suite — neither reads as a measurement. The **skips** are watched by
+**identity** rather than by count, because a skipped test did not run: it
+neither passed nor failed, so counting only PASS-or-FAIL would make a skip
+invisible to both sides of the bound — and a count cannot tell "the same
+test skipped" from "a different test skipped", of which only the first is
+innocent. A control whose run skipped where the baseline did not is
+inconclusive.
+
+And the baseline itself must be **fully green**: a baseline in which any
+test skipped is refused, because a skipped test cannot be part of the
+denominator. (With the baseline refusing to skip, the identity comparison
+reduces to "the control skipped nothing" — but it is kept in the identity
+form, because the count form is the one that would fail silently.)
 
 And the baseline is **required**: an earlier version defaulted it to zero,
 which silently restored the very bound the baseline was introduced to fix,
@@ -769,11 +777,36 @@ and all five are fixed here.
 | a skip was invisible to both sides | both counts were PASS-or-FAIL only, so a test that skipped — which did not run, and so neither passed nor failed — was invisible | the skips are tracked on **both** sides, and a control whose run skipped where the baseline did not is inconclusive |
 | the note said "a third of the **suite**" where the SPEC said "of the **baseline**" | and the claim that the boundary was stated in the SPEC was false — "exactly a third" occurred **zero** times in `docs/SPEC.md` | both documents name the same denominator, and the SPEC now states the boundary case |
 
-The self-test grew to **nine** cases: the published measurement, the
+The self-test grew to **twelve** cases: the published measurement, the
 control that stopped detecting, the defence-in-depth control that broke the
 suite, the undeclared failure, the whole suite taken along, the aborted
-suite, the skipped test, the zero baseline, and the call with no baseline
-at all.
+suite, the skipped test, the run that produced more tests than the
+baseline, the defence-in-depth control that aborted, the zero baseline, the
+empty corner, and the call with no baseline at all.
+
+### 5.8 What the sixth review found
+
+The sixth round confirmed that **every** one of the fifth round's findings
+was genuinely fixed, and it did not take the notes' word for it: it
+verified the `--- SKIP:` regex against Go's own output with a stdlib-only
+probe, it enumerated the registry's action values itself, and it **mutated
+the gate eight ways** to ask which mutations the self-test catches. It
+found one more defect and five nits.
+
+| the finding | what it was | the fix |
+|---|---|---|
+| the two-sided comparison was **published but not pinned** | the SPEC states the comparison is two-sided, and the code does it — but no self-test case exercised the *more* direction, so a regression to one-sided would pass the self-test, pass `TestControls_TheHarnessGateCanFail`, and contradict a published sentence, silently, with a green exit code. The reviewer **proved** it by mutation | the self-test gained a case for the *more* direction, and the mutant is now caught |
+| the defence-in-depth branch's new checks were **unpinned** | removing `total == baseline and skipped <= baseline_skipped` left the self-test at exit 0 | the self-test gained a case: a defence-in-depth control whose run **aborted** — a different number of tests, with no failure to catch it |
+| the explicit zero-baseline guard was **unpinned in isolation** | the two-sided bound already refuses a zero baseline, so the case pinned the *outcome* rather than the *guard* | the self-test gained the corner where only the guard refuses: no baseline **and** no results at all |
+| the INCONCLUSIVE message was wrong for one direction | it said "the mutation ABORTED the suite" for the **more**-tests direction, which is a different explanation | the two directions now have their own messages, and they say what is actually wrong |
+| the baseline's health was checked for failures but not for **skips** | a baseline in which most tests skipped would have been accepted as the denominator — and since the total counts a skip as if it had run, a control that skipped the same tests would have matched it exactly | a baseline that skips **anything** is refused: a skipped test cannot be part of the denominator |
+| the self-test dispatched on a case's **display string** | the name was both the label and the switch that decided how the gate was driven, so renaming a case would have silently changed what the self-test proves | each case carries a **mode**, and the name is only the label |
+
+**THE SELF-TEST IS NOW TWELVE CASES**, and each new gate mechanism has a
+case that fails when the mechanism is removed. That was verified by
+mutation rather than asserted: the one-sided mutant, the removal of the
+defence-in-depth checks, the removal of the zero-baseline guard and the
+removal of the skip check are each **caught** by the self-test.
 
 **THE CLAUDE CODE DRILL WAS FLAKY.** The full gate turned up one failure
 that had nothing to do with this PR: the Claude Code end-to-end drill
