@@ -935,11 +935,12 @@ unpinned, and one case that claimed to isolate a mechanism it did not.
 | the published case count counted **output lines** | not cases — the message assertion and the "no baseline at all" check are assertions *within* a case | the self-test prints its own case count, and the note publishes that |
 | a **duplicated heading** | a stray ALL-CAPS line at the end of §5.10, left over from the renumbering | removed |
 
-**THE SELF-TEST IS NOW TWENTY-THREE CASES**, and the matrix grew with
-it: the round-eight mutants are all caught too, including the three
-compounds — the identity comparison with the default removed, the case
-renamed *and* the message reverted, and the default removed with the
-defence-in-depth branch's identity comparison.
+**THE SELF-TEST IS NOW TWENTY-THREE CASES** (and forty-three after the
+last round), and the matrix grew with it: the round-eight mutants are
+all caught too, including the three compounds — the identity comparison
+with the default removed, the case renamed *and* the message reverted,
+and the default removed with the defence-in-depth branch's identity
+comparison.
 
 ### 5.12 What the ninth review found
 
@@ -963,9 +964,100 @@ this note's own**.
 | the SKIP anchor's catchability rested on an unpinned sample line | removing the line from the sample would make the anchor unobservable | the sample's load-bearing shapes are **asserted** |
 | the mode dispatch was protected by a counter rather than by itself | the same shape as the guard above | the count is derived from the counter, so the dispatch is pinned by the count |
 
-**THE SELF-TEST IS NOW FORTY-TWO CASES**, and the number is published in
-two places that check each other: the harness's own literal, and the Go
-test that compares the harness's printed count.
+**THE SELF-TEST IS NOW FORTY-THREE CASES** (and sixty after the tenth
+round — §5.14), and the number is published in two places that check
+each other: the harness's own literal, and the Go test that compares the
+harness's printed count.
+
+### 5.13 What the tenth review found, and where the matrix lives
+
+The tenth review applied **sixty-five** mutations to the harness and
+found that **fourteen** left the self-test green — and that four of them
+were single-edit behaviour changes. It also said plainly that the PR was
+ready for the merge gate: none of its findings affects the gate's
+behaviour as it stands, they are about whether the gate would *notice*.
+
+| the finding | what it was | the fix |
+|---|---|---|
+| the count pinned the **presence** of an assertion's dispatch, not the assertion | the counter incremented before the assertion ran, so removing an assertion's **body** while keeping the counter left the count unchanged — and the wrong message could be published with a green exit code | the count is the **LOG** (§5.14): every check records that it ran, so a check that stops running leaves the count short |
+| the drive captured `main()`'s exit code and **never read it** | a refusal that exits 0 is a green answer to a measurement that was refused — and the harness's exit code **is** the gate | the exit code is checked, and a refusal must exit 1 |
+| the behavioural drive was pinned by **nothing** | removing it left the self-test green, which voided the whole of round nine's F1 fix | the drive's verdict is a **function**, and the self-test proves the function **can fail** by driving it with a deliberately wrong expectation |
+| the SPEC published "each removal must make the self-test fail" | still false for the four above | the SPEC says what the matrix says, and the matrix now lives where it can be exhaustive |
+
+**THE MATRIX MOVED OUT OF THE HARNESS.** The last four holes share one
+shape: a mutation that **neuters** a check cannot be caught by that
+check, and the harness has no observer left — the check *is* the thing
+being neutered. So the matrix is now a **Go test**:
+
+    TestControls_TheHarnessFailsWhenAMechanismIsRemoved
+
+It copies the harness to a temporary directory (never the tree), applies
+one mutation at a time, and requires the harness's own self-test to
+**FAIL** against the copy. **Twenty-seven mutations, every one caught.**
+The matrix is an **independent observer**: the harness is only its
+subject, so it cannot influence what the matrix requires.
+
+That is the difference between a self-report and a measurement. The
+harness can say "every mechanism has a case behind it"; only something
+outside it can say "and here is the proof, one neutered mechanism at a
+time".
+
+### 5.14 The log and the predicates: how a neutered check is seen
+
+Closing the tenth round's findings turned up one more class, and it is
+worth stating separately because it is the class that **any** self-test
+has.
+
+**THE CLASS.** A check inside a program can be **neutered** by editing
+that program — `if not _message_ok(out):` becomes `if False:` — and the
+program cannot see it. The check *is* the thing being neutered, so
+there is no observer left inside. Worse, the usual counters make it
+worse: a counter that increments in the check's **success** branch still
+increments when the check is neutered, so the count is unchanged and the
+evidence looks intact.
+
+**THE ANSWER HAS TWO PARTS.**
+
+**Part one: every check is a PREDICATE, and every predicate is proved
+able to fail.** The five predicates are `_equal`, `_message_ok`,
+`_isolation_ok`, `_sample_ok` and `_wiring_ok`. Each is a function, so
+the self-test can drive it with a **deliberately wrong value** and
+require it to refuse. That is what makes a neutered predicate's *body*
+visible: the probe drives the predicate directly, and a predicate that
+always says yes fails its own probe.
+
+**Part two: the count is a LOG, and the predicates write it.** Every
+predicate **appends to a log the caller owns** as it runs. The self-test's
+count is the log's **length** — the number of checks that were
+*evaluated*, not the number of lines that were printed and not a number a
+branch increments on its way past. Three things follow, and each is a
+mechanism:
+
+| what is mutated | what happens |
+|---|---|
+| a check **stops running** | it does not log, so the log is short, so the count changes, so the count's check fires |
+| a check's **call site** is neutered | the predicate is not called, so the check does not log, so the count changes |
+| a predicate's **body** is neutered | it still logs, so the count is unchanged — and the **probe** catches it |
+
+The count's own check is pinned from **outside**: the Go test mutates
+the **published literal** in a copy and requires the self-test to fail,
+so a copy whose count check has been disabled passes and the Go test
+says so by name.
+
+**THE COUNT IS SIXTY CHECKS**, published in two places that check
+each other: the harness's own literal, and the Go test that compares the
+harness's *printed* count against the same figure. The three checks that
+are not predicate calls — the baseline verdict, the three output
+patterns and the call with no baseline at all — are counted in the same
+figure, so a case added without the published figure being updated fails
+the suite in two places.
+
+**WHAT THE MATRIX STILL DOES NOT SAY.** Two things, stated rather than
+claimed away. The `^` anchor on the **FAIL** pattern is not a behaviour
+change — Go reports a parent whose subtest failed as `--- FAIL:` on a
+top-level line, so the parent's name is in the set either way. And the
+matrix is a list of **single-edit** mutations: a two-edit mutation that
+removes a mechanism *and* the check that watches it is outside it.
 
 ## 6. What PR 2 leaves to PRs 3–5
 

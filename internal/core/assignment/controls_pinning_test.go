@@ -335,9 +335,11 @@ func TestControls_TheHarnessGateCanFail(t *testing.T) {
 // published figure being updated fails here rather than silently
 // making the documentation stale.
 //
-// The count is of CASES, not of output lines: the message assertion
-// and the "no baseline at all" check are assertions WITHIN a case.
-const publishedSelfTestCases = 42
+// The count is the LOG's LENGTH — the number of checks the self-test
+// EVALUATED, not the number of lines it printed. Every check in the
+// harness is a predicate, and every predicate records that it ran, so
+// a check that stops running leaves the count short.
+const publishedSelfTestCases = 60
 
 // TestControls_TheHarnessPublishesItsOwnCaseCount pins the published
 // figure to the harness's own.
@@ -369,6 +371,287 @@ func TestControls_TheHarnessPublishesItsOwnCaseCount(t *testing.T) {
 			"(%d) is stale — the self-test now makes a different number of "+
 			"cases. Update the published figure and this constant together.\n%s",
 			want, publishedSelfTestCases, out)
+	}
+}
+
+// harnessMutations is the MUTATION MATRIX: each entry removes one
+// mechanism from a COPY of the harness, and the self-test must FAIL
+// against the copy.
+//
+// The matrix lives HERE, outside the harness, on purpose. The harness's
+// own self-test cannot catch a mutation that neuters one of its own
+// checks — turning `ok = (proceeded == want_proceeded)` into
+// `ok = True` leaves the check in place, leaves the case count the
+// same, and leaves the self-test green. From inside the harness there
+// is no observer left: the check IS the thing being neutered.
+//
+// From out here there is. The copy is written to a temporary directory
+// and run from there — the tree is never touched.
+var harnessMutations = []struct {
+	name string
+	old  string
+	new  string
+}{
+	{
+		"the gate's first question (the named test must fail)",
+		`named = len(hit) == len(control["expect"])`,
+		`named = True`,
+	},
+	{
+		"the one-third bound",
+		`len(specific) * BROKEN_SUITE_FRACTION > denominator`,
+		`False`,
+	},
+	{
+		"the identity comparison in the bound",
+		`set(skipped) != set(baseline_skipped) or`,
+		`len(skipped) != len(baseline_skipped) or`,
+	},
+	{
+		"the defence-in-depth branch's identity comparison",
+		`and set(skipped) == set(baseline_skipped))`,
+		`and len(skipped) <= len(baseline_skipped))`,
+	},
+	{
+		"the defence-in-depth branch's whole clean clause",
+		`clean = (not specific and total == baseline
+                     and set(skipped) == set(baseline_skipped))`,
+		`clean = True`,
+	},
+	{
+		"the two-sided bound",
+		`broke_suite = (total != denominator or`,
+		`broke_suite = (total < denominator or`,
+	},
+	{
+		"the unexpected-failures clause",
+		`unexpected = [f for f in specific
+                          if f not in control["expect"] and f not in control.get("breaks", [])]`,
+		`unexpected = []`,
+	},
+	{
+		"the published-message assertion's dispatch",
+		`if case["mode"] == "more_tests":`,
+		`if False:`,
+	},
+	{
+		"the isolation assertion's dispatch",
+		`if case.get("isolates"):`,
+		`if False:`,
+	},
+	{
+		"the main() wiring drive's verdict",
+		`    return ok_proceeded and ok_exited and ok_ran`,
+		`    return True`,
+	},
+	{
+		"the PASS pattern's anchor",
+		`PASS_RE = re.compile(r"^--- PASS: (\w+)", re.M)`,
+		`PASS_RE = re.compile(r"--- PASS: (\w+)", re.M)`,
+	},
+	{
+		"the SKIP pattern's anchor",
+		`SKIP_RE = re.compile(r"^--- SKIP: (\w+)", re.M)`,
+		`SKIP_RE = re.compile(r"--- SKIP: (\w+)", re.M)`,
+	},
+	{
+		"the baseline's not-green refusal",
+		`if base_failed:`,
+		`if False:`,
+	},
+	{
+		"the baseline's skipping refusal",
+		`if base_skipped:`,
+		`if False:`,
+	},
+	{
+		// The count's own CHECK is pinned by
+		// TestControls_TheHarnessCountsItsOwnCases, which removes it.
+		// This entry pins the PUBLISHED FIGURE: a copy whose count no
+		// longer matches the literal must fail.
+		"the published case count",
+		`expected_self_test_cases = 60`,
+		`expected_self_test_cases = 59`,
+	},
+	{
+		"main()'s use of the baseline verdict",
+		`baseline = baseline_verdict(base_failed, base_passed, base_skipped,
+                                    base_detail)`,
+		`baseline = base_passed`,
+	},
+	// The NEUTERED PREDICATES. A mutation that turns a predicate's
+	// BODY into a constant leaves the check in place — so the counter
+	// still increments, the case count is unchanged, and the harness's
+	// own self-test would stay green. The harness CANNOT catch that:
+	// the check IS the thing being neutered.
+	//
+	// Which is why every check in the self-test is a call to a
+	// PREDICATE, and every predicate is driven with a deliberately
+	// wrong value to prove it can fail. These four entries are that
+	// proof, from outside: a neutered predicate fails its own probe.
+	{
+		"the equality predicate's body",
+		`    return got == want`,
+		`    return True`,
+	},
+	{
+		"the published-message predicate's body",
+		`    return "NOT a run of this suite" in output`,
+		`    return True`,
+	},
+	{
+		"the isolation predicate's body",
+		`    return refused == 1`,
+		`    return True`,
+	},
+	{
+		"the sample predicate's body",
+		`    return needle in sample`,
+		`    return True`,
+	},
+	// The NEUTERED CALL SITES. A mutation that turns a check's call
+	// site into a constant leaves the check in place — and with the
+	// count derived from the LOG, it also leaves the check unlogged,
+	// so the count changes and the self-test fails against the copy.
+	{
+		"the baseline denominator's call site",
+		`if not _equal(good, SUITE_SIZE, calls):`,
+		`if False:`,
+	},
+	{
+		"the regex comparison's call site",
+		`if not _equal(got, want, calls):`,
+		`if False:`,
+	},
+	{
+		"the sample's shape call site",
+		`if not _sample_ok(needle, sample, calls):`,
+		`if False:`,
+	},
+	{
+		"the published-message call site",
+		`if not _message_ok(buf.getvalue(), calls):`,
+		`if False:`,
+	},
+	{
+		"the isolation call site",
+		`if not _isolation_ok(refused, calls):`,
+		`if False:`,
+	},
+	{
+		"the case verdict's call site",
+		`if not _equal(ok, want, calls):`,
+		`if False:`,
+	},
+	{
+		"the wiring verdict's call site",
+		`wiring_ok = _wiring_ok(proceeded, exited, ran, want_proceeded,
+                               want_exit, calls)`,
+		`wiring_ok = True`,
+	},
+}
+
+// TestControls_TheHarnessFailsWhenAMechanismIsRemoved is the MUTATION
+// MATRIX as an executable artefact.
+//
+// Each mutation removes one published mechanism from a COPY of the
+// harness, and the harness's own self-test must FAIL against that
+// copy. A mutation the self-test survives is a mechanism with nothing
+// behind it — and this test says so by name.
+func TestControls_TheHarnessFailsWhenAMechanismIsRemoved(t *testing.T) {
+	root := repoRoot(t)
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not on PATH; the harness's self-test cannot be driven here")
+	}
+	original, err := os.ReadFile(filepath.Join(root, controlsScript))
+	if err != nil {
+		t.Fatalf("read the control harness: %v", err)
+	}
+	for _, m := range harnessMutations {
+		t.Run(m.name, func(t *testing.T) {
+			mutated := strings.Replace(string(original), m.old, m.new, 1)
+			if mutated == string(original) {
+				t.Fatalf("the mutation did not apply — %q is not in the harness, "+
+					"so the matrix no longer tests what it claims", m.old)
+			}
+			dir := t.TempDir()
+			script := filepath.Join(dir, "controls.py")
+			if err := os.WriteFile(script, []byte(mutated), 0o600); err != nil {
+				t.Fatalf("write the mutated copy: %v", err)
+			}
+			cmd := exec.Command(python, script, "--selftest")
+			cmd.Env = []string{
+				"PATH=" + os.Getenv("PATH"),
+				"HOME=" + t.TempDir(),
+				"MPM_WORKSPACE=" + t.TempDir(),
+			}
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Errorf("the self-test PASSED against a copy with %s removed, so "+
+					"that mechanism has nothing behind it:\n%s", m.name, out)
+			}
+		})
+	}
+}
+
+// TestControls_TheHarnessCountsItsOwnCases pins that the harness's
+// count is CHECKED, not merely printed.
+//
+// The harness compares its own case count against a published literal
+// and fails when they differ. That check is what makes the published
+// figure mean something: a case added without the figure being
+// updated changes the count, and the check refuses.
+//
+// The check itself needs a case that fails when it is removed — and
+// removing it cannot be observed from the harness's own output, since
+// the printed count is the same either way. So this test mutates a
+// COPY of the harness — in a temporary directory, never the tree —
+// and requires the self-test to FAIL.
+//
+// The tree is never touched: the copy is written to a temp directory
+// and run from there.
+func TestControls_TheHarnessCountsItsOwnCases(t *testing.T) {
+	root := repoRoot(t)
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not on PATH; the harness's self-test cannot be driven here")
+	}
+	original, err := os.ReadFile(filepath.Join(root, controlsScript))
+	if err != nil {
+		t.Fatalf("read the control harness: %v", err)
+	}
+	// The mutation: the published literal is made wrong, so the
+	// harness's count no longer matches it. A harness that CHECKS the
+	// count fails; a harness that only PRINTS it does not.
+	//
+	// The literal is derived from the published constant, so the two
+	// cannot drift apart: the mutation always moves the harness's
+	// figure by one.
+	mutated := strings.Replace(string(original),
+		fmt.Sprintf("expected_self_test_cases = %d", publishedSelfTestCases),
+		fmt.Sprintf("expected_self_test_cases = %d", publishedSelfTestCases-1),
+		1)
+	if mutated == string(original) {
+		t.Fatal("the mutation did not apply — the harness's published literal " +
+			"is not where this test expects it")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "controls.py")
+	if err := os.WriteFile(script, []byte(mutated), 0o600); err != nil {
+		t.Fatalf("write the mutated copy: %v", err)
+	}
+	cmd := exec.Command(python, script, "--selftest")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"MPM_WORKSPACE=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Errorf("the harness's self-test PASSED against a mutated copy whose "+
+			"published case count is wrong, so the count is printed but not "+
+			"checked:\n%s", out)
 	}
 }
 

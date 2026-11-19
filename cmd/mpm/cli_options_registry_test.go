@@ -133,15 +133,21 @@ func collectOptionVocabulary(f *ast.File, vocab sourceOptionVocabulary) {
 // `Var` family, where the first argument is the value and the name is
 // the second.
 //
-// The set is the stdlib's own: `String`, `Bool`, `Int`, `Int64`,
-// `Float64`, `Uint`, `Uint64`, `Duration` and `Func` name the option
+// The set is the stdlib's own — all twenty registration methods Go's
+// `flag` package has: `String`, `Bool`, `Int`, `Int64`, `Float64`,
+// `Uint`, `Uint64`, `Duration`, `Func` and `BoolFunc` name the option
 // first; `Var`, `TextVar` and the `*Var` family name it second. There
 // is no `VarX` in Go's `flag` package, and a map whose whole purpose is
 // to be right about the stdlib has no business naming one.
+//
+// It is all twenty because a MISSING name hides an option in the
+// DANGEROUS direction: the registry would reject an invocation the
+// code accepts. `BoolFunc` is not used today; it is here so that it
+// cannot be missed the day it is.
 var flagRegistrationMethods = map[string]bool{
 	"String": true, "Bool": true, "Int": true, "Int64": true,
 	"Float64": true, "Uint": true, "Uint64": true, "Duration": true,
-	"Func": true,
+	"Func": true, "BoolFunc": true,
 	"Var": true, "TextVar": true,
 	"BoolVar": true, "StringVar": true, "IntVar": true, "Int64Var": true,
 	"Float64Var": true, "UintVar": true, "Uint64Var": true,

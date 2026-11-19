@@ -1129,28 +1129,89 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
     return results
 
 
-def _drive_main_with_baseline(base_failed, base_skipped):
+def _equal(got, want, calls):
+    """Whether two values are equal.
+
+    Every VALUE comparison in the self-test goes through here, so that
+    each one can be driven with a deliberately wrong value and proved
+    able to fail. A check that is inlined cannot be driven, so an
+    inlined check that is neutered leaves the self-test green with
+    nothing to notice it.
+
+    It also RECORDS that it ran, in the log the caller owns. That is
+    what makes a neutered CALL SITE visible: a check that stops
+    running leaves the log short, and the count — which is the log's
+    length — changes.
+    """
+    calls.append("equal")
+    return got == want
+
+
+def _message_ok(output, calls):
+    """Whether the more-tests direction says what is actually wrong."""
+    calls.append("message")
+    return "NOT a run of this suite" in output
+
+
+def _isolation_ok(refused, calls):
+    """Whether a case refused exactly the one control it is about."""
+    calls.append("isolation")
+    return refused == 1
+
+
+def _sample_ok(needle, sample, calls):
+    """Whether the sample carries the shape the pattern needs."""
+    calls.append("sample")
+    return needle in sample
+
+
+def _wiring_ok(proceeded, exited, ran, want_proceeded, want_exit, calls):
+    """The verdict on whether main()'s wiring behaved.
+
+    It is a FUNCTION so that the self-test can prove that it CAN fail:
+    a verdict that is inlined cannot be driven with a deliberately
+    wrong expectation, and so a neutered inlined verdict would leave
+    the self-test green with no way to notice.
+    """
+    calls.append("wiring")
+    # The three are evaluated SEPARATELY, not as one `and` chain: a
+    # short-circuiting chain would log a different number of checks
+    # depending on the values, and the count must be a DETERMINISTIC
+    # number or it is not a number at all.
+    ok_proceeded = _equal(proceeded, want_proceeded, calls)
+    ok_exited = _equal(exited, want_exit, calls)
+    ok_ran = _equal(bool(ran), want_proceeded, calls)
+    return ok_proceeded and ok_exited and ok_ran
+
+
+def _drive_main_with_baseline(base_failed, base_skipped, ran):
     """Call main() with a STUBBED suite, and report what it did.
 
     It returns (proceeded, exit_code): whether main() got past the
     baseline to the controls, and what it exited with.
+
+    `ran` is a list the CALLER owns, and the stub control appends to
+    it. That is deliberate: the record of what the stub did lives with
+    the caller, so a mutation that substitutes the EXPECTATION for the
+    observation — inside the driver or at the call site — cannot forge
+    it. The driver can only append to a list it was handed.
 
     The stub replaces the suite run, so the wiring of main() is
     exercised without the cost of the suite — and, more to the point,
     without the guards being reachable some other way. The controls are
     stubbed too: a real control's mutator would edit the source.
     """
-    mutated = []
     # The stub is a plain control DICT, because the gate reads its
     # fields by key. Its mutator only records that it ran — a real
-    # control's mutator would edit the source.
+    # control's mutator would edit the source — and it appends to the
+    # list the CALLER owns.
     stub = {
         "name": "stub",
         "invariant": "a stub control",
         "expect": [],
         "load_bearing": True,
         "breaks": [],
-        "mutate": lambda: mutated.append(True),
+        "mutate": lambda: ran.append(True),
     }
     originals = {k: globals()[k] for k in
                  ("run_tests", "snapshot", "restore", "CONTROLS")}
@@ -1165,8 +1226,8 @@ def _drive_main_with_baseline(base_failed, base_skipped):
         try:
             main()
         except SystemExit as e:
-            return (bool(mutated), e.code)
-        return (bool(mutated), None)
+            return (bool(ran), e.code)
+        return (bool(ran), None)
     finally:
         for k, v in originals.items():
             globals()[k] = v
@@ -1195,7 +1256,7 @@ def selftest():
     # mutation that removes both a mechanism and the guard that watches
     # it is not in the matrix, and the note says so rather than
     # claiming more.
-    expected_self_test_cases = 42
+    expected_self_test_cases = 60
 
     # Each case carries a MODE. The mode decides how the gate is
     # driven; the name is only the label. Dispatching on the label
@@ -1293,6 +1354,23 @@ def selftest():
 
     failures = 0
 
+    # The LOG of the checks the self-test made. It is owned by THIS
+    # frame, and every predicate appends to it as it runs.
+    #
+    # The self-test's case count is the log's LENGTH — so it is the
+    # number of checks that were EVALUATED, not the number of lines
+    # that were printed and not a number a branch increments on its way
+    # past. Three things follow, and each is a mechanism:
+    #
+    #   * a check that STOPS RUNNING leaves the log short, so the
+    #     count changes and the count's check fires;
+    #   * a check that is NEUTERED at its call site does not log, so
+    #     the count changes;
+    #   * a predicate whose BODY is neutered still logs, so the count
+    #     is unchanged — and the PROBE catches that one, because the
+    #     probe drives the predicate directly with a wrong value.
+    calls = []
+
     # M4: main()'s two baseline guards. The baseline decision is a
     # function, and these two cases are what fail when a guard is
     # removed — an inline guard has no case at all, which is how round
@@ -1304,7 +1382,8 @@ def selftest():
     # bound's denominator must be.
     try:
         good = baseline_verdict([], SUITE_SIZE, [])
-        if good != SUITE_SIZE:
+        calls.append("baseline")
+        if not _equal(good, SUITE_SIZE, calls):
             failures += 1
             print(f"\nSELF-TEST FAILED: a green baseline returned the denominator "
                   f"{good}, want {SUITE_SIZE}")
@@ -1324,6 +1403,7 @@ def selftest():
             failures += 1
             print(f"\nSELF-TEST FAILED: {label} — the baseline was ACCEPTED")
         except SystemExit:
+            calls.append("baseline")
             print(f"\nSELF-TEST OK: {label} — the baseline was refused.")
 
     # M4, the wiring: main() must USE the verdict. The function is
@@ -1333,19 +1413,80 @@ def selftest():
     # suite: a source search would be satisfied by a COMMENT, and
     # main() could swallow the raise that was introduced so it could
     # not be ignored.
-    for label, stub_failed, stub_skipped, want_proceeded in (
-            ("a not-green baseline", ["TestSomethingFailed"], [], False),
-            ("a baseline that skipped a test", [], ["TestSomethingSkipped"], False),
-            ("a green baseline", [], [], True)):
-        proceeded, exited = _drive_main_with_baseline(stub_failed, stub_skipped)
-        if proceeded != want_proceeded:
+    for label, stub_failed, stub_skipped, want_proceeded, want_exit in (
+            ("a not-green baseline", ["TestSomethingFailed"], [], False, 1),
+            ("a baseline that skipped a test", [], ["TestSomethingSkipped"], False, 1),
+            ("a green baseline", [], [], True, None)):
+        # The record of what the stub did belongs to THIS frame: the
+        # driver appends to the list it is handed, so a mutation that
+        # substitutes the expectation for the observation cannot forge
+        # it.
+        ran = []
+        proceeded, exited = _drive_main_with_baseline(stub_failed, stub_skipped,
+                                                       ran)
+        # ONE boolean, so that the mutation matrix can neuter the whole
+        # verdict with one edit — and so that the three things it
+        # checks are checked together rather than in a chain where a
+        # neutered first clause hides the rest.
+        #
+        #   proceeded   main() got past the baseline to the controls
+        #   exited      and it exited with the gate's code
+        #   ran         and the STUB CONTROL'S OWN RECORD says so
+        #
+        # The third is the record that belongs to THIS frame: the
+        # driver appends to the list it was handed, so a mutation that
+        # substitutes the expectation for the observation cannot forge
+        # it.
+        wiring_ok = _wiring_ok(proceeded, exited, ran, want_proceeded,
+                               want_exit, calls)
+        if not wiring_ok:
             failures += 1
             print(f"\nSELF-TEST FAILED: main() with {label} "
-                  f"{'proceeded' if proceeded else 'refused'}, want "
-                  f"{'proceeded' if want_proceeded else 'refused'}")
+                  f"{'proceeded' if proceeded else 'refused'} and exited {exited}, "
+                  f"running the control {bool(ran)} — want "
+                  f"{'proceeded' if want_proceeded else 'refused'}, exited "
+                  f"{want_exit}, running the control {want_proceeded}")
         else:
             print(f"\nSELF-TEST OK: main() with {label} "
                   f"{'proceeded to the controls' if proceeded else 'refused the measurement'}.")
+
+    # Every PREDICATE can FAIL — and that is proved, not assumed.
+    #
+    # A check that is inlined cannot be driven with a deliberately
+    # wrong value, so an inlined check that is neutered leaves the
+    # self-test green with nothing to notice it. Each predicate below
+    # is therefore driven with a value it must refuse, and each probe
+    # is a case.
+    for label, predicate in (
+            ("the equality predicate", lambda: _equal("a", "b", calls)),
+            ("the published-message predicate", lambda: _message_ok("a run of "
+             "this suite", calls)),
+            ("the isolation predicate", lambda: _isolation_ok(2, calls)),
+            ("the sample predicate",
+             lambda: _sample_ok("nothing", "sample", calls))):
+        if predicate():
+            failures += 1
+            print(f"\nSELF-TEST FAILED: {label} accepted a value it must "
+                  f"refuse, so it cannot fail")
+        else:
+            print(f"\nSELF-TEST OK: {label} refuses a value it must refuse, so "
+                  f"it can fail.")
+
+    # The wiring verdict can FAIL — and that is proved, not assumed.
+    # A verdict that is inlined cannot be driven with a deliberately
+    # wrong expectation, so a neutered inlined verdict would leave the
+    # self-test green with nothing to notice it. The function can be
+    # driven, so it is.
+    probe_ran = []
+    probe_proceeded, probe_exited = _drive_main_with_baseline(
+        ["TestSomethingFailed"], [], probe_ran)
+    if _wiring_ok(probe_proceeded, probe_exited, probe_ran, True, 1, calls):
+        failures += 1
+        print("\nSELF-TEST FAILED: the wiring verdict accepted a deliberately "
+              "wrong expectation, so it cannot fail")
+    else:
+        print("\nSELF-TEST OK: the wiring verdict refuses a deliberately wrong "
+              "expectation, so it can fail.")
 
     # M6: the three patterns are the harness's entire contact with Go's
     # output. The `^` anchor is what stops a PASSING parent test whose
@@ -1362,7 +1503,7 @@ def selftest():
              "    --- PASS: TestAPIWithFailure/beta"),
             ("the failing parent's own top-level line",
              "--- FAIL: TestAPIWithFailure (0.00s)")):
-        if needle not in sample:
+        if not _sample_ok(needle, sample, calls):
             failures += 1
             print(f"\nSELF-TEST FAILED: the sample of Go's output does not carry "
                   f"{label}, so the pattern's anchor would be unobservable")
@@ -1377,15 +1518,13 @@ def selftest():
             ("the SKIP pattern", sorted(set(SKIP_RE.findall(sample))),
              ["TestAPISkipped"]))
     for label, got, want in regex_cases:
-        if got != want:
+        if not _equal(got, want, calls):
             failures += 1
             print(f"\nSELF-TEST FAILED: {label} read {got} from Go's output, "
                   f"want {want}")
         else:
             print(f"\nSELF-TEST OK: {label} read {got} from Go's output.")
 
-    message_assertions = 0
-    isolates_assertions = 0
     for case in cases:
         name, results, want = case["name"], case["results"], case["want"]
         # The output is CAPTURED, because a published MESSAGE is part of
@@ -1409,8 +1548,7 @@ def selftest():
         # round-seven fix reintroduced it, and the round-eight fix
         # removes it again.
         if case["mode"] == "more_tests":
-            message_assertions += 1
-            if "NOT a run of this suite" not in buf.getvalue():
+            if not _message_ok(buf.getvalue(), calls):
                 failures += 1
                 print("\nSELF-TEST FAILED: the more-tests direction does not say "
                       "that the run is not a run of this suite")
@@ -1422,14 +1560,13 @@ def selftest():
         # controls would refuse thirteen bystanders too — and the
         # VERDICT would be the same, so nothing else would notice.
         if case.get("isolates"):
-            isolates_assertions += 1
             refused = buf.getvalue().count("\nNO  ")
-            if refused != 1:
+            if not _isolation_ok(refused, calls):
                 failures += 1
                 print(f"\nSELF-TEST FAILED: {name} refused {refused} control(s), "
                       f"want 1 — the case must isolate the control it is about")
         verdict = "REFUSED" if not ok else "ACCEPTED"
-        if ok != want:
+        if not _equal(ok, want, calls):
             failures += 1
             print(f"\nSELF-TEST FAILED: {name} — the gate {verdict} it, want "
                   f"{'REFUSED' if not want else 'ACCEPTED'}")
@@ -1443,31 +1580,21 @@ def selftest():
         failures += 1
         print("\nSELF-TEST FAILED: the gate accepted a call with no baseline at all")
     except TypeError:
+        calls.append("no-baseline")
         print("\nSELF-TEST OK: the gate refused a call with no baseline at all "
               "— the parameter is required, so the measurement cannot be made "
               "without one")
-    # EVERY check the self-test makes is counted here, so the printed
-    # number is the number of cases and not the number of output lines.
+    # EVERY check the self-test makes is counted here, and the count
+    # is the LOG's length — the number of checks that were EVALUATED,
+    # not the number of lines that were printed and not a number a
+    # branch increments on its way past.
     #
-    #   len(cases)          the gate cases
-    #   3                   the baseline verdict (green, not-green, skipping)
-    #   len(regex_cases)    the three output patterns
-    #   3                   the sample's load-bearing shapes
-    #   3                   the main() wiring drives
-    #   1                   the call with no baseline at all
-    #   message_assertions  the published-message assertion, once per
-    #                       case that produces that direction
-    #   isolates_assertions the isolation assertion, once per case that
-    #                       isolates a target
-    #
-    # The last two are DERIVED from the counters, not assumed. That is
-    # what makes the count a mechanism rather than a number: an
-    # assertion that stops running changes the count, and the count is
-    # checked against the published literal below — so removing an
-    # assertion's dispatch fails the self-test, and a Go test pins the
+    # The log is the mechanism. A check that stops running leaves it
+    # short; a check that is neutered at its call site does not log;
+    # and the count is checked against the published literal below — so
+    # removing a check fails the self-test, and a Go test pins the
     # published figure against what the harness actually prints.
-    total = (len(cases) + 3 + len(regex_cases) + 3 + 3 + 1
-             + message_assertions + isolates_assertions)
+    total = len(calls)
     if total != expected_self_test_cases:
         failures += 1
         print(f"\nSELF-TEST FAILED: the self-test made {total} case(s), want "
