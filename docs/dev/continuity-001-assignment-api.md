@@ -557,14 +557,39 @@ in depth.**
 | `fence-go-half` | **only** the Go half of the fence | *none — and that is the measurement* |
 | `fence-sql-half` | **only** the `WHERE` clause | *none — and that is the measurement* |
 
-**THE GATE ASKS TWO QUESTIONS OF EACH CONTROL.** Not only must the named
-test fail — the control must also break **nothing it did not declare** it
-would break. A mutation that removed the invariant *and* broke the
-statement would fail the named test for the wrong reason and take the rest
-of the suite with it, and that must not read as a pass. So each control
-declares the extra tests its removal breaks (`fence` breaks the renewal
-test, `state-machine` breaks the four tests that depend on a transition
-being refused), and a failure outside the declaration refuses the control.
+**THE GATE ASKS THREE QUESTIONS OF EACH CONTROL.**
+
+1. The named test must fail.
+2. The control must break **nothing it did not declare** it would break. A
+   mutation that removed the invariant *and* broke the statement would fail
+   the named test for the wrong reason and take the rest of the suite with
+   it, and that must not read as a pass. So each control declares the extra
+   tests its removal breaks — `fence` breaks the renewal test, because a
+   renewal that did not advance the epoch would not fence the old holder
+   out; `state-machine` breaks the four tests that depend on a transition
+   being refused, because the path *is* the state machine — and a failure
+   outside the declaration refuses the control.
+3. The control must not have broken **more than a third of the suite**. A
+   mutation that took the suite with it did not remove an invariant, it
+   broke the build, and the named test may have failed for that reason
+   instead. Such a control is **inconclusive**, and an inconclusive control
+   does not count as load-bearing.
+
+The third question is what stops the declaration from becoming an escape
+hatch: however broad a control's `breaks` list is, a mutation that broke
+the suite is refused rather than accepted. The exemptions are also
+**printed** by the harness, so they are part of the published measurement
+rather than hidden in its source, and the pinning test checks that every
+declared exemption names a test that **exists** — a stale exemption matches
+nothing, and nobody notices.
+
+**THE DECLARED EXEMPTIONS.** Two controls have any, and both are printed by
+the harness on every run:
+
+| control | it also breaks | because |
+|---|---|---|
+| `fence` | `TestAPIRenewalAdvancesTheEpoch` | a renewal that did not advance the epoch would not fence the old holder out, so the renewal test depends on the fence |
+| `state-machine` | `TestAPIAnUndeliveredAssignmentCannotBeAcknowledged`, `TestAPIInvalidTransitionsAreRefused`, `TestAPIRedeliveryIsRefusedAndTheWorkStaysVisible`, `TestAPITheApprovalMustNameTheGateAction` | the path *is* the state machine, so removing it breaks every test that depends on a transition being refused |
 
 The last two are the **defence in depth**, published rather than hidden:
 

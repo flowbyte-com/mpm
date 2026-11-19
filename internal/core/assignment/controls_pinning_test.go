@@ -96,6 +96,15 @@ func suiteTestNames(t *testing.T) map[string]bool {
 // expectRe finds the "expect" list of a control in the harness.
 var expectRe = regexp.MustCompile(`"expect":\s*\[([^\]]*)\]`)
 
+// breaksRe finds the "breaks" list of a control in the harness.
+//
+// The list is the control's DECLARED EXEMPTIONS: the extra tests its
+// removal is expected to break. The gate refuses a control that broke
+// anything outside the declaration, so a stale entry here is an
+// exemption for a test that no longer exists — and one that nobody
+// notices, because a stale entry never matches anything.
+var breaksRe = regexp.MustCompile(`"breaks":\s*\[([^\]]*)\]`)
+
 // TestControls_TheHarnessNamesTestsThatExist pins that every test the
 // harness names is a test that exists.
 //
@@ -131,6 +140,44 @@ func TestControls_TheHarnessNamesTestsThatExist(t *testing.T) {
 	if seen == 0 {
 		t.Fatal("the control harness names no tests at all; the expectations have rotted away")
 	}
+}
+
+// TestControls_TheHarnessNamesOnlyTestsThatExist pins that every
+// DECLARED EXEMPTION names a test that exists.
+//
+// The gate refuses a control that broke a test it did not declare, so
+// the declaration is what makes a control's measurement possible. A
+// stale entry — an exemption for a test that was renamed or deleted —
+// matches nothing, and nobody notices: it looks like a declaration that
+// simply never applied.
+func TestControls_TheHarnessNamesOnlyTestsThatExist(t *testing.T) {
+	root := repoRoot(t)
+	b, err := os.ReadFile(filepath.Join(root, controlsScript))
+	if err != nil {
+		t.Fatalf("read the control harness: %v", err)
+	}
+	suite := suiteTestNames(t)
+
+	seen := 0
+	for _, m := range breaksRe.FindAllStringSubmatch(string(b), -1) {
+		for _, quoted := range strings.Split(m[1], ",") {
+			quoted = strings.TrimSpace(quoted)
+			if !strings.HasPrefix(quoted, `"`) {
+				continue
+			}
+			name := strings.Trim(quoted, `"`)
+			if name == "" {
+				continue
+			}
+			seen++
+			if !suite[name] {
+				t.Errorf("the control harness declares an exemption for the test %q, "+
+					"which does not exist in this package — the exemption matches nothing, "+
+					"so it looks like a declaration that never applied", name)
+			}
+		}
+	}
+	_ = seen
 }
 
 // filesRe finds the FILES tuple of the harness.
@@ -259,6 +306,15 @@ func TestControls_TheHarnessGateCanFail(t *testing.T) {
 		t.Skip("python3 is not on PATH; the harness's self-test cannot be driven here")
 	}
 	cmd := exec.Command(python, filepath.Join(root, controlsScript), "--selftest")
+	// The child gets a PINNED environment, not the ambient one: the
+	// subprocess guard exists precisely because an inherited environment
+	// is how a test reaches a live workspace. The harness's self-test
+	// opens no database, but the rule is the rule.
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"MPM_WORKSPACE=" + t.TempDir(),
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("the harness's self-test failed, so its gate cannot be trusted "+

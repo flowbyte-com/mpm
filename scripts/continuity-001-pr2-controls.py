@@ -117,8 +117,22 @@ def restore():
         shutil.copy2(BACKUP / rel.replace("/", "__"), REPO / rel)
 
 
+# A control that breaks more than ONE THIRD of the suite is not removing
+# an invariant — it is breaking the build. The gate treats such a control
+# as INCONCLUSIVE, and an inconclusive control FAILS the gate.
+#
+# This is what stops the `breaks` declaration from becoming an escape
+# hatch: however broad a control's declaration is, a mutation that took
+# the suite with it is refused rather than accepted.
+#
+# The comparison is `failures * 3 > total`: the third is the numerator
+# because the bound is a FRACTION of the suite, and writing it this way
+# keeps the direction obvious.
+BROKEN_SUITE_FRACTION = 3
+
+
 def run_tests():
-    """Run the acceptance suite and return the tests that fail."""
+    """Run the acceptance suite and return the tests that fail, and how many ran."""
     env = dict(os.environ)
     env["CGO_CFLAGS"] = "-DSQLITE_ENABLE_FTS5=1"
     env["CGO_LDFLAGS"] = "-lm"
@@ -129,12 +143,13 @@ def run_tests():
             cwd=CORE, capture_output=True, text=True, env=env, timeout=3600,
         )
     except subprocess.TimeoutExpired:
-        return ["<TIMEOUT>"], []
+        return ["<TIMEOUT>"], [], 0
     failed = sorted(set(re.findall(r"^--- FAIL: (\w+)", p.stdout, re.M)))
+    passed = len(set(re.findall(r"^--- PASS: (\w+)", p.stdout, re.M)))
     if p.returncode != 0 and not failed:
         err = (p.stdout + p.stderr).strip().splitlines()
-        return ["<BUILD FAILED>"], err[-3:]
-    return failed, []
+        return ["<BUILD FAILED>"], err[-3:], passed
+    return failed, [], passed
 
 
 def replace_text(rel, old, new, what):
@@ -704,10 +719,11 @@ def main():
             restore()
             print(f"\n=== {name}: {control['invariant']} ===")
             control["mutate"]()
-            failed, detail = run_tests()
+            failed, detail, passed = run_tests()
             inconclusive = [f for f in failed if f in INCONCLUSIVE]
             specific = [f for f in failed if f not in INCONCLUSIVE]
             hit = [t for t in control["expect"] if t in specific]
+            total = len(specific) + passed
             print(f"    failing tests: {specific or '(none)'}")
             if detail:
                 print(f"    detail: {detail}")
@@ -715,7 +731,7 @@ def main():
                 print(f"    NOT LOAD-BEARING: {control['expect']} did not fail")
             if not control["load_bearing"] and specific:
                 print(f"    UNEXPECTED: {specific} failed, but this control removes only one half")
-            results.append((control, hit, specific, inconclusive))
+            results.append((control, hit, specific, inconclusive, total))
     finally:
         restore()
         print("\nthe tree is restored")
@@ -734,10 +750,21 @@ def summarise(results):
     load_bearing_total = 0
     redundant_total = 0
     redundant_clean = 0
-    for control, hit, specific, inconclusive in results:
+    for control, hit, specific, inconclusive, total in results:
         if control["load_bearing"]:
             load_bearing_total += 1
             named = len(hit) == len(control["expect"])
+            # The BOUND. A mutation that broke more than a third of the
+            # suite did not remove one invariant — it broke the build,
+            # and the named test may have failed for that reason
+            # instead. Such a control is INCONCLUSIVE, and an
+            # inconclusive control does not count as load-bearing.
+            broke_suite = (total > 0 and
+                           len(specific) * BROKEN_SUITE_FRACTION > total)
+            if broke_suite:
+                print(f"     INCONCLUSIVE: the mutation broke {len(specific)} of the "
+                      f"suite's {total} tests — that is a broken build, not a "
+                      f"removed invariant")
             # The gate asks a second question: did the mutation break
             # anything the control did not DECLARE it would break? A
             # mutation that broke the statement would fail the named
@@ -745,7 +772,7 @@ def summarise(results):
             # with it — and that must not read as a pass.
             unexpected = [f for f in specific
                           if f not in control["expect"] and f not in control.get("breaks", [])]
-            ok = named and not unexpected
+            ok = named and not unexpected and not broke_suite
             if ok:
                 load_bearing_passed += 1
             print(f"{'OK ' if ok else 'NO '} {control['name']:22s} {control['invariant']}")
@@ -755,8 +782,16 @@ def summarise(results):
                 print(f"     UNEXPECTED failures: {unexpected} — the control did not "
                       f"declare that its removal breaks them, so the named test may have "
                       f"failed for the wrong reason")
+            # The exemptions are PUBLISHED, so a broad declaration is
+            # visible in the measurement rather than hidden in this file.
+            exemptions = control.get("breaks", [])
+            if exemptions:
+                print(f"     declared exemptions: {exemptions}")
         else:
             redundant_total += 1
+            exemptions = control.get("breaks", [])
+            if exemptions:
+                print(f"     declared exemptions: {exemptions}")
             # A defence-in-depth control removes ONE half of an
             # enforcement, so the suite must be UNCHANGED. An
             # unexpected failure means the mutation broke more than
@@ -777,8 +812,13 @@ def summarise(results):
     return ok
 
 
+# SUITE_SIZE is the number of tests the `-run TestAPI` selection runs.
+# The synthetic results only need it to compute the broken-suite bound.
+SUITE_SIZE = 36
+
+
 def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
-                       undeclared=False):
+                       undeclared=False, broken_suite=False):
     """Build the results a run would produce, for the self-test.
 
     `broken_load_bearing` names a load-bearing control whose named test
@@ -801,12 +841,22 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
                 # The named test DID fail, and something else broke
                 # too — and the control never said it would.
                 specific = list(hit) + ["TestSomethingElseBroke"]
-            results.append((control, hit, specific, []))
+            if broken_suite and control["name"] == first_lb:
+                # The EXACT attack the review described: the mutation
+                # took the suite with it, AND the control DECLARES
+                # every test it broke. The declaration is broad enough
+                # to swallow anything — so the bound is what refuses
+                # it, not the declaration.
+                broken = [f"TestBroke{i}" for i in range(SUITE_SIZE)]
+                specific = list(hit) + broken
+                control = dict(control)
+                control["breaks"] = list(control.get("breaks", [])) + broken
+            results.append((control, hit, specific, [], SUITE_SIZE))
         else:
             specific = []
             if control["name"] == broken_redundant:
                 specific = ["TestTheSuiteBroke"]
-            results.append((control, [], specific, []))
+            results.append((control, [], specific, [], SUITE_SIZE))
     return results
 
 
@@ -833,6 +883,8 @@ def selftest():
          _synthetic_results(broken_redundant=first_rd), False),
         (f"the load-bearing control {first_lb} broke tests it did not declare",
          _synthetic_results(undeclared=True), False),
+        (f"the load-bearing control {first_lb} took the whole suite with it",
+         _synthetic_results(broken_suite=True), False),
     ]
 
     failures = 0
