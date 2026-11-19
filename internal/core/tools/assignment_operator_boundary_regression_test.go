@@ -77,7 +77,6 @@ package tools
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
@@ -128,10 +127,6 @@ func TestAssignment_NoRegistryActionCreatesARoot(t *testing.T) {
 		tool := tool
 		t.Run(tool.Name, func(t *testing.T) {
 			for _, action := range operatorOnlyAssignmentActions {
-				if strings.Contains(action, "root") || strings.Contains(action, "approv") ||
-					strings.Contains(action, "author") {
-					// These action names are the ones under test.
-				}
 				// The action must not even be dispatchable: the
 				// handler refuses an unknown action.
 				_, err := tool.Handler(newTestDMForTools(t), mpminternal.ActiveContext{},

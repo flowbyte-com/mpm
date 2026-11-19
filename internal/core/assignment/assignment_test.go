@@ -962,10 +962,12 @@ func TestAPITerminalAssignmentsAreNotClaimable(t *testing.T) {
 // Every transition appends exactly one event to the transitioned
 // assignment's ledger, and the event names the state it moved to.
 //
-// EVERY event type the service can write is covered here. A test that
-// covered six of the thirteen and was called "every transition" would
-// publish a claim the test does not make — and the event types it left
-// out are exactly the ones the operator's gate is made of.
+// EVERY event type the service WRITES is covered here — twelve of the
+// vocabulary's thirteen; `lease_expired` is reserved and never emitted.
+//
+// A test that covered six of them and was called "every transition"
+// would publish a claim the test does not make — and the event types it
+// left out are exactly the ones the operator's gate is made of.
 //
 // The count is taken AROUND each operation, so it is about ONE
 // transition rather than about a chain of them: a test that counted the
@@ -993,6 +995,15 @@ func TestAPIEveryTransitionWritesExactlyOneEvent(t *testing.T) {
 			t.Errorf("the %s operation wrote %q, want %q", want, got[len(got)-1], want)
 		}
 		return out
+	}
+
+	// The CREATION writes its own event: the assignment's ledger
+	// starts with the `created` that made it. That is not a
+	// transition, so it has no transition to hang off — but it is an
+	// event type the service writes, and this test covers every one
+	// of them.
+	if got := eventTypes(t, store, root.ID); len(got) != 1 || got[0] != EventCreated {
+		t.Errorf("the creation left the ledger at %v, want exactly one %q", got, EventCreated)
 	}
 
 	// The implementer's chain.
@@ -1332,7 +1343,13 @@ func TestAPIRestartPreservesAssignmentsEventsAndClaims(t *testing.T) {
 	t.Setenv("MPM_WORKSPACE", dir)
 	t.Setenv("MPM_SHARED_DB", "")
 
-	dm, err := internal.NewDatabaseManager("")
+	// The path is given EXPLICITLY, not through the empty argument:
+	// `NewDatabaseManager("")` falls through to config.GetMPMDir() —
+	// the LIVE workspace — and the DB-safety guard is a static scan,
+	// so it cannot see the MPM_WORKSPACE this test sets. The
+	// non-empty form derives the same <dir>/src/db/mpm.db and
+	// genuinely redirects the database.
+	dm, err := internal.NewDatabaseManager(dir)
 	if err != nil {
 		t.Fatalf("open the workspace: %v", err)
 	}
@@ -1366,7 +1383,7 @@ func TestAPIRestartPreservesAssignmentsEventsAndClaims(t *testing.T) {
 	}
 
 	// And comes back.
-	dm2, err := internal.NewDatabaseManager("")
+	dm2, err := internal.NewDatabaseManager(dir)
 	if err != nil {
 		t.Fatalf("reopen the workspace: %v", err)
 	}

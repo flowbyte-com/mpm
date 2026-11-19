@@ -119,15 +119,18 @@ func TestAssignmentCLITheOperatorCanCreateARoot(t *testing.T) {
 	}
 }
 
-// TestAssignmentCLITheOperatorCanRecordAnApproval proves the operator's
-// own front door records an approval, end to end through the router.
+// assignmentCLIGatedSubject builds an assignment that is AT the
+// operator's gate.
 //
-// The fixture — the work, the review and the hand-off — is built with
-// the service, because those are the AGENT's steps. The thing under
-// test is the operator's VERB.
-func TestAssignmentCLITheOperatorCanRecordAnApproval(t *testing.T) {
-	dm := assignmentCLIFixture(t)
-	store := assignment.NewStore(dm)
+// The work, the review and the hand-off are built with the service,
+// because those are the AGENT's steps. What the operator's verbs then
+// do with the result is the thing under test.
+//
+// It has to be a real gate: the state check comes BEFORE the fence in
+// RecordApproval, so an assignment that is not at the gate would be
+// refused by the state check and the fence would never be consulted.
+func assignmentCLIGatedSubject(t *testing.T, store *assignment.Store, key string) *assignment.Assignment {
+	t.Helper()
 
 	// The work: a root, a child that finishes, an independent reviewer
 	// that passes it, and the hand-off to the operator's gate.
@@ -138,7 +141,7 @@ func TestAssignmentCLITheOperatorCanRecordAnApproval(t *testing.T) {
 			Title:               "the root",
 			Objective:           "the objective",
 			Recipient:           "alpha",
-			IdempotencyKey:      "idem:cli:approval:root",
+			IdempotencyKey:      "idem:cli:" + key + ":root",
 			PermittedOperations: []string{"read", "write"},
 			EligibleRecipients:  []string{"alpha", "charlie"},
 			MaxDepth:            2,
@@ -156,7 +159,7 @@ func TestAssignmentCLITheOperatorCanRecordAnApproval(t *testing.T) {
 		Objective:      "the work",
 		Recipient:      "alpha",
 		Role:           assignment.RoleImplementer,
-		IdempotencyKey: "idem:cli:approval:subject",
+		IdempotencyKey: "idem:cli:" + key + ":subject",
 	})
 	if err != nil || !created {
 		t.Fatalf("delegate the subject: %v (created=%v)", err, created)
@@ -169,7 +172,7 @@ func TestAssignmentCLITheOperatorCanRecordAnApproval(t *testing.T) {
 		Objective:      "review the work",
 		Recipient:      "charlie",
 		Role:           assignment.RoleReviewer,
-		IdempotencyKey: "idem:cli:approval:reviewer",
+		IdempotencyKey: "idem:cli:" + key + ":reviewer",
 		Payload:        map[string]interface{}{assignment.PayloadKeyReviewTarget: subject.ID},
 	})
 	if err != nil || !created {
@@ -196,6 +199,23 @@ func TestAssignmentCLITheOperatorCanRecordAnApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hand the work to the gate: %v", err)
 	}
+	if gated.State != assignment.StateAwaitingOperator {
+		t.Fatalf("the assignment is %q, want %q — the fence must be reachable",
+			gated.State, assignment.StateAwaitingOperator)
+	}
+	return gated
+}
+
+// TestAssignmentCLITheOperatorCanRecordAnApproval proves the operator's
+// own front door records an approval, end to end through the router.
+//
+// The fixture — the work, the review and the hand-off — is built with
+// the service, because those are the AGENT's steps. The thing under
+// test is the operator's VERB.
+func TestAssignmentCLITheOperatorCanRecordAnApproval(t *testing.T) {
+	dm := assignmentCLIFixture(t)
+	store := assignment.NewStore(dm)
+	gated := assignmentCLIGatedSubject(t, store, "approval")
 
 	// The operator's verb.
 	code, out := runCLI(t, "assignment", "record-approval",
@@ -241,33 +261,20 @@ func TestAssignmentCLITheOperatorCanRecordAnApproval(t *testing.T) {
 //
 // The operator read the assignment at one epoch and records the
 // approval at another: the approval does not land.
+//
+// The fixture is an assignment that is AT the gate, because the state
+// check comes before the fence: an assignment that was not at the gate
+// would be refused by the state check, and the fence would never be
+// consulted — the test would pass without ever reaching it.
 func TestAssignmentCLITheApprovalRefusesAStaleEpoch(t *testing.T) {
 	dm := assignmentCLIFixture(t)
 	store := assignment.NewStore(dm)
-
-	root, _, err := store.CreateRoot(
-		assignment.NewLocalOperatorAuthority("operator"),
-		assignment.CreateRootParams{
-			ProjectID:           "cpj-cli",
-			Title:               "the root",
-			Objective:           "the objective",
-			Recipient:           "alpha",
-			IdempotencyKey:      "idem:cli:stale:root",
-			PermittedOperations: []string{"read"},
-			EligibleRecipients:  []string{"alpha"},
-			MaxDepth:            1,
-			MaxTasks:            2,
-			MaxConcurrency:      1,
-			MaxResourceUnits:    10,
-		})
-	if err != nil {
-		t.Fatalf("create the root: %v", err)
-	}
+	gated := assignmentCLIGatedSubject(t, store, "stale")
 
 	// The operator names an epoch the assignment is not at. The verb
 	// refuses, and says so.
 	code, out, refusals := runAssignmentCLI(t, "assignment", "record-approval",
-		"--id", root.ID,
+		"--id", gated.ID,
 		"--action", "merge PR #260",
 		"--revision", "abc123",
 		"--source", "operator",
@@ -275,10 +282,53 @@ func TestAssignmentCLITheApprovalRefusesAStaleEpoch(t *testing.T) {
 		"--epoch", "7",
 	)
 	if code == 0 {
-		t.Fatalf("the approval of an assignment that is not at the gate was accepted: %s", out)
+		t.Fatalf("the approval presenting a stale epoch was accepted: %s", out)
 	}
-	if !strings.Contains(refusals, "assignment:") {
-		t.Errorf("the refusal did not come from the service: %s", refusals)
+	if !strings.Contains(refusals, "stale") {
+		t.Errorf("the refusal is not the fence's: %s", refusals)
+	}
+
+	// And nothing moved: the assignment is still at the gate.
+	after, err := store.Get(gated.ID)
+	if err != nil {
+		t.Fatalf("read the assignment: %v", err)
+	}
+	if after.State != assignment.StateAwaitingOperator {
+		t.Errorf("the assignment is %q after the refused approval, want %q",
+			after.State, assignment.StateAwaitingOperator)
+	}
+	if after.ApprovedAt != nil {
+		t.Errorf("the refused approval recorded a moment: %v", after.ApprovedAt)
+	}
+}
+
+// TestAssignmentCLITheApprovalRefusesAnOmittedEpoch proves the omission
+// is called out.
+//
+// An approval that names NO epoch names no revision of the assignment,
+// and the refusal says so — and names the epoch the assignment is
+// actually at, so the operator can re-read and retry.
+func TestAssignmentCLITheApprovalRefusesAnOmittedEpoch(t *testing.T) {
+	dm := assignmentCLIFixture(t)
+	store := assignment.NewStore(dm)
+	gated := assignmentCLIGatedSubject(t, store, "omitted")
+
+	// No --epoch at all.
+	code, out, refusals := runAssignmentCLI(t, "assignment", "record-approval",
+		"--id", gated.ID,
+		"--action", "merge PR #260",
+		"--revision", "abc123",
+		"--source", "operator",
+		"--evidence", "ev://the-approval",
+	)
+	if code == 0 {
+		t.Fatalf("the approval naming no epoch was accepted: %s", out)
+	}
+	if !strings.Contains(refusals, "must name the claim epoch") {
+		t.Errorf("the refusal does not say the epoch was not named: %s", refusals)
+	}
+	if !strings.Contains(refusals, "epoch 1") {
+		t.Errorf("the refusal does not name the epoch the assignment is at: %s", refusals)
 	}
 }
 

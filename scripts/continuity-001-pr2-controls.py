@@ -139,6 +139,14 @@ def run_tests():
 
 def replace_text(rel, old, new, what):
     """Replace one block of source text, and PROVE that it changed."""
+    # A control may only touch a file the harness backs up. A mutation
+    # outside FILES would be left behind in the operator's tree when the
+    # harness restored itself — a green run over a broken tree.
+    if rel not in FILES:
+        raise SystemExit(
+            f"the control for {what} would mutate {rel}, which is not in "
+            f"the harness's FILES tuple — the tree would not be restored"
+        )
     path = REPO / rel
     t = path.read_text()
     if t.count(old) != 1:
@@ -413,6 +421,11 @@ def drop_trigger(name):
     import re
 
     rel = "internal/core/migration_agent_assignments.go"
+    if rel not in FILES:
+        raise SystemExit(
+            f"the control for {name} would mutate {rel}, which is not in "
+            f"the harness's FILES tuple — the tree would not be restored"
+        )
     path = REPO / rel
     t = path.read_text()
     pattern = r"CREATE TRIGGER IF NOT EXISTS " + re.escape(name) + r"\b.*?\nEND;\n"
@@ -548,6 +561,10 @@ CONTROLS = [
         "invariant": "N1 — a claimed write presents the current claim_epoch",
         "mutate": control_fence,
         "expect": ["TestAPIAnExpiredLeaseIsReclaimableAndThePreviousHolderIsFencedOut"],
+        # The renewal test depends on the fence too: a renewal that
+        # did not advance the epoch would not fence the old holder
+        # out. Removing the fence breaks both.
+        "breaks": ["TestAPIRenewalAdvancesTheEpoch"],
         "load_bearing": True,
     },
     {
@@ -648,6 +665,16 @@ CONTROLS = [
         "invariant": "the role's path is enforced before the write",
         "mutate": control_state_machine,
         "expect": ["TestAPIDeliveryAcknowledgementAcceptanceAndCompletionAreDistinct"],
+        # The path IS the state machine, so removing it breaks every
+        # test that depends on a transition being refused: the
+        # undelivered acknowledgement, the invalid transitions, the
+        # redelivery, and the approval's gate.
+        "breaks": [
+            "TestAPIAnUndeliveredAssignmentCannotBeAcknowledged",
+            "TestAPIInvalidTransitionsAreRefused",
+            "TestAPIRedeliveryIsRefusedAndTheWorkStaysVisible",
+            "TestAPITheApprovalMustNameTheGateAction",
+        ],
         "load_bearing": True,
     },
     {
@@ -710,12 +737,24 @@ def summarise(results):
     for control, hit, specific, inconclusive in results:
         if control["load_bearing"]:
             load_bearing_total += 1
-            ok = len(hit) == len(control["expect"])
+            named = len(hit) == len(control["expect"])
+            # The gate asks a second question: did the mutation break
+            # anything the control did not DECLARE it would break? A
+            # mutation that broke the statement would fail the named
+            # test for the wrong reason and take the rest of the suite
+            # with it — and that must not read as a pass.
+            unexpected = [f for f in specific
+                          if f not in control["expect"] and f not in control.get("breaks", [])]
+            ok = named and not unexpected
             if ok:
                 load_bearing_passed += 1
             print(f"{'OK ' if ok else 'NO '} {control['name']:22s} {control['invariant']}")
-            if not ok:
+            if not named:
                 print(f"     expected {control['expect']}, failing {specific}")
+            if unexpected:
+                print(f"     UNEXPECTED failures: {unexpected} — the control did not "
+                      f"declare that its removal breaks them, so the named test may have "
+                      f"failed for the wrong reason")
         else:
             redundant_total += 1
             # A defence-in-depth control removes ONE half of an
@@ -738,13 +777,18 @@ def summarise(results):
     return ok
 
 
-def _synthetic_results(broken_load_bearing=None, broken_redundant=None):
+def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
+                       undeclared=False):
     """Build the results a run would produce, for the self-test.
 
     `broken_load_bearing` names a load-bearing control whose named test
     did NOT fail; `broken_redundant` names a defence-in-depth control
-    that DID break the suite.
+    that DID break the suite; `undeclared` adds a failure the control
+    did not declare it would break — the shape a mutation that broke
+    the STATEMENT produces, where the named test fails for the wrong
+    reason and takes the rest of the suite with it.
     """
+    first_lb = next(c["name"] for c in CONTROLS if c["load_bearing"])
     results = []
     for control in CONTROLS:
         if control["load_bearing"]:
@@ -753,6 +797,10 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None):
             if control["name"] == broken_load_bearing:
                 hit = []
                 specific = ["TestTheSuiteDidNotNotice"]
+            if undeclared and control["name"] == first_lb:
+                # The named test DID fail, and something else broke
+                # too — and the control never said it would.
+                specific = list(hit) + ["TestSomethingElseBroke"]
             results.append((control, hit, specific, []))
         else:
             specific = []
@@ -783,6 +831,8 @@ def selftest():
          _synthetic_results(broken_load_bearing=first_lb), False),
         (f"the defence-in-depth control {first_rd} broke the suite",
          _synthetic_results(broken_redundant=first_rd), False),
+        (f"the load-bearing control {first_lb} broke tests it did not declare",
+         _synthetic_results(undeclared=True), False),
     ]
 
     failures = 0

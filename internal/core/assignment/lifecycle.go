@@ -407,6 +407,17 @@ func (s *Store) RecordApproval(auth OperatorAuthority, p ApprovalParams) (*Assig
 		// The fence. The operator presents the epoch it read; a
 		// mismatch means the assignment moved under it, so the
 		// approval was made against something else.
+		//
+		// A MISSING epoch is called out separately, because it is a
+		// different mistake: an approval that names no epoch names
+		// no revision of the assignment. The refusal names the
+		// epoch the assignment is actually at, so the operator can
+		// re-read and retry.
+		if p.Epoch <= 0 {
+			return fmt.Errorf(
+				"%w: the approval must name the claim epoch the operator read; %s is at epoch %d",
+				ErrConstraint, p.ID, current.ClaimEpoch)
+		}
 		if p.Epoch != current.ClaimEpoch {
 			return fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, p.ID, current.ClaimEpoch)
 		}

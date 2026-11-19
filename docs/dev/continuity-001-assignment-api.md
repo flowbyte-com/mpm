@@ -24,7 +24,7 @@ this design:
 | | invariant | where it is enforced here |
 |---|---|---|
 | **N1** | a claimed write presents the current `claim_epoch`, checked atomically | every state-changing operation takes the epoch and writes `WHERE id = ? AND claim_epoch = ?` |
-| **N2** | a child's recipient is among the root's `eligible_recipients` | `Delegate` validates it; the root's list is immutable, so no later operation can invalidate it |
+| **N2** | a child's recipient is among the root's `eligible_recipients` | `Delegate` validates it; the service never changes the root's list, so no later operation can invalidate it |
 | **N3** | a child's depth is within the root's `max_depth` | `Delegate` validates it |
 | **N6** | a root is created only through an operator-controlled entry point | root creation is **absent from the tool registry**; only the CLI verb reaches it |
 
@@ -194,13 +194,13 @@ holder's write therefore matches **no row**, atomically with the write
 itself. That is N1, and it is the fence PR 1 deliberately left to the
 `WHERE` clause — a trigger cannot see the epoch a caller *presented*.
 
-**THE TWO PLACES WHERE THE CALLER PRESENTS NO EPOCH.** There are two,
-and both are stated here rather than left to be discovered:
+**WHERE THE PRESENTED EPOCH IS NOT A LEASE HOLDER'S.** Two writes present
+an epoch that is not the caller's claim about a lease it holds, and both
+are stated here rather than left to be discovered:
 
-* **The approval.** The operator is not a lease holder, so it presents
-  the epoch it *read* — `mpm assignment show` — and the approval lands
-  only on the revision of the assignment the operator actually read.
-  See §3.7.
+* **The approval.** The operator is not a lease holder. It presents the
+  epoch it *read* — `mpm assignment show` — and the approval lands only
+  on the revision of the assignment the operator actually read. See §3.7.
 * **The reviewer's write on the SUBJECT.** The subject is moved because
   the review passed, and the reviewer holds no epoch on the subject: it
   is a different assignment, in a different row. That write binds the
@@ -333,6 +333,18 @@ entry.
 The operator learns the epoch from `mpm assignment show`. An approval
 that names the wrong epoch is refused with the epoch the assignment is
 actually at, so the refusal tells the operator what to re-read.
+
+**AN APPROVAL THAT NAMES NO EPOCH IS REFUSED SEPARATELY.** The two are
+different mistakes: a wrong epoch is a claim about a revision that is no
+longer there, and a missing epoch is no claim at all. The refusal for the
+second names the epoch the assignment is at, so the operator can re-read
+and retry — and it says which of the two happened.
+
+The gate is always at epoch 1 or more, because `Start` requires a claim
+and the gate is only reachable through `in_progress`. That is the
+**service's** rule, not the schema's: the schema's transition trigger
+does not require a claim for `in_progress`. So a row that reached the
+gate without a claim would be a row the service did not write.
 
 **MPM records an approval it did not manufacture.** The revision and the
 evidence pointer are the operator's claims about what was authorised, and
@@ -499,7 +511,7 @@ that a hash or a string changed.
 | 6 | every transition writes exactly one corresponding durable event atomically, **including injected failure and rollback** | `TestAPIEveryTransitionWritesExactlyOneEvent`, `TestAPIAFailedTransitionRollsBackItsEvent`, `TestAPIAFailedCreationRollsBackItsEvent` |
 | 7 | delivery, acknowledgement, acceptance and completion remain distinct, and a redelivery does not lose the work | `TestAPIDeliveryAcknowledgementAcceptanceAndCompletionAreDistinct`, `TestAPIAnUndeliveredAssignmentCannotBeAcknowledged`, `TestAPIRedeliveryIsRefusedAndTheWorkStaysVisible` |
 | 8 | restarting the process preserves assignments, events, claims and recoverable work | `TestAPIRestartPreservesAssignmentsEventsAndClaims` |
-| 9 | invalid state transitions, forged approval fields and attempts to bypass review are refused, and the approval is a fenced write | `TestAPIInvalidTransitionsAreRefused`, `TestAPIForgedApprovalFieldsAreRefused`, `TestAPITheApprovalMustNameTheGateAction`, `TestAPIAnApprovalPresentingAStaleEpochIsRefused` |
+| 9 | invalid state transitions, forged approval fields and attempts to bypass review are refused, and the approval is a fenced write — a stale epoch and an omitted epoch are refused **separately** | `TestAPIInvalidTransitionsAreRefused`, `TestAPIForgedApprovalFieldsAreRefused`, `TestAPITheApprovalMustNameTheGateAction`, `TestAPIAnApprovalPresentingAStaleEpochIsRefused` |
 | 10 | the independent review moves the subject, records the verdict on both ledgers, refuses a reviewer that judges its own work, and **cannot be re-pointed** at another subject | `TestAPIReviewVerdictMovesTheSubject`, `TestAPIChangesRequestedLeavesTheSubjectAndRecordsANote`, `TestAPIReviewerCannotReviewItsOwnWork`, `TestAPIReviewOfAnIncompleteSubjectIsRefused`, `TestAPIAStaleReviewerIsFencedOut`, `TestAPIReviewersTargetIsFixedByItsDelegation` |
 
 Plus the reads (`TestAPIInboxListsTheAddressedWork`), the authority boundary
@@ -507,12 +519,14 @@ Plus the reads (`TestAPIInboxListsTheAddressedWork`), the authority boundary
 operator's own CLI path (`cmd/mpm/assignment_cmds_test.go`) and the control
 harness's own pinning (`internal/core/assignment/controls_pinning_test.go`).
 
-**`TestAPIEveryTransitionWritesExactlyOneEvent` COVERS EVERY EVENT TYPE.**
-The thirteen event types the service can write are all exercised by it, each
-on its own fixture so that the count is about ONE transition rather than
-about a chain of them. A test that covered six of the thirteen and was called
-"every transition" would publish a claim the test does not make — and the
-event types it left out are exactly the ones the operator's gate is made of.
+**`TestAPIEveryTransitionWritesExactlyOneEvent` COVERS EVERY EVENT TYPE THE
+SERVICE WRITES.** That is **twelve** of the vocabulary's thirteen — the
+thirteenth, `lease_expired`, is reserved and never emitted (see the event
+vocabulary in `types.go`). All twelve are exercised, each on its own fixture
+so that the count is about ONE transition rather than about a chain of them.
+A test that covered six of them and was called "every transition" would
+publish a claim the test does not make — and the event types it left out are
+exactly the ones the operator's gate is made of.
 
 ### 5.2 The negative controls
 
@@ -542,6 +556,15 @@ in depth.**
 | `atomicity` | the fault seam between the transition and its event | `TestAPIAFailedTransitionRollsBackItsEvent` |
 | `fence-go-half` | **only** the Go half of the fence | *none — and that is the measurement* |
 | `fence-sql-half` | **only** the `WHERE` clause | *none — and that is the measurement* |
+
+**THE GATE ASKS TWO QUESTIONS OF EACH CONTROL.** Not only must the named
+test fail — the control must also break **nothing it did not declare** it
+would break. A mutation that removed the invariant *and* broke the
+statement would fail the named test for the wrong reason and take the rest
+of the suite with it, and that must not read as a pass. So each control
+declares the extra tests its removal breaks (`fence` breaks the renewal
+test, `state-machine` breaks the four tests that depend on a transition
+being refused), and a failure outside the declaration refuses the control.
 
 The last two are the **defence in depth**, published rather than hidden:
 
@@ -612,6 +635,52 @@ as **reserved** (the schema's vocabulary is frozen at thirteen, and a reclaim
 is recorded as `claimed` with `reclaimed: true` rather than as a second
 event), and `ApprovalParams.Actor` — a field nothing read — was removed
 rather than left as a field that silently does nothing.
+
+### 5.5 What the second review found, and what the full gate found
+
+The second independent review confirmed that **all nine** of the first
+round's findings were genuinely fixed — the mutators were applied and
+counted by hand, the gate was driven directly, and the central claim was
+re-checked against the whole registry. It found three more defects and
+five nits, and all eight are fixed here.
+
+| the finding | what it was | what changed |
+|---|---|---|
+| the gate did not enforce "no unexpected failures" for a load-bearing control | it asked only whether the named test failed, so a mutation that removed the invariant **and** broke the statement would read as a pass | each control now **declares** the extra tests its removal breaks, and the gate refuses anything outside the declaration |
+| the M3 fix introduced a self-contradicting sentence | a heading said "the two places where the caller presents no epoch" and the next clause said the caller **does** present one | both documents now say "where the presented epoch is not a lease holder's" — which is what the code does |
+| the CLI's stale-epoch test never reached the fence | the fixture was at `enqueued`, and the state check precedes the fence, so the refusal was the state check's | the fixture is now AT the gate, and the test asserts the refusal is the fence's and that nothing moved |
+| "every event type" was still not true | the service writes **twelve** of the vocabulary's thirteen (`lease_expired` is reserved), and `created` was not asserted by that test | the test now asserts the creation's event too, and the wording says twelve |
+| the `FILES` tuple had no mechanical link to the controls' targets | a control mutating a file outside it would leave the tree mutated and un-restored | the mutators now **refuse** a path that is not in `FILES` |
+| "the root's list is immutable" read as a schema claim | the schema does not freeze `eligible_recipients`; the **service** never changes it | the wording says "the service never changes the root's list" |
+| an omitted `--epoch` was silently 0 | the operator's omission and a stale epoch produced the same kind of refusal | the two are refused **separately**, and the refusal names the epoch the assignment is at |
+| a dead `if` with an empty body survived in the boundary test | its comment read as if it filtered something, and it did nothing | removed, with the now-unused import |
+
+**THE FULL TEST GATE FOUND THREE MORE GAPS.** The `make test` gate had
+never reached them, because the `cmd/mpm` package failed first and the
+chain stopped. They are all consequences of adding a tool to the
+registry, and all three are fixed:
+
+* **The reviewer's deny list.** The reviewer definition is
+  default-deny, and the test that pins it requires every registry tool to
+  be denied **by name** — "a rule that does not name a route is not a
+  closure". `mpm_assignment` is now in that list. This is PR 3's
+  territory, but the contract is enforced here, and a red gate is a red
+  gate.
+* **The tool-reference stability contract.** Every registered tool needs
+  a row, or an agent reading the contract cannot discover its actions.
+  `mpm_assignment` now has one, listing all seventeen actions.
+* **The contract's reader could not name a hyphenated action.** The
+  registry publishes `record-review`, and the reader's character class
+  had no hyphen — so such a tool was **undocumentable**: the row would
+  have to omit the action, and the equality check would then fail
+  forever. The class now includes the hyphen. The guard's intent is
+  unchanged; only its ability to read the registry's vocabulary is
+  fixed.
+* **The DB-safety guard.** The assignment's restart test called
+  `NewDatabaseManager("")`, which falls through to
+  `config.GetMPMDir()` — the live workspace. The guard is a static scan,
+  so it cannot see the `MPM_WORKSPACE` the test sets. The test now
+  passes the path explicitly, which genuinely redirects the database.
 
 **THE UNRELATED REGENERATION DELTA.** `docs/SPEC.md`'s Command Catalogue is
 generated by `cmd/gen-cli` from `cmd/mpm/router.go`, and this PR's

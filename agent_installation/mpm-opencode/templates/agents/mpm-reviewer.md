@@ -138,6 +138,9 @@ permissions:
   # checked against the registry by
   # agent_installation/tests/test_reviewer_isolation.py, so a NEW tool
   # cannot be added without this list being extended.
+  - action: mpm_assignment
+    resource: "*"
+    effect: deny
   - action: mpm_blob_read
     resource: "*"
     effect: deny

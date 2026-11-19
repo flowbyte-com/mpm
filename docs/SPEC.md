@@ -3048,7 +3048,7 @@ A **passing** verdict moves the subject to `review_passed` and the reviewer to `
 
 `HandoffToOperator` moves `review_passed → awaiting_operator` and **supplies** the exact action the operator is being asked to authorise. `RecordApproval` moves `awaiting_operator → operator_approved` and supplies the action, the revision, the source **and** the evidence pointer — and the approval must name the **same** action the gate awaited.
 
-**The approval is a fenced write.** The operator presents the claim epoch it read, and the write is `WHERE id = ? AND claim_epoch = ?` with that value — the same rule every other state change follows, and the one place where following it mattered most, because the approval **is** the gate. An approval that does not match the assignment as it stands does not land, and it leaves nothing behind: no state change and no ledger entry.
+**The approval is a fenced write.** The operator presents the claim epoch it read, and the write is `WHERE id = ? AND claim_epoch = ?` with that value — the same rule every other state change follows, and the one place where following it mattered most, because the approval **is** the gate. An approval that does not match the assignment as it stands does not land, and it leaves nothing behind: no state change and no ledger entry. An approval that names **no** epoch is refused separately — that is no claim about a revision at all — and the refusal names the epoch the assignment is actually at.
 
 **MPM records an approval it did not manufacture.** The revision and the evidence pointer are the operator's claims about what was authorised, and the row says so. Nothing in PR 2 authenticates an approval, and no command in PR 2 merges a pull request, deploys, or changes any state outside the assignment ledger: the authority to merge and to deploy stays exactly where it was.
 
@@ -3064,7 +3064,7 @@ Nor does PR 2 supply an identity provider, an RBAC layer, a signing scheme or an
 
 PR 2's controls live in `scripts/continuity-001-pr2-controls.py`. They mutate the **service's source** — PR 1's invariants lived in the database, PR 2's are code — and require the acceptance suite to notice. **Sixteen controls: fourteen are load-bearing, and two measure the defence in depth** by removing one half of the fence at a time and observing that nothing changes.
 
-The harness's **exit code is the gate**, and it can fail: a load-bearing control that did not detect its removal, and a defence-in-depth control that broke the suite, are both refused. The harness carries its own `--selftest` for that, and a test runs it.
+The harness's **exit code is the gate**, and it can fail: a load-bearing control that did not detect its removal, and a defence-in-depth control that broke the suite, are both refused. The gate asks **two** questions of a load-bearing control — the named test must fail, **and** the control must break nothing it did not declare it would break, so a mutation that broke the statement (and failed the named test for the wrong reason) cannot read as a pass. The harness carries its own `--selftest` for all of this, and a test runs it.
 
 The controls are not decoration. Their first run found two defects in PR 2's own code and tests:
 
