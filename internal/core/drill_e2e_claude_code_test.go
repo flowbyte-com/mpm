@@ -162,6 +162,19 @@ func TestDrillE2E_ClaudeCode(t *testing.T) {
 
 	calls, err := h.Finish(ctx, dm.SQLDB())
 	if err != nil {
+		// (0) The model-capability gate, consulted on the FAILURE
+		// path too. The warning is emitted at startup, so it is
+		// already in the harness's debug buffer even when the child
+		// hung and Finish timed out — and a hang caused BY the
+		// unsupported model is the same condition the gate below
+		// exists for, not a failure of the drill. Without this, the
+		// gate only held when the child happened to finish in
+		// time, and the same environment failed intermittently.
+		if os.Getenv("MPM_E2E_CLAUDE") != "1" &&
+			strings.Contains(h.DebugOutput(), "claude-code:unrecognized_model") {
+			t.Skipf("Claude Code rejected the harness model (unrecognized_model on stderr); " +
+				"set MPM_E2E_CLAUDE=1 to bypass this gate")
+		}
 		t.Fatalf("Finish: %v", err)
 	}
 

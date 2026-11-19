@@ -87,14 +87,16 @@ TEST_PATTERN = "TestAPI"
 # failure or a timeout is INCONCLUSIVE: it says nothing about whether
 # the suite depends on the rule.
 #
-# The DDL pin is in this set for the controls that mutate the DDL: it
-# fails because the SOURCE changed, which is not a statement about the
-# invariant under test.
+# PR 1's DDL pin used to be here, for the controls that mutate the
+# DDL: it fails because the SOURCE changed, which is not a statement
+# about the invariant under test. It has been REMOVED, because that test
+# lives in `internal/core` and the `-run TestAPI` selection never runs
+# it — so the entry was dead. A dead entry in an exclusion list is
+# worse than no entry: it reads as "this failure is tolerated" for
+# something that can never happen.
 INCONCLUSIVE = {
     "<BUILD FAILED>",
     "<TIMEOUT>",
-    "TestAgentAssignmentDDLIsPinned",
-    "TestAgentAssignmentObjectInventoryIsStable",
 }
 
 
@@ -576,9 +578,12 @@ CONTROLS = [
         "invariant": "N1 — a claimed write presents the current claim_epoch",
         "mutate": control_fence,
         "expect": ["TestAPIAnExpiredLeaseIsReclaimableAndThePreviousHolderIsFencedOut"],
-        # The renewal test depends on the fence too: a renewal that
-        # did not advance the epoch would not fence the old holder
-        # out. Removing the fence breaks both.
+        # The renewal test depends on the transition's fence, but not
+        # on the renewal's own compare-and-swap: `Renew` has its own
+        # CAS in claim.go, which this control does not touch, so the
+        # renewal still advances the epoch. What breaks is the test's
+        # LAST step — a `Start` presenting the PRE-renewal epoch, which
+        # the transition's fence is what refuses.
         "breaks": ["TestAPIRenewalAdvancesTheEpoch"],
         "load_bearing": True,
     },
@@ -711,7 +716,30 @@ def main():
 
     snapshot()
     results = []
+    baseline = 0
     try:
+        # THE BASELINE. The suite must be green before any control runs,
+        # and the number of tests it runs is the DENOMINATOR of the
+        # bound.
+        #
+        # It has to be the baseline rather than "the tests that ran" in
+        # the control's own run: a mutation that ABORTS the suite — a
+        # panic turns a guard into a nil dereference, and the test
+        # binary dies — shrinks both sides of the comparison, so the
+        # bound would get weaker at the moment it must be strongest.
+        # A control whose run produced FEWER tests than the baseline
+        # aborted, and its measurement is inconclusive.
+        restore()
+        print("\n=== the baseline ===")
+        base_failed, base_detail, base_passed = run_tests()
+        if base_failed:
+            print(f"THE SUITE IS NOT GREEN BEFORE THE CONTROLS RUN: {base_failed}")
+            if base_detail:
+                print(f"    {base_detail}")
+            return 1
+        baseline = len(base_failed) + base_passed
+        print(f"the suite runs {baseline} tests and is green")
+
         for control in CONTROLS:
             name = control["name"]
             if args.only and args.only != name:
@@ -736,12 +764,18 @@ def main():
         restore()
         print("\nthe tree is restored")
 
-    ok = summarise(results)
+    ok = summarise(results, baseline)
     return 0 if ok else 1
 
 
-def summarise(results):
+def summarise(results, baseline=0):
     """Print the summary and return whether the measurement holds.
+
+    `baseline` is the number of tests the suite runs when nothing is
+    mutated. It is the denominator of the bound, and it is what makes
+    an ABORTED run visible: a control whose run produced fewer tests
+    than the baseline did not measure an invariant, it stopped the
+    suite.
 
     The RETURN VALUE is the gate. It can fail, and it does.
     """
@@ -759,12 +793,19 @@ def summarise(results):
             # and the named test may have failed for that reason
             # instead. Such a control is INCONCLUSIVE, and an
             # inconclusive control does not count as load-bearing.
-            broke_suite = (total > 0 and
-                           len(specific) * BROKEN_SUITE_FRACTION > total)
+            denominator = baseline or total
+            broke_suite = (total < denominator or
+                           len(specific) * BROKEN_SUITE_FRACTION > denominator)
             if broke_suite:
-                print(f"     INCONCLUSIVE: the mutation broke {len(specific)} of the "
-                      f"suite's {total} tests — that is a broken build, not a "
-                      f"removed invariant")
+                if total < denominator:
+                    print(f"     INCONCLUSIVE: the run produced {total} tests and the "
+                          f"baseline runs {denominator} — the mutation ABORTED the "
+                          f"suite, so the named test may have failed for that reason "
+                          f"instead")
+                else:
+                    print(f"     INCONCLUSIVE: the mutation broke {len(specific)} of "
+                          f"the suite's {denominator} tests — that is a broken build, "
+                          f"not a removed invariant")
             # The gate asks a second question: did the mutation break
             # anything the control did not DECLARE it would break? A
             # mutation that broke the statement would fail the named
@@ -818,7 +859,7 @@ SUITE_SIZE = 36
 
 
 def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
-                       undeclared=False, broken_suite=False):
+                       undeclared=False, broken_suite=False, aborted=False):
     """Build the results a run would produce, for the self-test.
 
     `broken_load_bearing` names a load-bearing control whose named test
@@ -851,7 +892,15 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
                 specific = list(hit) + broken
                 control = dict(control)
                 control["breaks"] = list(control.get("breaks", [])) + broken
-            results.append((control, hit, specific, [], SUITE_SIZE))
+            total = SUITE_SIZE
+            if aborted and control["name"] == first_lb:
+                # The mutation PANICKED, and the test binary died: the
+                # run produced three tests and the other thirty-three
+                # never ran. The named test failed, and the gate must
+                # still refuse it.
+                specific = list(hit)
+                total = 3
+            results.append((control, hit, specific, [], total))
         else:
             specific = []
             if control["name"] == broken_redundant:
@@ -885,11 +934,13 @@ def selftest():
          _synthetic_results(undeclared=True), False),
         (f"the load-bearing control {first_lb} took the whole suite with it",
          _synthetic_results(broken_suite=True), False),
+        (f"the load-bearing control {first_lb} aborted the suite",
+         _synthetic_results(aborted=True), False),
     ]
 
     failures = 0
     for name, results, want in cases:
-        ok = summarise(results)
+        ok = summarise(results, SUITE_SIZE)
         verdict = "REFUSED" if not ok else "ACCEPTED"
         if ok != want:
             failures += 1

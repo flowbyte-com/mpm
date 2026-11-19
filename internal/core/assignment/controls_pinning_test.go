@@ -177,7 +177,10 @@ func TestControls_TheHarnessNamesOnlyTestsThatExist(t *testing.T) {
 			}
 		}
 	}
-	_ = seen
+	if seen == 0 {
+		t.Fatal("the control harness declares no exemptions at all; the declarations " +
+			"have rotted away, and this test would pass vacuously")
+	}
 }
 
 // filesRe finds the FILES tuple of the harness.
