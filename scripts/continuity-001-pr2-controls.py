@@ -882,6 +882,14 @@ def main():
     finally:
         restore()
         print("\nthe tree is restored")
+        # The pristine copy has served its purpose: the tree is
+        # restored. Leaving it behind is litter in the operator's
+        # TMPDIR, and a copy of the service's source is not something to
+        # leave lying around for the next run to trip over. It is
+        # removed HERE, in the `finally`, so a run that ABANDONS the
+        # measurement -- a refused baseline, a missing pristine copy --
+        # does not leave it behind either.
+        shutil.rmtree(BACKUP, ignore_errors=True)
 
     # The FLOOR: the measurement must cover every control, unless
     # `--only` selected one. Without it, "every control that ran was

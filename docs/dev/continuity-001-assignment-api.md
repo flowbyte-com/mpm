@@ -1050,7 +1050,7 @@ harness's *printed* count against the same figure.
 
 **THE MATRICES ARE THIRTY-EIGHT AND FOUR ENTRIES** (§5.19).
 
-**THE FOUR SUITES HOLD SIXTY-FIVE TEST FUNCTIONS**, and that figure is
+**THE FOUR SUITES HOLD SIXTY-NINE TEST FUNCTIONS**, and that figure is
 computed from the tree rather than copied into it: the Go pin counts the
 test functions in the four suites and requires the count to be the
 published one, so a suite that lost a test cannot leave the number
@@ -1347,6 +1347,102 @@ pin, a question that could ask nothing, a selection, and now a
 **scope**. Each was fixed properly and immediately, and each fix is
 checked from **outside** the harness, because the harness cannot check
 itself.
+
+### 5.20 What the sixteenth review found: the invocation, the workflow and the note
+
+The first fifteen rounds looked for the class **inside** the harness:
+its constants, its pins, its questions, its selection, its scope. The
+sixteenth review looked for the same class **outside** it — in the
+build and the workflow that *invoke* it, and in the note that
+*publishes* it — and found it there. That is the class's second half,
+and it is the half that matters most, because a harness that is
+correct but never asked to do the work is not a measurement.
+
+**THE SEVEN FINDINGS.**
+
+| | the finding | the fix |
+|---|---|---|
+| **F1** | **the invocation was unpinned.** Nothing required the Makefile's `test-continuity-controls` target to ask for **every** control. A target that asked for one (`--only fence`) would measure one control and pass — the floor is **one** when `--only` chose a control (§5.19) — and every other gate in the tree would stay green | a Go pin requires the target to run the harness, with **no** `--only` and **no** `--selfcheck-gate` |
+| **F2** | **the CI step could swallow the harness's exit status.** The harness's exit code **is** the gate (§5.2), and the workflow's step ended in `exit 0`, which reports success whatever the harness said. `\|\| true` was caught before, but only **incidentally** — as a "pipeline", so the message named the wrong problem | a Python pin refuses `\|\| true`, `exit 0` and `set +e` in the step, requires the step to run the **Makefile target** rather than the script, and refuses `--only` in the step |
+| **F3** | **the note's table was not tied to the harness.** The note publishes every control and the test it must fail; nothing checked that the table described the harness, so a control could be renamed and the note would keep publishing the old pair | a Go pin requires every control's name to appear in the note, and the note's **own row** for that control to name the test the harness's `expect` requires |
+| **F4** *(nit)* | **nothing ties a control's mutation to its invariant.** The note says what each control removes; nothing checks that the harness's mutator removes *that* | **partly** — see the limitation below |
+| **F5** *(nit)* | **`run_tests` was exercised by no test.** It is the harness's **entire** contact with Go: it builds the command, runs it and parses the output into the four numbers the gate reasons about. Ten mutations of it survived everything | a Go pin requires the command to carry the **selection**, the **package** and the two **FTS5** flags — the three things that decide *what* is measured |
+| **F6** *(nit)* | **`FILES` named doors the selection cannot observe.** The tuple lists every file a control **may** mutate — the service, the agent's door, the operator's door, PR 1's DDL. But the acceptance suite lives in ONE package, so a control that mutated `internal/core/tools/handlers_assignment.go` would remove code the suite **cannot see**: the control would measure nothing and the gate would report it as load-bearing | a Go pin requires every control's **mutator** to touch files inside `internal/core/assignment/` — the package the selection reaches |
+| **F7** *(nit)* | **the pristine copy was never removed.** The harness backs the tree up into `TMPDIR` and restores it; the copy stayed behind, which is litter in the operator's temporary directory and a copy of the service's source to trip over | the harness removes the backup in its `finally`, so even an **abandoned** measurement leaves nothing behind |
+
+**THE REVIEWER'S ATTRIBUTION OF F1 WAS WRONG, AND THE SUBSTANCE
+STANDS.** The review reported that the Makefile's target already asked
+for one control (`--only fence`). It did not: the target ran the
+harness with no `--only`. The finding was **the absence of a pin**, not
+the presence of a fence — and that is exactly the shape of the class,
+because a claim nothing checks is false until something checks it, and
+until then it may be true, false, or anything in between. The finding
+is recorded here as it stands, with the correction.
+
+**F3 HAD A SECOND HALF, AND IT WAS THE ONE THAT MATTERED.** The first
+version of the pin required the note to **contain** the test the
+harness names — anywhere in the document. That is satisfied by the
+same name appearing in a different table, so a row that named the
+**wrong** test was not caught: the drift mutation survived the first
+form of the pin. The pin now reads the note's **own row** for the
+control and compares that row's third cell with the harness's
+`expect`. The mutation is caught, and the table a reader can check is
+now a table the build checks.
+
+**F4 IS NOT FULLY FIXED, AND THAT IS STATED RATHER THAN PAPERED OVER.**
+What is mechanical now: the control → **test** link. What is not: the
+control → **invariant** link. The note's second column says what each
+control removes ("the fence, both halves"), and the harness's mutator
+removes source text that a human must read to confirm it is *that*
+invariant. A mutation that removed the fence's *bound epoch* instead of
+its *check* would satisfy every pin in this PR — the control would
+still fail the named test, and the note would still publish the pair —
+and the invariant it actually broke would be a different one. The
+honest statement is that **the invariant a control claims to break is
+prose, and prose is not checked**. The mitigation is that the control
+and its expectation are read together by a human reviewer each round,
+and this is recorded here as the next thing a future round should
+close, rather than as a defect that is closed.
+
+**THE VERIFICATION IS BY MUTATION, IN BOTH LANGUAGES.** Each fix is
+caught by removing it, in a scratch copy, and requiring the check to
+fail:
+
+```
+the Makefile target asks for ONE control            CAUGHT
+the Makefile target runs the self-check mode         CAUGHT
+the harness's command drops the selection             CAUGHT
+the harness's command changes the package             CAUGHT
+a control mutates a file outside the suite's package CAUGHT
+the note's table drifts from the harness             CAUGHT
+
+the CI step swallows the exit status with `|| true`   CAUGHT
+the CI step swallows the exit status with `; exit 0`  CAUGHT
+the CI step asks for one control                      CAUGHT
+the CI step calls the script directly                CAUGHT
+the CI step is gone                                  CAUGHT
+```
+
+The first group is the Go pins; the second is the Python CI pin, run
+in a scratch copy so the operator's workflow is never touched. The
+pristine tree passes in both.
+
+**THE COUNTS MOVE WITH THE FIXES.** The four suites now hold
+**sixty-nine** test functions (§5.14's figure, computed from the tree),
+the harness publishes **sixteen** controls, its self-test runs
+**eighty-two** checks, and the two matrices are **thirty-eight** and
+**four** entries.
+
+**THE CLASS SO FAR — THE SECOND HALF.** Sixteen rounds. The first
+fifteen found the class inside the harness; the sixteenth found it
+outside — in the build, in the workflow, in the note. The shape is the
+same: **a claim the harness carries that nothing checked**. A harness
+cannot check its own invocation, so the invocation is checked by a Go
+test that reads the Makefile; a step that can discard an exit code
+cannot check itself, so the workflow is checked by a Python test that
+reads it; a note that publishes a table cannot check the table, so the
+table is checked against the harness. Each fix is checked from
+**outside** the thing it pins, because nothing can check itself.
 
 ## 6. What PR 2 leaves to PRs 3–5
 

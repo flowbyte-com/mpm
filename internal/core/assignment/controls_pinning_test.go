@@ -985,7 +985,7 @@ const publishedLoadBearingControls = 14
 // publishedTestFunctions is the number of test functions in the four
 // suites this PR adds. It is checked against the tree — a published
 // number nobody checks drifts.
-const publishedTestFunctions = 65
+const publishedTestFunctions = 69
 
 // publishedControls is the number of controls the harness publishes in
 // its CONTROLS list: sixteen, of which fourteen are load-bearing and
@@ -1263,6 +1263,260 @@ func numberWords(n int) string {
 	default:
 		return tens[n/10] + "-" + ones[n%10]
 	}
+}
+
+// TestControls_TheInvocationAsksForEveryControl pins the INVOCATION.
+//
+// The floor (round fifteen) guarantees the harness measures every
+// control WHEN ASKED TO. One line asks: the Makefile's target.
+//
+// Nothing pinned that, so a target that asked for ONE control would
+// measure one control and pass — the gate's own floor is one when
+// `--only` chose a control — and every other gate in the tree would
+// stay green: the Python suite, docs_check, the guard suites and the
+// harness's own self-test.
+//
+// So the target must invoke the harness with NO `--only`, and the
+// workflow's step must invoke the TARGET.
+func TestControls_TheInvocationAsksForEveryControl(t *testing.T) {
+	root := repoRoot(t)
+	makefile := readDocument(t, filepath.Join(root, "Makefile"))
+
+	// The target's recipe: the lines that run the harness.
+	target := makefileTarget(t, makefile, "test-continuity-controls")
+	if target == "" {
+		t.Fatal("the Makefile has no test-continuity-controls target")
+	}
+	if !strings.Contains(target, "continuity-001-pr2-controls.py") {
+		t.Errorf("the test-continuity-controls target does not run the "+
+			"negative-control harness:\n%s", target)
+	}
+	// `--only` narrows the measurement to one control, and the floor
+	// is one when it does — so a target that asked for one control
+	// would certify one control and pass.
+	if strings.Contains(target, "--only") {
+		t.Errorf("the test-continuity-controls target asks for a single "+
+			"control (--only), so it measures one control out of %d "+
+			"and certifies it:\n%s", publishedControls, target)
+	}
+	// `--selfcheck-gate` stubs the suite and the controls: it is the
+	// gate's own self-check, not the measurement.
+	if strings.Contains(target, "--selfcheck-gate") {
+		t.Errorf("the test-continuity-controls target runs the "+
+			"harness's self-check mode, which stubs the suite and the "+
+			"controls, so it measures nothing:\n%s", target)
+	}
+}
+
+// makefileTarget returns the recipe of a named target.
+func makefileTarget(t *testing.T, makefile, name string) string {
+	t.Helper()
+	lines := strings.Split(makefile, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == name+":" {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	var recipe []string
+	for _, line := range lines[start+1:] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "\t") {
+			break
+		}
+		recipe = append(recipe, line)
+	}
+	return strings.Join(recipe, "\n")
+}
+
+// TestControls_TheHarnessRunsTheAcceptanceSuite pins `run_tests`.
+//
+// `run_tests` is the harness's ENTIRE contact with Go: it builds the
+// command, runs it, and parses the output into the four numbers the
+// gate reasons about. No test exercised it — ten mutations of it
+// survived everything.
+//
+// It must carry the SELECTION and the PACKAGE: a command that dropped
+// `-run` would measure the whole package, and one that changed the
+// package path would measure a different suite.
+func TestControls_TheHarnessRunsTheAcceptanceSuite(t *testing.T) {
+	root := repoRoot(t)
+	harness := readDocument(t, filepath.Join(root, controlsScript))
+
+	// The command's arguments, as the harness writes them.
+	for _, want := range []string{
+		`["go", "test", "-tags", "fts5", "-count=1", "-v"`,
+		`"-run", TEST_PATTERN, "./assignment/..."]`,
+	} {
+		if !strings.Contains(harness, want) {
+			t.Errorf("the harness's go test command does not contain "+
+				"%s — the harness's contact with Go carries the "+
+				"selection and the package, and a command that did "+
+				"not would measure something else", want)
+		}
+	}
+	// The flags that carry the FTS5 build, without which the suite
+	// does not even link.
+	for _, want := range []string{
+		`env["CGO_CFLAGS"] = "-DSQLITE_ENABLE_FTS5=1"`,
+		`env["CGO_LDFLAGS"] = "-lm"`,
+	} {
+		if !strings.Contains(harness, want) {
+			t.Errorf("the harness's go test command does not set %s — "+
+				"without it the suite does not link", want)
+		}
+	}
+}
+
+// TestControls_EveryControlMutatesInsideTheSelection pins the
+// selection's REACH.
+//
+// The harness's FILES tuple lists every file a control MAY mutate —
+// the service, the agent's door, the operator's door, and PR 1's DDL.
+// But the acceptance suite the gate measures lives in ONE package, so
+// a control that mutated a file outside that package would remove
+// code the suite cannot see: the control would measure nothing and
+// the gate would report it as load-bearing.
+//
+// So every control's mutation must land inside the selection's reach.
+func TestControls_EveryControlMutatesInsideTheSelection(t *testing.T) {
+	root := repoRoot(t)
+	harness := readDocument(t, filepath.Join(root, controlsScript))
+
+	// The files each control's mutator touches.
+	mutators := map[string][]string{}
+	for _, m := range regexp.MustCompile(
+		`"mutate":\s*(control_\w+)`).FindAllStringSubmatch(harness, -1) {
+		fn := m[1]
+		body := harnessFunctionBody(t, harness, fn)
+		files := regexp.MustCompile(
+			`"((?:internal|cmd)/[^"]*\.go)"`).FindAllStringSubmatch(body, -1)
+		for _, f := range files {
+			mutators[fn] = append(mutators[fn], f[1])
+		}
+	}
+	if len(mutators) == 0 {
+		t.Fatal("the harness declares no control mutators, so this pin " +
+			"no longer tests what it claims")
+	}
+	for fn, files := range mutators {
+		if len(files) == 0 {
+			t.Errorf("the mutator %s touches no file, so this pin "+
+				"cannot say where it removes code", fn)
+			continue
+		}
+		for _, f := range files {
+			if !strings.HasPrefix(f, "internal/core/assignment/") {
+				t.Errorf("the mutator %s removes code from %s, which "+
+					"is OUTSIDE the acceptance suite's package — the "+
+					"suite cannot see that code, so the control would "+
+					"measure nothing and the gate would report it as "+
+					"load-bearing", fn, f)
+			}
+		}
+	}
+}
+
+// harnessFunctionBody returns the body of a module-level function.
+func harnessFunctionBody(t *testing.T, harness, name string) string {
+	t.Helper()
+	marker := "\ndef " + name + "("
+	i := strings.Index(harness, marker)
+	if i < 0 {
+		t.Fatalf("the harness has no function %s — this pin no longer "+
+			"tests what it claims", name)
+	}
+	rest := harness[i+1:]
+	j := strings.Index(rest, "\ndef ")
+	if j < 0 {
+		return rest
+	}
+	return rest[:j]
+}
+
+// TestControls_TheNotePublishesTheControls ties the note to the
+// harness.
+//
+// The design note publishes every control and the test it must fail —
+// a table a reader can check. Nothing tied that table to the
+// harness's CONTROLS: a control could be renamed, or its expectation
+// changed, and the note would keep publishing the old pair.
+func TestControls_TheNotePublishesTheControls(t *testing.T) {
+	root := repoRoot(t)
+	harness := readDocument(t, filepath.Join(root, controlsScript))
+	note := readDocument(t, filepath.Join(root,
+		"docs/dev/continuity-001-assignment-api.md"))
+
+	region := controlsRegion(t, harness)
+	nameRe := regexp.MustCompile(`"name"\s*:\s*"([^"]+)"`)
+	expectRe := regexp.MustCompile(`"expect"\s*:\s*\[([^\]]*)\]`)
+	testRe := regexp.MustCompile(`"(Test[A-Za-z0-9_]+)"`)
+	published := 0
+	for _, block := range regexp.MustCompile(`(?s)\{[^{}]*\}`).
+		FindAllString(region, -1) {
+		name := nameRe.FindStringSubmatch(block)
+		if name == nil {
+			continue
+		}
+		published++
+		// The note publishes the control's name.
+		if !strings.Contains(note, "`"+name[1]+"`") {
+			t.Errorf("the design note does not publish the control "+
+				"%q, so the table a reader can check does not "+
+				"describe the harness", name[1])
+		}
+		// And the test it must fail — in the note's OWN ROW for this
+		// control, so a row that names a different test is caught rather
+		// than satisfied by the same name appearing elsewhere.
+		expect := expectRe.FindStringSubmatch(block)
+		if expect == nil {
+			continue
+		}
+		row := noteRow(t, note, name[1])
+		if row == "" {
+			t.Errorf("the design note has no row for the control %q",
+				name[1])
+			continue
+		}
+		for _, m := range testRe.FindAllStringSubmatch(expect[1], -1) {
+			if !strings.Contains(row, "`"+m[1]+"`") {
+				t.Errorf("the design note's row for the control %q "+
+					"names %q, and the harness requires %q — the "+
+					"table a reader can check does not describe the "+
+					"harness", name[1], row, m[1])
+			}
+		}
+	}
+	if published != publishedControls {
+		t.Errorf("the harness publishes %d control(s) and the pin saw "+
+			"%d — a control dropped out of the pin", publishedControls,
+			published)
+	}
+}
+
+// noteRow returns the design note's table row for a control: the
+// whole line, so the third cell can be read.
+func noteRow(t *testing.T, note, name string) string {
+	t.Helper()
+	for _, line := range strings.Split(note, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "|") {
+			continue
+		}
+		cells := strings.Split(line, "|")
+		if len(cells) < 4 {
+			continue
+		}
+		if strings.TrimSpace(cells[1]) == "`"+name+"`" {
+			return strings.TrimSpace(cells[3])
+		}
+	}
+	return ""
 }
 
 func TestControls_EveryControlIsNamedAndClassified(t *testing.T) {
