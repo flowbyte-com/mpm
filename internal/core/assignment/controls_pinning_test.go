@@ -171,6 +171,73 @@ func TestControls_TheHarnessOnlyMutatesFilesThatExist(t *testing.T) {
 	}
 }
 
+// writePatternRe finds an INSERT into the assignment tables.
+var writePatternRe = regexp.MustCompile(
+	`INSERT(?: OR \w+)? INTO (agent_tasks|agent_task_events)`)
+
+// TestOnlyTheAssignmentPackageWritesTheAssignmentTables is a
+// STRUCTURAL companion to the behavioural boundary test.
+//
+// The behavioural test (internal/core/tools/assignment_operator_boundary_regression_test.go)
+// asks every registry action whether it can create a root or record an
+// approval. This one asks the source: which files INSERT into
+// `agent_tasks` or `agent_task_events` at all?
+//
+// The answer must be the assignment package and nothing else. A write
+// outside it would be a way to create a root that no registry action
+// names — invisible to a behavioural test that only probes the actions
+// it knows about.
+//
+// The assignment package's OWN test files are excluded: a test may
+// write a malformed row deliberately, to prove that the schema refuses
+// it, and that is not a path into production.
+func TestOnlyTheAssignmentPackageWritesTheAssignmentTables(t *testing.T) {
+	root := repoRoot(t)
+
+	var offenders []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			switch info.Name() {
+			case ".git", "node_modules", ".build", "__pycache__":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		if strings.HasSuffix(rel, "_test.go") {
+			return nil
+		}
+		b, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		if writePatternRe.Match(b) {
+			offenders = append(offenders, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the repository: %v", err)
+	}
+
+	for _, rel := range offenders {
+		if strings.HasPrefix(rel, "internal/core/assignment/") {
+			continue
+		}
+		t.Errorf("%s writes an assignment row; only internal/core/assignment/ may, "+
+			"or the authority boundary has a path no registry action names", rel)
+	}
+}
+
 // controlNameRe finds a control's name in the harness.
 var controlNameRe = regexp.MustCompile(`(?m)^\s*"name":\s*"([a-z0-9-]+)",`)
 
