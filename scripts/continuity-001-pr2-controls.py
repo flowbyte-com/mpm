@@ -55,7 +55,6 @@ import os
 import re
 import shutil
 import contextlib
-import inspect
 import io
 import subprocess
 import sys
@@ -149,6 +148,36 @@ BROKEN_SUITE_FRACTION = 3
 FAIL_RE = re.compile(r"^--- FAIL: (\w+)", re.M)
 PASS_RE = re.compile(r"^--- PASS: (\w+)", re.M)
 SKIP_RE = re.compile(r"^--- SKIP: (\w+)", re.M)
+
+# GO_OUTPUT_SAMPLE is a sample of Go's real `go test -v` output, and it
+# carries the two shapes that make the patterns' `^` anchor load-bearing:
+#
+#   * a PASSING parent whose subtest SKIPPED. Go reports the parent's
+#     result on a top level line and the subtest's INDENTED, so
+#     without the anchor the parent is counted as SKIPPED — and a
+#     skipped test is a test that did not run.
+#   * a FAILING parent whose subtest PASSED. Go reports the parent as
+#     `--- FAIL:` on a top level line and the passing subtest's result
+#     INDENTED, so without the anchor the parent is counted as PASSED
+#     — and it FAILED.
+#
+# The second shape is the one that was missing: without it the PASS
+# pattern's anchor looks inert, because a passing parent's own line
+# already carries the name.
+GO_OUTPUT_SAMPLE = (
+    "=== RUN   TestAPIAlpha\n"
+    "--- PASS: TestAPIAlpha (0.00s)\n"
+    "=== RUN   TestAPIWithSkip\n"
+    "=== RUN   TestAPIWithSkip/alpha\n"
+    "    --- SKIP: TestAPIWithSkip/alpha (0.00s)\n"
+    "--- PASS: TestAPIWithSkip (0.00s)\n"
+    "=== RUN   TestAPIWithFailure\n"
+    "=== RUN   TestAPIWithFailure/beta\n"
+    "    --- PASS: TestAPIWithFailure/beta (0.00s)\n"
+    "--- FAIL: TestAPIWithFailure (0.00s)\n"
+    "--- SKIP: TestAPISkipped (0.00s)\n"
+    "--- FAIL: TestAPIBroke (0.00s)\n"
+)
 
 
 def run_tests():
@@ -1100,6 +1129,50 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
     return results
 
 
+def _drive_main_with_baseline(base_failed, base_skipped):
+    """Call main() with a STUBBED suite, and report what it did.
+
+    It returns (proceeded, exit_code): whether main() got past the
+    baseline to the controls, and what it exited with.
+
+    The stub replaces the suite run, so the wiring of main() is
+    exercised without the cost of the suite — and, more to the point,
+    without the guards being reachable some other way. The controls are
+    stubbed too: a real control's mutator would edit the source.
+    """
+    mutated = []
+    # The stub is a plain control DICT, because the gate reads its
+    # fields by key. Its mutator only records that it ran — a real
+    # control's mutator would edit the source.
+    stub = {
+        "name": "stub",
+        "invariant": "a stub control",
+        "expect": [],
+        "load_bearing": True,
+        "breaks": [],
+        "mutate": lambda: mutated.append(True),
+    }
+    originals = {k: globals()[k] for k in
+                 ("run_tests", "snapshot", "restore", "CONTROLS")}
+    argv = sys.argv
+    try:
+        globals()["run_tests"] = lambda: (base_failed, [], 36,
+                                          list(base_skipped))
+        globals()["snapshot"] = lambda: None
+        globals()["restore"] = lambda: None
+        globals()["CONTROLS"] = [stub]
+        sys.argv = ["continuity-001-pr2-controls.py", "--only", "stub"]
+        try:
+            main()
+        except SystemExit as e:
+            return (bool(mutated), e.code)
+        return (bool(mutated), None)
+    finally:
+        for k, v in originals.items():
+            globals()[k] = v
+        sys.argv = argv
+
+
 def selftest():
     """Prove that the gate can fail.
 
@@ -1113,6 +1186,16 @@ def selftest():
     """
     first_lb = next(c["name"] for c in CONTROLS if c["load_bearing"])
     first_rd = next(c["name"] for c in CONTROLS if not c["load_bearing"])
+    # The published number of cases. The self-test checks its own count
+    # against it, and a Go test checks the harness's PRINTED count
+    # against the same figure — so adding a case without publishing it
+    # fails the suite in two places.
+    #
+    # The matrix is a list of SINGLE-EDIT mutations: a two-edit
+    # mutation that removes both a mechanism and the guard that watches
+    # it is not in the matrix, and the note says so rather than
+    # claiming more.
+    expected_self_test_cases = 42
 
     # Each case carries a MODE. The mode decides how the gate is
     # driven; the name is only the label. Dispatching on the label
@@ -1244,38 +1327,53 @@ def selftest():
             print(f"\nSELF-TEST OK: {label} — the baseline was refused.")
 
     # M4, the wiring: main() must USE the verdict. The function is
-    # driven above; the CALL SITE is what makes the refusal real, and
-    # nothing else would notice its removal.
-    if "baseline_verdict(" not in inspect.getsource(main):
-        failures += 1
-        print("\nSELF-TEST FAILED: main() does not call baseline_verdict, so the "
-              "baseline guards are not wired in")
-    else:
-        print("\nSELF-TEST OK: main() calls baseline_verdict, so the baseline "
-              "guards are wired in.")
+    # driven above; the CALL SITE is what makes the refusal real.
+    #
+    # This is checked BEHAVIOURALLY, by driving main() with a stubbed
+    # suite: a source search would be satisfied by a COMMENT, and
+    # main() could swallow the raise that was introduced so it could
+    # not be ignored.
+    for label, stub_failed, stub_skipped, want_proceeded in (
+            ("a not-green baseline", ["TestSomethingFailed"], [], False),
+            ("a baseline that skipped a test", [], ["TestSomethingSkipped"], False),
+            ("a green baseline", [], [], True)):
+        proceeded, exited = _drive_main_with_baseline(stub_failed, stub_skipped)
+        if proceeded != want_proceeded:
+            failures += 1
+            print(f"\nSELF-TEST FAILED: main() with {label} "
+                  f"{'proceeded' if proceeded else 'refused'}, want "
+                  f"{'proceeded' if want_proceeded else 'refused'}")
+        else:
+            print(f"\nSELF-TEST OK: main() with {label} "
+                  f"{'proceeded to the controls' if proceeded else 'refused the measurement'}.")
 
     # M6: the three patterns are the harness's entire contact with Go's
     # output. The `^` anchor is what stops a PASSING parent test whose
     # subtest skipped from being counted as skipped.
-    sample = (
-        "=== RUN   TestAPIAlpha\n"
-        "--- PASS: TestAPIAlpha (0.00s)\n"
-        "=== RUN   TestAPIWithSubtests\n"
-        "=== RUN   TestAPIWithSubtests/alpha\n"
-        "    --- SKIP: TestAPIWithSubtests/alpha (0.00s)\n"
-        "--- PASS: TestAPIWithSubtests (0.00s)\n"
-        "=== RUN   TestAPIWithFailures\n"
-        "=== RUN   TestAPIWithFailures/beta\n"
-        "    --- FAIL: TestAPIWithFailures/beta (0.00s)\n"
-        "--- FAIL: TestAPIWithFailures (0.00s)\n"
-        "--- SKIP: TestAPISkipped (0.00s)\n"
-        "--- FAIL: TestAPIBroke (0.00s)\n"
-    )
+    sample = GO_OUTPUT_SAMPLE
+    # The nit: the SKIP anchor's catchability rests on the sample
+    # carrying an INDENTED skip, and the PASS anchor's on the sample
+    # carrying a FAILING parent with an indented passing subtest. If
+    # either line were removed from the sample, the anchor would become
+    # unobservable — so the sample's shape is asserted.
+    for label, needle in (
+            ("an indented skip", "    --- SKIP: "),
+            ("a failing parent with an indented passing subtest",
+             "    --- PASS: TestAPIWithFailure/beta"),
+            ("the failing parent's own top-level line",
+             "--- FAIL: TestAPIWithFailure (0.00s)")):
+        if needle not in sample:
+            failures += 1
+            print(f"\nSELF-TEST FAILED: the sample of Go's output does not carry "
+                  f"{label}, so the pattern's anchor would be unobservable")
+        else:
+            print(f"\nSELF-TEST OK: the sample of Go's output carries {label}.")
+
     regex_cases = (
             ("the FAIL pattern", sorted(set(FAIL_RE.findall(sample))),
-             ["TestAPIBroke", "TestAPIWithFailures"]),
+             ["TestAPIBroke", "TestAPIWithFailure"]),
             ("the PASS pattern", sorted(set(PASS_RE.findall(sample))),
-             ["TestAPIAlpha", "TestAPIWithSubtests"]),
+             ["TestAPIAlpha", "TestAPIWithSkip"]),
             ("the SKIP pattern", sorted(set(SKIP_RE.findall(sample))),
              ["TestAPISkipped"]))
     for label, got, want in regex_cases:
@@ -1338,28 +1436,6 @@ def selftest():
         else:
             print(f"\nSELF-TEST OK: {name} — the gate {verdict} it.")
 
-    # MUT-30 and its sibling: an assertion that never runs cannot fail,
-    # so removing an assertion's dispatch would leave the self-test
-    # green. Both are therefore COUNTED, and the counts are required.
-    if isolates_assertions == 0:
-        failures += 1
-        print("\nSELF-TEST FAILED: the isolation assertion never ran, so no case "
-              "pins that a case isolates its own target")
-    else:
-        print(f"\nSELF-TEST OK: the isolation assertion ran "
-              f"{isolates_assertions} time(s).")
-
-    # MUT-30: the message assertion must RUN. An assertion that never
-    # runs cannot fail, so removing its dispatch would leave the
-    # self-test green.
-    if message_assertions == 0:
-        failures += 1
-        print("\nSELF-TEST FAILED: the published-message assertion never ran, so "
-              "no case pins the message")
-    else:
-        print(f"\nSELF-TEST OK: the published-message assertion ran "
-              f"{message_assertions} time(s).")
-
     # And the call WITHOUT a baseline at all is not even a measurement:
     # the parameter is required, so the call cannot be made.
     try:
@@ -1370,16 +1446,42 @@ def selftest():
         print("\nSELF-TEST OK: the gate refused a call with no baseline at all "
               "— the parameter is required, so the measurement cannot be made "
               "without one")
+    # EVERY check the self-test makes is counted here, so the printed
+    # number is the number of cases and not the number of output lines.
+    #
+    #   len(cases)          the gate cases
+    #   3                   the baseline verdict (green, not-green, skipping)
+    #   len(regex_cases)    the three output patterns
+    #   3                   the sample's load-bearing shapes
+    #   3                   the main() wiring drives
+    #   1                   the call with no baseline at all
+    #   message_assertions  the published-message assertion, once per
+    #                       case that produces that direction
+    #   isolates_assertions the isolation assertion, once per case that
+    #                       isolates a target
+    #
+    # The last two are DERIVED from the counters, not assumed. That is
+    # what makes the count a mechanism rather than a number: an
+    # assertion that stops running changes the count, and the count is
+    # checked against the published literal below — so removing an
+    # assertion's dispatch fails the self-test, and a Go test pins the
+    # published figure against what the harness actually prints.
+    total = (len(cases) + 3 + len(regex_cases) + 3 + 3 + 1
+             + message_assertions + isolates_assertions)
+    if total != expected_self_test_cases:
+        failures += 1
+        print(f"\nSELF-TEST FAILED: the self-test made {total} case(s), want "
+              f"{expected_self_test_cases} — an assertion stopped running, or a "
+              f"case was added without the published figure being updated")
+    else:
+        print(f"\nSELF-TEST OK: the self-test made {total} case(s), as published.")
+
+    # The count is checked BEFORE the verdict, so a count that does not
+    # match the published figure FAILS the self-test rather than being
+    # printed under a green exit code.
     if failures:
         print(f"\nTHE SELF-TEST FAILED ({failures} case(s)).")
         return 1
-    # The COUNT is printed, so the published figure is the harness's
-    # own and not a count of output lines: the message assertion and
-    # the "no baseline at all" check are assertions WITHIN a case, and
-    # counting them as cases would overstate the number.
-    # Three baseline cases (a green one, a not-green one, a skipping
-    # one), the regex cases, and the wiring check.
-    total = len(cases) + 3 + len(regex_cases) + 1
     print(f"\nTHE SELF-TEST PASSED: the gate can fail. {total} cases.")
     return 0
 

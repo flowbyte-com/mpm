@@ -891,17 +891,25 @@ cases", because it is a claim about the cases that do not exist: the
 matrix says which mechanisms would break the gate silently.
 
 **AND WHAT THE MATRIX DOES NOT SAY.** The matrix is not a proof that no
-mutation can escape, and the eighth review says so in the note's own
-words. Two mutations are **not behaviour changes** and so cannot be
-caught, and the matrix says which: the `^` anchor on the harness's
-**PASS** and **FAIL** patterns. Removing the anchor from the **SKIP**
-pattern IS caught — and it is the one that matters, because a skipped
-test is a test that did not run, and the pattern's job is to tell a
-top-level skip from a subtest's skip. For PASS and FAIL the anchor
-changes nothing observable: Go always reports the parent test's own
-result on a top-level line, so the parent's name is already in the set
-whether the anchor is there or not. That was checked against Go's real
-output, not assumed.
+mutation can escape, and it says so in its own words. One mutation is
+**not a behaviour change** and so cannot be caught: the `^` anchor on the
+harness's **FAIL** pattern. Go reports a parent test's own result on a
+top-level line, and a parent whose subtest failed is itself reported as
+`--- FAIL:` — so the parent's name is in the set whether the anchor is
+there or not, and removing the anchor changes nothing observable.
+
+The **SKIP** and **PASS** anchors are both load-bearing, and both are
+caught. The SKIP anchor is what stops a **passing** parent whose subtest
+skipped from being counted as skipped. The PASS anchor is what stops a
+**failing** parent whose subtest passed from being counted as passed —
+and the eighth review was right that the note's exemption of it was
+false: it held only for a *passing* parent, whose name the top-level
+line already carries. The sample of Go's output now carries **both**
+shapes, so the failure is caught rather than argued about.
+
+The matrix is a list of **single-edit** mutations. A two-edit mutation
+that removes a mechanism *and* the check that watches it is outside it,
+and the note says so rather than claiming more.
 
 ### 5.11 What the eighth review found
 
@@ -932,6 +940,32 @@ it: the round-eight mutants are all caught too, including the three
 compounds — the identity comparison with the default removed, the case
 renamed *and* the message reverted, and the default removed with the
 defence-in-depth branch's identity comparison.
+
+### 5.12 What the ninth review found
+
+The ninth round **verified round eight's fixes by mutation** and found
+the fix for the leak to be the strongest result of the whole exercise:
+re-introducing the leak is caught by **eleven** cases, so it is not a
+one-case accident. It also confirmed the service is **byte-identical** to
+the state round seven reviewed — the last two rounds touched only the
+harness, the tests and the documents.
+
+But it found three more defects, and one of them was a **false claim of
+this note's own**.
+
+| the finding | what it was | the fix |
+|---|---|---|
+| the note's exemption of the **PASS** anchor was **false** | the justification held only for a *passing* parent. For a **failing** parent — the standard table-driven shape — Go reports `--- FAIL: TestX` on the top level and the passing subtest's result INDENTED, so the unanchored PASS pattern counts a test that **failed**. On a realistic run the harness's own arithmetic then makes every control's total 37 against a baseline of 36: inconclusive, and one of the gate's three questions masked | the sample of Go's output now carries **both** shapes — a passing parent whose subtest skipped, and a failing parent whose subtest passed — and the PASS anchor is caught |
+| `main()`'s wiring was checked by a **source search** | `inspect.getsource(main)` plus a substring, so a **comment** satisfied it, and `main()` could swallow the raise that was introduced precisely so it could not be ignored | the wiring is checked **behaviourally**: the self-test drives `main()` with a **stubbed** suite and asserts that a not-green baseline and a skipping baseline both **refuse** the measurement, while a green baseline proceeds to the controls |
+| the SPEC published "each removal must make the self-test fail" | which is not true — one mutation is not a behaviour change | the SPEC now says **each removal that changes the gate's behaviour** |
+| the "assertion never ran" guards were themselves unpinned | each mechanism died in two edits: remove the assertion and its guard | the two guards are **gone**, and the **count** is the one mechanism: it is derived from the counters, so an assertion that stops running changes the count, and the count is checked against the published literal |
+| the published case count was printed but not asserted | a printed number nobody checks drifts | the self-test checks its own count against a published literal, and a **Go test** checks the harness's *printed* count against the same figure — so adding a case without publishing it fails the suite in two places |
+| the SKIP anchor's catchability rested on an unpinned sample line | removing the line from the sample would make the anchor unobservable | the sample's load-bearing shapes are **asserted** |
+| the mode dispatch was protected by a counter rather than by itself | the same shape as the guard above | the count is derived from the counter, so the dispatch is pinned by the count |
+
+**THE SELF-TEST IS NOW FORTY-TWO CASES**, and the number is published in
+two places that check each other: the harness's own literal, and the Go
+test that compares the harness's printed count.
 
 ## 6. What PR 2 leaves to PRs 3–5
 

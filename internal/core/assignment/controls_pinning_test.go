@@ -30,6 +30,7 @@
 package assignment
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -322,6 +323,52 @@ func TestControls_TheHarnessGateCanFail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the harness's self-test failed, so its gate cannot be trusted "+
 			"to fail when a control stops detecting: %v\n%s", err, out)
+	}
+}
+
+// publishedSelfTestCases is the number of cases the harness's
+// self-test makes.
+//
+// It is PUBLISHED — the design note and the pull request both carry
+// it — and this test is what makes the published number true: the
+// self-test prints its own count, and a case added without the
+// published figure being updated fails here rather than silently
+// making the documentation stale.
+//
+// The count is of CASES, not of output lines: the message assertion
+// and the "no baseline at all" check are assertions WITHIN a case.
+const publishedSelfTestCases = 42
+
+// TestControls_TheHarnessPublishesItsOwnCaseCount pins the published
+// figure to the harness's own.
+//
+// A printed number nobody checks is a number that drifts. The
+// harness prints its count precisely so that this test can compare
+// it, and so that the number in the documentation is the harness's
+// count rather than somebody's memory of it.
+func TestControls_TheHarnessPublishesItsOwnCaseCount(t *testing.T) {
+	root := repoRoot(t)
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not on PATH; the harness's self-test cannot be driven here")
+	}
+	cmd := exec.Command(python, filepath.Join(root, controlsScript), "--selftest")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"MPM_WORKSPACE=" + t.TempDir(),
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the harness's self-test failed: %v\n%s", err, out)
+	}
+	want := fmt.Sprintf("THE SELF-TEST PASSED: the gate can fail. %d cases.",
+		publishedSelfTestCases)
+	if !strings.Contains(string(out), want) {
+		t.Errorf("the harness did not print %q, so the PUBLISHED case count "+
+			"(%d) is stale — the self-test now makes a different number of "+
+			"cases. Update the published figure and this constant together.\n%s",
+			want, publishedSelfTestCases, out)
 	}
 }
 
