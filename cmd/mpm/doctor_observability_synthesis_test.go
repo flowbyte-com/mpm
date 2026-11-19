@@ -211,14 +211,16 @@ func TestDoctor_Usage_Acceptance(t *testing.T) {
 	}
 
 	// MCP tool registry surface.
-	if got := report.Usage.RegisteredTools; got != 21 {
-		t.Errorf("RegisteredTools = %d, want 21", got)
+	//
+	// 22 as of Continuity 001 PR 2, which added mpm_assignment.
+	if got := report.Usage.RegisteredTools; got != 22 {
+		t.Errorf("RegisteredTools = %d, want 22", got)
 	}
 	if got := report.Usage.ExposedTools; got != 3 {
 		t.Errorf("ExposedTools = %d, want 3", got)
 	}
-	if got := report.Usage.ExposedToolsUnfiltered; got != 21 {
-		t.Errorf("ExposedToolsUnfiltered = %d, want 21", got)
+	if got := report.Usage.ExposedToolsUnfiltered; got != 22 {
+		t.Errorf("ExposedToolsUnfiltered = %d, want 22", got)
 	}
 }
 
