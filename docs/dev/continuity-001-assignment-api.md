@@ -883,15 +883,55 @@ including the gate's own **first** question.
 | the drift guard's option map named **`VarX`** | there is no `VarX` in Go's `flag` package, and the map's comment said "Both put the name first" — which the map itself exists to correct | the map is the stdlib's own set, the `*Var` family is included with the right argument position, and the comment says what is true |
 | the round-six table omitted **N25** | the table is the only record of what round six changed, and it listed five of six | the sixth row is there |
 
-**THE MUTATION MATRIX IS NOW THE EVIDENCE.** Sixteen behaviour-changing
-mutants of the gate, and **every one of them is caught** by the
-self-test — verified by applying each to a scratch copy and running the
-self-test against it. That is a stronger claim than "the self-test has
-many cases", because it is a claim about the cases that do not exist:
-the matrix says which mechanisms would break the gate silently, and
-the answer is now none of them.
+**THE MUTATION MATRIX IS THE EVIDENCE.** Sixteen behaviour-changing
+mutants of the gate, and every one of them is caught by the self-test —
+verified by applying each to a scratch copy and running the self-test
+against it. That is a stronger claim than "the self-test has many
+cases", because it is a claim about the cases that do not exist: the
+matrix says which mechanisms would break the gate silently.
 
-**THE CLI'S LIST-VALUED FLAGS, FOUND BY THE OPERATOR'S OWN SMOKE TEST.**
+**AND WHAT THE MATRIX DOES NOT SAY.** The matrix is not a proof that no
+mutation can escape, and the eighth review says so in the note's own
+words. Two mutations are **not behaviour changes** and so cannot be
+caught, and the matrix says which: the `^` anchor on the harness's
+**PASS** and **FAIL** patterns. Removing the anchor from the **SKIP**
+pattern IS caught — and it is the one that matters, because a skipped
+test is a test that did not run, and the pattern's job is to tell a
+top-level skip from a subtest's skip. For PASS and FAIL the anchor
+changes nothing observable: Go always reports the parent test's own
+result on a top-level line, so the parent's name is already in the set
+whether the anchor is there or not. That was checked against Go's real
+output, not assumed.
+
+### 5.11 What the eighth review found
+
+The eighth round **verified round seven's fixes by mutation** — all
+fifteen of the author's mutants caught, plus ten more it constructed —
+and then confirmed that the new cases are genuinely load-bearing with a
+**double-knockout** test: dropping `detected_nothing` *and* removing
+`named` is green; dropping `swapped_skip_lb` *and* reverting the
+identity comparison is green. So M2 and M3's fixes are correctly pinned.
+
+But it found three mechanisms that round seven had **added** and left
+unpinned, and one case that claimed to isolate a mechanism it did not.
+
+| the finding | what it was | the fix |
+|---|---|---|
+| the `redundant_skipped` case **leaked** into every control after the one it targeted | `baseline_skips` is the loop variable every control's skip set is derived from, and the case assigned to it **inside** the loop — so thirteen bystanders inherited the change and refused for the wrong reason. The verdict was the same either way, so nothing noticed | the assignment is gone, and the case's construction is asserted: a case that isolates a target must refuse **exactly one** control |
+| the "every control carries the baseline's skips" **default** was unpinned | removing it *together with* the identity comparison defeated the identity comparison entirely — an escape from two half-mutations at once | the self-test gained a case where every control skips exactly what the baseline skipped, and the run is **accepted**; remove the default and every control differs from the baseline and the case fails |
+| the published-message assertion dispatched on the case's **display string** | round six's N24 was exactly that defect, round seven **re-introduced** it, and the compound — renaming the case *and* reverting the message — was green, so the wrong message could be published with a green exit code | the dispatch is on the case's **mode**, and the assertion is **counted**, so removing the assertion's dispatch fails the self-test |
+| `main()` still ignored the baseline verdict | round seven's fix moved the guards into a testable function, but the **call site** was still driven by nothing: a regression that made `main()` proceed on a not-green baseline would print a green gate and exit 0 | the verdict now **raises** rather than returning, so a caller cannot forget to look at a return value but cannot ignore an exception; and the self-test asserts that `main()` calls it |
+| the baseline's **denominator** was unpinned | the self-test asserted the function's boolean verdict but never its returned denominator — and a `+1` makes every control's run look short of the baseline, so every control becomes inconclusive and the gate refuses everything | the denominator is the number of tests that ran and passed, and the self-test asserts the value |
+| the three output **regexes** were unpinned | they are the harness's entire contact with Go's output, and the `^` anchor is what stops a **passing** parent test being counted as skipped | the three patterns are named constants, and the self-test reads a sample of Go's real output — including an indented subtest skip and an indented subtest failure — and asserts what each pattern reads |
+| the note published the matrix as a **complete proof** | and it is not complete: two mutations are not behaviour changes and cannot be caught | the note says what the matrix does not say, and names the two |
+| the published case count counted **output lines** | not cases — the message assertion and the "no baseline at all" check are assertions *within* a case | the self-test prints its own case count, and the note publishes that |
+| a **duplicated heading** | a stray ALL-CAPS line at the end of §5.10, left over from the renumbering | removed |
+
+**THE SELF-TEST IS NOW TWENTY-THREE CASES**, and the matrix grew with
+it: the round-eight mutants are all caught too, including the three
+compounds — the identity comparison with the default removed, the case
+renamed *and* the message reverted, and the default removed with the
+defence-in-depth branch's identity comparison.
 
 ## 6. What PR 2 leaves to PRs 3–5
 

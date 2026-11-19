@@ -55,6 +55,7 @@ import os
 import re
 import shutil
 import contextlib
+import inspect
 import io
 import subprocess
 import sys
@@ -136,6 +137,20 @@ def restore():
 BROKEN_SUITE_FRACTION = 3
 
 
+# The three patterns that read Go's `go test -v` output. They are the
+# harness's entire contact with Go's output, so they are named and
+# pinned rather than buried in a call.
+#
+# The `^` anchor is LOAD-BEARING. A subtest's result is INDENTED, so
+# without the anchor a passing parent test whose subtest skipped would
+# be counted as skipped — and a skipped test is, by the gate's own
+# definition, a test that did not run. The identity comparison would
+# then be comparing the wrong sets.
+FAIL_RE = re.compile(r"^--- FAIL: (\w+)", re.M)
+PASS_RE = re.compile(r"^--- PASS: (\w+)", re.M)
+SKIP_RE = re.compile(r"^--- SKIP: (\w+)", re.M)
+
+
 def run_tests():
     """Run the acceptance suite and report what it did.
 
@@ -160,9 +175,9 @@ def run_tests():
         )
     except subprocess.TimeoutExpired:
         return ["<TIMEOUT>"], [], 0, []
-    failed = sorted(set(re.findall(r"^--- FAIL: (\w+)", p.stdout, re.M)))
-    passed = len(set(re.findall(r"^--- PASS: (\w+)", p.stdout, re.M)))
-    skipped = sorted(set(re.findall(r"^--- SKIP: (\w+)", p.stdout, re.M)))
+    failed = sorted(set(FAIL_RE.findall(p.stdout)))
+    passed = len(set(PASS_RE.findall(p.stdout)))
+    skipped = sorted(set(SKIP_RE.findall(p.stdout)))
     if p.returncode != 0 and not failed:
         err = (p.stdout + p.stderr).strip().splitlines()
         return ["<BUILD FAILED>"], err[-3:], passed, skipped
@@ -736,15 +751,29 @@ CONTROLS = [
 # run skipped the same tests would match a skipping baseline EXACTLY
 # and be measured against a baseline that never measured anything.
 #
-# It returns (baseline, ok, reason).
-def baseline_verdict(base_failed, base_passed, base_skipped):
+# IT RAISES rather than returning a verdict. Returning made main()'s
+# USE of it unpinnable: a caller can forget to look at a return value,
+# but it cannot ignore an exception. A regression that made main()
+# proceed on a not-green baseline would otherwise print a green gate
+# and exit 0, and nothing would catch it.
+def baseline_verdict(base_failed, base_passed, base_skipped, detail=None):
     if base_failed:
-        return 0, False, (f"THE SUITE IS NOT GREEN BEFORE THE CONTROLS RUN: "
-                          f"{base_failed}")
+        print(f"THE SUITE IS NOT GREEN BEFORE THE CONTROLS RUN: {base_failed}")
+        if detail:
+            print(f"    {detail}")
+        raise SystemExit(1)
     if base_skipped:
-        return 0, False, (f"THE BASELINE SKIPPED {len(base_skipped)} TESTS, so "
-                          f"it cannot be the denominator: {base_skipped}")
-    return len(base_failed) + base_passed + len(base_skipped), True, ""
+        print(f"THE BASELINE SKIPPED {len(base_skipped)} TESTS, so it cannot "
+              f"be the denominator: {base_skipped}")
+        if detail:
+            print(f"    {detail}")
+        raise SystemExit(1)
+    # The denominator is the number of tests the suite RAN AND PASSED.
+    # The two refusals above mean a baseline that failed or skipped
+    # never reaches this line, so the failed and skipped terms would
+    # be zero — and a term that can never be non-zero is a term
+    # nothing can pin.
+    return base_passed
 
 
 # Result is one control's measurement. It is a named tuple because the
@@ -781,13 +810,10 @@ def main():
         restore()
         print("\n=== the baseline ===")
         base_failed, base_detail, base_passed, base_skipped = run_tests()
-        baseline, ok, reason = baseline_verdict(base_failed, base_passed,
-                                                base_skipped)
-        if not ok:
-            print(reason)
-            if base_detail:
-                print(f"    {base_detail}")
-            return 1
+        # The verdict RAISES on a baseline that cannot be the
+        # denominator, so there is no return value to forget to check.
+        baseline = baseline_verdict(base_failed, base_passed, base_skipped,
+                                    base_detail)
         baseline_skipped = set(base_skipped)
         print(f"the suite runs {baseline} tests and is green "
               f"({len(base_skipped)} of them skipped)")
@@ -1055,8 +1081,14 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
                 # The defence-in-depth control's run SKIPPED a test.
                 # Nothing failed, so the `not specific` clause cannot
                 # catch it — the skip clause is what must.
+                #
+                # The baseline's skips are NOT changed here: this
+                # variable is what every control's skip set is derived
+                # from, and assigning to it inside the loop would leak
+                # the change into every control after this one — so
+                # the case would refuse thirteen bystanders for the
+                # wrong reason and pin nothing.
                 run_redundant_skipped = ["TestSomethingSkipped"]
-                baseline_skips = ["TestSomethingSkipped"]
             if redundant_aborted and control["name"] == first_rd:
                 # The defence-in-depth control's run ABORTED: it
                 # produced three tests and the rest never ran. The
@@ -1091,22 +1123,22 @@ def selftest():
          "results": _synthetic_results(), "want": True, "mode": "normal"},
         {"name": f"the load-bearing control {first_lb} did not detect its removal",
          "results": _synthetic_results(broken_load_bearing=first_lb),
-         "want": False, "mode": "normal"},
+         "want": False, "mode": "normal", "isolates": True},
         {"name": f"the defence-in-depth control {first_rd} broke the suite",
          "results": _synthetic_results(broken_redundant=first_rd),
-         "want": False, "mode": "normal"},
+         "want": False, "mode": "normal", "isolates": True},
         {"name": f"the load-bearing control {first_lb} broke tests it did not declare",
          "results": _synthetic_results(undeclared=True),
-         "want": False, "mode": "normal"},
+         "want": False, "mode": "normal", "isolates": True},
         {"name": f"the load-bearing control {first_lb} took the whole suite with it",
          "results": _synthetic_results(broken_suite=True),
-         "want": False, "mode": "normal"},
+         "want": False, "mode": "normal", "isolates": True},
         {"name": f"the load-bearing control {first_lb} aborted the suite",
          "results": _synthetic_results(aborted=True),
-         "want": False, "mode": "normal"},
+         "want": False, "mode": "normal", "isolates": True},
         {"name": f"the load-bearing control {first_lb} made a test skip",
          "results": _synthetic_results(skipped=True),
-         "want": False, "mode": "normal"},
+         "want": False, "mode": "normal", "isolates": True},
         # M17: the comparison is TWO-SIDED, and the SPEC publishes
         # that. The "more" direction needs its own case, or a
         # regression to one-sided would pass this self-test, pass
@@ -1114,13 +1146,13 @@ def selftest():
         # published sentence — silently, with a green exit code.
         {"name": f"the load-bearing control {first_lb} produced MORE tests than the baseline",
          "results": _synthetic_results(more_tests=True),
-         "want": False, "mode": "normal"},
+         "want": False, "mode": "more_tests", "isolates": True},
         # N20: the defence-in-depth branch's own checks. A run that
         # produced a different number of tests is a broken
         # measurement there too, and nothing else catches it.
         {"name": f"the defence-in-depth control {first_rd} aborted the suite",
          "results": _synthetic_results(redundant_aborted=True),
-         "want": False, "mode": "normal"},
+         "want": False, "mode": "normal", "isolates": True},
         # N15: the baseline is REQUIRED. A caller that passes a zero
         # gets a refusal rather than the vulnerable measurement the
         # old default produced.
@@ -1142,14 +1174,14 @@ def selftest():
         # refuse it.
         {"name": f"the load-bearing control {first_lb} detected NOTHING at all",
          "results": _synthetic_results(detected_nothing=True),
-         "want": False, "mode": "normal"},
+         "want": False, "mode": "normal", "isolates": True},
         # M3(a): the comparison is by IDENTITY, not by count. The run
         # skipped a DIFFERENT test than the baseline did — the same
         # count — so a count comparison would wave it through.
         {"name": f"the load-bearing control {first_lb} skipped a DIFFERENT test than the baseline",
          "results": _synthetic_results(swapped_skip=True,
                                        baseline_skips=["TestSomethingSkipped"]),
-         "want": False, "mode": "swapped_skip"},
+         "want": False, "mode": "swapped_skip", "isolates": True},
         # M3(b): the same identity question on the OTHER branch — the
         # defence-in-depth branch's own comparison. The control's run
         # skipped a different test than the baseline did, the same
@@ -1157,13 +1189,23 @@ def selftest():
         {"name": f"the defence-in-depth control {first_rd} skipped a DIFFERENT test than the baseline",
          "results": _synthetic_results(redundant_swapped_skip=True,
                                        baseline_skips=["TestSomethingSkipped"]),
-         "want": False, "mode": "swapped_skip"},
+         "want": False, "mode": "swapped_skip", "isolates": True},
         # M3(b): the defence-in-depth branch's skip clause, on its own.
         # Nothing failed, so the `not specific` clause cannot catch
         # it — the skip clause is what must.
         {"name": f"the defence-in-depth control {first_rd} made a test skip",
          "results": _synthetic_results(redundant_skipped=True),
-         "want": False, "mode": "normal"},
+         "want": False, "mode": "normal", "isolates": True},
+        # M2: the DEFAULT — every control carries the baseline's skips —
+        # is a mechanism too, and it was unpinned. Removing it TOGETHER
+        # with the identity comparison defeated the identity comparison
+        # entirely. This case pins it: every control skips exactly what
+        # the baseline skipped, so the run is ACCEPTED. Remove the
+        # default and every control differs from the baseline, and this
+        # case fails.
+        {"name": "every control skipped exactly what the baseline skipped",
+         "results": _synthetic_results(baseline_skips=["TestSomethingSkipped"]),
+         "want": True, "mode": "swapped_skip"},
     ]
 
     failures = 0
@@ -1172,24 +1214,80 @@ def selftest():
     # function, and these two cases are what fail when a guard is
     # removed — an inline guard has no case at all, which is how round
     # six's N23 fix went unverified.
-    baseline_cases = [
-        ("a green baseline that skipped nothing",
-         baseline_verdict([], SUITE_SIZE, []), True),
-        ("a baseline that is not green",
-         baseline_verdict(["TestSomethingFailed"], SUITE_SIZE - 1, []), False),
-        ("a baseline that skipped a test",
-         baseline_verdict([], SUITE_SIZE - 1, ["TestSomethingSkipped"]), False),
-    ]
-    for label, (baseline, ok, reason), want in baseline_cases:
-        if ok != want:
+    # M4: the verdict RAISES on a baseline that cannot be the
+    # denominator, so main() cannot forget to look at it. A green
+    # baseline returns the DENOMINATOR — and M5: the denominator is
+    # the number of tests that ran and passed, which is what the
+    # bound's denominator must be.
+    try:
+        good = baseline_verdict([], SUITE_SIZE, [])
+        if good != SUITE_SIZE:
             failures += 1
-            print(f"\nSELF-TEST FAILED: {label} — the baseline was "
-                  f"{'accepted' if ok else 'refused'}, want "
-                  f"{'accepted' if want else 'refused'}")
+            print(f"\nSELF-TEST FAILED: a green baseline returned the denominator "
+                  f"{good}, want {SUITE_SIZE}")
         else:
-            print(f"\nSELF-TEST OK: {label} — the baseline was "
-                  f"{'accepted' if ok else 'refused'}.")
+            print("\nSELF-TEST OK: a green baseline that skipped nothing was "
+                  f"accepted, with the denominator {good}.")
+    except SystemExit:
+        failures += 1
+        print("\nSELF-TEST FAILED: a green baseline was REFUSED")
 
+    for label, bad in (("a baseline that is not green",
+                        (["TestSomethingFailed"], SUITE_SIZE - 1, [])),
+                       ("a baseline that skipped a test",
+                        ([], SUITE_SIZE - 1, ["TestSomethingSkipped"]))):
+        try:
+            baseline_verdict(*bad)
+            failures += 1
+            print(f"\nSELF-TEST FAILED: {label} — the baseline was ACCEPTED")
+        except SystemExit:
+            print(f"\nSELF-TEST OK: {label} — the baseline was refused.")
+
+    # M4, the wiring: main() must USE the verdict. The function is
+    # driven above; the CALL SITE is what makes the refusal real, and
+    # nothing else would notice its removal.
+    if "baseline_verdict(" not in inspect.getsource(main):
+        failures += 1
+        print("\nSELF-TEST FAILED: main() does not call baseline_verdict, so the "
+              "baseline guards are not wired in")
+    else:
+        print("\nSELF-TEST OK: main() calls baseline_verdict, so the baseline "
+              "guards are wired in.")
+
+    # M6: the three patterns are the harness's entire contact with Go's
+    # output. The `^` anchor is what stops a PASSING parent test whose
+    # subtest skipped from being counted as skipped.
+    sample = (
+        "=== RUN   TestAPIAlpha\n"
+        "--- PASS: TestAPIAlpha (0.00s)\n"
+        "=== RUN   TestAPIWithSubtests\n"
+        "=== RUN   TestAPIWithSubtests/alpha\n"
+        "    --- SKIP: TestAPIWithSubtests/alpha (0.00s)\n"
+        "--- PASS: TestAPIWithSubtests (0.00s)\n"
+        "=== RUN   TestAPIWithFailures\n"
+        "=== RUN   TestAPIWithFailures/beta\n"
+        "    --- FAIL: TestAPIWithFailures/beta (0.00s)\n"
+        "--- FAIL: TestAPIWithFailures (0.00s)\n"
+        "--- SKIP: TestAPISkipped (0.00s)\n"
+        "--- FAIL: TestAPIBroke (0.00s)\n"
+    )
+    regex_cases = (
+            ("the FAIL pattern", sorted(set(FAIL_RE.findall(sample))),
+             ["TestAPIBroke", "TestAPIWithFailures"]),
+            ("the PASS pattern", sorted(set(PASS_RE.findall(sample))),
+             ["TestAPIAlpha", "TestAPIWithSubtests"]),
+            ("the SKIP pattern", sorted(set(SKIP_RE.findall(sample))),
+             ["TestAPISkipped"]))
+    for label, got, want in regex_cases:
+        if got != want:
+            failures += 1
+            print(f"\nSELF-TEST FAILED: {label} read {got} from Go's output, "
+                  f"want {want}")
+        else:
+            print(f"\nSELF-TEST OK: {label} read {got} from Go's output.")
+
+    message_assertions = 0
+    isolates_assertions = 0
     for case in cases:
         name, results, want = case["name"], case["results"], case["want"]
         # The output is CAPTURED, because a published MESSAGE is part of
@@ -1207,7 +1305,13 @@ def selftest():
         # N8: the "more tests" direction says what is actually wrong.
         # The verdict is unchanged either way, so the case that pins it
         # is the one that produces that direction.
-        if "produced MORE tests than the baseline" in name:
+        #
+        # The dispatch is on the MODE, never on the name: a name is a
+        # label, and round six's N24 was exactly this defect — the
+        # round-seven fix reintroduced it, and the round-eight fix
+        # removes it again.
+        if case["mode"] == "more_tests":
+            message_assertions += 1
             if "NOT a run of this suite" not in buf.getvalue():
                 failures += 1
                 print("\nSELF-TEST FAILED: the more-tests direction does not say "
@@ -1215,6 +1319,17 @@ def selftest():
             else:
                 print("\nSELF-TEST OK: the more-tests direction says that the run "
                       "is not a run of this suite.")
+        # MUT-43: a case that isolates a target must refuse EXACTLY
+        # ONE control. A construction that leaked into the other
+        # controls would refuse thirteen bystanders too — and the
+        # VERDICT would be the same, so nothing else would notice.
+        if case.get("isolates"):
+            isolates_assertions += 1
+            refused = buf.getvalue().count("\nNO  ")
+            if refused != 1:
+                failures += 1
+                print(f"\nSELF-TEST FAILED: {name} refused {refused} control(s), "
+                      f"want 1 — the case must isolate the control it is about")
         verdict = "REFUSED" if not ok else "ACCEPTED"
         if ok != want:
             failures += 1
@@ -1222,6 +1337,28 @@ def selftest():
                   f"{'REFUSED' if not want else 'ACCEPTED'}")
         else:
             print(f"\nSELF-TEST OK: {name} — the gate {verdict} it.")
+
+    # MUT-30 and its sibling: an assertion that never runs cannot fail,
+    # so removing an assertion's dispatch would leave the self-test
+    # green. Both are therefore COUNTED, and the counts are required.
+    if isolates_assertions == 0:
+        failures += 1
+        print("\nSELF-TEST FAILED: the isolation assertion never ran, so no case "
+              "pins that a case isolates its own target")
+    else:
+        print(f"\nSELF-TEST OK: the isolation assertion ran "
+              f"{isolates_assertions} time(s).")
+
+    # MUT-30: the message assertion must RUN. An assertion that never
+    # runs cannot fail, so removing its dispatch would leave the
+    # self-test green.
+    if message_assertions == 0:
+        failures += 1
+        print("\nSELF-TEST FAILED: the published-message assertion never ran, so "
+              "no case pins the message")
+    else:
+        print(f"\nSELF-TEST OK: the published-message assertion ran "
+              f"{message_assertions} time(s).")
 
     # And the call WITHOUT a baseline at all is not even a measurement:
     # the parameter is required, so the call cannot be made.
@@ -1236,7 +1373,14 @@ def selftest():
     if failures:
         print(f"\nTHE SELF-TEST FAILED ({failures} case(s)).")
         return 1
-    print("\nTHE SELF-TEST PASSED: the gate can fail.")
+    # The COUNT is printed, so the published figure is the harness's
+    # own and not a count of output lines: the message assertion and
+    # the "no baseline at all" check are assertions WITHIN a case, and
+    # counting them as cases would overstate the number.
+    # Three baseline cases (a green one, a not-green one, a skipping
+    # one), the regex cases, and the wiring check.
+    total = len(cases) + 3 + len(regex_cases) + 1
+    print(f"\nTHE SELF-TEST PASSED: the gate can fail. {total} cases.")
     return 0
 
 
