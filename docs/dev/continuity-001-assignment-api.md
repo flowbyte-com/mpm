@@ -784,6 +784,39 @@ suite, the skipped test, the run that produced more tests than the
 baseline, the defence-in-depth control that aborted, the zero baseline, the
 empty corner, and the call with no baseline at all.
 
+### 5.8a The CLI's list-valued flags, found by the operator's own smoke test
+
+The final end-to-end smoke test — the operator's path, from `create-root`
+through the review, the handoff and the approval, against a disposable
+workspace — found a defect that no unit test had: **a repeated
+list-valued flag silently lost its earlier values.**
+
+Go's `flag` package overwrites a string flag's value on every `Set`, so
+the obvious way to write a root's permitted operations —
+
+    --permitted-operation deliver --permitted-operation acknowledge \
+    --permitted-operation accept …
+
+— silently kept only the **last** one. The root was created permitting a
+single operation, and the work order could not be delivered. The help
+page did not mention the flag at all, so the operator had no way to know
+the comma-separated form was the expected one.
+
+The failure was in the **safe direction** — a lost value narrows what the
+root permits and never widens it — but a silent narrowing is still a
+defect: the operator asked for six permitted operations and got one, with
+no error and no way to tell.
+
+So the list flags **accumulate**: the comma-separated form and the
+repeated form both work, and neither loses the other's values. The help
+page now names the three list-valued flags and both forms.
+
+The option registry's drift guard caught the change immediately, and
+correctly: it derives the option vocabulary from the source, and it read
+the name as the **first** argument of every registration — which is true
+of `fs.String` and false of `fs.Var`, where the value comes first. The
+guard's collector now knows the difference.
+
 ### 5.8 What the sixth review found
 
 The sixth round confirmed that **every** one of the fifth round's findings

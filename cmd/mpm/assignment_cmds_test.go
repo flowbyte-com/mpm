@@ -75,6 +75,142 @@ func assignmentCLIFixture(t *testing.T) *internal.DatabaseManager {
 	return dm
 }
 
+// TestAssignmentCLITheListFlagsAccumulate proves that a REPEATED
+// list-valued flag does not lose values.
+//
+// Go's flag package overwrites a string flag's value on every Set, so
+// the obvious way to write six permitted operations —
+// `--permitted-operation deliver --permitted-operation accept ...` —
+// silently kept only the LAST one. The root was then created with a
+// permitted set of one, and the work order could not be delivered.
+//
+// The failure was in the safe direction (a lost value narrows what the
+// root permits and never widens it), but a silent narrowing is still a
+// defect: the operator asked for six and got one.
+//
+// So the flag accumulates, and both the comma-separated form and the
+// repeated form work — and neither loses the other's values.
+func TestAssignmentCLITheListFlagsAccumulate(t *testing.T) {
+	dm := assignmentCLIFixture(t)
+	_ = dm
+
+	// The REPEATED form.
+	code, out, errOut := runAssignmentCLI(t,
+		"assignment", "create-root",
+		"--title", "the repeated form",
+		"--objective", "six permitted operations",
+		"--actor", "operator",
+		"--actor-kind", "operator",
+		"--project-id", "cpj-cli",
+		"--idempotency-key", "cli-list-repeated",
+		"--recipient", "worker-a",
+		"--eligible-recipient", "worker-a",
+		"--eligible-recipient", "worker-b",
+		"--permitted-operation", "deliver",
+		"--permitted-operation", "acknowledge",
+		"--permitted-operation", "accept",
+		"--permitted-operation", "claim",
+		"--permitted-operation", "start",
+		"--permitted-operation", "complete",
+		"--max-depth", "2",
+		"--max-tasks", "4",
+		"--max-concurrency", "2",
+		"--max-resource-units", "10",
+		"--json")
+	if code != 0 {
+		t.Fatalf("create-root: exit %d\n%s\n%s", code, out, errOut)
+	}
+
+	var state assignmentCLIState
+	if err := json.Unmarshal([]byte(out), &state); err != nil {
+		t.Fatalf("the output is not JSON: %v\n%s", err, out)
+	}
+	if state.ID == "" {
+		t.Fatalf("the root has no id: %s", out)
+	}
+
+	_, show, _ := runAssignmentCLI(t, "assignment", "show", "--id", state.ID, "--json")
+	var shown struct {
+		PermittedOperations []string `json:"permitted_operations"`
+		EligibleRecipients  []string `json:"eligible_recipients"`
+	}
+	if err := json.Unmarshal([]byte(show), &shown); err != nil {
+		t.Fatalf("the show output is not JSON: %v\n%s", err, show)
+	}
+	wantPermitted := []string{"deliver", "acknowledge", "accept", "claim", "start", "complete"}
+	if len(shown.PermittedOperations) != len(wantPermitted) {
+		t.Fatalf("the repeated form kept %d permitted operation(s) (%v), want %d (%v) — "+
+			"a repeated flag silently lost values",
+			len(shown.PermittedOperations), shown.PermittedOperations,
+			len(wantPermitted), wantPermitted)
+	}
+	for i, want := range wantPermitted {
+		if shown.PermittedOperations[i] != want {
+			t.Errorf("permitted operation %d is %q, want %q (the whole list: %v)",
+				i, shown.PermittedOperations[i], want, shown.PermittedOperations)
+		}
+	}
+	if len(shown.EligibleRecipients) != 2 {
+		t.Errorf("the repeated form kept %d eligible recipient(s) (%v), want 2",
+			len(shown.EligibleRecipients), shown.EligibleRecipients)
+	}
+
+	// The COMMA-SEPARATED form, and the two forms together: neither
+	// loses the other's values.
+	code, out, errOut = runAssignmentCLI(t,
+		"assignment", "create-root",
+		"--title", "the mixed form",
+		"--objective", "a comma-separated list and a repeated flag",
+		"--actor", "operator",
+		"--actor-kind", "operator",
+		"--project-id", "cpj-cli",
+		"--idempotency-key", "cli-list-mixed",
+		"--recipient", "worker-a",
+		"--eligible-recipient", "worker-a,worker-b",
+		"--eligible-recipient", "worker-c",
+		"--permitted-operation", "deliver,acknowledge",
+		"--permitted-operation", "accept",
+		"--max-depth", "2",
+		"--max-tasks", "4",
+		"--max-concurrency", "2",
+		"--max-resource-units", "10",
+		"--json")
+	if code != 0 {
+		t.Fatalf("create-root (mixed): exit %d\n%s\n%s", code, out, errOut)
+	}
+	var mixed struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &mixed); err != nil {
+		t.Fatalf("the output is not JSON: %v\n%s", err, out)
+	}
+	_, show, _ = runAssignmentCLI(t, "assignment", "show", "--id", mixed.ID, "--json")
+	if err := json.Unmarshal([]byte(show), &shown); err != nil {
+		t.Fatalf("the show output is not JSON: %v\n%s", err, show)
+	}
+	wantMixed := []string{"deliver", "acknowledge", "accept"}
+	if len(shown.PermittedOperations) != len(wantMixed) {
+		t.Fatalf("the mixed form kept %v, want %v — one form lost the other's values",
+			shown.PermittedOperations, wantMixed)
+	}
+	for i, want := range wantMixed {
+		if shown.PermittedOperations[i] != want {
+			t.Errorf("permitted operation %d is %q, want %q (the whole list: %v)",
+				i, shown.PermittedOperations[i], want, shown.PermittedOperations)
+		}
+	}
+	wantRecipients := []string{"worker-a", "worker-b", "worker-c"}
+	if len(shown.EligibleRecipients) != len(wantRecipients) {
+		t.Fatalf("the mixed form kept %v, want %v", shown.EligibleRecipients, wantRecipients)
+	}
+	for i, want := range wantRecipients {
+		if shown.EligibleRecipients[i] != want {
+			t.Errorf("eligible recipient %d is %q, want %q (the whole list: %v)",
+				i, shown.EligibleRecipients[i], want, shown.EligibleRecipients)
+		}
+	}
+}
+
 // TestAssignmentCLITheOperatorCanCreateARoot proves the operator's own
 // front door creates a root, end to end through the router.
 func TestAssignmentCLITheOperatorCanCreateARoot(t *testing.T) {

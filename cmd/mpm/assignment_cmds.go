@@ -194,6 +194,31 @@ func assignmentSplitList(raw string) []string {
 	return out
 }
 
+// assignmentListFlag is a list-valued flag that ACCUMULATES.
+//
+// Go's flag package overwrites a string flag's value on every Set, so
+// `--permitted-operation deliver --permitted-operation accept` would
+// silently keep only `accept` — and `permitted-operation` is the flag
+// that says what the root permits. The comma-separated form is the
+// CLI's convention and is what the help names, but a REPEATED flag
+// must not lose values either.
+//
+// The failure was in the safe direction — a lost value narrows what
+// the root permits and never widens it — but a silent narrowing is
+// still a defect: the operator asked for six permitted operations and
+// got one, and the work order cannot be delivered.
+//
+// So the flag accumulates: the comma-separated form and the repeated
+// form both work, and neither loses the other's values.
+type assignmentListFlag struct{ values []string }
+
+func (f *assignmentListFlag) String() string { return strings.Join(f.values, ",") }
+
+func (f *assignmentListFlag) Set(raw string) error {
+	f.values = append(f.values, assignmentSplitList(raw)...)
+	return nil
+}
+
 // assignmentParseFlags parses the flags of one verb.
 //
 // Every verb accepts every flag and IGNORES the ones that do not apply
@@ -232,8 +257,12 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 	owner := fs.String("owner", "", "the holder of the lease")
 	leaseSeconds := fs.Int64("lease-seconds", 0, "the length of the lease")
 	idempotencyKey := fs.String("idempotency-key", "", "the key that identifies the logical assignment")
-	permitted := fs.String("permitted-operation", "", "the operations the root permits (comma-separated)")
-	eligible := fs.String("eligible-recipient", "", "the recipients the root allows (comma-separated)")
+	permitted := &assignmentListFlag{}
+	fs.Var(permitted, "permitted-operation",
+		"the operations the root permits (comma-separated, or repeated)")
+	eligible := &assignmentListFlag{}
+	fs.Var(eligible, "eligible-recipient",
+		"the recipients the root allows (comma-separated, or repeated)")
 	maxDepth := fs.Int64("max-depth", 0, "the root's depth budget")
 	maxTasks := fs.Int64("max-tasks", 0, "the root's task budget")
 	maxConcurrency := fs.Int64("max-concurrency", 0, "the root's concurrency budget")
@@ -246,7 +275,9 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 	reviewedSHA := fs.String("reviewed-sha", "", "the revision that was reviewed")
 	findingsSHA256 := fs.String("findings-sha256", "", "the digest of the review's findings")
 	evidenceRef := fs.String("evidence-ref", "", "a pointer to the evidence")
-	states := fs.String("state", "", "the states to filter the inbox by (comma-separated)")
+	states := &assignmentListFlag{}
+	fs.Var(states, "state",
+		"the states to filter the inbox by (comma-separated, or repeated)")
 	limit := fs.Int("limit", 0, "the row limit")
 	action := fs.String("action", "", "the action that was authorised")
 	revision := fs.String("revision", "", "the revision the authorisation names")
@@ -277,8 +308,8 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 		owner:            *owner,
 		leaseSeconds:     *leaseSeconds,
 		idempotencyKey:   *idempotencyKey,
-		permitted:        assignmentSplitList(*permitted),
-		eligible:         assignmentSplitList(*eligible),
+		permitted:        permitted.values,
+		eligible:         eligible.values,
 		maxDepth:         *maxDepth,
 		maxTasks:         *maxTasks,
 		maxConcurrency:   *maxConcurrency,
@@ -291,7 +322,7 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 		reviewedSHA:      *reviewedSHA,
 		findingsSHA256:   *findingsSHA256,
 		evidenceRef:      *evidenceRef,
-		states:           assignmentSplitList(*states),
+		states:           states.values,
 		limit:            *limit,
 		action:           *action,
 		revision:         *revision,
@@ -687,6 +718,11 @@ OPERATOR ONLY
 Common flags:
   --id, --root-id, --parent-id, --project-id, --recipient, --actor
   --epoch, --owner, --lease-seconds, --note, --json
+
+List-valued flags:
+  --permitted-operation, --eligible-recipient, --state
+  These accept a COMMA-SEPARATED list or the flag REPEATED, and both
+  forms accumulate: no value is lost either way.
 
 The operator-only verbs are not reachable from ` + "`mpm call`" + ` or from any
 MCP tool: they are absent from the tool registry, not hidden behind a

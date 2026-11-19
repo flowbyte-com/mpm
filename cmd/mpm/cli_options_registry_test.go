@@ -129,11 +129,27 @@ func collectOptionVocabulary(f *ast.File, vocab sourceOptionVocabulary) {
 // flagRegistrationMethods are the FlagSet methods that register an
 // option under a name.
 //
-// The name is always the FIRST argument, as a string literal.
+// The name is the FIRST argument, as a string literal — EXCEPT for the
+// `Var` family, where the first argument is the value and the name is
+// the second.
 var flagRegistrationMethods = map[string]bool{
 	"String": true, "Bool": true, "Int": true, "Int64": true,
 	"Float64": true, "Uint": true, "Uint64": true, "Duration": true,
 	"Var": true, "VarX": true, "TextVar": true,
+}
+
+// flagRegistrationNameIndex is the argument position of the option's
+// NAME for each registration method.
+//
+// `fs.String("json", ...)` names the option first. `fs.Var(&v, "json",
+// ...)` names the VALUE first, because `Var` takes an already-built
+// value — so its name is the second argument.
+//
+// Getting this wrong makes the drift guard report a phantom: the
+// registry names an option that the source does not declare, and the
+// guard refuses the tree for a flag that is really there.
+var flagRegistrationNameIndex = map[string]int{
+	"Var": 1, "VarX": 1, "TextVar": 1,
 }
 
 // collectFlagRegistration reads one FlagSet registration call.
@@ -154,7 +170,14 @@ func collectFlagRegistration(call *ast.CallExpr, vocab sourceOptionVocabulary) {
 	if len(call.Args) == 0 {
 		return
 	}
-	name, ok := stringLiteral(call.Args[0])
+	idx := 0
+	if i, ok := flagRegistrationNameIndex[sel.Sel.Name]; ok {
+		idx = i
+	}
+	if len(call.Args) <= idx {
+		return
+	}
+	name, ok := stringLiteral(call.Args[idx])
 	if !ok {
 		return
 	}
