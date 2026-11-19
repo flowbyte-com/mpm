@@ -56,6 +56,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections import namedtuple
 import tempfile
 from pathlib import Path
 
@@ -134,7 +135,16 @@ BROKEN_SUITE_FRACTION = 3
 
 
 def run_tests():
-    """Run the acceptance suite and return the tests that fail, and how many ran."""
+    """Run the acceptance suite and report what it did.
+
+    The return value is (failed, detail, passed, skipped).
+
+    The SKIPPED count matters. A skipped test did not run: it neither
+    passed nor failed, so counting only PASS-or-FAIL makes a skip
+    invisible to both sides of the bound — and a control whose mutation
+    made a test skip has stopped the suite from saying anything about
+    the invariant.
+    """
     env = dict(os.environ)
     env["CGO_CFLAGS"] = "-DSQLITE_ENABLE_FTS5=1"
     env["CGO_LDFLAGS"] = "-lm"
@@ -145,13 +155,14 @@ def run_tests():
             cwd=CORE, capture_output=True, text=True, env=env, timeout=3600,
         )
     except subprocess.TimeoutExpired:
-        return ["<TIMEOUT>"], [], 0
+        return ["<TIMEOUT>"], [], 0, 0
     failed = sorted(set(re.findall(r"^--- FAIL: (\w+)", p.stdout, re.M)))
     passed = len(set(re.findall(r"^--- PASS: (\w+)", p.stdout, re.M)))
+    skipped = len(set(re.findall(r"^--- SKIP: (\w+)", p.stdout, re.M)))
     if p.returncode != 0 and not failed:
         err = (p.stdout + p.stderr).strip().splitlines()
-        return ["<BUILD FAILED>"], err[-3:], passed
-    return failed, [], passed
+        return ["<BUILD FAILED>"], err[-3:], passed, skipped
+    return failed, [], passed, skipped
 
 
 def replace_text(rel, old, new, what):
@@ -707,6 +718,14 @@ CONTROLS = [
 ]
 
 
+# Result is one control's measurement. It is a named tuple because the
+# fields have to travel together and a bare tuple is easy to mis-read.
+#
+#   total    the number of tests the control's run produced
+#   skipped  the number of those that did not run at all
+Result = namedtuple("Result", "control hit specific inconclusive total skipped")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--only", help="run one control by name")
@@ -717,6 +736,7 @@ def main():
     snapshot()
     results = []
     baseline = 0
+    baseline_skipped = 0
     try:
         # THE BASELINE. The suite must be green before any control runs,
         # and the number of tests it runs is the DENOMINATOR of the
@@ -731,14 +751,16 @@ def main():
         # aborted, and its measurement is inconclusive.
         restore()
         print("\n=== the baseline ===")
-        base_failed, base_detail, base_passed = run_tests()
+        base_failed, base_detail, base_passed, base_skipped = run_tests()
         if base_failed:
             print(f"THE SUITE IS NOT GREEN BEFORE THE CONTROLS RUN: {base_failed}")
             if base_detail:
                 print(f"    {base_detail}")
             return 1
-        baseline = len(base_failed) + base_passed
-        print(f"the suite runs {baseline} tests and is green")
+        baseline = len(base_failed) + base_passed + base_skipped
+        baseline_skipped = base_skipped
+        print(f"the suite runs {baseline} tests and is green "
+              f"({base_skipped} of them skipped)")
 
         for control in CONTROLS:
             name = control["name"]
@@ -747,11 +769,16 @@ def main():
             restore()
             print(f"\n=== {name}: {control['invariant']} ===")
             control["mutate"]()
-            failed, detail, passed = run_tests()
+            failed, detail, passed, skipped = run_tests()
             inconclusive = [f for f in failed if f in INCONCLUSIVE]
             specific = [f for f in failed if f not in INCONCLUSIVE]
             hit = [t for t in control["expect"] if t in specific]
-            total = len(specific) + passed
+            # The total counts every test the run PRODUCED — the ones
+            # that passed, the ones that failed, and the ones that
+            # skipped. A skip counts towards the total because the
+            # test was selected and did not run, which is what the
+            # comparison against the baseline is watching for.
+            total = len(specific) + passed + skipped
             print(f"    failing tests: {specific or '(none)'}")
             if detail:
                 print(f"    detail: {detail}")
@@ -759,16 +786,17 @@ def main():
                 print(f"    NOT LOAD-BEARING: {control['expect']} did not fail")
             if not control["load_bearing"] and specific:
                 print(f"    UNEXPECTED: {specific} failed, but this control removes only one half")
-            results.append((control, hit, specific, inconclusive, total))
+            results.append(Result(control, hit, specific, inconclusive,
+                                  total, skipped))
     finally:
         restore()
         print("\nthe tree is restored")
 
-    ok = summarise(results, baseline)
+    ok = summarise(results, baseline, baseline_skipped)
     return 0 if ok else 1
 
 
-def summarise(results, baseline=0):
+def summarise(results, baseline, baseline_skipped=0):
     """Print the summary and return whether the measurement holds.
 
     `baseline` is the number of tests the suite runs when nothing is
@@ -777,34 +805,58 @@ def summarise(results, baseline=0):
     than the baseline did not measure an invariant, it stopped the
     suite.
 
+    IT IS REQUIRED. An earlier version defaulted it to 0, which
+    silently restored the very bound the baseline was introduced to
+    fix — a caller that forgot the baseline got the vulnerable
+    measurement and a green exit code. A missing baseline now fails
+    CLOSED: no denominator, no measurement.
+
     The RETURN VALUE is the gate. It can fail, and it does.
     """
     print("\n=== the summary ===")
+    if not baseline or baseline <= 0:
+        print("THE HARNESS FAILED: there is no baseline, so the bound has no "
+              "denominator. A measurement without a baseline is not a "
+              "measurement, and it is refused rather than assumed.")
+        return False
     load_bearing_passed = 0
     load_bearing_total = 0
     redundant_total = 0
     redundant_clean = 0
-    for control, hit, specific, inconclusive, total in results:
+    for result in results:
+        control, hit, specific, inconclusive = (
+            result.control, result.hit, result.specific, result.inconclusive)
+        total, skipped = result.total, result.skipped
         if control["load_bearing"]:
             load_bearing_total += 1
             named = len(hit) == len(control["expect"])
-            # The BOUND. A mutation that broke more than a third of the
-            # suite did not remove one invariant — it broke the build,
-            # and the named test may have failed for that reason
+            # THE BOUND. A mutation that broke more than a third of the
+            # BASELINE did not remove one invariant — it broke the
+            # build, and the named test may have failed for that reason
             # instead. Such a control is INCONCLUSIVE, and an
             # inconclusive control does not count as load-bearing.
-            denominator = baseline or total
-            broke_suite = (total < denominator or
+            #
+            # The comparison is TWO-SIDED. A run that produced FEWER
+            # tests than the baseline ABORTED the suite; a run that
+            # produced MORE is not a run of this suite, and neither
+            # reads as a measurement.
+            denominator = baseline
+            broke_suite = (total != denominator or
+                           skipped > baseline_skipped or
                            len(specific) * BROKEN_SUITE_FRACTION > denominator)
             if broke_suite:
-                if total < denominator:
+                if total != denominator:
                     print(f"     INCONCLUSIVE: the run produced {total} tests and the "
                           f"baseline runs {denominator} — the mutation ABORTED the "
                           f"suite, so the named test may have failed for that reason "
                           f"instead")
+                elif skipped > baseline_skipped:
+                    print(f"     INCONCLUSIVE: the run skipped {skipped} tests and the "
+                          f"baseline skipped {baseline_skipped} — a test that does not "
+                          f"run says nothing about the invariant")
                 else:
                     print(f"     INCONCLUSIVE: the mutation broke {len(specific)} of "
-                          f"the suite's {denominator} tests — that is a broken build, "
+                          f"the baseline's {denominator} tests — that is a broken build, "
                           f"not a removed invariant")
             # The gate asks a second question: did the mutation break
             # anything the control did not DECLARE it would break? A
@@ -836,14 +888,23 @@ def summarise(results, baseline=0):
             # A defence-in-depth control removes ONE half of an
             # enforcement, so the suite must be UNCHANGED. An
             # unexpected failure means the mutation broke more than
-            # it claimed — a broken measurement, not a pass.
-            clean = not specific
+            # it claimed — a broken measurement, not a pass. A run that
+            # produced a different number of tests, or skipped more,
+            # is a broken measurement for the same reason.
+            clean = (not specific and total == baseline
+                     and skipped <= baseline_skipped)
             if clean:
                 redundant_clean += 1
             print(f"{'OK ' if clean else 'NO '} {control['name']:22s} {control['invariant']}")
             print(f"     (redundant: {control['why']})")
             if not clean:
-                print(f"     UNEXPECTED failures: {specific}")
+                if specific:
+                    print(f"     UNEXPECTED failures: {specific}")
+                else:
+                    print(f"     INCONCLUSIVE: the run produced {total} tests against "
+                          f"a baseline of {baseline} ({skipped} skipped against "
+                          f"{baseline_skipped}) — the suite must be UNCHANGED by this "
+                          f"control")
     print(f"\n{load_bearing_passed}/{load_bearing_total} controls are load-bearing; "
           f"{redundant_total} measure the defence in depth")
     ok = (load_bearing_passed == load_bearing_total
@@ -859,7 +920,8 @@ SUITE_SIZE = 36
 
 
 def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
-                       undeclared=False, broken_suite=False, aborted=False):
+                       undeclared=False, broken_suite=False, aborted=False,
+                       skipped=False):
     """Build the results a run would produce, for the self-test.
 
     `broken_load_bearing` names a load-bearing control whose named test
@@ -893,6 +955,13 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
                 control = dict(control)
                 control["breaks"] = list(control.get("breaks", [])) + broken
             total = SUITE_SIZE
+            run_skipped = 0
+            if skipped and control["name"] == first_lb:
+                # The mutation made a test SKIP. A skipped test did not
+                # run: it neither passed nor failed, so it says
+                # nothing about the invariant — and the baseline did
+                # not skip.
+                run_skipped = 1
             if aborted and control["name"] == first_lb:
                 # The mutation PANICKED, and the test binary died: the
                 # run produced three tests and the other thirty-three
@@ -900,12 +969,12 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
                 # still refuse it.
                 specific = list(hit)
                 total = 3
-            results.append((control, hit, specific, [], total))
+            results.append(Result(control, hit, specific, [], total, run_skipped))
         else:
             specific = []
             if control["name"] == broken_redundant:
                 specific = ["TestTheSuiteBroke"]
-            results.append((control, [], specific, [], SUITE_SIZE))
+            results.append(Result(control, [], specific, [], SUITE_SIZE, 0))
     return results
 
 
@@ -936,11 +1005,25 @@ def selftest():
          _synthetic_results(broken_suite=True), False),
         (f"the load-bearing control {first_lb} aborted the suite",
          _synthetic_results(aborted=True), False),
+        (f"the load-bearing control {first_lb} made a test skip",
+         _synthetic_results(skipped=True), False),
     ]
+
+    # N15: the baseline is REQUIRED. A caller that omits it, or that
+    # passes a zero, gets a refusal rather than the vulnerable
+    # measurement the old default produced.
+    cases.append((
+        "the baseline is zero",
+        _synthetic_results(),
+        False,
+    ))
 
     failures = 0
     for name, results, want in cases:
-        ok = summarise(results, SUITE_SIZE)
+        if name == "the baseline is zero":
+            ok = summarise(results, 0, 0)
+        else:
+            ok = summarise(results, SUITE_SIZE, 0)
         verdict = "REFUSED" if not ok else "ACCEPTED"
         if ok != want:
             failures += 1
@@ -948,6 +1031,17 @@ def selftest():
                   f"{'REFUSED' if not want else 'ACCEPTED'}")
         else:
             print(f"\nSELF-TEST OK: {name} — the gate {verdict} it.")
+
+    # And the call WITHOUT a baseline at all is not even a measurement:
+    # the parameter is required, so the call cannot be made.
+    try:
+        summarise(_synthetic_results())
+        failures += 1
+        print("\nSELF-TEST FAILED: the gate accepted a call with no baseline at all")
+    except TypeError:
+        print("\nSELF-TEST OK: the gate refused a call with no baseline at all "
+              "— the parameter is required, so the measurement cannot be made "
+              "without one")
     if failures:
         print(f"\nTHE SELF-TEST FAILED ({failures} case(s)).")
         return 1

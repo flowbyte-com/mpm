@@ -564,12 +564,13 @@ in depth.**
    mutation that removed the invariant *and* broke the statement would fail
    the named test for the wrong reason and take the rest of the suite with
    it, and that must not read as a pass. So each control declares the extra
-   tests its removal breaks — `fence` breaks the renewal test, because a
-   renewal that did not advance the epoch would not fence the old holder
-   out; `state-machine` breaks the four tests that depend on a transition
-   being refused, because the path *is* the state machine — and a failure
-   outside the declaration refuses the control.
-3. The control must not have broken **more than a third of the suite**. A
+   tests its removal breaks — `fence` breaks the renewal test, whose LAST
+   step is a `Start` presenting the **pre-renewal** epoch, which the
+   transition's fence is what refuses; `state-machine` breaks the four
+   tests that depend on a transition being refused, because the path *is*
+   the state machine — and a failure outside the declaration refuses the
+   control.
+3. The control must not have broken **more than a third of the baseline**. A
    mutation that took the suite with it did not remove an invariant, it
    broke the build, and the named test may have failed for that reason
    instead. Such a control is **inconclusive**, and an inconclusive control
@@ -586,6 +587,20 @@ aborted, and is inconclusive for that reason too.
 
 The boundary case is stated rather than left implicit: **exactly** a third
 is accepted, and more than a third is refused.
+
+The comparison is **two-sided**: a run that produced FEWER tests than the
+baseline aborted the suite, and a run that produced MORE is not a run of
+this suite — neither reads as a measurement. The **skips** are watched on
+both sides too, because a skipped test did not run: it neither passed nor
+failed, so counting only PASS-or-FAIL would make a skip invisible to both
+sides of the bound. A control whose run skipped where the baseline did not
+is inconclusive.
+
+And the baseline is **required**: an earlier version defaulted it to zero,
+which silently restored the very bound the baseline was introduced to fix,
+so a caller that forgot it got the vulnerable measurement and a green exit
+code. A missing baseline now fails **closed** — no denominator, no
+measurement.
 
 The third question is what stops the declaration from becoming an escape
 hatch: however broad a control's `breaks` list is, a mutation that broke
@@ -735,6 +750,30 @@ and four nits, and all five are fixed here.
 | the new pinning test ended with `_ = seen` | it passed vacuously if every declaration was removed | it now fails when there are none, like its sibling |
 | two INCONCLUSIVE names were dead | they name tests in another package, which the `-run TestAPI` selection never runs | removed — a dead entry in an exclusion list reads as "this failure is tolerated" for something that can never happen |
 | the stated reason for the `fence` exemption was **wrong** | the renewal DOES advance the epoch — `Renew` has its own compare-and-swap in `claim.go`, which the control does not touch. What breaks is the renewal test's **last** step: a `Start` presenting the pre-renewal epoch, which the transition's fence refuses | the harness's comment, the note's table and the SPEC now say what actually happens |
+
+### 5.7 What the fifth review found
+
+The fifth round confirmed that M15 was genuinely fixed — it **proved** the
+baseline is taken on an unmutated tree by digesting the tree on every call
+to `run_tests()` and comparing the first call against the pristine digest,
+showed that a non-green baseline refuses to measure and restores the tree
+without running a single control, and drove the abort, the timeout and the
+"exactly a third" boundary itself. It found one more defect and four nits,
+and all five are fixed here.
+
+| the finding | what it was | the fix |
+|---|---|---|
+| the note contradicted itself about the `fence` exemption | round four fixed the harness's comment and the note's **table**, but the note's **item 2** still carried the old reason — 34 lines away, saying the opposite | the note's item 2 now says what actually breaks: the renewal test's **last** step, a `Start` presenting the pre-renewal epoch |
+| the baseline was **opt-out-able** | `summarise(results, baseline=0)` silently restored the very bound the baseline was introduced to fix: the reviewer drove the abort with the default and it was **ACCEPTED** | the parameter is **required**, and a zero baseline **fails closed** — no denominator, no measurement. The self-test covers both the zero and the omitted call |
+| the bound was one-sided | a run with **more** tests than the baseline was never questioned — unreachable, but unstated | the comparison is **two-sided**: a run that produced a different number of tests than the baseline is inconclusive |
+| a skip was invisible to both sides | both counts were PASS-or-FAIL only, so a test that skipped — which did not run, and so neither passed nor failed — was invisible | the skips are tracked on **both** sides, and a control whose run skipped where the baseline did not is inconclusive |
+| the note said "a third of the **suite**" where the SPEC said "of the **baseline**" | and the claim that the boundary was stated in the SPEC was false — "exactly a third" occurred **zero** times in `docs/SPEC.md` | both documents name the same denominator, and the SPEC now states the boundary case |
+
+The self-test grew to **nine** cases: the published measurement, the
+control that stopped detecting, the defence-in-depth control that broke the
+suite, the undeclared failure, the whole suite taken along, the aborted
+suite, the skipped test, the zero baseline, and the call with no baseline
+at all.
 
 **THE CLAUDE CODE DRILL WAS FLAKY.** The full gate turned up one failure
 that had nothing to do with this PR: the Claude Code end-to-end drill
