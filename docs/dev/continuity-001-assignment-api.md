@@ -1046,7 +1046,9 @@ says so by name.
 
 **THE COUNT IS SEVENTY-FOUR CHECKS**, published in two places that check
 each other: the harness's own literal, and the Go test that compares the
-harness's *printed* count against the same figure. The three checks that
+harness's *printed* count against the same figure.
+
+**THE MATRICES ARE THIRTY-THREE AND FOUR ENTRIES** (§5.17). The three checks that
 are not predicate calls — the baseline verdict, the three output
 patterns and the call with no baseline at all — are counted in the same
 figure, so a case added without the published figure being updated fails
@@ -1153,6 +1155,53 @@ two-edit mutation that removes a mechanism *and* the check that watches
 it is outside them. And the matrices enumerate the mechanisms they
 name — a constant or a pin that nothing checks is outside them, which
 is exactly what the twelfth round found and fixed.
+
+### 5.17 What the thirteenth review found: a question that asked nothing
+
+The thirteenth review asked a question no earlier round had asked: **is
+the gate's claim about itself correct?** — not whether the mechanisms
+are pinned, but whether the gate's three questions can be made to ask
+nothing.
+
+And one of them could. The gate's **first** question is "did the NAMED
+test fail?", and it was written as:
+
+    named = len(hit) == len(control["expect"])
+
+A control that names **no** test makes that `0 == 0`, which is **True**.
+So the question asks nothing about a control that names nothing — and
+**13 of the 14 load-bearing controls could have their `expect` list
+emptied by one edit**, with nothing in the tree catching it: not the
+self-test, not the gate mode, not either matrix, not the suite-size
+test.
+
+**THE DIRECTION IS THE WHOLE POINT.** A control whose `expect` was
+emptied and whose removal broke **nothing** would be **ACCEPTED**: the
+gate would report it as load-bearing when it detected nothing. That is
+the dangerous direction — the gate certifying a control that certified
+nothing.
+
+The fix has three parts, and each is a mechanism:
+
+| the part | what it does |
+|---|---|
+| the `named` clause now requires the control to **declare** a test | `named = (len(control["expect"]) > 0 and len(hit) == len(control["expect"]))` — a control that names nothing is never load-bearing, so the question can never be vacuous |
+| the self-test's "the removal detected **nothing**" case now covers **every** control | the shape is what the question exists for, and a clause exercised against one control says nothing about the other thirteen. And a **new** case covers a control that names **no test at all** — the shape that made the clause vacuous |
+| a Go test pins that every load-bearing control **names a test** | that is the structural statement the gate now relies on, and it is checked from outside |
+
+**THE MATRICES ARE NOW THIRTY-THREE AND FOUR ENTRIES**, and every one of
+them is caught — including the new entry that removes the non-vacuity
+guard.
+
+**WHAT THE MATRICES STILL DO NOT SAY.** Three things, stated rather than
+claimed away. The `^` anchor on the **FAIL** pattern is not a behaviour
+change — Go reports a parent whose subtest failed as `--- FAIL:` on a
+top-level line, so the parent's name is in the set either way. The
+matrices cover **single-edit** mutations only: a two-edit mutation that
+removes a mechanism *and* the check that watches it is outside them.
+And they enumerate the mechanisms they name — a constant, a pin, or a
+**question** that nothing checks is outside them, which is exactly what
+the twelfth and thirteenth rounds found and fixed.
 
 ## 6. What PR 2 leaves to PRs 3–5
 

@@ -396,8 +396,18 @@ var harnessMutations = []struct {
 }{
 	{
 		"the gate's first question (the named test must fail)",
-		`named = len(hit) == len(control["expect"])`,
+		`named = (len(control["expect"]) > 0
+                     and len(hit) == len(control["expect"]))`,
 		`named = True`,
+	},
+	{
+		// The first question must not be VACUOUS: a control that
+		// names no test asks nothing, so a control whose removal
+		// detected nothing would be reported as load-bearing.
+		"the gate's first question loses its non-vacuity guard",
+		`            named = (len(control["expect"]) > 0
+                     and len(hit) == len(control["expect"]))`,
+		`            named = (len(hit) == len(control["expect"]))`,
 	},
 	{
 		"the one-third bound",
@@ -835,6 +845,52 @@ func harnessConstant(t *testing.T, harness, name string) int {
 		t.Fatalf("read the harness's %s: %v", name, err)
 	}
 	return n
+}
+
+// TestControls_EveryLoadBearingControlNamesATest pins the structural
+// statement the gate's first question now relies on.
+//
+// The gate asks "did the NAMED test fail?" — and a control that names
+// no test asks nothing: `len(hit) == len(expect)` is `0 == 0`, which
+// is True. So a control whose removal detected NOTHING would be
+// reported as load-bearing. The gate now refuses a control that names
+// no test, and this pins that every load-bearing control DOES name
+// one — which is what makes the refusal unreachable in practice.
+func TestControls_EveryLoadBearingControlNamesATest(t *testing.T) {
+	root := repoRoot(t)
+	b, err := os.ReadFile(filepath.Join(root, controlsScript))
+	if err != nil {
+		t.Fatalf("read the control harness: %v", err)
+	}
+	// Each control is a flat `{...}` block: a name, an invariant, an
+	// expect list, a load_bearing flag and a breaks list. None of them
+	// contains a nested brace, so the block is bounded by them.
+	blockRe := regexp.MustCompile(`(?s)\{[^{}]*\}`)
+	nameRe := regexp.MustCompile(`"name":\s*"([^"]+)"`)
+	expectRe := regexp.MustCompile(`"expect":\s*\[([^\]]*)\]`)
+	loadBearingRe := regexp.MustCompile(`"load_bearing":\s*True`)
+	seen := 0
+	for _, match := range blockRe.FindAllString(string(b), -1) {
+		if !loadBearingRe.MatchString(match) {
+			continue
+		}
+		name := nameRe.FindStringSubmatch(match)
+		expect := expectRe.FindStringSubmatch(match)
+		if name == nil || expect == nil {
+			continue
+		}
+		seen++
+		if strings.TrimSpace(expect[1]) == "" {
+			t.Errorf("the load-bearing control %q names NO test, so the "+
+				"gate's first question asks nothing about it — a control "+
+				"whose removal detected nothing would be reported as "+
+				"load-bearing", name[1])
+		}
+	}
+	if seen == 0 {
+		t.Fatal("the harness declares no load-bearing controls at all, so " +
+			"this pin no longer tests what it claims")
+	}
 }
 
 // TestControls_TheHarnessCountsItsOwnCases pins that the harness's

@@ -906,7 +906,14 @@ def summarise(results, baseline, baseline_skipped=()):
         total, skipped = result.total, result.skipped
         if control["load_bearing"]:
             load_bearing_total += 1
-            named = len(hit) == len(control["expect"])
+            # The first question must not be VACUOUS. A control that
+            # names NO test asks nothing: `len(hit) == len(expect)` is
+            # `0 == 0`, which is True, so a control whose removal
+            # detected NOTHING would be reported as load-bearing. So
+            # the clause requires the control to DECLARE a test, and a
+            # control that names nothing is never load-bearing.
+            named = (len(control["expect"]) > 0
+                     and len(hit) == len(control["expect"]))
             # THE BOUND. A mutation that broke more than a third of the
             # BASELINE did not remove one invariant — it broke the
             # build, and the named test may have failed for that reason
@@ -1018,7 +1025,7 @@ BOUND_ONE_PAST_THE_LINE = 13
 def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
                        undeclared=False, broken_suite=False, aborted=False,
                        skipped=False, more_tests=False, redundant_aborted=False,
-                       at_the_bound=None,
+                       at_the_bound=None, emptied_expect=False,
                        detected_nothing=False, redundant_skipped=False,
                        swapped_skip=False, redundant_swapped_skip=False,
                        baseline_skips=None):
@@ -1087,12 +1094,30 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
             # control is refused for the same reason and the case
             # proves nothing about the one under test.
             run_skipped = list(baseline_skips)
-            if detected_nothing and control["name"] == first_lb:
+            if emptied_expect:
+                # The control NAMES NO TEST. The gate's first question
+                # — "did the named test fail?" — asks NOTHING about a
+                # control that names nothing: `len(hit) == len(expect)`
+                # is `0 == 0`, which is True. So without a guard the
+                # gate would report a control whose removal detected
+                # NOTHING as load-bearing, and a control that
+                # detected nothing would be ACCEPTED. The gate must
+                # refuse it.
+                control = dict(control)
+                control["expect"] = []
+                hit = []
+                specific = []
+            if detected_nothing:
                 # The mutation stopped breaking the named test AND
                 # broke nothing else. The `named` clause is the FIRST
                 # of the gate's three questions, and it must refuse
                 # this on its own: the "unexpected failures" clause
                 # cannot, because nothing unexpected happened.
+                #
+                # It applies to EVERY control, not just the first:
+                # the shape is what the question exists for, and a
+                # clause that is only exercised against one control
+                # says nothing about the other thirteen.
                 hit = []
                 specific = []
             if swapped_skip and control["name"] == first_lb:
@@ -1246,8 +1271,8 @@ def _measurement_ok(result, want_hit, want_specific, want_total, calls):
             and result.total == want_total)
 
 
-def _drive_main_with_baseline(base_failed, base_skipped, ran, expect=(),
-                               run_failed=()):
+def _drive_main_with_baseline(base_failed, base_skipped, ran, expect=None,
+                               run_failed=None):
     """Call main() with a STUBBED suite, and report what it did.
 
     It returns (proceeded, exit_code, gate): whether main() got past
@@ -1260,9 +1285,16 @@ def _drive_main_with_baseline(base_failed, base_skipped, ran, expect=(),
     given left every test in the tree green.
 
     `expect` is what the stub control DECLARES and `run_failed` is
-    what the stubbed run FAILS. A stub that declares a test the run
-    does not fail BREAKS the gate — the named test must fail — so the
-    gate must REFUSE and main() must return 1.
+    what the stubbed run FAILS. Both default to a REAL test name, so
+    the gate ACCEPTS the measurement: the named test failed, nothing
+    else broke, and the run produced the baseline's number of tests.
+
+    A stub that DECLARES a test the run does NOT fail BREAKS the gate
+    — the named test must fail — so the gate must REFUSE and main()
+    must return 1.
+
+    The name is REAL because the pinning test requires every test the
+    harness names to exist, and it is right to.
 
     `ran` is a list the CALLER owns, and the stub control appends to
     it. That is deliberate: the record of what the stub did lives with
@@ -1279,10 +1311,14 @@ def _drive_main_with_baseline(base_failed, base_skipped, ran, expect=(),
     # fields by key. Its mutator only records that it ran — a real
     # control's mutator would edit the source — and it appends to the
     # list the CALLER owns.
+    stub_expect = (list(expect) if expect is not None
+                   else ["TestAPIRootCreationSucceeds"])
+    stub_failed = (list(run_failed) if run_failed is not None
+                   else list(stub_expect))
     stub = {
         "name": "stub",
         "invariant": "a stub control",
-        "expect": list(expect),
+        "expect": stub_expect,
         "load_bearing": True,
         "breaks": [],
         "mutate": lambda: ran.append(True),
@@ -1298,7 +1334,11 @@ def _drive_main_with_baseline(base_failed, base_skipped, ran, expect=(),
         calls_to_run.append(True)
         if len(calls_to_run) == 1:
             return (list(base_failed), [], 36, list(base_skipped))
-        return (list(run_failed), [], 36, [])
+        # The control's run produced the SAME number of tests as the
+        # baseline, or the two-sided bound would call it inconclusive
+        # for the wrong reason: the failures come out of the total,
+        # not on top of it.
+        return (list(stub_failed), [], 36 - len(stub_failed), [])
 
     try:
         globals()["run_tests"] = stub_run_tests
@@ -1448,9 +1488,21 @@ def selftest():
         # removing the `named` clause left the self-test green. This
         # case detects nothing and breaks nothing, so only `named` can
         # refuse it.
-        {"name": f"the load-bearing control {first_lb} detected NOTHING at all",
+        # A control that names NO TEST. The gate's first question asks
+        # nothing about it, so it must not be reported as load-bearing:
+        # the gate must REFUSE it. Without the guard, the gate would
+        # accept it — and a control that detected nothing, accepted,
+        # is the dangerous direction.
+        {"name": "EVERY control names NO test at all",
+         "results": _synthetic_results(emptied_expect=True),
+         "want": False, "mode": "normal"},
+        # EVERY control, so the shape is exercised for all of them.
+        # The case therefore refuses EVERY control, and the isolation
+        # assertion — which is for cases that refuse exactly one — does
+        # not apply. What it checks is that the gate refuses at all.
+        {"name": "EVERY control detected NOTHING at all",
          "results": _synthetic_results(detected_nothing=True),
-         "want": False, "mode": "normal", "isolates": True},
+         "want": False, "mode": "normal"},
         # M3(a): the comparison is by IDENTITY, not by count. The run
         # skipped a DIFFERENT test than the baseline did — the same
         # count — so a count comparison would wave it through.
@@ -1547,13 +1599,13 @@ def selftest():
     # not be ignored.
     for label, stub_failed, stub_skipped, expect, run_failed, \
             want_proceeded, want_exit, want_gate in (
-            ("a not-green baseline", ["TestSomethingFailed"], [], (), (),
+            ("a not-green baseline", ["TestSomethingFailed"], [], None, None,
              False, 1, None),
             ("a baseline that skipped a test", [], ["TestSomethingSkipped"],
-             (), (), False, 1, None),
-            ("a green baseline", [], [], (), (), True, None, 0),
+             None, None, False, 1, None),
+            ("a green baseline", [], [], None, None, True, None, 0),
             ("a green baseline whose control breaks the gate", [], [],
-             ("TestNeverFails",), (), True, None, 1)):
+             ["TestAPIRootCreationSucceeds"], [], True, None, 1)):
         # The record of what the stub did belongs to THIS frame: the
         # driver appends to the list it was handed, so a mutation that
         # substitutes the expectation for the observation cannot forge
