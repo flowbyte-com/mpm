@@ -1044,11 +1044,17 @@ the **published literal** in a copy and requires the self-test to fail,
 so a copy whose count check has been disabled passes and the Go test
 says so by name.
 
-**THE COUNT IS SEVENTY-FOUR CHECKS**, published in two places that check
+**THE COUNT IS EIGHTY-TWO CHECKS**, published in two places that check
 each other: the harness's own literal, and the Go test that compares the
 harness's *printed* count against the same figure.
 
-**THE MATRICES ARE THIRTY-THREE AND FOUR ENTRIES** (§5.17). The three checks that
+**THE MATRICES ARE THIRTY-EIGHT AND FOUR ENTRIES** (§5.19).
+
+**THE FOUR SUITES HOLD SIXTY-FIVE TEST FUNCTIONS**, and that figure is
+computed from the tree rather than copied into it: the Go pin counts the
+test functions in the four suites and requires the count to be the
+published one, so a suite that lost a test cannot leave the number
+behind. The three checks that
 are not predicate calls — the baseline verdict, the three output
 patterns and the call with no baseline at all — are counted in the same
 figure, so a case added without the published figure being updated fails
@@ -1089,10 +1095,10 @@ exit code and the module-level exit. Each entry in the gate's matrix
 must make the harness **ACCEPT** the measurement — exit 0 where it must
 exit non-zero.
 
-Thirty entries in the first, four in the second, and every one of
+Thirty-eight entries in the first, four in the second, and every one of
 them is caught.
 
-**THE SELF-TEST IS NOW SEVENTY-ONE CHECKS**, and the number is published
+**THE SELF-TEST WAS SEVENTY-ONE CHECKS AT THAT ROUND**, and the number is published
 in two places that check each other: the harness's own literal, and the
 Go test that compares the harness's *printed* count against the same
 figure.
@@ -1258,6 +1264,89 @@ checked from outside:
 pin, a question that could ask nothing, and now a selection. Each was
 fixed properly and immediately, and each fix is checked from outside
 the harness — because the harness cannot check itself.
+
+### 5.19 What the fifteenth review found: a gate with no floor on what it measured
+
+The fifteenth review asked the central question in the form that has
+now found three real defects, and found a new instance of the class —
+but a **sharper** one: about the gate's **SCOPE**, not its thresholds.
+
+**THE HEADLINE: THE GATE HAS NO FLOOR ON THE NUMBER OF CONTROLS IT
+MEASURED.** The verdict is "every control that **ran** was
+load-bearing", which is vacuous below a floor:
+`summarise([], 36, ())` returns **True** — the gate certifies **zero**
+controls. And the harness's **production** path was driven by
+**nothing**: both the self-test's drive and the gate mode pass
+`--only` explicitly, so the loop over the controls was exercised by
+nothing.
+
+Four single-edit mutations survived everything. The reviewer drove the
+harness's own `main()` in the production configuration with the suite
+stubbed:
+
+```
+the PRISTINE harness                      14/14 load-bearing; 2 defence
+                                         main() returned: 0
+L-1: the loop runs only the FIRST        1/1  load-bearing; 0 defence
+                                         main() returned: 0
+L-3: the loop runs the first FOURTEEN     12/12 load-bearing; 2 defence
+                                         main() returned: 0
+```
+
+The gate — which **is** the process's exit code, which **is** what CI
+reads — passed having certified one control out of sixteen. The printed
+figure is honest ("1/1"), which is exactly what makes it subtle.
+
+**THE FIX HAS FOUR PARTS, AND EACH IS A MECHANISM.**
+
+| the part | what it does |
+|---|---|
+| `summarise()` takes a **required** floor — the number of controls the measurement must cover | it refuses a measurement over a different number. "Every control that ran was load-bearing" is only a statement when the set of controls that ran is the set that was supposed to run |
+| `main()` states the floor | every control, or the one `--only` selected |
+| the **baseline** the bound is measured over must be the **published** suite size | this is the **invocation** check, and it is behavioural: the harness refuses a measurement that is not over the suite the bound is published for. A wider selection measures more, a narrower one measures less, and a missing `-run` measures the whole package — all three are now refused by the harness itself, in the production path, rather than by a source inspection |
+| a **new drive** runs `main()` in the **production** configuration — no `--only` — with the suite stubbed | the loop over the controls is now exercised, and the drive requires every control to have run and the gate to have accepted the measurement |
+
+**MEASURED, IN THE HARNESS'S OWN TERMS.** The gate, in the production
+configuration with the suite stubbed:
+
+```
+the pristine harness                        exit=0  -> ACCEPTED
+the loop runs only the FIRST control        exit=1  -> REFUSED
+    THE HARNESS FAILED: the measurement covers 1 control(s) and it must
+    cover 16 — a measurement over fewer controls certifies less than it
+    appears to
+the loop runs the first FOURTEEN             exit=1  -> REFUSED
+one control excluded                         exit=1  -> REFUSED
+--only defaults to a name                    exit=1  -> REFUSED
+the published size (36)                      exit=0  -> ACCEPTED
+a WIDER selection (49)                       exit=1  -> REFUSED
+    THE HARNESS FAILED: the baseline ran 49 tests and the published
+    suite size is 36
+a NARROWER selection (1)                     exit=1  -> REFUSED
+```
+
+**AND THE TWO-EDIT COMBINATIONS ARE CAUGHT TOO** — the pairs the
+matrices do not cover, because the matrices cover single edits: the
+floor's check removed **and** the loop limited; the floor's check
+removed **and** the production predicate neutered; the baseline's size
+check removed **and** the selection widened; the non-vacuity guard
+removed **and** a control's `expect` emptied. All four are caught by
+the self-test.
+
+**THE NITS, ALL CLOSED.**
+
+| the nit | the fix |
+|---|---|
+| §5.18 re-classified `--only` as closed without addressing it | `--only` selects one control **by name**, and the name must exist — the harness raises otherwise. The floor is **one** when `--only` chose a control, and **every** control otherwise, so `--only` cannot widen the gate's claim: it narrows what the harness measures, and the printed figure says so |
+| `publishedControls = 16` had no link to the documents' "Sixteen controls" | a Go test now requires the **design note** and the **SPEC** to state the counts the code publishes — the numbers are spelled out in words, and the pin checks the words |
+| the selection pin was keyed to a **file** rather than to the suite | the pin's premise is now stated: the file is the acceptance suite, and the pin compares the harness's selection with the suite's test functions. A file that lost a test, or a suite that moved, makes the pin **fail** rather than shrink the set it compares with |
+
+**THE CLASS SO FAR.** Fifteen rounds, and the findings have one shape:
+**a claim the harness carries that nothing checked** — a constant, a
+pin, a question that could ask nothing, a selection, and now a
+**scope**. Each was fixed properly and immediately, and each fix is
+checked from **outside** the harness, because the harness cannot check
+itself.
 
 ## 6. What PR 2 leaves to PRs 3–5
 

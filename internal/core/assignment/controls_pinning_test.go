@@ -343,7 +343,7 @@ func TestControls_TheHarnessGateCanFail(t *testing.T) {
 // EVALUATED, not the number of lines it printed. Every check in the
 // harness is a predicate, and every predicate records that it ran, so
 // a check that stops running leaves the count short.
-const publishedSelfTestCases = 74
+const publishedSelfTestCases = 82
 
 // TestControls_TheHarnessPublishesItsOwnCaseCount pins the published
 // figure to the harness's own.
@@ -498,14 +498,48 @@ var harnessMutations = []struct {
 		// This entry pins the PUBLISHED FIGURE: a copy whose count no
 		// longer matches the literal must fail.
 		"the published case count",
-		`expected_self_test_cases = 74`,
-		`expected_self_test_cases = 73`,
+		`expected_self_test_cases = 82`,
+		`expected_self_test_cases = 81`,
 	},
 	{
 		"main()'s use of the baseline verdict",
 		`baseline = baseline_verdict(base_failed, base_passed, base_skipped,
                                     base_detail)`,
 		`baseline = base_passed`,
+	},
+	{
+		// The FLOOR. "Every control that ran was load-bearing" is
+		// only a statement when the set of controls that ran is the
+		// set that was supposed to run — and the production path
+		// states the floor as every control, unless `--only` chose
+		// one.
+		"the floor's check removed",
+		`    if len(results) != expected_controls:`,
+		`    if False:`,
+	},
+	{
+		"the floor's comparison weakened",
+		`    if len(results) != expected_controls:`,
+		`    if len(results) > expected_controls:`,
+	},
+	{
+		"main()'s floor",
+		`    expected_controls = 1 if args.only else len(CONTROLS)`,
+		`    expected_controls = 1`,
+	},
+	{
+		// The BASELINE the bound is measured over must be the
+		// PUBLISHED suite size. A selection that measured something
+		// else moves the published line.
+		"the baseline's size check removed",
+		`        if baseline != SUITE_SIZE:`,
+		`        if False:`,
+	},
+	{
+		"the production path's predicate",
+		`    return (proceeded is True and exited is None and gate == 0
+            and ran_count == controls)`,
+		`    return True`,
 	},
 	// The NEUTERED PREDICATES. A mutation that turns a predicate's
 	// BODY into a constant leaves the check in place — so the counter
@@ -661,7 +695,7 @@ var gateMutations = []struct {
 }{
 	{
 		"main()'s use of the verdict",
-		`    ok = summarise(results, baseline, baseline_skipped)`,
+		`    ok = summarise(results, baseline, baseline_skipped, expected_controls)`,
 		`    ok = True`,
 	},
 	{
@@ -948,6 +982,11 @@ func controlsRegion(t *testing.T, harness string) string {
 // of the pin must make the pin fail, not pass over a smaller set.
 const publishedLoadBearingControls = 14
 
+// publishedTestFunctions is the number of test functions in the four
+// suites this PR adds. It is checked against the tree — a published
+// number nobody checks drifts.
+const publishedTestFunctions = 65
+
 // publishedControls is the number of controls the harness publishes in
 // its CONTROLS list: sixteen, of which fourteen are load-bearing and
 // two measure the defence in depth.
@@ -1106,6 +1145,126 @@ var controlNameRe = regexp.MustCompile(`(?m)^\s*"name":\s*"([a-z0-9-]+)",`)
 //
 // A control without a classification is ambiguous: the harness would
 // not know whether the named test is supposed to fail.
+// TestControls_ThePublishedCountsAreInTheDocuments pins the published
+// counts against the DOCUMENTS that state them.
+//
+// The harness's counts are published in the design note and in the
+// SPEC, in ENGLISH WORDS: "Sixteen controls: fourteen are
+// load-bearing". A number nobody checks drifts — and here the number
+// is in two places at once, the code and the prose, and one of them
+// will be right and the other wrong.
+//
+// This is the link between them, and it is checked from outside the
+// harness.
+func TestControls_ThePublishedCountsAreInTheDocuments(t *testing.T) {
+	root := repoRoot(t)
+	note := readDocument(t, filepath.Join(root,
+		"docs/dev/continuity-001-assignment-api.md"))
+	spec := readDocument(t, filepath.Join(root, "docs/SPEC.md"))
+
+	controls := numberWords(publishedControls)
+	loadBearing := numberWords(publishedLoadBearingControls)
+	phrase := controls + " controls: " + loadBearing + " are load-bearing"
+	for name, doc := range map[string]string{
+		"the design note": note,
+		"the SPEC":        spec,
+	} {
+		// The prose is written in sentence case — "Sixteen controls:
+		// fourteen are load-bearing" — and the numbers are spelled in
+		// upper case. The comparison is case-insensitive so that the
+		// pin checks the WORDS, not the typesetting.
+		if !strings.Contains(strings.ToUpper(doc), strings.ToUpper(phrase)) {
+			t.Errorf("%s does not state %q — the published counts and "+
+				"the documents' counts have drifted", name, phrase)
+		}
+	}
+
+	count := numberWords(publishedSelfTestCases)
+	if !strings.Contains(strings.ToUpper(note),
+		strings.ToUpper("THE COUNT IS "+count+" CHECKS")) {
+		t.Errorf("the design note does not state that the count is %s "+
+			"checks — the published figure and the note's have drifted",
+			count)
+	}
+
+	// The four suites this PR adds, and the number of test functions
+	// in them. The count is computed from the tree, not from a
+	// constant — a constant that says 65 while the tree holds 64 is
+	// a published number nobody checked.
+	suites := []string{
+		"internal/core/assignment/assignment_test.go",
+		"internal/core/tools/assignment_operator_boundary_regression_test.go",
+		"cmd/mpm/assignment_cmds_test.go",
+		"internal/core/assignment/controls_pinning_test.go",
+	}
+	total := 0
+	for _, rel := range suites {
+		total += len(testNameRe.FindAllStringSubmatch(
+			readDocument(t, filepath.Join(root, rel)), -1))
+	}
+	if total != publishedTestFunctions {
+		t.Errorf("the four suites hold %d test function(s), and the "+
+			"published figure is %d — the published number and the "+
+			"tree's have drifted", total, publishedTestFunctions)
+	}
+	functions := numberWords(publishedTestFunctions)
+	if !strings.Contains(strings.ToUpper(note),
+		strings.ToUpper("THE FOUR SUITES HOLD "+functions+" TEST FUNCTIONS")) {
+		t.Errorf("the design note does not state that the four suites "+
+			"hold %s test functions — the published figure and the "+
+			"note's have drifted", functions)
+	}
+
+	first := numberWords(len(harnessMutations))
+	second := numberWords(len(gateMutations))
+	matrices := "THE MATRICES ARE " + first + " AND " + second + " ENTRIES"
+	if !strings.Contains(strings.ToUpper(note), strings.ToUpper(matrices)) {
+		t.Errorf("the design note does not state %q — the published "+
+			"matrices and the note's have drifted", matrices)
+	}
+}
+
+// readDocument reads a document, and fails the test if it cannot.
+func readDocument(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
+// numberWords spells a number the way the documents spell it: in
+// English words, in upper case. It covers one to ninety-nine, which is
+// every number these documents publish.
+//
+// A number spelled in digits would be a different document: the prose
+// reads "Sixteen controls", not "16 controls", and the pin has to
+// check the prose that is actually there.
+func numberWords(n int) string {
+	ones := []string{
+		"ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN",
+		"EIGHT", "NINE", "TEN", "ELEVEN", "TWELVE", "THIRTEEN",
+		"FOURTEEN", "FIFTEEN", "SIXTEEN", "SEVENTEEN", "EIGHTEEN",
+		"NINETEEN",
+	}
+	tens := []string{
+		"", "", "TWENTY", "THIRTY", "FORTY", "FIFTY", "SIXTY",
+		"SEVENTY", "EIGHTY", "NINETY",
+	}
+	if n < 0 || n > 99 {
+		return ""
+	}
+	switch {
+	case n < 20:
+		return ones[n]
+	case n%10 == 0:
+		return tens[n/10]
+	default:
+		return tens[n/10] + "-" + ones[n%10]
+	}
+}
+
 func TestControls_EveryControlIsNamedAndClassified(t *testing.T) {
 	root := repoRoot(t)
 	b, err := os.ReadFile(filepath.Join(root, controlsScript))

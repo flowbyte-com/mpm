@@ -842,6 +842,21 @@ def main():
         # denominator, so there is no return value to forget to check.
         baseline = baseline_verdict(base_failed, base_passed, base_skipped,
                                     base_detail)
+        # The baseline must be the PUBLISHED suite size. The bound is
+        # published against that number, and the baseline is what the
+        # bound is measured over — so a selection that measured
+        # something else (wider, narrower, or the whole package
+        # because the `-run` argument went missing) moves the
+        # published line. This is the check, and it is BEHAVIOURAL: the
+        # harness refuses a measurement that is not over the suite the
+        # bound is published for.
+        if baseline != SUITE_SIZE:
+            print(f"THE HARNESS FAILED: the baseline ran {baseline} tests "
+                  f"and the published suite size is {SUITE_SIZE} — the "
+                  f"selection measured something other than the "
+                  f"acceptance suite, and the bound is published against "
+                  f"it.")
+            raise SystemExit(1)
         baseline_skipped = set(base_skipped)
         print(f"the suite runs {baseline} tests and is green "
               f"({len(base_skipped)} of them skipped)")
@@ -868,11 +883,17 @@ def main():
         restore()
         print("\nthe tree is restored")
 
-    ok = summarise(results, baseline, baseline_skipped)
+    # The FLOOR: the measurement must cover every control, unless
+    # `--only` selected one. Without it, "every control that ran was
+    # load-bearing" is true of a measurement over one control out of
+    # sixteen — and the printed figure would say so honestly and mean
+    # nothing.
+    expected_controls = 1 if args.only else len(CONTROLS)
+    ok = summarise(results, baseline, baseline_skipped, expected_controls)
     return 0 if ok else 1
 
 
-def summarise(results, baseline, baseline_skipped=()):
+def summarise(results, baseline, baseline_skipped, expected_controls):
     """Print the summary and return whether the measurement holds.
 
     `baseline` is the number of tests the suite runs when nothing is
@@ -888,8 +909,21 @@ def summarise(results, baseline, baseline_skipped=()):
     CLOSED: no denominator, no measurement.
 
     The RETURN VALUE is the gate. It can fail, and it does.
+
+    `expected_controls` is the FLOOR: the number of controls the
+    measurement must cover. It is what makes "every control that ran
+    was load-bearing" a statement rather than a vacuity — without it,
+    a measurement over ONE control out of sixteen passes, and so does
+    a measurement over none at all.
     """
     print("\n=== the summary ===")
+    if len(results) != expected_controls:
+        print(f"THE HARNESS FAILED: the measurement covers "
+              f"{len(results)} control(s) and it must cover "
+              f"{expected_controls} — a measurement over fewer controls "
+              f"certifies less than it appears to, and the verdict it "
+              f"prints would say so honestly and mean nothing.")
+        return False
     if not baseline or baseline <= 0:
         print("THE HARNESS FAILED: there is no baseline, so the bound has no "
               "denominator. A measurement without a baseline is not a "
@@ -1271,7 +1305,7 @@ def _measurement_ok(result, want_hit, want_specific, want_total, calls):
 
 
 def _drive_main_with_baseline(base_failed, base_skipped, ran, expect=None,
-                               run_failed=None):
+                               run_failed=None, baseline_size=None):
     """Call main() with a STUBBED suite, and report what it did.
 
     It returns (proceeded, exit_code, gate): whether main() got past
@@ -1332,12 +1366,16 @@ def _drive_main_with_baseline(base_failed, base_skipped, ran, expect=None,
     def stub_run_tests():
         calls_to_run.append(True)
         if len(calls_to_run) == 1:
-            return (list(base_failed), [], 36, list(base_skipped))
+            # The BASELINE run. `baseline_size` lets a case make it
+            # measure something other than the published suite size —
+            # which is what the size check exists to refuse.
+            size = SUITE_SIZE if baseline_size is None else baseline_size
+            return (list(base_failed), [], size, list(base_skipped))
         # The control's run produced the SAME number of tests as the
         # baseline, or the two-sided bound would call it inconclusive
         # for the wrong reason: the failures come out of the total,
         # not on top of it.
-        return (list(stub_failed), [], 36 - len(stub_failed), [])
+        return (list(stub_failed), [], SUITE_SIZE - len(stub_failed), [])
 
     try:
         globals()["run_tests"] = stub_run_tests
@@ -1345,6 +1383,86 @@ def _drive_main_with_baseline(base_failed, base_skipped, ran, expect=None,
         globals()["restore"] = lambda: None
         globals()["CONTROLS"] = [stub]
         sys.argv = ["continuity-001-pr2-controls.py", "--only", "stub"]
+        try:
+            code = main()
+        except SystemExit as e:
+            return (bool(ran), e.code, None)
+        return (bool(ran), None, code)
+    finally:
+        for k, v in originals.items():
+            globals()[k] = v
+        sys.argv = argv
+
+
+def _production_ok(proceeded, exited, gate, ran_count, controls, calls):
+    """Whether the PRODUCTION path ran every control and was accepted.
+
+    It is a PREDICATE, like every other check in the self-test, so it
+    can be driven with a deliberately wrong value and proved able to
+    fail.
+    """
+    calls.append("production")
+    return (proceeded is True and exited is None and gate == 0
+            and ran_count == controls)
+
+
+def _drive_all_controls(ran):
+    """Call main() with a STUBBED suite, over EVERY control.
+
+    The self-test's other drive passes `--only`, so the loop over the
+    controls was exercised by NOTHING: a mutation that limited the
+    loop to one control left the gate certifying one control out of
+    sixteen, with a green exit code and an honest-looking "1/1" on
+    its output.
+
+    So this drive runs the PRODUCTION path — no `--only` — with the
+    suite stubbed. Each stub control MIRRORS the real one (its name,
+    its invariant, its expect list, its load-bearing flag, its declared
+    exemptions), but its mutator only records that it ran, and the
+    stubbed suite fails exactly the test the running control declares.
+
+    It returns (proceeded, exit_code, gate).
+    """
+    current = {}
+
+    def stub_mutator(control):
+        def mutate():
+            ran.append(True)
+            current["control"] = control
+        return mutate
+
+    stubs = []
+    for control in CONTROLS:
+        stub = {
+            "name": control["name"],
+            "invariant": control["invariant"],
+            "expect": list(control["expect"]),
+            "load_bearing": control["load_bearing"],
+            "breaks": list(control.get("breaks", [])),
+            "mutate": stub_mutator(control),
+        }
+        # The defence-in-depth controls carry a "why": the reason they
+        # are redundant. The gate prints it, so the stub must too.
+        if "why" in control:
+            stub["why"] = control["why"]
+        stubs.append(stub)
+
+    def stub_run_tests():
+        control = current.get("control")
+        failed = list(control["expect"]) if control else []
+        # The run produced the BASELINE's number of tests: the failures
+        # come out of the total, not on top of it.
+        return (failed, [], SUITE_SIZE - len(failed), [])
+
+    originals = {k: globals()[k] for k in
+                 ("run_tests", "snapshot", "restore", "CONTROLS")}
+    argv = sys.argv
+    try:
+        globals()["run_tests"] = stub_run_tests
+        globals()["snapshot"] = lambda: None
+        globals()["restore"] = lambda: None
+        globals()["CONTROLS"] = stubs
+        sys.argv = ["continuity-001-pr2-controls.py"]
         try:
             code = main()
         except SystemExit as e:
@@ -1409,7 +1527,7 @@ def selftest():
     # mutation that removes both a mechanism and the guard that watches
     # it is not in the matrix, and the note says so rather than
     # claiming more.
-    expected_self_test_cases = 74
+    expected_self_test_cases = 82
 
     # Each case carries a MODE. The mode decides how the gate is
     # driven; the name is only the label. Dispatching on the label
@@ -1487,6 +1605,14 @@ def selftest():
         # removing the `named` clause left the self-test green. This
         # case detects nothing and breaks nothing, so only `named` can
         # refuse it.
+        # The FLOOR. A measurement over FEWER controls than the
+        # harness published certifies less than it appears to, and the
+        # verdict it prints would say so honestly and mean nothing —
+        # "1/1 controls are load-bearing" is a true sentence about a
+        # measurement that measured one control out of sixteen.
+        {"name": "the measurement covers FEWER controls than the harness published",
+         "results": _synthetic_results()[:-1],
+         "want": False, "mode": "normal"},
         # A control that names NO TEST. The gate's first question asks
         # nothing about it, so it must not be reported as load-bearing:
         # the gate must REFUSE it. Without the guard, the gate would
@@ -1597,21 +1723,25 @@ def selftest():
     # main() could swallow the raise that was introduced so it could
     # not be ignored.
     for label, stub_failed, stub_skipped, expect, run_failed, \
-            want_proceeded, want_exit, want_gate in (
+            baseline_size, want_proceeded, want_exit, want_gate in (
             ("a not-green baseline", ["TestSomethingFailed"], [], None, None,
-             False, 1, None),
+             None, False, 1, None),
             ("a baseline that skipped a test", [], ["TestSomethingSkipped"],
-             None, None, False, 1, None),
-            ("a green baseline", [], [], None, None, True, None, 0),
+             None, None, None, False, 1, None),
+            ("a baseline that measured something OTHER than the published "
+             "suite size", [], [], None, None, SUITE_SIZE + 1,
+             False, 1, None),
+            ("a green baseline", [], [], None, None, None, True, None, 0),
             ("a green baseline whose control breaks the gate", [], [],
-             ["TestAPIRootCreationSucceeds"], [], True, None, 1)):
+             ["TestAPIRootCreationSucceeds"], [], None, True, None, 1)):
         # The record of what the stub did belongs to THIS frame: the
         # driver appends to the list it was handed, so a mutation that
         # substitutes the expectation for the observation cannot forge
         # it.
         ran = []
         proceeded, exited, gate = _drive_main_with_baseline(
-            stub_failed, stub_skipped, ran, expect, run_failed)
+            stub_failed, stub_skipped, ran, expect, run_failed,
+            baseline_size)
         # ONE boolean, so that the mutation matrix can neuter the whole
         # verdict with one edit — and so that the three things it
         # checks are checked together rather than in a chain where a
@@ -1695,7 +1825,9 @@ def selftest():
             ("the measurement predicate",
              lambda: _measurement_ok(probe_measurement, ["wrong"],
                                      ["TestAPIRootCreationSucceeds"], 32,
-                                     calls))):
+                                     calls)),
+            ("the production-path predicate",
+             lambda: _production_ok(True, None, 0, 1, len(CONTROLS), calls))):
         if predicate():
             failures += 1
             print(f"\nSELF-TEST FAILED: {label} accepted a value it must "
@@ -1703,6 +1835,29 @@ def selftest():
         else:
             print(f"\nSELF-TEST OK: {label} refuses a value it must refuse, so "
                   f"it can fail.")
+
+    # The PRODUCTION path. The other drive passes `--only`, so the
+    # loop over the controls was exercised by NOTHING: a mutation that
+    # limited the loop to one control left the gate certifying one
+    # control out of sixteen, with a green exit code and an
+    # honest-looking "1/1" on its output.
+    #
+    # So main() is driven here with NO `--only`, the suite stubbed, and
+    # every control must run — and the gate must ACCEPT the
+    # measurement.
+    production_ran = []
+    p_proceeded, p_exited, p_gate = _drive_all_controls(production_ran)
+    if not _production_ok(p_proceeded, p_exited, p_gate,
+                           len(production_ran), len(CONTROLS), calls):
+        failures += 1
+        print(f"\nSELF-TEST FAILED: the production path ran "
+              f"{len(production_ran)} control(s) of {len(CONTROLS)} and "
+              f"returned {p_gate} — the loop over the controls is not "
+              f"exercised, so a mutation that limits it is invisible")
+    else:
+        print(f"\nSELF-TEST OK: the production path ran all "
+              f"{len(CONTROLS)} control(s) and the gate accepted the "
+              f"measurement.")
 
     # The wiring verdict can FAIL — and that is proved, not assumed.
     # A verdict that is inlined cannot be driven with a deliberately
@@ -1765,13 +1920,14 @@ def selftest():
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             if case["mode"] == "zero_baseline":
-                ok = summarise(results, 0, ())
+                ok = summarise(results, 0, (), len(CONTROLS))
             elif case["mode"] == "swapped_skip":
                 # The baseline skipped a DIFFERENT test, so the
                 # identity comparison has something to compare.
-                ok = summarise(results, SUITE_SIZE, ("TestSomethingSkipped",))
+                ok = summarise(results, SUITE_SIZE, ("TestSomethingSkipped",),
+                               len(CONTROLS))
             else:
-                ok = summarise(results, SUITE_SIZE, ())
+                ok = summarise(results, SUITE_SIZE, (), len(CONTROLS))
         # N8: the "more tests" direction says what is actually wrong.
         # The verdict is unchanged either way, so the case that pins it
         # is the one that produces that direction.
