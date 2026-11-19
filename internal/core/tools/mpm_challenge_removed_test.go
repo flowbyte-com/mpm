@@ -35,10 +35,10 @@ func TestRegistry_mpm_challenge_Retired(t *testing.T) {
 }
 
 // TestRegistry_CurrentToolCount pins the size of the surface so a
-// future tool add/remove can't drift silently. As of the mpm_challenge
-// retirement (2026-09-05), the registry holds exactly 21 substrate
-// Registry entries (plus `mpm_help` discovery closure = 22 MCP
-// registrations when `MPM_EXPOSE_ALL_TOOLS=1`):
+// future tool add/remove can't drift silently. As of Continuity 001
+// PR 2 (2026-11-19), the registry holds exactly 22 substrate Registry
+// entries (plus `mpm_help` discovery closure = 23 MCP registrations
+// when `MPM_EXPOSE_ALL_TOOLS=1`):
 //
 //   - 14 domain tools (mpm_memory, mpm_theories, mpm_decisions,
 //     mpm_lessons, mpm_topics, mpm_references, mpm_evidence,
@@ -48,12 +48,13 @@ func TestRegistry_mpm_challenge_Retired(t *testing.T) {
 //     mpm_blob_search)
 //   - 1 retrieval diagnostic (mpm_retrieval_diagnose)
 //   - 2 non-MPM standalones (mpm_log_to_changelog, mpm_request_review)
+//   - 1 coordination tool (mpm_assignment — Continuity 001 PR 2)
 //
 // Change this constant deliberately, with a corresponding update to
 // generator/docs that hard-code the count (e.g. specification tool listing,
 // agent_installation/INSTALL.md).
 func TestRegistry_CurrentToolCount(t *testing.T) {
-	const want = 21
+	const want = 22
 	if got := len(Registry); got != want {
 		t.Fatalf("Registry has %d tools, want %d. If you added or removed a tool, "+
 			"update this test deliberately and re-run "+

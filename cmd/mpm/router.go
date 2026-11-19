@@ -92,6 +92,7 @@ func NewRouter() *CommandRouter {
 		"handoff":   {Name: "handoff", Description: "Manage handoffs (write|read|list|shred)"},
 		"lesson":    {Name: "lesson", Description: "Manage lessons", MinArgs: 1},
 		"memory":    {Name: "memory", Description: "Manage memories", MinArgs: 1},
+		"assignment": {Name: "assignment", Description: "Manage assignments (inbox|show|history|deliver|claim|delegate|record-review|handoff|create-root|record-approval)", MinArgs: 1, Help: printAssignmentHelp},
 
 		// Ingest / cascade / migrate
 		"ingest":  {Name: "ingest", Description: "Import from external SQLite"},
@@ -466,6 +467,8 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleSession(args[1:])
 	case "handoff":
 		return handleHandoff(args[1:])
+	case "assignment":
+		return handleAssignment(args[1:])
 	case "lesson":
 		return handleLesson(args[1:])
 	case "hint":
@@ -685,6 +688,8 @@ func (r *CommandRouter) handleHelp(args []string) int {
 		helpFunc = printRefHelp
 	case "memory":
 		helpFunc = handleMemoryHelp
+	case "assignment":
+		helpFunc = printAssignmentHelp
 	case "gateway":
 		helpFunc = printGatewayHelp
 	case "challenge":
@@ -831,6 +836,8 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 		helpFunc = printRefHelp
 	case "memory":
 		helpFunc = handleMemoryHelp
+	case "assignment":
+		helpFunc = printAssignmentHelp
 	case "gateway":
 		helpFunc = printGatewayHelp
 	case "challenge":
@@ -937,6 +944,7 @@ func (r *CommandRouter) handleCommandHelp(name string, cmd *Command) int {
 var commandsWithSubcommandDispatch = map[string]bool{
 	"work":        true, // status|show|clear|promote|item
 	"session":     true, // add|search|show|shred|list
+	"assignment":  true, // inbox|show|history|deliver|claim|delegate|handoff
 	"handoff":     true, // write|read|list|shred
 	"lesson":      true, // add|show|list|search|shred
 	"skill":       true, // add|list|show|search|workshop
@@ -1425,6 +1433,7 @@ var opsSubcommandDescs = []struct {
 	{"topic", "Topic operations"},
 	{"lesson", "Lesson operations"},
 	{"session", "Session operations"},
+	{"assignment", "Assignment operations — inbox, deliver, claim, delegate, review, operator gate"},
 	{"memory", "Memory operations"},
 	{"reference", "Reference library"},
 	{"wake", "Show last session context"},

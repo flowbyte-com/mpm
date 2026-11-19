@@ -1035,6 +1035,56 @@ Do not use when: you just want to store a fact or insight (mpm_memory save).`,
 		}`),
 		Handler: handleMpmWork,
 	},
+	{
+		Name: "mpm_assignment",
+		Description: `Durable multi-agent assignment coordination: work addressed to an agent, with leases, a ledger and an operator gate.
+Use when: you have been handed work (action=inbox to list what is addressed to you); you are taking work (action=acknowledge, then action=accept to commit to it); you are holding work (action=claim takes a fenced lease, action=renew extends it, action=start, action=complete); you are splitting work (action=delegate creates a bounded child inside the root's budgets); you are reviewing someone else's work (action=record-review); or you are withdrawing (action=cancel, action=refuse).
+Do not use when: you want to create the top-level work order (an operator creates the root — no agent action can); you want to approve something (the operator's gate is reached by action=handoff and only the operator can approve it); you want general notes (use mpm_memory).
+Delivery is at-least-once, never exactly-once: re-read your inbox, and every action is idempotent in effect because the state machine refuses a transition that is not legal from the current state.
+Authority boundary: creating a root and recording an operator approval are ABSENT from this tool — not refused by a flag, not present at all. A confirmation field is not a credential.`,
+		Schema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {"type": "string", "enum": ["inbox","show","history","tree","deliver","acknowledge","accept","refuse","claim","renew","start","complete","delegate","cancel","note","record-review","handoff"]},
+				"params": {
+					"type": "object",
+					"properties": {
+						"id":               {"type": "string", "description": "The assignment id. Required by every action except inbox and tree."},
+						"root_id":          {"type": "string", "description": "The root of the delegation tree. Required by action=tree."},
+						"recipient":        {"type": "string", "description": "The address the work is addressed to. Required by action=inbox."},
+						"project_id":       {"type": "string"},
+						"states":           {"type": "array", "items": {"type": "string"}, "description": "Optional state filter for action=inbox."},
+						"limit":            {"type": "number", "description": "Optional row limit for action=inbox."},
+						"epoch":            {"type": "number", "description": "The claim epoch the caller holds. Every write is fenced by it: a stale epoch matches no row."},
+						"owner":            {"type": "string", "description": "The holder of the lease. Required by action=claim and action=renew."},
+						"lease_seconds":    {"type": "number", "description": "The length of the lease. Required by action=claim and action=renew."},
+						"actor":            {"type": "string", "description": "Who is writing the row. ATTRIBUTION, not identity: it is recorded and never grants authority."},
+						"actor_kind":       {"type": "string"},
+						"note":             {"type": "string"},
+						"parent_id":        {"type": "string", "description": "The assignment being delegated from. Required by action=delegate."},
+						"title":            {"type": "string", "description": "Required by action=delegate."},
+						"objective":        {"type": "string", "description": "Required by action=delegate."},
+						"role":             {"type": "string", "enum": ["implementer","reviewer"], "description": "Required by action=delegate. A reviewer reviews; an implementer implements."},
+						"idempotency_key":  {"type": "string", "description": "Required by action=delegate. A repeated key resolves to the existing assignment."},
+						"resource_units":   {"type": "number"},
+						"issue_ref":        {"type": "string"},
+						"pr_ref":           {"type": "string"},
+						"base_sha":         {"type": "string"},
+						"head_sha":         {"type": "string"},
+						"reviewed_sha":     {"type": "string"},
+						"findings_sha256":  {"type": "string"},
+						"evidence_ref":     {"type": "string"},
+						"payload":          {"type": "object", "description": "The free-form payload. A reviewer names its subject in payload.review_target."},
+						"verdict":          {"type": "string", "enum": ["passed","changes_requested"], "description": "Required by action=record-review."},
+						"awaiting_action":  {"type": "string", "description": "The EXACT action the operator is being asked to authorise. Required by action=handoff."}
+					},
+					"additionalProperties": true
+				}
+			},
+			"required": ["action"]
+		}`),
+		Handler: handleMpmAssignment,
+	},
 }
 
 // ByName returns the tool with the given name, or false.

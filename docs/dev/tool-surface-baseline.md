@@ -28,14 +28,14 @@
 
 ### 1.2 The specialist tools behind the filter
 
-21 tools in `internal/core/tools/registry_list.go`:
+22 tools in `internal/core/tools/registry_list.go`:
 
 ```
 mpm_memory  mpm_theories  mpm_decisions  mpm_lessons  mpm_topics
 mpm_references  mpm_evidence  mpm_confidence  mpm_retrieval_diagnose
 mpm_context  mpm_skills  mpm_wakes  mpm_handoff  mpm_scratchpad
 mpm_system  mpm_log_to_changelog  mpm_request_review  mpm_resolve
-mpm_blob_read  mpm_blob_search  mpm_work
+mpm_blob_read  mpm_blob_search  mpm_work  mpm_assignment
 ```
 
 plus `mpm_route` and `mpm_help` registered directly by the MCP server, and

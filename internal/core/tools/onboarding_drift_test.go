@@ -250,8 +250,8 @@ func TestOnboardingDrift_mpm_lessons_summary_default(t *testing.T) {
 // this test file. (Bigger count checks live in
 // mpm_challenge_removed_test.go.)
 func TestOnboardingDrift_AllFactsArePinned(t *testing.T) {
-	if len(Registry) < 21 {
-		t.Fatalf("tool count regressed below 21: %d — the seven facts in this file assume the audited registry shape",
+	if len(Registry) < 22 {
+		t.Fatalf("tool count regressed below 22: %d — the seven facts in this file assume the audited registry shape",
 			len(Registry))
 	}
 }

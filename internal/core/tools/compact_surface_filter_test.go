@@ -65,7 +65,9 @@ func TestCompactSurface_DefaultCoreHasThreeTools(t *testing.T) {
 // from `len(Registry)` so the test does not go stale as tools are
 // added or removed.
 func TestCompactSurface_FullRegistryPreserved(t *testing.T) {
-	const want = 21 // Registry entries (mpm_help is registered via closure, not Registry)
+	// Registry entries (mpm_help is registered via closure, not Registry).
+	// 22 as of Continuity 001 PR 2, which added mpm_assignment.
+	const want = 22
 	if len(Registry) != want {
 		t.Errorf("tools.Registry has %d entries; expected %d (the full internal surface)",
 			len(Registry), want)
@@ -101,7 +103,7 @@ func TestCompactSurface_FilterIsNoOpWhenEnvSet(t *testing.T) {
 // and the documented behaviour.
 func applyPolicyForTest() int {
 	if os.Getenv("MPM_EXPOSE_ALL_TOOLS") != "" {
-		// Full surface: Registry (21) + mpm_help closure.
+		// Full surface: Registry + mpm_help closure.
 		return len(Registry) + 1
 	}
 	return len(defaultCoreTools)

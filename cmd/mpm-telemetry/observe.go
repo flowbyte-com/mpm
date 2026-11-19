@@ -29,7 +29,7 @@
 //
 //  1. THE COUNT CAME FROM A TOOL THAT DOES NOT EXIST. The hunt shelled
 //     out to `mpm call mpm_provenance --payload
-//     {"action":"count_by_session"}`. The registry publishes 21 tools
+//     {"action":"count_by_session"}`. The registry publishes 22 tools
 //     and no mpm_provenance, so the hunt FAILED on every qualifying
 //     session ("mpm_provenance: exit status 1") and the command exited
 //     1. The count is now computed IN-PROCESS, read-only, against the
