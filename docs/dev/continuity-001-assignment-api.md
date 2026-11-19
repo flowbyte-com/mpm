@@ -540,8 +540,8 @@ in depth.**
 
 | control | what it removes | the test that must then fail |
 |---|---|---|
-| `fence` | the fence, both halves | `TestAPIAnExpiredLeaseIsReclaimableAndThePreviousHolderIsFencedOut` |
-| `fence-review` | the fence on the review path, all three halves | `TestAPIAStaleReviewerIsFencedOut` |
+| `fence` | N1, the fence, both halves | `TestAPIAnExpiredLeaseIsReclaimableAndThePreviousHolderIsFencedOut` |
+| `fence-review` | N1, the fence on the review path, all three halves | `TestAPIAStaleReviewerIsFencedOut` |
 | `recipient-allow-list` | N2 | `TestAPIChildOutsideTheRootAllowListIsRefused` |
 | `depth-budget` | N3 | `TestAPIChildBeyondTheRootDepthIsRefused` |
 | `operator-authority` | N6 | `TestAPIRootCreationRequiresTheOperatorAuthority` |
@@ -549,13 +549,29 @@ in depth.**
 | `approval-action` | the approval's action check | `TestAPITheApprovalMustNameTheGateAction` |
 | `reviewer-independence` | the review's independence check | `TestAPIReviewerCannotReviewItsOwnWork` |
 | `live-lease` | the live-lease refusal | `TestAPIALiveLeaseIsNotStealable` |
-| `claim-cas` | the claim's compare-and-swap, all three halves | `TestAPIClaimPresentingAStaleEpochIsRefused` |
+| `claim-cas` | the claim's compare-and-swap, **the two halves the suite observes** | `TestAPIClaimPresentingAStaleEpochIsRefused` |
 | `idempotency-lookup` | the early lookup | `TestAPIDuplicateCreationWithADifferentAssignmentIsAConflict` |
 | `idempotency-readback` | the read-back after the unique index refused the insert | `TestAPITheDuplicateIsResolvedWhenTheLookupCannotSeeItYet` |
 | `state-machine` | the role's path | `TestAPIDeliveryAcknowledgementAcceptanceAndCompletionAreDistinct` |
 | `atomicity` | the fault seam between the transition and its event | `TestAPIAFailedTransitionRollsBackItsEvent` |
-| `fence-go-half` | **only** the Go half of the fence | *none — and that is the measurement* |
-| `fence-sql-half` | **only** the `WHERE` clause | *none — and that is the measurement* |
+| `fence-go-half` | N1, **only** the Go half of the fence | *none — and that is the measurement* |
+| `fence-sql-half` | N1, **only** the `WHERE` clause | *none — and that is the measurement* |
+
+**THE `claim-cas` CONTROL REMOVES WHAT THE SUITE OBSERVES, AND PR 1's
+SCHEMA ENFORCEMENT IS NOT PART OF IT.** The claim's compare-and-swap is
+enforced in two places the acceptance suite can see — the Go check and
+the `WHERE` clause of the writing statement — and both are removed. PR 1's
+DDL also enforces the claim's discipline, with a trigger that refuses an
+epoch advance of more than one. That trigger is **not** removed, for a
+reason the seventeenth review found: it lives in PR 1's migration,
+**outside** the package the acceptance suite lives in, so removing it
+would remove code the suite cannot see — the control would measure less
+than it claims, and the pin that holds the controls inside the selection's
+reach would be stating something false. It contributes nothing to the
+measurement either way, because the service advances the epoch by exactly
+one and the trigger never fires; PR 1's own suite is where that
+enforcement is tested. So the control removes what this suite observes,
+and says so.
 
 **THE GATE ASKS THREE QUESTIONS OF EACH CONTROL.**
 
@@ -1050,7 +1066,7 @@ harness's *printed* count against the same figure.
 
 **THE MATRICES ARE THIRTY-EIGHT AND FOUR ENTRIES** (§5.19).
 
-**THE FOUR SUITES HOLD SIXTY-NINE TEST FUNCTIONS**, and that figure is
+**THE FOUR SUITES HOLD SEVENTY-TWO TEST FUNCTIONS**, and that figure is
 computed from the tree rather than copied into it: the Go pin counts the
 test functions in the four suites and requires the count to be the
 published one, so a suite that lost a test cannot leave the number
@@ -1423,12 +1439,23 @@ the CI step calls the script directly                CAUGHT
 the CI step is gone                                  CAUGHT
 ```
 
+**THE THIRD ROW OF THAT TABLE WAS WRONG, AND §5.21 SAYS HOW.** The
+seventeenth review found that the `; exit 0` row was true only of the
+**block-scalar** spelling — the mutation that puts `exit 0` on its own
+line — and false of the **inline** spelling
+(`run: make test-continuity-controls; exit 0`), which the pin's
+line-anchored patterns could not see. The table published a verification
+result that the tree did not produce. That is the same class as every
+other finding in these seventeen rounds, and it is recorded here rather
+than quietly corrected in place, because a reader who checks the table
+against the old code deserves to know that the table was wrong.
+
 The first group is the Go pins; the second is the Python CI pin, run
 in a scratch copy so the operator's workflow is never touched. The
 pristine tree passes in both.
 
 **THE COUNTS MOVE WITH THE FIXES.** The four suites now hold
-**sixty-nine** test functions (§5.14's figure, computed from the tree),
+**seventy-two** test functions (§5.14's figure, computed from the tree),
 the harness publishes **sixteen** controls, its self-test runs
 **eighty-two** checks, and the two matrices are **thirty-eight** and
 **four** entries.
@@ -1443,6 +1470,188 @@ cannot check itself, so the workflow is checked by a Python test that
 reads it; a note that publishes a table cannot check the table, so the
 table is checked against the harness. Each fix is checked from
 **outside** the thing it pins, because nothing can check itself.
+
+### 5.21 What the seventeenth review found: the pin that could not see
+
+The seventeenth review looked for the class once more, and found it in
+the fix the sixteenth round had just installed — which is the sharpest
+form the class has taken: **the evidence for the last round's fix was
+itself unverified, and one row of it was false.**
+
+**THE HEADLINE (M1): THE CI PIN COULD NOT SEE `; exit 0`.** The
+sixteenth round's pin refused the exit-status swallow with four
+patterns, and two of them were **line-anchored**:
+
+```python
+(r"(?m)^\s*exit\s+0\s*$", "`exit 0` discards the exit status"),
+(r"(?m)^\s*exit\s+0\s*;", "`exit 0` discards the exit status"),
+```
+
+A line-anchored pattern cannot match `exit 0` at the end of a line
+whose first token is `run:`. So the inline spelling —
+`run: make test-continuity-controls; exit 0` — was **not caught**,
+while the block-scalar spelling was. And the sixteenth round's own
+verification had mutated the step into the block-scalar form, so the
+table it published said `; exit 0` was CAUGHT. **That row was false.**
+
+Two more shapes sat beside it, and both are genuine swallows rather
+than the `; exit 0` one's arguable one:
+
+| the shape | why it swallows |
+|---|---|
+| `run: make test-continuity-controls &` | the shell reports **0** for a job it did not wait for |
+| `if: false` on the step | the step never runs, and the job still reads green |
+
+**THE FIX.** The patterns are widened to the shapes that matter, and
+three more are added:
+
+| the shape | how it is caught now |
+|---|---|
+| `exit 0` anywhere in the step | `r"\bexit\s+0\b"` — the token, not the line |
+| a backgrounded command | `r"(?m)&(?!&)\s*$"` — a trailing single `&` |
+| a step-level condition | `r"(?m)^\s*if:\s*\S"` — the step may never run |
+| `continue-on-error` on the step | `r"(?mi)^\s*continue-on-error:\s*[\"']?true[\"']?\s*$"` |
+
+**MINOR m1: THE NOTE'S OTHER TWO TABLES WERE NOT TIED TO THE TREE.**
+The sixteenth round tied the note's **control** table to the harness.
+The note publishes two more tables, and nothing tied either:
+
+* §5.1's **property table** — the ten properties and the tests that
+  carry them, which is the table a reader checks to see what the suite
+  covers; and
+* §5.2's **declared exemptions** — the extra tests each control's
+  removal breaks, which is the declaration the gate refuses a control
+  for exceeding.
+
+The seventeenth review showed that a test could be **renamed** in the
+suite and the note would keep publishing the old name; that a row could
+name a test that **does not exist**; that a row could **drop** a test;
+and that the exemptions table could drop or invent an exemption — and
+that **none** of those was caught by anything in the tree. Two pins
+close it, and both are **bidirectional**, because a one-way check
+passes over a declaration that was *removed*:
+
+* `TestControls_TheNotePublishesTheProperties` — §5.1 must name
+  **exactly** the acceptance suite's test functions: no phantoms, and
+  no orphans; and
+* `TestControls_TheNotePublishesTheExemptions` — the note's table and
+  the harness's `breaks` lists must agree, in **both** directions.
+
+**MINOR m2: THE SELECTION'S REACH PIN COULD NOT SEE A HELPER, AND THE
+TREE BROKE ITS OWN PIN.** The pin read each mutator's **own** body. A
+mutator could therefore reach a file **outside** the acceptance suite's
+package through a **helper**, whose body named the file — and the tree
+did exactly that: the `claim-cas` control called a helper that dropped
+**PR 1's** epoch-discipline trigger, which lives in PR 1's migration,
+outside the package the selection reaches. So the tree passed a pin
+whose own statement was false, and the note published that control as
+removing "all three halves" when the third half contributes **nothing**
+to the measurement — the service advances the epoch by exactly one, so
+the trigger never fires, and no test in the acceptance suite mentions
+it.
+
+The fix has two parts. The pin now **follows the calls**: a mutator's
+files are its own body's literals *and* the literals of every harness
+function it calls, transitively. And the control no longer reaches
+outside the package — PR 1's schema enforcement is **not** removed,
+because it is PR 1's, it is covered by PR 1's own suite, and removing
+it would remove code this suite cannot see. The published cell now says
+"**the two halves the suite observes**", and the note says why.
+
+**MINOR m3: `continue-on-error` IN A SPELLING THE CHECK DID NOT
+MATCH.** The check was case-sensitive and unquoted-only, while the
+file's own header claims that no job or step may be marked
+`continue-on-error`. `continue-on-error: True` and
+`continue-on-error: "true"` both passed — and either would make GitHub
+ignore the step's failure, which is the very swallow the file exists to
+prevent. Both spellings are now caught.
+
+**NIT n1: THE `run_tests` PIN WAS A WHOLE-FILE SUBSTRING SEARCH.** A
+dead literal elsewhere in the harness satisfied it, so the pin reported
+"the command carries the selection" while the command that actually
+runs did not. The search is now scoped to `run_tests`'s own body — and
+to its **code**: a literal inside a comment does not count.
+
+**NIT n2, AND A CLASS THAT THE ROUND DISCOVERED WHILE CLOSING IT: A
+COMMENT CAN SATISFY A PIN.** The seventeenth review's n1 was that the
+`run_tests` pin searched the whole file. Fixing it by scoping the
+search to the function's body was not enough: a **commented-out**
+literal is inside the function's body, and it satisfied the pin. The
+same shape applies to the harness's whole structure — a commented-out
+`"expect": [...]` looks exactly like a control that names a test, and a
+commented-out `"breaks": [...]` looks exactly like a declaration. So
+the pins that read the harness's structure now read its **code**: a
+comment stripper that understands single-quoted, double-quoted and
+triple-quoted strings, and escapes, removes the comments before the
+structure is read. Two mutations that a comment-only version of the
+fix would have missed — a commented-out `expect` and a commented-out
+`breaks` — are caught.
+
+**NIT n2 ITSELF — THE PROSE — IS PARTLY CLOSED, AND THE REST IS NOT.**
+The control → invariant link was prose. The harness's `CONTROLS` carry
+an `invariant` field, and four of them name PR 1's deferred invariants
+by their identifiers — **N1**, **N2**, **N3**, **N6**. The note's table
+said what each control removes in prose, and nothing tied the prose to
+the harness's field: a control could be re-pointed at a different
+invariant and the note would keep publishing the old pair. So
+`TestControls_TheNotePublishesTheInvariant` requires the note's row to
+name the identifier the harness names, and the four fence rows now say
+**N1**. What is still prose is the part with **no name** — the fence's
+two halves, the approval's action check, the state machine — and that
+remains stated as open, in §5.20 and here.
+
+**THE VERIFICATION IS BY MUTATION, IN BOTH LANGUAGES.** Every fix is
+caught by removing it, in a scratch copy, and requiring the check to
+fail:
+
+```
+a control reaches outside the package through a HELPER       CAUGHT
+the command's selection moves out of run_tests into a
+    dead literal                                              CAUGHT
+a test is RENAMED in the suite and the note keeps the
+    old name                                                 CAUGHT
+the note's property table names a test that does not exist    CAUGHT
+the note's property table DROPS a test                        CAUGHT
+the note's exemptions table drops a declared exemption       CAUGHT
+the note's exemptions table names an exemption the
+    harness does not declare                                  CAUGHT
+the note's control row stops naming N1                        CAUGHT
+the harness re-points a control at another invariant          CAUGHT
+a control's expect list is COMMENTED OUT                      CAUGHT
+a control's breaks list is COMMENTED OUT                      CAUGHT
+
+the CI step swallows the exit status with `|| true`           CAUGHT
+the CI step swallows the exit status with `; exit 0`          CAUGHT
+    ... on its own line                                       CAUGHT
+the CI step swallows the exit status with an INLINE
+    `; exit 0`                                                CAUGHT
+the CI step BACKGROUNDES the harness                          CAUGHT
+the step carries a CONDITION, so it may never run             CAUGHT
+the step is marked `continue-on-error: true`                  CAUGHT
+the step is marked `continue-on-error: True`                  CAUGHT
+the step is marked `continue-on-error: "true"`                CAUGHT
+the CI step asks for one control                              CAUGHT
+the CI step calls the script directly                         CAUGHT
+the CI step is gone                                           CAUGHT
+a JOB elsewhere is marked `continue-on-error: True`           CAUGHT
+```
+
+**The measured numbers did not move.** The `claim-cas` control no
+longer drops PR 1's trigger, and the measurement is identical: a green
+baseline of **36 tests** with **0 skipped**, **14/14** load-bearing
+controls failing exactly what they declared, **2** defence in depth,
+exit 0. The self-test is still **eighty-two** checks, the matrices are
+still **thirty-eight** and **four**, and the four suites now hold
+**seventy-two** test functions — the three new pins are the difference.
+
+**THE CLASS SO FAR.** Seventeen rounds, and the findings have one
+shape: **a claim the harness carries that nothing checked**. The first
+fifteen found it inside the harness; the sixteenth found it outside,
+in the build, the workflow and the note; and the seventeenth found it
+**in the sixteenth round's own verification table** — a row that said
+`CAUGHT` for a mutation the code did not catch. A verification table is
+a claim like any other, and a claim nothing checks is false until
+something checks it.
 
 ## 6. What PR 2 leaves to PRs 3–5
 

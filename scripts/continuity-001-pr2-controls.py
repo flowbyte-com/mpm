@@ -77,10 +77,15 @@ FILES = (
     "internal/core/assignment/store.go",
     "internal/core/tools/handlers_assignment.go",
     "cmd/mpm/assignment_cmds.go",
-    # PR 1's DDL. Some of PR 2's invariants are ALSO enforced by the
-    # schema — the claim's epoch discipline is one — so a control that
-    # removes the whole enforcement has to remove that half too.
-    "internal/core/migration_agent_assignments.go",
+    # PR 1's DDL is NOT here, and that is deliberate. A control that
+    # mutated a file OUTSIDE the acceptance suite's package would
+    # remove code the suite cannot see, so the control would measure
+    # nothing — and the gate would report it as load-bearing. PR 1's
+    # schema enforcement (the claim's epoch-discipline trigger among
+    # it) is covered by PR 1's own suite; PR 2's controls remove what
+    # PR 2's suite observes. The seventeenth review found a control
+    # that reached outside the package through a helper, and the pin
+    # that now follows helper calls is what holds this true.
 )
 
 TEST_PATTERN = "TestAPI"
@@ -491,34 +496,24 @@ def control_live_lease_is_stealable():
     )
 
 
-def drop_trigger(name):
-    """Remove one trigger from PR 1's DDL."""
-    import re
-
-    rel = "internal/core/migration_agent_assignments.go"
-    if rel not in FILES:
-        raise SystemExit(
-            f"the control for {name} would mutate {rel}, which is not in "
-            f"the harness's FILES tuple — the tree would not be restored"
-        )
-    path = REPO / rel
-    t = path.read_text()
-    pattern = r"CREATE TRIGGER IF NOT EXISTS " + re.escape(name) + r"\b.*?\nEND;\n"
-    new, n = re.subn(pattern, "", t, flags=re.S)
-    if n != 1:
-        raise SystemExit(f"the control could not find the trigger {name} ({n} matches)")
-    if new == t:
-        raise SystemExit(f"the control for {name} changed NOTHING")
-    path.write_text(new)
-
-
 def control_claim_is_not_a_cas():
     """The claim must be a compare-and-swap.
 
-    The CAS is enforced in THREE places: the Go check, the WHERE clause
-    of the writing statement, and PR 1's epoch-discipline trigger. All
-    three are removed, because a control that removes one of them
-    measures nothing — the other two still refuse the second claim.
+    The CAS is enforced in TWO places the acceptance suite can SEE: the
+    Go check, and the WHERE clause of the writing statement. Both are
+    removed, because a control that removes one of them measures
+    nothing — the other still refuses the second claim.
+
+    PR 1's schema also enforces the claim's discipline — a trigger
+    that refuses an epoch advance of more than one. That enforcement is
+    NOT removed, and the reason is the seventeenth review's finding:
+    the trigger lives in PR 1's migration, OUTSIDE the package the
+    acceptance suite lives in, so removing it would remove code this
+    suite cannot see. It contributes nothing to the measurement either
+    way — the service advances the epoch by exactly one, so the
+    trigger never fires — and PR 1's own suite is where that
+    enforcement is tested. So the control removes what THIS suite
+    observes, and says so.
     """
     replace_text(
         "internal/core/assignment/claim.go",
@@ -544,7 +539,6 @@ def control_claim_is_not_a_cas():
         """			5, newEpoch, p.Owner, newLease, now, p.ID)""",
         "the claim's bound epoch",
     )
-    drop_trigger("trg_agent_tasks_claim_discipline")
 
 
 def control_idempotency_lookup():

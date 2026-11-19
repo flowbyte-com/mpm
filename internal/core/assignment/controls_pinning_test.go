@@ -125,7 +125,10 @@ func TestControls_TheHarnessNamesTestsThatExist(t *testing.T) {
 	suite := suiteTestNames(t)
 
 	seen := 0
-	for _, m := range expectRe.FindAllStringSubmatch(string(b), -1) {
+	// The harness is read as CODE: a commented-out expectation looks
+	// exactly like a control that names a test.
+	for _, m := range expectRe.FindAllStringSubmatch(
+		stripPythonComments(string(b)), -1) {
 		for _, quoted := range strings.Split(m[1], ",") {
 			quoted = strings.TrimSpace(quoted)
 			if !strings.HasPrefix(quoted, `"`) {
@@ -164,7 +167,8 @@ func TestControls_TheHarnessNamesOnlyTestsThatExist(t *testing.T) {
 	suite := suiteTestNames(t)
 
 	seen := 0
-	for _, m := range breaksRe.FindAllStringSubmatch(string(b), -1) {
+	for _, m := range breaksRe.FindAllStringSubmatch(
+		stripPythonComments(string(b)), -1) {
 		for _, quoted := range strings.Split(m[1], ",") {
 			quoted = strings.TrimSpace(quoted)
 			if !strings.HasPrefix(quoted, `"`) {
@@ -964,6 +968,9 @@ func TestControls_EveryLoadBearingControlNamesATest(t *testing.T) {
 // ends.
 func controlsRegion(t *testing.T, harness string) string {
 	t.Helper()
+	// The region is read as CODE: a commented-out control would look
+	// exactly like a declared one.
+	harness = stripPythonComments(harness)
 	start := strings.Index(harness, "\nCONTROLS = [\n")
 	if start < 0 {
 		t.Fatal("the harness does not declare a CONTROLS list at the start of a line")
@@ -976,6 +983,100 @@ func controlsRegion(t *testing.T, harness string) string {
 	return rest[:end]
 }
 
+// stripPythonComments removes the comments from a fragment of Python.
+//
+// The harness's structure is read as TEXT by several pins, and a
+// COMMENT can satisfy a substring or a regex: a commented-out
+// `"expect": [...]` looks exactly like a control that names a test, and
+// a commented-out command looks exactly like the command the harness
+// runs. The seventeenth round's verification found that shape — a dead
+// literal satisfying a live-looking pin — so the pins that read the
+// harness's structure read its CODE.
+//
+// The scanner understands single-quoted, double-quoted and triple-quoted
+// strings, and escapes, so a '#' inside a string is not a comment.
+func stripPythonComments(src string) string {
+	const (
+		inCode = iota
+		inSingle
+		inDouble
+		inTripleSingle
+		inTripleDouble
+	)
+	state := inCode
+	var out strings.Builder
+	i := 0
+	for i < len(src) {
+		c := src[i]
+		switch state {
+		case inCode:
+			switch {
+			case c == '#':
+				for i < len(src) && src[i] != '\n' {
+					i++
+				}
+			case c == '\'':
+				if strings.HasPrefix(src[i:], `'''`) {
+					out.WriteString(src[i : i+3])
+					i += 3
+					state = inTripleSingle
+				} else {
+					out.WriteByte(c)
+					i++
+					state = inSingle
+				}
+			case c == '"':
+				if strings.HasPrefix(src[i:], `"""`) {
+					out.WriteString(src[i : i+3])
+					i += 3
+					state = inTripleDouble
+				} else {
+					out.WriteByte(c)
+					i++
+					state = inDouble
+				}
+			default:
+				out.WriteByte(c)
+				i++
+			}
+		case inSingle, inDouble:
+			if c == '\\' && i+1 < len(src) {
+				out.WriteString(src[i : i+2])
+				i += 2
+				continue
+			}
+			if (state == inSingle && c == '\'') ||
+				(state == inDouble && c == '"') {
+				out.WriteByte(c)
+				i++
+				state = inCode
+				continue
+			}
+			out.WriteByte(c)
+			i++
+		default: // the triple-quoted states
+			if c == '\\' && i+1 < len(src) {
+				out.WriteString(src[i : i+2])
+				i += 2
+				continue
+			}
+			q := byte('\'')
+			if state == inTripleDouble {
+				q = '"'
+			}
+			if strings.HasPrefix(src[i:], strings.Repeat(string(q), 3)) {
+				out.WriteString(src[i : i+3])
+				i += 3
+				state = inCode
+				continue
+			}
+			out.WriteByte(c)
+			i++
+		}
+	}
+	return out.String()
+}
+
 // publishedLoadBearingControls is the number of controls the harness
 // publishes as load-bearing. It is the FLOOR of the pin that checks
 // every load-bearing control names a test: a control that dropped out
@@ -985,7 +1086,7 @@ const publishedLoadBearingControls = 14
 // publishedTestFunctions is the number of test functions in the four
 // suites this PR adds. It is checked against the tree — a published
 // number nobody checks drifts.
-const publishedTestFunctions = 69
+const publishedTestFunctions = 72
 
 // publishedControls is the number of controls the harness publishes in
 // its CONTROLS list: sixteen, of which fourteen are load-bearing and
@@ -1349,16 +1450,22 @@ func TestControls_TheHarnessRunsTheAcceptanceSuite(t *testing.T) {
 	root := repoRoot(t)
 	harness := readDocument(t, filepath.Join(root, controlsScript))
 
+	// The command lives in `run_tests` — the harness's ENTIRE contact
+	// with Go. The search is scoped to that function's body: a whole-
+	// file search is satisfied by a DEAD LITERAL elsewhere in the file,
+	// so the pin would report "the command carries the selection" while
+	// the command that actually runs does not.
+	body := harnessFunctionBody(t, harness, "run_tests")
+
 	// The command's arguments, as the harness writes them.
 	for _, want := range []string{
 		`["go", "test", "-tags", "fts5", "-count=1", "-v"`,
 		`"-run", TEST_PATTERN, "./assignment/..."]`,
 	} {
-		if !strings.Contains(harness, want) {
-			t.Errorf("the harness's go test command does not contain "+
-				"%s — the harness's contact with Go carries the "+
-				"selection and the package, and a command that did "+
-				"not would measure something else", want)
+		if !strings.Contains(body, want) {
+			t.Errorf("run_tests does not contain %s — the harness's contact "+
+				"with Go carries the selection and the package, and a command "+
+				"that did not would measure something else", want)
 		}
 	}
 	// The flags that carry the FTS5 build, without which the suite
@@ -1367,9 +1474,9 @@ func TestControls_TheHarnessRunsTheAcceptanceSuite(t *testing.T) {
 		`env["CGO_CFLAGS"] = "-DSQLITE_ENABLE_FTS5=1"`,
 		`env["CGO_LDFLAGS"] = "-lm"`,
 	} {
-		if !strings.Contains(harness, want) {
-			t.Errorf("the harness's go test command does not set %s — "+
-				"without it the suite does not link", want)
+		if !strings.Contains(body, want) {
+			t.Errorf("run_tests does not set %s — without it the suite does "+
+				"not link", want)
 		}
 	}
 }
@@ -1388,18 +1495,14 @@ func TestControls_TheHarnessRunsTheAcceptanceSuite(t *testing.T) {
 func TestControls_EveryControlMutatesInsideTheSelection(t *testing.T) {
 	root := repoRoot(t)
 	harness := readDocument(t, filepath.Join(root, controlsScript))
+	defined := harnessDefinedFunctions(harness)
 
 	// The files each control's mutator touches.
 	mutators := map[string][]string{}
 	for _, m := range regexp.MustCompile(
 		`"mutate":\s*(control_\w+)`).FindAllStringSubmatch(harness, -1) {
 		fn := m[1]
-		body := harnessFunctionBody(t, harness, fn)
-		files := regexp.MustCompile(
-			`"((?:internal|cmd)/[^"]*\.go)"`).FindAllStringSubmatch(body, -1)
-		for _, f := range files {
-			mutators[fn] = append(mutators[fn], f[1])
-		}
+		mutators[fn] = mutatorFiles(t, harness, defined, fn)
 	}
 	if len(mutators) == 0 {
 		t.Fatal("the harness declares no control mutators, so this pin " +
@@ -1423,9 +1526,60 @@ func TestControls_EveryControlMutatesInsideTheSelection(t *testing.T) {
 	}
 }
 
+// harnessDefinedFunctions returns the names of every function the
+// harness defines.
+func harnessDefinedFunctions(harness string) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^def ([a-z_][a-z0-9_]*)\(`).
+		FindAllStringSubmatch(harness, -1) {
+		out[m[1]] = true
+	}
+	return out
+}
+
+// mutatorFiles returns every source file a mutator reaches — its own
+// body's literals, and the literals of every harness function it calls,
+// TRANSITIVELY.
+//
+// The seventeenth review found the hole this closes: the pin read the
+// mutator's own body, and a mutator could reach a file outside the
+// acceptance suite's package through a HELPER, whose body named the
+// file. The tree then passed a pin whose own statement was false. So
+// the pin follows the calls.
+func mutatorFiles(t *testing.T, harness string, defined map[string]bool,
+	fn string) []string {
+	t.Helper()
+	seen := map[string]bool{}
+	var files []string
+	var walk func(string)
+	walk = func(name string) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		body := harnessFunctionBody(t, harness, name)
+		for _, f := range regexp.MustCompile(
+			`"((?:internal|cmd)/[^"]*\.go)"`).FindAllStringSubmatch(body, -1) {
+			files = append(files, f[1])
+		}
+		for _, c := range regexp.MustCompile(`\b([a-z_][a-z0-9_]*)\(`).
+			FindAllStringSubmatch(body, -1) {
+			if defined[c[1]] {
+				walk(c[1])
+			}
+		}
+	}
+	walk(fn)
+	return files
+}
+
 // harnessFunctionBody returns the body of a module-level function.
+//
+// The body is read as CODE: a commented-out line inside a function
+// looks exactly like a line the function executes.
 func harnessFunctionBody(t *testing.T, harness, name string) string {
 	t.Helper()
+	harness = stripPythonComments(harness)
 	marker := "\ndef " + name + "("
 	i := strings.Index(harness, marker)
 	if i < 0 {
@@ -1504,19 +1658,305 @@ func TestControls_TheNotePublishesTheControls(t *testing.T) {
 // whole line, so the third cell can be read.
 func noteRow(t *testing.T, note, name string) string {
 	t.Helper()
+	rows := noteControlsRows(t, note)
+	cells, ok := rows[name]
+	if !ok || len(cells) < 4 {
+		return ""
+	}
+	return strings.TrimSpace(cells[3])
+}
+
+// noteControlsRows returns the design note's CONTROL table: the
+// control's name, and the cells of its row.
+//
+// The table is found by its HEADER — "| control | what it removes |"
+// — so the note's other tables (the declared exemptions, whose first
+// cell is also a control's name) cannot be mistaken for it. Finding
+// the first row that merely starts with the control's name was good
+// enough while the note had one such table; the seventeenth review's
+// finding is that "the table a reader can check" must be THE table.
+func noteControlsRows(t *testing.T, note string) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+	inTable := false
 	for _, line := range strings.Split(note, "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), "|") {
-			continue
-		}
 		cells := strings.Split(line, "|")
 		if len(cells) < 4 {
+			inTable = false
 			continue
 		}
-		if strings.TrimSpace(cells[1]) == "`"+name+"`" {
-			return strings.TrimSpace(cells[3])
+		first := strings.TrimSpace(cells[1])
+		second := strings.TrimSpace(cells[2])
+		if first == "control" && second == "what it removes" {
+			inTable = true
+			continue
+		}
+		if !inTable {
+			continue
+		}
+		if strings.HasPrefix(first, "---") {
+			continue
+		}
+		if !strings.HasPrefix(first, "`") || !strings.HasSuffix(first, "`") {
+			inTable = false
+			continue
+		}
+		out[strings.Trim(first, "`")] = cells
+	}
+	return out
+}
+
+// noteExemptionRows returns the design note's DECLARED-EXEMPTIONS
+// table: the control, and the tests it also breaks.
+func noteExemptionRows(t *testing.T, note string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	inTable := false
+	for _, line := range strings.Split(note, "\n") {
+		cells := strings.Split(line, "|")
+		if len(cells) < 4 {
+			inTable = false
+			continue
+		}
+		first := strings.TrimSpace(cells[1])
+		second := strings.TrimSpace(cells[2])
+		if first == "control" && second == "it also breaks" {
+			inTable = true
+			continue
+		}
+		if !inTable {
+			continue
+		}
+		if strings.HasPrefix(first, "---") {
+			continue
+		}
+		if !strings.HasPrefix(first, "`") || !strings.HasSuffix(first, "`") {
+			inTable = false
+			continue
+		}
+		out[strings.Trim(first, "`")] = second
+	}
+	return out
+}
+
+// noteSection returns the text of a section of the design note,
+// between two headings.
+func noteSection(t *testing.T, note, from, to string) string {
+	t.Helper()
+	i := strings.Index(note, from)
+	if i < 0 {
+		t.Fatalf("the design note has no section %q", from)
+	}
+	j := strings.Index(note[i:], to)
+	if j < 0 {
+		t.Fatalf("the design note has no section %q after %q", to, from)
+	}
+	return note[i : i+j]
+}
+
+// TestControls_TheNotePublishesTheProperties ties the note's property
+// table to the acceptance suite.
+//
+// §5.1 publishes the ten properties and the tests that carry them —
+// the table a reader checks to see what the suite covers. The
+// seventeenth review found that nothing tied it to the tree: a test
+// could be RENAMED and the table would keep publishing the old name; a
+// row could name a test that does not exist; a row could drop a test
+// and the suite would grow past the table. None of those was caught by
+// anything.
+//
+// So the table must name EXACTLY the acceptance suite's tests: no
+// phantoms, and no orphans.
+func TestControls_TheNotePublishesTheProperties(t *testing.T) {
+	root := repoRoot(t)
+	note := readDocument(t, filepath.Join(root,
+		"docs/dev/continuity-001-assignment-api.md"))
+	suite := readDocument(t, filepath.Join(root,
+		"internal/core/assignment/assignment_test.go"))
+
+	section := noteSection(t, note, "### 5.1", "### 5.2")
+	named := map[string]bool{}
+	for _, m := range regexp.MustCompile("`(Test[A-Za-z0-9_]+)`").
+		FindAllStringSubmatch(section, -1) {
+		named[m[1]] = true
+	}
+	inSuite := testNameRe.FindAllStringSubmatch(suite, -1)
+	if len(inSuite) == 0 {
+		t.Fatal("the acceptance suite holds no test functions, so this " +
+			"pin no longer tests what it claims")
+	}
+	known := map[string]bool{}
+	for _, m := range inSuite {
+		known[m[1]] = true
+		if !named[m[1]] {
+			t.Errorf("the note's property table does not name the test %q, "+
+				"so the table a reader checks does not describe the suite "+
+				"the gate measures", m[1])
 		}
 	}
-	return ""
+	for name := range named {
+		if !known[name] {
+			t.Errorf("the note's property table names the test %q, which is "+
+				"not in the acceptance suite — the table publishes a test "+
+				"that does not exist", name)
+		}
+	}
+}
+
+// TestControls_TheNotePublishesTheExemptions ties the note's declared
+// exemptions to the harness.
+//
+// The note publishes, per control, the EXTRA tests its removal breaks
+// — the declaration the gate refuses a control for exceeding. The
+// seventeenth review found that nothing tied that table to the
+// harness: the table could drop an exemption, or name one the harness
+// does not declare, and the published declaration and the real one
+// would drift apart.
+func TestControls_TheNotePublishesTheExemptions(t *testing.T) {
+	root := repoRoot(t)
+	note := readDocument(t, filepath.Join(root,
+		"docs/dev/continuity-001-assignment-api.md"))
+	harness := readDocument(t, filepath.Join(root, controlsScript))
+
+	// What the harness declares, per control.
+	declared := map[string][]string{}
+	region := controlsRegion(t, harness)
+	for _, block := range regexp.MustCompile(`(?s)\{[^{}]*\}`).
+		FindAllString(region, -1) {
+		name := regexp.MustCompile(`"name":\s*"([^"]+)"`).
+			FindStringSubmatch(block)
+		if name == nil {
+			continue
+		}
+		m := breaksRe.FindStringSubmatch(block)
+		if m == nil {
+			continue
+		}
+		var tests []string
+		for _, quoted := range strings.Split(m[1], ",") {
+			quoted = strings.TrimSpace(quoted)
+			if !strings.HasPrefix(quoted, `"`) {
+				continue
+			}
+			tests = append(tests, strings.Trim(quoted, `"`))
+		}
+		declared[name[1]] = tests
+	}
+	published := 0
+	for _, tests := range declared {
+		if len(tests) > 0 {
+			published++
+		}
+	}
+	if published == 0 {
+		t.Fatal("the harness declares no exemptions, so this pin no longer " +
+			"tests what it claims")
+	}
+
+	// What the note publishes.
+	rows := noteExemptionRows(t, note)
+	for control, tests := range declared {
+		if len(tests) == 0 {
+			continue
+		}
+		row, ok := rows[control]
+		if !ok {
+			t.Errorf("the design note publishes no exemptions for the "+
+				"control %q — the gate refuses a control for breaking more "+
+				"than it declared, and the declaration is not published",
+				control)
+			continue
+		}
+		for _, want := range tests {
+			if !strings.Contains(row, "`"+want+"`") {
+				t.Errorf("the design note's exemptions for the control %q do "+
+					"not name %q, and the harness declares it — the published "+
+					"declaration and the harness's have drifted", control, want)
+			}
+		}
+	}
+	// And the other direction: what the note publishes, the harness must
+	// declare. A one-way check would pass over a control whose
+	// declaration had been REMOVED — the pin would simply check less,
+	// and say nothing.
+	for control, row := range rows {
+		named := regexp.MustCompile("`(Test[A-Za-z0-9_]+)`").
+			FindAllStringSubmatch(row, -1)
+		if len(named) == 0 {
+			t.Errorf("the design note publishes an exemptions row for the "+
+				"control %q that names no test — a row that declares nothing "+
+				"is not a declaration", control)
+			continue
+		}
+		for _, m := range named {
+			found := false
+			for _, want := range declared[control] {
+				if want == m[1] {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("the design note publishes the exemption %q for the "+
+					"control %q, and the harness does not declare it — the "+
+					"published declaration and the harness's have drifted",
+					m[1], control)
+			}
+		}
+	}
+}
+
+// TestControls_TheNotePublishesTheInvariant ties a control to the
+// invariant it removes, where the harness names one.
+//
+// The harness's CONTROLS carry an `invariant` field, and four of them
+// name PR 1's deferred invariants by their identifiers — N1, N2, N3,
+// N6. The note's table said what each control removes in PROSE, and
+// nothing tied the prose to the harness's field: a control could be
+// re-pointed at a different invariant and the note would keep
+// publishing the old pair.
+//
+// This closes PART of the seventeenth round's nit n2 — the part where
+// the invariant has a NAME. The rest is still prose, and §5.20 says so.
+func TestControls_TheNotePublishesTheInvariant(t *testing.T) {
+	root := repoRoot(t)
+	note := readDocument(t, filepath.Join(root,
+		"docs/dev/continuity-001-assignment-api.md"))
+	harness := readDocument(t, filepath.Join(root, controlsScript))
+
+	rows := noteControlsRows(t, note)
+	region := controlsRegion(t, harness)
+	seen := 0
+	for _, block := range regexp.MustCompile(`(?s)\{[^{}]*\}`).
+		FindAllString(region, -1) {
+		name := regexp.MustCompile(`"name":\s*"([^"]+)"`).
+			FindStringSubmatch(block)
+		invariant := regexp.MustCompile(`"invariant":\s*"([^"]+)"`).
+			FindStringSubmatch(block)
+		if name == nil || invariant == nil {
+			continue
+		}
+		code := regexp.MustCompile(`^(N[0-9]+)\b`).FindStringSubmatch(invariant[1])
+		if code == nil {
+			continue
+		}
+		seen++
+		cells, ok := rows[name[1]]
+		if !ok || len(cells) < 3 {
+			t.Errorf("the design note has no row for the control %q", name[1])
+			continue
+		}
+		if !strings.Contains(cells[2], code[1]) {
+			t.Errorf("the control %q removes the invariant %q, and the note's "+
+				"row does not name %s — the table a reader checks does not "+
+				"say which invariant the control removes", name[1],
+				invariant[1], code[1])
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no control names an invariant by its identifier, so this pin " +
+			"no longer tests what it claims")
+	}
 }
 
 func TestControls_EveryControlIsNamedAndClassified(t *testing.T) {

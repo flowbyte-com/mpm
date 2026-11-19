@@ -294,9 +294,28 @@ class TestGatingJobsStillExist(unittest.TestCase):
         body = _strip_comments(block)
         for pattern, what in (
             (r"\|\|\s*(true|:)\b", "`|| true` discards the exit status"),
-            (r"(?m)^\s*exit\s+0\s*$", "`exit 0` discards the exit status"),
-            (r"(?m)^\s*exit\s+0\s*;", "`exit 0` discards the exit status"),
+            # `exit 0` ANYWHERE, not only at the start of a line. The
+            # inline form -- `run: make test-continuity-controls; exit
+            # 0` -- is the shape the sixteenth round's verification
+            # claimed to catch and did not: that round's mutation put
+            # `exit 0` on its OWN line, which is the one spelling a
+            # line-anchored pattern can see. The seventeenth review
+            # found the inline form, and found two more shapes beside
+            # it.
+            (r"\bexit\s+0\b", "`exit 0` discards the exit status"),
             (r"set\s+\+e\b", "`set +e` discards the exit status"),
+            # A backgrounded command discards the exit status outright:
+            # the shell reports 0 for a job it did not wait for.
+            (r"(?m)&(?!&)\s*$", "a trailing `&` discards the exit status"),
+            # A step-level condition means the step may never run at
+            # all, while the job still reads green.
+            (r"(?m)^\s*if:\s*\S", "a step-level `if:` means the harness "
+                                   "may never run, while the job reads "
+                                   "green"),
+            # `continue-on-error` on THIS step makes GitHub ignore the
+            # step's failure: the same swallow, by another name.
+            (r"(?mi)^\s*continue-on-error:\s*[\"']?true[\"']?\s*$",
+             "`continue-on-error: true` discards the exit status"),
         ):
             self.assertNotRegex(
                 body, pattern,
@@ -339,7 +358,7 @@ class TestGatingJobsStillExist(unittest.TestCase):
         text = _strip_comments(_workflow_text())
         self.assertNotRegex(
             text,
-            r"(?m)^\s*continue-on-error:\s*true\s*$",
+            r"(?mi)^\s*continue-on-error:\s*[\"']?true[\"']?\s*$",
             "a job or step is marked continue-on-error; its conclusion "
             "would read success while its log shows a failure",
         )
