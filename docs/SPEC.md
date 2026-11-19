@@ -71,6 +71,7 @@ Every section is self-contained enough to read in isolation. This document is th
    - 6.11 [Skill Package Archive Import (P5 — the `.skill` ZIP adapter)](#611-skill-package-archive-import-p5--the-skill-zip-adapter)
    - 6.12 [Skill Package Retrieval (P6 — the read-only retrieval and verification API)](#612-skill-package-retrieval-p6--the-read-only-retrieval-and-verification-api)
    - 6.13 [Skill Package Export (P7 — the deterministic `.skill` writer and the complete skills export)](#613-skill-package-export-p7--the-deterministic-skill-writer-and-the-complete-skills-export)
+   - 6.14 [Durable Assignment Storage (Continuity 001, PR 1 — storage only)](#614-durable-assignment-storage-continuity-001-pr-1--storage-only)
 7. [Core Stability](#7-core-stability)
 8. [CLI Reference](#8-cli-reference)
 9. [Runtime Services](#9-runtime-services)
@@ -2888,6 +2889,98 @@ Archives and export metadata are written through **private staging paths**:
 **No change to the database schema, and no write to the database at all.** The exporter reads the three package tables §6.8 specifies, plus `memories`. It writes nothing.
 
 **No change to the importer.** The `.skill` archive the writer produces is accepted by the existing P5 importer **by construction** — the flat layout is what §5.3.1's root rule expects — and no importer change was needed to make it so.
+
+---
+
+### 6.14 Durable Assignment Storage (Continuity 001, PR 1 — storage only)
+
+A **work item** (`works`) is a commitment. A **thread** (`continuity_threads`) is a line of conversation. Neither is an **assignment**: a unit of work addressed to a named agent, with an owner, a lease, a state and an evidence trail. Continuity 001 adds that grain, in storage.
+
+This section describes **PR 1 of six**: the storage only. No API, no CLI, no agent-facing surface, no dispatcher and no OpenCode adapter exist for it yet — the tables are created empty and stay empty until PR 2. The design of record is `docs/dev/continuity-001-assignment-schema.md`; the DDL is authoritative in `internal/core/migration_agent_assignments.go`, where it is a single literal whose SHA-256 a test pins, so the shipped schema cannot drift from the design note without failing the build.
+
+#### What PR 1 adds
+
+Two **additive** tables, seven indexes and thirty triggers. No existing table, row, index or trigger is modified.
+
+| table | what it holds |
+|---|---|
+| `agent_tasks` | the assignment: its project, its place in the delegation tree, its recipient and role, its state, its idempotency key, its lease, the root's budgets, and the evidence pointers. |
+| `agent_task_events` | the append-only ledger of an assignment's transitions. The event index is `UNIQUE` per assignment and a trigger refuses an index that does not advance, so the ledger is ordered and **monotonic**. |
+
+The project axis is **reused, not duplicated**: PR #224's Stage 1 already shipped `projects` in `main` (commit `d8b373fb`), so an assignment references `projects(id)` and inherits Stage 1's containment idiom — the project id is denormalised onto the assignment and held honest by a **composite** foreign key, so a child cannot name a root or a parent of another project.
+
+#### The state machine
+
+Ten states, and the separations are the point:
+
+`enqueued` → `delivered` → `acknowledged` → `accepted` → `in_progress` → `completed` → `review_passed` → `awaiting_operator` → `operator_approved`, with `cancelled` as the universal withdrawal.
+
+**Delivery is not acceptance, and completion is not approval.** An assignment that was delivered and never acknowledged is **re-deliverable**, not lost: delivery is a state transition with its own **ledger entry** — the `delivered` event in `agent_task_events` — never a side effect of the row having been read. This is deliberately *not* the wake path's semantics: `scheduled_wakes.fired` is set in the same transaction that surfaces the row, so a crash after the mark loses the wake permanently, and that at-most-once path is not promoted into a delivery queue here.
+
+The transition path depends on the role, and the **database** knows it:
+
+- an **implementer** follows the path above, and **cannot skip its independent review**: `completed → awaiting_operator` is refused;
+- a **reviewer** follows the path to `in_progress` and ends at either `review_passed` (the verdict was passing) or `completed` (the review asked for changes). A reviewer never reaches the operator's gate: a reviewer approves nothing.
+
+`cancelled` is legal from **every** state except itself, for **every** role — including `operator_approved`, because an operator may withdraw an approved assignment. `operator_approved` and `cancelled` are otherwise terminal.
+
+The gate is a **hand-off, not a claim**: an assignment at `awaiting_operator` cannot be claimed, because the work is finished and the operator holds the decision. Only a live assignment can be claimed, and the refusal covers both sides of the statement — a claim that arrives with the cancellation in the same write is refused too.
+
+`operator_approved` is a **record, not a grant**. MPM records an approval that was verified **outside** MPM — its source, the exact revision it covers and a pointer to the evidence — and never manufactures or authenticates one. The approval names the exact action and the exact revision, so a change to the head revision after the approval was recorded leaves the approval **stale**, and staleness is observable rather than implied. A transition into the gate must name the action it awaits, and a transition into the approval must name its action, its revision, its source **and its evidence pointer**: an approval with nothing behind it is a claim about what was authorised with nothing to check it against. The approval must name the **same** action the gate awaited: the row has to say what was approved relative to what was asked.
+
+The transitions must **supply** those fields, not merely carry them: the awaited action is set by the transition into the gate and by nothing else, and the approval's fields are set by the transition that records it. Without that, a row could be given the whole gate and approval record in an earlier write and then walk the path without naming anything, and the record would not be attributable to the event that claims it.
+
+And the records are **born empty**: an assignment is created with no gate and no approval. A row created carrying them would be permanently wedged — the immutability rules would refuse every attempt to supply the value the transition needs, and the "must supply" rules would refuse a transition that re-stated it.
+
+Once the gate is reached, **neither record changes** — not to a different value and not to nothing. That covers the action the operator is asked to authorise and every column of the approval: its action, its revision, its source, its evidence pointer and the moment it was recorded. The rule holds on the statement that **leaves** the gate as well, so an assignment cannot be approved for one action while the row says it was asked for another, and it cannot be approved with its awaited action erased. And it holds on the assignment's **later** states: the protection is scoped to the record rather than to the row's current state, so a cancelled assignment's gate and approval records are still fixed.
+
+#### The delegation tree, and the budgets it inherits
+
+A **root** assignment is the operator-authorised one: it is its own root, it has no parent, and it **carries the budgets** — `max_depth`, `max_tasks`, `max_concurrency`, `max_resource_units`, `permitted_operations` and `eligible_recipients`.
+
+A **child** is an agent's delegation: it names its root and its parent, and it carries **none** of the root's budgets — including no allow-list of its own. That is the important part, and it is **structural** — there is no column in which a child could widen what it was given, so inheritance is a property of the schema rather than a rule the code is trusted to apply. A root must also name at least one permitted operation, every element of both lists must be a non-null, non-empty string, and a root's own recipient must be among its eligible recipients: a root that may do nothing, or that is addressed to an agent the tree may not target, is a silent misconfiguration rather than a safe default.
+
+The tree is a **tree**: the root must be a root of the same project, the parent must belong to the same tree, the parent's depth must be exactly one less, and nobody is their own parent — checked on the insert path and on the update path. The depth condition is what excludes a **cycle**: following the parent chain must strictly decrease the depth, so the chain cannot come back to where it started. That condition is only sound because **the depth is immutable** — a depth that never changes makes the chain strictly decreasing by construction, where a trigger that merely checked the parent would be satisfied by two statements that each change a depth. The depth's immutability also means a child cannot be promoted to a root.
+
+A child **does** carry a `resource_units` figure — its own consumption against the root's cumulative budget. It carries no budget *limit*: the limit it must respect is the root's `max_resource_units`, and enforcing that is the dispatcher's job, not the schema's.
+
+#### The lease and the fence
+
+`claim_epoch` is the fencing token. It advances by **exactly one** on every claim; a claim leaves the row with an owner and a lease; the owner changes **only** on a claim. So the epoch cannot be skipped or reset, and an owner cannot be reassigned without the row ceasing to be a lease. Only a **live** assignment can be claimed — the terminal states and the gate are refused on both sides of the statement.
+
+The lease is **new** on every claim: the lease is the claim's window, and a claim that inherited the last claim's window would have no window at all. A claimed assignment keeps its lease, and an unclaimed one cannot be given one.
+
+The owner is required to be **present** after a claim, but the schema cannot require it to have *changed*: a claim that renews the same holder's lease leaves the owner unchanged, and a trigger cannot tell that from a takeover that forgot to write the new owner. So the guarantee is the one the database can make — the owner is present, and only a claim changes it — and the API carries the rest. An assignment is born **unclaimed** — epoch 0, no owner, no lease — and an assignment that was claimed, or that has a ledger, is cancelled and never deleted, so its id cannot be reused and a stale token cannot become current again.
+
+The fence against a **stale** owner is the `WHERE` clause of the writing statement — `WHERE id = ? AND claim_epoch = ?` — because that comparison is atomic with the write. It is deliberately not a trigger: a trigger cannot see the epoch a caller *presented*. A lease that expires without a transition is recoverable; the next claim takes it and advances the epoch, which invalidates the previous holder.
+
+#### Nothing is replaced, rewritten or reused
+
+`INSERT OR REPLACE` is DELETE + INSERT, so it defeats every rule that is enforced by a `BEFORE UPDATE` or a `BEFORE DELETE` trigger: the update triggers never fire, and SQLite does not fire the delete triggers for REPLACE's implicit delete unless the `recursive_triggers` pragma is enabled, which MPM does not enable. The storage therefore refuses an INSERT whose id or whose idempotency key already exists, and an INSERT into the ledger whose id or whose `(task, index)` pair already exists. SQLite runs the insert trigger **before** the conflict resolution, so the conflicting row is still there and the replacement is refused as a whole: the existing row survives with its role, its state, its lease, its claim epoch and its approval record intact.
+
+`UPDATE OR REPLACE` is the other half of the same hole: it resolves a uniqueness conflict by **deleting** the conflicting row, and the delete triggers do not fire for that implicit delete either — so without a guard a **claimed** assignment could be destroyed by an UPDATE that merely set a colliding idempotency key, its id freed and a stale token made current again.
+
+And a collision is not the only way to free an id: a **rename** frees it without any conflict at all, and a fresh row can take the freed id, come back at epoch 0 and be claimed at epoch 1 — so the previous holder's stale token (`WHERE id = ? AND claim_epoch = ?`) matches the **new** row. The storage therefore makes the id and the idempotency key **immutable**. That closes the hole from both sides: the rename is refused, and a collision cannot arise, because the only two columns a uniqueness conflict can be resolved on are the two that no longer move.
+
+The ledger's ids and indexes are guarded the same way, so a ledger entry cannot be destroyed by a replacement in either form, and the ledger's append-only property holds against an ordinary SQL statement and not only against an explicit `UPDATE` or `DELETE`.
+
+#### What the database enforces
+
+Thirty-four properties are enforced by the schema itself rather than by convention — the creation state, the unclaimed creation, the refusal to reuse an id or a key, the immutability of both, the tree's shape on both write paths, the depth's immutability, the role-aware state machine, the universal cancellation, the operator's gate and its approval record, the rule that each is written only by its own transition, the rule that both are born empty, the epoch discipline, the owner discipline, the refusal to claim anything terminal or at the gate, the lease's tie to the claim, the root/child budget shape, the one-project containment, the two lists' element types, the ledger's monotonicity, append-only nature and state vocabulary, the refusal to delete anything with children or a ledger by a DELETE statement, and the type of every identifier, key, number, pointer and JSON column.
+
+The guarantees above are the ones a **database file** can make. A `DROP TABLE` destroys every row without any trigger firing, and `PRAGMA writable_schema` can remove the triggers themselves; a file under an adversary's control is not the threat model, and the substrate is not the boundary.
+
+`docs/dev/continuity-001-assignment-schema.md` lists them one by one, **and names the six that the schema does not enforce** — the fence, the recipient membership, the depth limit, the tree budgets, the findings capture and the authorisation of a root — so that "the schema enforces it" and "the API enforces it" are never confused. It also records the two closed vocabularies — the role and the event type — and the fact that widening a `CHECK` on a live table in SQLite means rebuilding that table, so a later PR that needs a third role must plan for a rebuild.
+
+Two boundaries are enforced **twice**, on purpose: the composite foreign keys hold the tree inside one project on the delete path, and the tree-shape triggers hold it on the insert and update paths; and the state vocabulary's `CHECK` sits behind the state machine's triggers. Both layers are measured by the negative controls, and the design note records which test is load-bearing for which.
+
+#### The tables are local-only
+
+They are created by a **migration**, not by `BaseTables`, so `attachShared` never propagates them into the cross-workspace `shared` schema. The migration runs inside the fatal migration transaction on every open, so a fresh database and an upgraded one take the same code path and the same DDL text, and the sentinel row is written **last** inside that transaction — a failure at the sentinel write rolls the DDL back with it.
+
+#### The restore allow-list
+
+Both tables are registered in `CanonicalMPMSchema`, so `mpm restore-db` **accepts** a dump that contains them. Without that registration every backup taken after this change would be rejected — a loud, immediate failure. The acceptance is proved through the **command**: `cmd/mpm/handlers_restore_assignment_test.go` builds a dump from the live schema — the real DDL of every table, index and trigger, plus real rows — and requires `mpm restore-db` to accept it and to restore the tables, the indexes, the triggers and the rows. A second test in that file proves the other shape: the one the **backup** command writes, because `mpm backup` is `sqlite3 .dump` — the data before the indexes, with the foreign keys turned off for the duration. Both restore. As with the Continuity tables, the registration also means an **old** binary refuses a dump taken by the new binary: the allow-list is not weakened to hide that.
 
 ---
 

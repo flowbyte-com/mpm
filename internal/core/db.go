@@ -3284,6 +3284,23 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("continuity project model migration failed: %w", err)
 	}
+
+	// Continuity 001, PR 1: the durable assignment storage.
+	//
+	// Same reasoning as the Continuity migration above: the tables are NOT
+	// in BaseTables, because BaseTables is the slice attachShared
+	// propagates into the cross-workspace `shared` schema, and an
+	// assignment — a unit of work addressed to a named agent — belongs
+	// inside ONE workspace. Idempotent via the agent_assignments_v1
+	// sentinel, and the sentinel is written last, inside this same
+	// transaction, so an injected failure leaves no partial schema.
+	//
+	// See internal/core/migration_agent_assignments.go for the DDL and for
+	// what the triggers enforce.
+	if err := MigrateAgentAssignments(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("agent assignments migration failed: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
 	}
