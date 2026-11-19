@@ -368,12 +368,12 @@ func (s *Store) Delegate(p DelegateParams) (*Assignment, bool, error) {
 
 // rootSpec is the description an idempotency key is compared against.
 type rootSpec struct {
-	projectID  string
-	parentID   string
-	title      string
-	objective  string
-	recipient  string
-	role       string
+	projectID string
+	parentID  string
+	title     string
+	objective string
+	recipient string
+	role      string
 }
 
 // sameLogicalAssignment reports whether the stored row describes the same

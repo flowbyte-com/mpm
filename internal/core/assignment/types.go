@@ -155,25 +155,25 @@ type Assignment struct {
 	PermittedOperations []string `json:"permitted_operations,omitempty"`
 	EligibleRecipients  []string `json:"eligible_recipients,omitempty"`
 
-	MaxDepth          int64 `json:"max_depth,omitempty"`
-	MaxTasks          int64 `json:"max_tasks,omitempty"`
-	MaxConcurrency    int64 `json:"max_concurrency,omitempty"`
-	MaxResourceUnits  int64 `json:"max_resource_units,omitempty"`
-	ResourceUnits     int64 `json:"resource_units"`
-	IssueRef          string `json:"issue_ref,omitempty"`
-	PRRef             string `json:"pr_ref,omitempty"`
-	BaseSHA           string `json:"base_sha,omitempty"`
-	HeadSHA           string `json:"head_sha,omitempty"`
-	ReviewedSHA       string `json:"reviewed_sha,omitempty"`
-	FindingsSHA256    string `json:"findings_sha256,omitempty"`
-	EvidenceRef       string `json:"evidence_ref,omitempty"`
+	MaxDepth         int64  `json:"max_depth,omitempty"`
+	MaxTasks         int64  `json:"max_tasks,omitempty"`
+	MaxConcurrency   int64  `json:"max_concurrency,omitempty"`
+	MaxResourceUnits int64  `json:"max_resource_units,omitempty"`
+	ResourceUnits    int64  `json:"resource_units"`
+	IssueRef         string `json:"issue_ref,omitempty"`
+	PRRef            string `json:"pr_ref,omitempty"`
+	BaseSHA          string `json:"base_sha,omitempty"`
+	HeadSHA          string `json:"head_sha,omitempty"`
+	ReviewedSHA      string `json:"reviewed_sha,omitempty"`
+	FindingsSHA256   string `json:"findings_sha256,omitempty"`
+	EvidenceRef      string `json:"evidence_ref,omitempty"`
 
-	AwaitingAction  string `json:"awaiting_action,omitempty"`
-	ApprovalAction  string `json:"approval_action,omitempty"`
+	AwaitingAction   string `json:"awaiting_action,omitempty"`
+	ApprovalAction   string `json:"approval_action,omitempty"`
 	ApprovalRevision string `json:"approval_revision,omitempty"`
-	ApprovalSource  string `json:"approval_source,omitempty"`
+	ApprovalSource   string `json:"approval_source,omitempty"`
 	ApprovalEvidence string `json:"approval_evidence,omitempty"`
-	ApprovedAt      *int64 `json:"approved_at,omitempty"`
+	ApprovedAt       *int64 `json:"approved_at,omitempty"`
 
 	Payload map[string]interface{} `json:"payload,omitempty"`
 
@@ -232,11 +232,11 @@ type Actor struct {
 // schema enforces the split, so the root's parameters are the budgets and
 // the child's are not.
 type CreateRootParams struct {
-	ProjectID   string
-	Title       string
-	Objective   string
-	Recipient   string
-	Role        string
+	ProjectID      string
+	Title          string
+	Objective      string
+	Recipient      string
+	Role           string
 	IdempotencyKey string
 
 	PermittedOperations []string
@@ -265,11 +265,11 @@ type CreateRootParams struct {
 // the schema's root/child CHECK makes that structural rather than a
 // convention.
 type DelegateParams struct {
-	ParentID string
-	Title    string
-	Objective string
-	Recipient string
-	Role      string
+	ParentID       string
+	Title          string
+	Objective      string
+	Recipient      string
+	Role           string
 	IdempotencyKey string
 
 	// Actor is the attribution of the DELEGATING party.
@@ -339,9 +339,9 @@ type CancelParams struct {
 
 // NoteParams describes an explicit ledger note.
 type NoteParams struct {
-	ID    string
-	Actor Actor
-	Note  string
+	ID      string
+	Actor   Actor
+	Note    string
 	Payload map[string]interface{}
 }
 

@@ -180,12 +180,12 @@ func buildSetClause(cols map[string]interface{}) (string, []interface{}) {
 // row having been read.
 func (s *Store) Deliver(p FencedParams) (*Assignment, error) {
 	return s.transition(transitionSpec{
-		id:            p.ID,
+		id:             p.ID,
 		presentedEpoch: p.Epoch,
-		toState:       StateDelivered,
-		eventType:     EventDelivered,
-		actor:         p.Actor,
-		note:          p.Note,
+		toState:        StateDelivered,
+		eventType:      EventDelivered,
+		actor:          p.Actor,
+		note:           p.Note,
 	})
 }
 
@@ -196,24 +196,24 @@ func (s *Store) Deliver(p FencedParams) (*Assignment, error) {
 // distinct states, and the distinction is the point.
 func (s *Store) Acknowledge(p FencedParams) (*Assignment, error) {
 	return s.transition(transitionSpec{
-		id:            p.ID,
+		id:             p.ID,
 		presentedEpoch: p.Epoch,
-		toState:       StateAcknowledged,
-		eventType:     EventAcknowledged,
-		actor:         p.Actor,
-		note:          p.Note,
+		toState:        StateAcknowledged,
+		eventType:      EventAcknowledged,
+		actor:          p.Actor,
+		note:           p.Note,
 	})
 }
 
 // Accept records the recipient's commitment: `acknowledged → accepted`.
 func (s *Store) Accept(p FencedParams) (*Assignment, error) {
 	return s.transition(transitionSpec{
-		id:            p.ID,
+		id:             p.ID,
 		presentedEpoch: p.Epoch,
-		toState:       StateAccepted,
-		eventType:     EventAccepted,
-		actor:         p.Actor,
-		note:          p.Note,
+		toState:        StateAccepted,
+		eventType:      EventAccepted,
+		actor:          p.Actor,
+		note:           p.Note,
 	})
 }
 
@@ -230,13 +230,13 @@ func (s *Store) Accept(p FencedParams) (*Assignment, error) {
 // to decline work they have not yet acknowledged.
 func (s *Store) Refuse(p FencedParams) (*Assignment, error) {
 	return s.transition(transitionSpec{
-		id:            p.ID,
+		id:             p.ID,
 		presentedEpoch: p.Epoch,
-		toState:       StateCancelled,
-		eventType:     EventCancelled,
-		actor:         p.Actor,
-		note:          p.Note,
-		eventPayload:  map[string]interface{}{"reason": "refused"},
+		toState:        StateCancelled,
+		eventType:      EventCancelled,
+		actor:          p.Actor,
+		note:           p.Note,
+		eventPayload:   map[string]interface{}{"reason": "refused"},
 	})
 }
 
@@ -246,13 +246,13 @@ func (s *Store) Refuse(p FencedParams) (*Assignment, error) {
 // lease, because there would be nothing to expire it.
 func (s *Store) Start(p FencedParams) (*Assignment, error) {
 	return s.transition(transitionSpec{
-		id:            p.ID,
+		id:             p.ID,
 		presentedEpoch: p.Epoch,
-		toState:       StateInProgress,
-		eventType:     EventStarted,
-		actor:         p.Actor,
-		note:          p.Note,
-		requireClaim:  true,
+		toState:        StateInProgress,
+		eventType:      EventStarted,
+		actor:          p.Actor,
+		note:           p.Note,
+		requireClaim:   true,
 	})
 }
 
@@ -263,13 +263,13 @@ func (s *Store) Start(p FencedParams) (*Assignment, error) {
 func (s *Store) Complete(p FencedParams) (*Assignment, error) {
 	now := s.Now()
 	return s.transition(transitionSpec{
-		id:            p.ID,
+		id:             p.ID,
 		presentedEpoch: p.Epoch,
-		toState:       StateCompleted,
-		eventType:     EventCompleted,
-		actor:         p.Actor,
-		note:          p.Note,
-		setColumns:    map[string]interface{}{"completed_at": now},
+		toState:        StateCompleted,
+		eventType:      EventCompleted,
+		actor:          p.Actor,
+		note:           p.Note,
+		setColumns:     map[string]interface{}{"completed_at": now},
 	})
 }
 
@@ -280,12 +280,12 @@ func (s *Store) Complete(p FencedParams) (*Assignment, error) {
 // state-machine special case.
 func (s *Store) Cancel(p CancelParams) (*Assignment, error) {
 	return s.transition(transitionSpec{
-		id:            p.ID,
+		id:             p.ID,
 		presentedEpoch: p.Epoch,
-		toState:       StateCancelled,
-		eventType:     EventCancelled,
-		actor:         p.Actor,
-		note:          p.Note,
+		toState:        StateCancelled,
+		eventType:      EventCancelled,
+		actor:          p.Actor,
+		note:           p.Note,
 	})
 }
 
@@ -337,14 +337,14 @@ func (s *Store) HandoffToOperator(p HandoffParams) (*Assignment, error) {
 		return nil, err
 	}
 	return s.transition(transitionSpec{
-		id:            p.ID,
+		id:             p.ID,
 		presentedEpoch: p.Epoch,
-		toState:       StateAwaitingOperator,
-		eventType:     EventAwaitingOperator,
-		actor:         p.Actor,
-		note:          p.Note,
-		setColumns:    map[string]interface{}{"awaiting_action": p.AwaitingAction},
-		eventPayload:  map[string]interface{}{"awaiting_action": p.AwaitingAction},
+		toState:        StateAwaitingOperator,
+		eventType:      EventAwaitingOperator,
+		actor:          p.Actor,
+		note:           p.Note,
+		setColumns:     map[string]interface{}{"awaiting_action": p.AwaitingAction},
+		eventPayload:   map[string]interface{}{"awaiting_action": p.AwaitingAction},
 	})
 }
 

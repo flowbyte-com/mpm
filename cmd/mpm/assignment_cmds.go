@@ -59,11 +59,11 @@ type assignmentFlags struct {
 	actorKind string
 
 	// content
-	title     string
-	objective string
-	role      string
-	note      string
-	verdict   string
+	title          string
+	objective      string
+	role           string
+	note           string
+	verdict        string
 	awaitingAction string
 
 	// the claim

@@ -1161,6 +1161,77 @@ func TestAPIDeliveryAcknowledgementAcceptanceAndCompletionAreDistinct(t *testing
 	}
 }
 
+// TestAPIRedeliveryIsRefusedAndTheWorkStaysVisible proves the
+// AT-LEAST-ONCE property.
+//
+// Delivery is at-least-once over the RECIPIENT, not over the runtime:
+// the assignment stays in the inbox until somebody acknowledges it, so a
+// second runtime addressed to the same recipient picks the work up
+// rather than finding it lost.
+//
+// It is NEVER exactly-once. The delivery transition itself is refused a
+// second time — the state machine has one `delivered` state, and a
+// second delivery would be a second state change — but the REFUSAL is
+// not the delivery being lost: the row is untouched and the work is
+// still listed for its recipient.
+//
+// A test that only checked the refusal would prove nothing about
+// at-least-once: it would pass with a delivery that dropped the work.
+func TestAPIRedeliveryIsRefusedAndTheWorkStaysVisible(t *testing.T) {
+	store, dm, _, projectID := newTestStore(t)
+	root := mustCreateRoot(t, store, projectID)
+
+	delivered := mustDo(t, func() (*Assignment, error) {
+		return store.Deliver(FencedParams{ID: root.ID, Epoch: root.ClaimEpoch,
+			Actor: agentActor("alpha")})
+	})
+	if delivered.State != StateDelivered {
+		t.Fatalf("the assignment is %q after the delivery, want %q",
+			delivered.State, StateDelivered)
+	}
+
+	// The SECOND delivery is refused — never exactly-once.
+	if _, err := store.Deliver(FencedParams{ID: root.ID, Epoch: root.ClaimEpoch,
+		Actor: agentActor("alpha")}); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("a second delivery returned %v, want %v", err, ErrIllegalTransition)
+	}
+
+	// And the work is NOT lost: it is still in the recipient's inbox,
+	// and the row is untouched.
+	inbox, err := store.Inbox(InboxQuery{Recipient: "alpha"})
+	if err != nil {
+		t.Fatalf("read the inbox: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != root.ID {
+		t.Fatalf("the inbox holds %d assignments, want the one still awaiting acknowledgement",
+			len(inbox))
+	}
+	if inbox[0].State != StateDelivered {
+		t.Errorf("the assignment in the inbox is %q, want %q", inbox[0].State, StateDelivered)
+	}
+
+	// The refused delivery wrote NOTHING: the ledger has the creation
+	// and the one delivery, and no more.
+	if got := eventTypes(t, store, root.ID); len(got) != 2 {
+		t.Errorf("the ledger holds %d events, want 2 (the creation and one delivery): %v",
+			len(got), got)
+	}
+	if n := countRows(t, dm, "agent_task_events"); n != 2 {
+		t.Errorf("the refused delivery left %d events, want 2", n)
+	}
+
+	// And the work is RECOVERABLE: the recipient acknowledges what was
+	// delivered, and the path continues.
+	acknowledged := mustDo(t, func() (*Assignment, error) {
+		return store.Acknowledge(FencedParams{ID: root.ID, Epoch: root.ClaimEpoch,
+			Actor: agentActor("alpha")})
+	})
+	if acknowledged.State != StateAcknowledged {
+		t.Errorf("the assignment is %q after the acknowledgement, want %q",
+			acknowledged.State, StateAcknowledged)
+	}
+}
+
 // TestAPIAnUndeliveredAssignmentCannotBeAcknowledged proves the order is
 // enforced, not merely conventional.
 func TestAPIAnUndeliveredAssignmentCannotBeAcknowledged(t *testing.T) {

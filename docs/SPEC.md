@@ -3013,6 +3013,10 @@ The **claim** is a compare-and-swap on the same principle: the caller presents t
 
 A **live lease is not stealable**, and an **expired** one is reclaimable: the reclaim advances the epoch, writes a new owner and a new lease, and fences the previous holder out. A **renewal advances the epoch too** — the lease changes only when the epoch advances, so a renewal that kept the epoch could not move the lease at all.
 
+#### Delivery is at-least-once, and never exactly-once
+
+The delivery transition is refused a second time — the state machine has one `delivered` state, and a second delivery would be a second state change. That is **not** the delivery being lost: the assignment stays in the **recipient's inbox** until somebody acknowledges it, so a second runtime addressed to the same recipient picks the work up rather than finding it gone; the refused delivery writes nothing; and the recovery is to continue from the current state. The guarantee is therefore at-least-once **over the recipient**, not over the runtime.
+
 #### The delegation is bounded by the root, not by the child
 
 A **root** carries the budgets: `max_depth`, `max_tasks`, `max_concurrency`, `max_resource_units`, `permitted_operations` and `eligible_recipients`. A **child** carries none of them — the schema makes that structural — and the service adds the two rules a `CHECK` cannot express:

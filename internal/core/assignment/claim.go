@@ -99,9 +99,9 @@ func (s *Store) Claim(p ClaimParams) (*Assignment, error) {
 		}
 		epoch := newEpoch
 		payload := map[string]interface{}{
-			"owner":        p.Owner,
-			"lease_until":  newLease,
-			"reclaimed":    reclaimed,
+			"owner":       p.Owner,
+			"lease_until": newLease,
+			"reclaimed":   reclaimed,
 		}
 		if reclaimed {
 			// The previous holder is recorded, so the ledger says

@@ -107,16 +107,16 @@ func TestAssignment_NoRegistryActionCreatesARoot(t *testing.T) {
 					map[string]interface{}{
 						"action": action,
 						"params": map[string]interface{}{
-							"project_id":       "cpj-test",
-							"title":            "a root an agent made for itself",
-							"objective":        "self-authorised",
-							"recipient":        "agent",
-							"idempotency_key":  "idem:self-authorised",
+							"project_id":           "cpj-test",
+							"title":                "a root an agent made for itself",
+							"objective":            "self-authorised",
+							"recipient":            "agent",
+							"idempotency_key":      "idem:self-authorised",
 							"permitted_operations": []interface{}{"read", "write"},
 							"eligible_recipients":  []interface{}{"agent"},
-							"max_tasks":           1000,
-							"max_concurrency":     100,
-							"max_resource_units":  100000,
+							"max_tasks":            1000,
+							"max_concurrency":      100,
+							"max_resource_units":   100000,
 						},
 					})
 				if err == nil {
@@ -172,11 +172,11 @@ func TestAssignment_NoPayloadFieldUnlocksTheOperatorActions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, action := range operatorOnlyAssignmentActions {
 				params := map[string]interface{}{
-					"project_id":          "cpj-test",
-					"title":               "a root an agent made for itself",
-					"objective":           "self-authorised",
-					"recipient":           "agent",
-					"idempotency_key":     "idem:self-authorised-" + tc.name,
+					"project_id":           "cpj-test",
+					"title":                "a root an agent made for itself",
+					"objective":            "self-authorised",
+					"recipient":            "agent",
+					"idempotency_key":      "idem:self-authorised-" + tc.name,
 					"permitted_operations": []interface{}{"read"},
 					"eligible_recipients":  []interface{}{"agent"},
 					"max_tasks":            10,

@@ -113,10 +113,10 @@ func (s *Store) RecordReviewResult(p ReviewResultParams) (*Assignment, error) {
 				// passed. Its epoch is its own, read in this
 				// transaction, so the clause says "the subject did
 				// not change under me".
-				toState:        StateReviewPassed,
-				eventType:      EventReviewPassed,
-				actor:          p.Actor,
-				note:           p.Note,
+				toState:   StateReviewPassed,
+				eventType: EventReviewPassed,
+				actor:     p.Actor,
+				note:      p.Note,
 				eventPayload: map[string]interface{}{
 					"reviewer_id": reviewer.ID,
 					"verdict":     VerdictPassed,

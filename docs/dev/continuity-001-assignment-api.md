@@ -137,6 +137,29 @@ timing-dependent.
 Reads: `Get`, `Inbox` (addressed to a recipient), `History` (the ledger),
 `ListByRoot` (the tree).
 
+#### Delivery is at-least-once, and never exactly-once
+
+The delivery transition is refused a second time — the state machine has
+one `delivered` state, and a second delivery would be a second state
+change. That is not the delivery being lost:
+
+* the assignment **stays in the recipient's inbox** until somebody
+  acknowledges it, so a second runtime addressed to the same recipient
+  picks the work up rather than finding it gone;
+* the refused delivery writes **nothing** — no state change and no
+  ledger entry; and
+* the recovery is to **continue from the current state**: the recipient
+  acknowledges what was delivered and the path continues.
+
+So the guarantee is at-least-once **over the recipient**, not over the
+runtime. A runtime that crashes after delivering does not lose the work
+and does not need the delivery to be replayed; the work is recovered by
+acknowledging it.
+
+The test that pins this is `TestAPIRedeliveryIsRefusedAndTheWorkStaysVisible`
+— a test that only checked the refusal would pass with a delivery that
+dropped the work on the floor.
+
 ### 3.4 The fence
 
 Every state-changing operation presents the caller's **current claim
