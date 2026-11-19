@@ -281,6 +281,20 @@ delegated *by* the work it reviews is refused, because the subject is on
 the reviewer's parent chain. The walk terminates because the depth is
 immutable and therefore strictly decreasing.
 
+**THE OTHER DIRECTION IS NOT UNCHECKED — IT IS UNREACHABLE.** The check
+walks one way, so it is worth saying what the other way does. A reviewer
+cannot review work it delegated itself, and the reason is the target:
+the reviewer's target is fixed by the delegation that **created** it, and
+a child's id is minted when the child is created. A reviewer cannot
+delegate a child and then name it, because at the moment the reviewer is
+created the child does not exist and its id cannot be known — the ids are
+eight random bytes. The delegation that creates a reviewer therefore
+cannot point it at that reviewer's own child, and the payload is
+immutable afterwards (it is not in the transition's settable-column
+whitelist). So the reachable cases are exactly: the subject is an
+ancestor of the reviewer, which is **refused**, and the subject is
+elsewhere in the tree, which is an **independent** review.
+
 **THE REWORK IS A NEW ASSIGNMENT.** A `changes_requested` verdict leaves the
 subject `completed`, because PR 1's state machine has no path back from
 `completed` — it is a forward path, and PR 2 does not widen it. The rework
@@ -486,7 +500,7 @@ that a hash or a string changed.
 | 7 | delivery, acknowledgement, acceptance and completion remain distinct, and a redelivery does not lose the work | `TestAPIDeliveryAcknowledgementAcceptanceAndCompletionAreDistinct`, `TestAPIAnUndeliveredAssignmentCannotBeAcknowledged`, `TestAPIRedeliveryIsRefusedAndTheWorkStaysVisible` |
 | 8 | restarting the process preserves assignments, events, claims and recoverable work | `TestAPIRestartPreservesAssignmentsEventsAndClaims` |
 | 9 | invalid state transitions, forged approval fields and attempts to bypass review are refused, and the approval is a fenced write | `TestAPIInvalidTransitionsAreRefused`, `TestAPIForgedApprovalFieldsAreRefused`, `TestAPITheApprovalMustNameTheGateAction`, `TestAPIAnApprovalPresentingAStaleEpochIsRefused` |
-| 10 | the independent review moves the subject, records the verdict on both ledgers, and refuses a reviewer that judges its own work | `TestAPIReviewVerdictMovesTheSubject`, `TestAPIChangesRequestedLeavesTheSubjectAndRecordsANote`, `TestAPIReviewerCannotReviewItsOwnWork`, `TestAPIReviewOfAnIncompleteSubjectIsRefused`, `TestAPIAStaleReviewerIsFencedOut` |
+| 10 | the independent review moves the subject, records the verdict on both ledgers, refuses a reviewer that judges its own work, and **cannot be re-pointed** at another subject | `TestAPIReviewVerdictMovesTheSubject`, `TestAPIChangesRequestedLeavesTheSubjectAndRecordsANote`, `TestAPIReviewerCannotReviewItsOwnWork`, `TestAPIReviewOfAnIncompleteSubjectIsRefused`, `TestAPIAStaleReviewerIsFencedOut`, `TestAPIReviewersTargetIsFixedByItsDelegation` |
 
 Plus the reads (`TestAPIInboxListsTheAddressedWork`), the authority boundary
 (`internal/core/tools/assignment_operator_boundary_regression_test.go`), the

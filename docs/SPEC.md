@@ -3038,7 +3038,7 @@ The idempotency key identifies one logical assignment. PR 1 found that the befor
 
 An implementer's assignment travels `completed → review_passed`, and somebody must perform that transition: the **independent reviewer**, a separate assignment with `role = 'reviewer'`. Its payload names the assignment it reviews — `{"review_target": "at-…"}` — so the delegation that created it **fixes** the target and the reviewer cannot be re-pointed afterwards.
 
-The subject must be an implementer in the same tree, and it must not be an **ancestor** of the reviewer: a reviewer delegated *by* the work it reviews is refused. The walk terminates because the depth is immutable and therefore strictly decreasing.
+The subject must be an implementer in the same tree, and it must not be an **ancestor** of the reviewer: a reviewer delegated *by* the work it reviews is refused. The walk terminates because the depth is immutable and therefore strictly decreasing. The other direction — a reviewer reviewing work it delegated itself — is not merely unchecked but **unreachable**: the reviewer's target is fixed by the delegation that created it, and a child's id is minted when the child is created, so a reviewer cannot delegate a child and then name it. The payload is immutable afterwards.
 
 A **passing** verdict moves the subject to `review_passed` and the reviewer to `review_passed`; a **`changes_requested`** verdict leaves the subject where it is and leaves a **note** on its ledger, so a failed review is not invisible on the work it judges. The hand-off to the operator's gate is a **separate, explicit** operation, so reaching the gate is a decision rather than a side effect of the verdict.
 

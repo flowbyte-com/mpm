@@ -1755,6 +1755,69 @@ func TestAPIReviewVerdictMovesTheSubject(t *testing.T) {
 	}
 }
 
+// TestAPIReviewersTargetIsFixedByItsDelegation proves the reviewer cannot
+// be re-pointed.
+//
+// The reviewer's target is fixed by the delegation that CREATED it, and
+// the payload is not one of the columns a transition may write — so no
+// operation can re-point the reviewer at another subject.
+//
+// This matters beyond tidiness: the review is the thing that makes a
+// verdict independent, and a reviewer that could be pointed at any
+// subject on demand would be a rubber stamp. It is also what makes the
+// other direction of the independence check unreachable — a reviewer
+// cannot review work it delegated itself, because at the moment the
+// reviewer is created that work does not exist and its id cannot be
+// known.
+func TestAPIReviewersTargetIsFixedByItsDelegation(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	root := mustCreateRoot(t, store, projectID, func(p *CreateRootParams) {
+		p.EligibleRecipients = []string{"alpha", "charlie", "dana"}
+		p.MaxDepth = 2
+	})
+
+	// TWO subjects, both finished. The reviewer names ONE of them.
+	first := mustAdvance(t, store, mustDelegate(t, store, root, func(p *DelegateParams) {
+		p.Recipient = "alpha"
+		p.IdempotencyKey = "idem:fixed-target:first"
+	}), StateCompleted)
+	second := mustAdvance(t, store, mustDelegate(t, store, root, func(p *DelegateParams) {
+		p.Recipient = "dana"
+		p.IdempotencyKey = "idem:fixed-target:second"
+	}), StateCompleted)
+
+	reviewer := mustCreateReviewer(t, store, root, first)
+	reviewing := mustStartReviewer(t, store, reviewer)
+
+	// The payload still names the first subject, after every step of
+	// the reviewer's path.
+	if got, _ := reviewing.Payload[PayloadKeyReviewTarget].(string); got != first.ID {
+		t.Fatalf("the reviewer's target is %q, want %q", got, first.ID)
+	}
+
+	// The verdict moves the subject the payload names — and NOT the
+	// other one, which is equally finished and equally in the tree.
+	mustDo(t, func() (*Assignment, error) {
+		return store.RecordReviewResult(ReviewResultParams{
+			ReviewerID: reviewing.ID,
+			Verdict:    VerdictPassed,
+			Epoch:      reviewing.ClaimEpoch,
+			Actor:      agentActor("charlie"),
+		})
+	})
+
+	afterFirst := mustGet(t, store, first.ID)
+	if afterFirst.State != StateReviewPassed {
+		t.Errorf("the subject the payload names is %q, want %q",
+			afterFirst.State, StateReviewPassed)
+	}
+	afterSecond := mustGet(t, store, second.ID)
+	if afterSecond.State != StateCompleted {
+		t.Errorf("the subject the payload does NOT name is %q, want %q",
+			afterSecond.State, StateCompleted)
+	}
+}
+
 // TestAPIChangesRequestedLeavesTheSubjectAndRecordsANote proves a failed
 // review is not invisible on the work it judges.
 func TestAPIChangesRequestedLeavesTheSubjectAndRecordsANote(t *testing.T) {
