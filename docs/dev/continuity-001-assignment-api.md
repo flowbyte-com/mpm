@@ -1203,6 +1203,62 @@ And they enumerate the mechanisms they name — a constant, a pin, or a
 **question** that nothing checks is outside them, which is exactly what
 the twelfth and thirteenth rounds found and fixed.
 
+### 5.18 What the fourteenth review found: the selection that was not pinned
+
+The fourteenth review asked the central question in the form that found
+round thirteen's finding, and found a new instance of the same class.
+
+**THE HEADLINE: THE HARNESS'S SELECTION IS UNPINNED.** `TEST_PATTERN`
+decides what the harness measures, and the bound's denominator is the
+**measured** baseline. So the published line — "a third of the
+baseline" — is only meaningful *relative to the selection*, and a
+selection one edit wider moves it. The same thirteen failures:
+
+```
+--- the TestAPI selection: 13 failures (baseline = 36) ---
+     INCONCLUSIVE: the mutation broke 13 of the baseline's 36 tests …
+    >>> summarise() returned: False          <-- REFUSED
+
+--- a widened selection: 13 failures (baseline = 48) ---
+    OK  fence    N1 — a claimed write presents the current claim_epoch
+    >>> summarise() returned: True           <-- ACCEPTED
+```
+
+**Refused at the published line, accepted one edit later.** Four
+single-edit mutations of the selection survived everything — the
+self-test never runs the suite, the gate mode stubs it, no matrix
+entry mentions it, and the suite-size test pins `SUITE_SIZE`, which
+the real gate does not use.
+
+And the test that ought to have caught it asserted a **false premise**:
+it said "SUITE_SIZE is the denominator of the harness's bound", but
+`SUITE_SIZE` is used only by the synthetic fixtures — the gate's
+denominator is the measured baseline. The test pinned one number and
+not the **link** between it and the population the gate actually
+measures, and the link was the hole.
+
+**THE FIX.** A Go test now requires the harness's selection to select
+**exactly** the acceptance suite's tests. That is the link, and it is
+checked from outside:
+
+    TestControls_TheHarnessSelectionIsTheAcceptanceSuite
+
+**THE OTHER FINDINGS.**
+
+| the finding | the fix |
+|---|---|
+| the new Go pin's floor was `seen == 0`, so one edit to a control's key **spacing** dropped it from the pin and the pin still passed | the pin's regexes are **tolerant** of the spacing, and its counts are **exact** over the harness's `CONTROLS` region — sixteen controls, fourteen of them load-bearing. A control that dropped out now makes the pin **fail** |
+| §5.17 presented the class as fixed | it is not, and it now says what the round found and what it did |
+| the "covers every control" claim was unpinned | the exact counts pin it |
+| `PKG` was dead code | it is gone |
+| `--only` was unchanged | it selects one control by name and the name must exist — already pinned by the harness itself |
+
+**THE CLASS SO FAR.** Fourteen rounds, and the findings have one shape:
+**a claim the harness carries that nothing checked.** A constant, a
+pin, a question that could ask nothing, and now a selection. Each was
+fixed properly and immediately, and each fix is checked from outside
+the harness — because the harness cannot check itself.
+
 ## 6. What PR 2 leaves to PRs 3–5
 
 | | deferred to |

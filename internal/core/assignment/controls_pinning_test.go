@@ -35,8 +35,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -785,10 +787,14 @@ func TestControls_TheHarnessGateRefusesAndExitsNonZero(t *testing.T) {
 // TestControls_TheHarnessSuiteSizeMatchesTheSuite pins the harness's
 // SUITE_SIZE — and the bound's line — against the suite that exists.
 //
-// SUITE_SIZE is the denominator of the harness's bound: the number of
-// tests the `-run TestAPI` selection runs. If it drifts from the real
-// suite, the bound is measured against a suite that does not exist,
-// and every case that used it is measuring nothing.
+// SUITE_SIZE is the denominator of the harness's SYNTHETIC fixtures:
+// the number of tests the `-run TestAPI` selection runs. If it drifts
+// from the real suite, every case that used it is measuring nothing.
+//
+// The gate's own denominator is the MEASURED baseline, not this
+// constant — and the link between the two is the harness's
+// SELECTION, which is pinned separately by
+// TestControls_TheHarnessSelectionIsTheAcceptanceSuite.
 //
 // The bound's LINE is pinned with it, and it is pinned as a literal
 // against the suite's size rather than derived from the harness's own
@@ -866,17 +872,32 @@ func TestControls_EveryLoadBearingControlNamesATest(t *testing.T) {
 	// expect list, a load_bearing flag and a breaks list. None of them
 	// contains a nested brace, so the block is bounded by them.
 	blockRe := regexp.MustCompile(`(?s)\{[^{}]*\}`)
-	nameRe := regexp.MustCompile(`"name":\s*"([^"]+)"`)
-	expectRe := regexp.MustCompile(`"expect":\s*\[([^\]]*)\]`)
-	loadBearingRe := regexp.MustCompile(`"load_bearing":\s*True`)
+	// The regexes are TOLERANT of the spacing around the colons. A
+	// strict one silently drops a control whose key was respaced, and
+	// a pin that quietly checks fewer controls than it claims is the
+	// failure this file exists to prevent.
+	nameRe := regexp.MustCompile(`"name"\s*:\s*"([^"]+)"`)
+	expectRe := regexp.MustCompile(`"expect"\s*:\s*\[([^\]]*)\]`)
+	loadBearingRe := regexp.MustCompile(`"load_bearing"\s*:\s*True`)
+	// The CONTROLS LIST is the region the pin measures. The helper
+	// blocks elsewhere in the harness — the drive's stub, the gate
+	// mode's stub, the measurement probe's control — are NOT controls
+	// of the harness, and counting them would make the floor a
+	// coincidence instead of a statement.
+	region := controlsRegion(t, string(b))
+	controls := 0
 	seen := 0
-	for _, match := range blockRe.FindAllString(string(b), -1) {
+	for _, match := range blockRe.FindAllString(region, -1) {
+		name := nameRe.FindStringSubmatch(match)
+		if name == nil {
+			continue
+		}
+		controls++
 		if !loadBearingRe.MatchString(match) {
 			continue
 		}
-		name := nameRe.FindStringSubmatch(match)
 		expect := expectRe.FindStringSubmatch(match)
-		if name == nil || expect == nil {
+		if expect == nil {
 			continue
 		}
 		seen++
@@ -887,10 +908,134 @@ func TestControls_EveryLoadBearingControlNamesATest(t *testing.T) {
 				"load-bearing", name[1])
 		}
 	}
-	if seen == 0 {
-		t.Fatal("the harness declares no load-bearing controls at all, so " +
-			"this pin no longer tests what it claims")
+	// The counts are EXACT, not a floor: the harness publishes sixteen
+	// controls of which fourteen are load-bearing, and a control that
+	// dropped out of the pin — for any reason — must make the pin
+	// fail rather than pass over a smaller set.
+	if controls != publishedControls {
+		t.Errorf("the pin saw %d control(s), and the harness publishes %d — "+
+			"a control dropped out of the pin, so the pin no longer covers "+
+			"every control", controls, publishedControls)
 	}
+	if seen != publishedLoadBearingControls {
+		t.Errorf("the pin saw %d load-bearing control(s), and the harness "+
+			"publishes %d — a control dropped out of the pin, so the pin "+
+			"no longer covers every control", seen, publishedLoadBearingControls)
+	}
+}
+
+// controlsRegion returns the harness's CONTROLS list — the region the
+// control pins measure. It is bounded by the assignment and by the
+// closing bracket at the start of a line, which is where the list
+// ends.
+func controlsRegion(t *testing.T, harness string) string {
+	t.Helper()
+	start := strings.Index(harness, "\nCONTROLS = [\n")
+	if start < 0 {
+		t.Fatal("the harness does not declare a CONTROLS list at the start of a line")
+	}
+	rest := harness[start+1:]
+	end := strings.Index(rest, "\n]\n")
+	if end < 0 {
+		t.Fatal("the harness's CONTROLS list has no closing bracket at the start of a line")
+	}
+	return rest[:end]
+}
+
+// publishedLoadBearingControls is the number of controls the harness
+// publishes as load-bearing. It is the FLOOR of the pin that checks
+// every load-bearing control names a test: a control that dropped out
+// of the pin must make the pin fail, not pass over a smaller set.
+const publishedLoadBearingControls = 14
+
+// publishedControls is the number of controls the harness publishes in
+// its CONTROLS list: sixteen, of which fourteen are load-bearing and
+// two measure the defence in depth.
+const publishedControls = 16
+
+// TestControls_TheHarnessSelectionIsTheAcceptanceSuite pins the
+// harness's SELECTION.
+//
+// The selection decides what the harness measures, and the bound's
+// denominator is the MEASURED baseline — so the published line ("a
+// third of the baseline") is only meaningful relative to the selection.
+// A selection one edit wider moves the line: the same thirteen
+// failures are REFUSED at the published line and ACCEPTED one edit
+// later, and nothing else in the tree notices.
+//
+// This is the link between the published suite size and the population
+// the gate actually measures, and the link was the hole.
+func TestControls_TheHarnessSelectionIsTheAcceptanceSuite(t *testing.T) {
+	root := repoRoot(t)
+	b, err := os.ReadFile(filepath.Join(root, controlsScript))
+	if err != nil {
+		t.Fatalf("read the control harness: %v", err)
+	}
+	pattern := harnessStringConstant(t, string(b), "TEST_PATTERN")
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		t.Fatalf("the harness's TEST_PATTERN %q does not compile: %v", pattern, err)
+	}
+	// The acceptance suite: the tests the bound is published against.
+	acceptance := acceptanceTestNames(t)
+	if len(acceptance) == 0 {
+		t.Fatal("the acceptance suite has no tests, so the harness's " +
+			"selection cannot be compared with anything")
+	}
+	names := suiteTestNames(t)
+	var selected []string
+	for name := range names {
+		// `go test -run` matches the pattern UNANCHORED, and the
+		// harness's pattern has no "/" in it, so this is the whole
+		// of Go's selection semantics for it.
+		if re.MatchString(name) {
+			selected = append(selected, name)
+		}
+	}
+	sort.Strings(selected)
+	sort.Strings(acceptance)
+	if !reflect.DeepEqual(selected, acceptance) {
+		t.Errorf("the harness's selection %q selects %d test(s), and the "+
+			"acceptance suite has %d — the selection is what the bound's "+
+			"MEASURED baseline is taken over, so a selection that is "+
+			"wider moves the published line and weakens the bound\n"+
+			"  selected:   %v\n  acceptance: %v",
+			pattern, len(selected), len(acceptance), selected, acceptance)
+	}
+}
+
+// acceptanceTestNames returns the test functions in the acceptance
+// suite — the file that holds the PR's ten properties.
+func acceptanceTestNames(t *testing.T) []string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate the test's own source file")
+	}
+	path := filepath.Join(filepath.Dir(thisFile), "assignment_test.go")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the acceptance suite: %v", err)
+	}
+	var names []string
+	for _, m := range testNameRe.FindAllStringSubmatch(string(b), -1) {
+		names = append(names, m[1])
+	}
+	return names
+}
+
+// harnessStringConstant reads a module-level string constant out of
+// the harness.
+func harnessStringConstant(t *testing.T, harness, name string) string {
+	t.Helper()
+	pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) +
+		` = "([^"]*)"$`)
+	match := pattern.FindStringSubmatch(harness)
+	if match == nil {
+		t.Fatalf("the harness does not declare %s as a module-level string "+
+			"constant — the pinning test no longer tests what it claims", name)
+	}
+	return match[1]
 }
 
 // TestControls_TheHarnessCountsItsOwnCases pins that the harness's

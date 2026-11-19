@@ -64,7 +64,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CORE = REPO / "internal/core"
-PKG = CORE / "assignment"
 BACKUP = Path(tempfile.gettempdir()) / f"mpm-continuity-001-pr2-controls-{os.getpid()}"
 
 # The files a control may mutate. The service is the API; the tool
