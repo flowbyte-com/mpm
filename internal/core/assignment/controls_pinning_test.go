@@ -30,6 +30,7 @@
 package assignment
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -339,7 +340,7 @@ func TestControls_TheHarnessGateCanFail(t *testing.T) {
 // EVALUATED, not the number of lines it printed. Every check in the
 // harness is a predicate, and every predicate records that it ran, so
 // a check that stops running leaves the count short.
-const publishedSelfTestCases = 60
+const publishedSelfTestCases = 71
 
 // TestControls_TheHarnessPublishesItsOwnCaseCount pins the published
 // figure to the harness's own.
@@ -441,7 +442,7 @@ var harnessMutations = []struct {
 	},
 	{
 		"the main() wiring drive's verdict",
-		`    return ok_proceeded and ok_exited and ok_ran`,
+		`    return ok_proceeded and ok_exited and ok_gate and ok_ran`,
 		`    return True`,
 	},
 	{
@@ -470,8 +471,8 @@ var harnessMutations = []struct {
 		// This entry pins the PUBLISHED FIGURE: a copy whose count no
 		// longer matches the literal must fail.
 		"the published case count",
-		`expected_self_test_cases = 60`,
-		`expected_self_test_cases = 59`,
+		`expected_self_test_cases = 71`,
+		`expected_self_test_cases = 70`,
 	},
 	{
 		"main()'s use of the baseline verdict",
@@ -545,9 +546,28 @@ var harnessMutations = []struct {
 	},
 	{
 		"the wiring verdict's call site",
-		`wiring_ok = _wiring_ok(proceeded, exited, ran, want_proceeded,
-                               want_exit, calls)`,
+		`wiring_ok = _wiring_ok(proceeded, exited, gate, ran, want_proceeded,
+                               want_exit, want_gate, calls)`,
 		`wiring_ok = True`,
+	},
+	// The MEASUREMENT's arithmetic. It used to be inline in main()'s
+	// loop, where nothing but the real controls exercised it — and the
+	// real controls were not in anyone's test run. The measurement
+	// probe catches these.
+	{
+		"the measurement's hit",
+		`    hit = [t for t in control["expect"] if t in specific]`,
+		`    hit = list(control["expect"])`,
+	},
+	{
+		"the measurement's total",
+		`    total = len(specific) + passed + len(skipped)`,
+		`    total = len(specific) + passed`,
+	},
+	{
+		"the measurement's specific set",
+		`    specific = [f for f in failed if f not in INCONCLUSIVE]`,
+		`    specific = list(failed)`,
 	},
 }
 
@@ -590,6 +610,121 @@ func TestControls_TheHarnessFailsWhenAMechanismIsRemoved(t *testing.T) {
 			if err == nil {
 				t.Errorf("the self-test PASSED against a copy with %s removed, so "+
 					"that mechanism has nothing behind it:\n%s", m.name, out)
+			}
+		})
+	}
+}
+
+// gateMutations is the matrix for the GATE'S OWN VERDICT PATH.
+//
+// The matrix above covers the summary's mechanisms, and the self-test
+// drives the summary directly. main()'s path — the arithmetic that
+// turns a run into a measurement, the verdict, the exit code and the
+// module-level exit — was exercised by NOTHING in the tree: every
+// invocation of the harness used --selftest, which returns before
+// main() is ever called. So a mutation there left every test green.
+//
+// Each entry below must make the harness's --selfcheck-gate mode
+// ACCEPT the measurement — that is, exit 0 where it must exit
+// non-zero.
+var gateMutations = []struct {
+	name string
+	old  string
+	new  string
+}{
+	{
+		"main()'s use of the verdict",
+		`    ok = summarise(results, baseline, baseline_skipped)`,
+		`    ok = True`,
+	},
+	{
+		"main()'s exit code",
+		`    return 0 if ok else 1`,
+		`    return 0`,
+	},
+	{
+		"main()'s exit code, inverted",
+		`    return 0 if ok else 1`,
+		`    return 1 if ok else 0`,
+	},
+	{
+		"the module-level exit",
+		`    sys.exit(main())`,
+		`    sys.exit(0)`,
+	},
+}
+
+// TestControls_TheHarnessGateRefusesAndExitsNonZero drives the
+// harness's gate in --selfcheck-gate mode, where the suite and the
+// controls are stubbed and the gate's verdict is the PROCESS's exit
+// code.
+//
+// The stub control declares a test the stubbed run does NOT fail, so
+// the gate must REFUSE. A refusal that exited 0 would be a green
+// answer to a measurement that was refused, and the exit code is the
+// gate.
+//
+// And every mutation of the gate's own verdict path must make it
+// ACCEPT — that is, exit 0 — or it would not be a mutation of the
+// gate at all.
+func TestControls_TheHarnessGateRefusesAndExitsNonZero(t *testing.T) {
+	root := repoRoot(t)
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not on PATH; the harness's gate cannot be driven here")
+	}
+	original, err := os.ReadFile(filepath.Join(root, controlsScript))
+	if err != nil {
+		t.Fatalf("read the control harness: %v", err)
+	}
+
+	run := func(t *testing.T, script string) int {
+		t.Helper()
+		cmd := exec.Command(python, script, "--selfcheck-gate")
+		cmd.Env = []string{
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + t.TempDir(),
+			"MPM_WORKSPACE=" + t.TempDir(),
+		}
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return 0
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("run the harness's gate: %v\n%s", err, out)
+		}
+		return exitErr.ExitCode()
+	}
+
+	// The unmutated harness: the gate must refuse, and the process
+	// must exit non-zero.
+	dir := t.TempDir()
+	pristine := filepath.Join(dir, "controls.py")
+	if err := os.WriteFile(pristine, original, 0o600); err != nil {
+		t.Fatalf("write the harness copy: %v", err)
+	}
+	if code := run(t, pristine); code == 0 {
+		t.Errorf("the harness's gate ACCEPTED a measurement it must refuse, " +
+			"and the process exited 0 — the exit code is the gate")
+	}
+
+	for _, m := range gateMutations {
+		t.Run(m.name, func(t *testing.T) {
+			mutated := strings.Replace(string(original), m.old, m.new, 1)
+			if mutated == string(original) {
+				t.Fatalf("the mutation did not apply — %q is not in the harness, "+
+					"so the matrix no longer tests what it claims", m.old)
+			}
+			dir := t.TempDir()
+			script := filepath.Join(dir, "controls.py")
+			if err := os.WriteFile(script, []byte(mutated), 0o600); err != nil {
+				t.Fatalf("write the mutated copy: %v", err)
+			}
+			if code := run(t, script); code != 0 {
+				t.Errorf("the gate still REFUSED with %s changed, so the "+
+					"mutation does not touch the gate's verdict — the matrix "+
+					"no longer tests what it claims", m.name)
 			}
 		})
 	}

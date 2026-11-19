@@ -243,6 +243,26 @@ class TestGatingJobsStillExist(unittest.TestCase):
             "the installer-contract suite is no longer run by the gate job",
         )
 
+    def test_the_gate_job_still_runs_the_negative_control_harness(self):
+        """The Continuity 001 PR 2 harness must run in the gate job.
+
+        It removes one invariant from the service's SOURCE at a time and
+        requires the acceptance suite to notice; the harness's exit code
+        is the gate.
+
+        Until this step existed, the only invocation of the harness was
+        the Go pinning test's --selftest, which returns before main() is
+        ever called. So the harness's own gate was exercised by NOTHING
+        in the tree, and a mutation of the gate's verdict path left
+        every test green. A step that is added and then quietly removed
+        is the same class of gap as the ones this file already pins.
+        """
+        self.assertIn(
+            "make test-continuity-controls",
+            _job_block(_workflow_text(), "gate"),
+            "the negative-control harness is no longer run by the gate job",
+        )
+
     def test_the_gate_job_still_runs_the_race_sweep_with_coverage(self):
         block = _job_block(_workflow_text(), "gate")
         self.assertIn("-race", block,

@@ -964,10 +964,10 @@ this note's own**.
 | the SKIP anchor's catchability rested on an unpinned sample line | removing the line from the sample would make the anchor unobservable | the sample's load-bearing shapes are **asserted** |
 | the mode dispatch was protected by a counter rather than by itself | the same shape as the guard above | the count is derived from the counter, so the dispatch is pinned by the count |
 
-**THE SELF-TEST IS NOW FORTY-THREE CASES** (and sixty after the tenth
-round — §5.14), and the number is published in two places that check
-each other: the harness's own literal, and the Go test that compares the
-harness's printed count.
+**THE SELF-TEST IS NOW FORTY-THREE CASES** (and seventy-one after the
+eleventh round — §5.15), and the number is published in two places that
+check each other: the harness's own literal, and the Go test that
+compares the harness's printed count.
 
 ### 5.13 What the tenth review found, and where the matrix lives
 
@@ -1044,7 +1044,7 @@ the **published literal** in a copy and requires the self-test to fail,
 so a copy whose count check has been disabled passes and the Go test
 says so by name.
 
-**THE COUNT IS SIXTY CHECKS**, published in two places that check
+**THE COUNT IS SEVENTY-ONE CHECKS**, published in two places that check
 each other: the harness's own literal, and the Go test that compares the
 harness's *printed* count against the same figure. The three checks that
 are not predicate calls — the baseline verdict, the three output
@@ -1058,6 +1058,50 @@ change — Go reports a parent whose subtest failed as `--- FAIL:` on a
 top-level line, so the parent's name is in the set either way. And the
 matrix is a list of **single-edit** mutations: a two-edit mutation that
 removes a mechanism *and* the check that watches it is outside it.
+
+### 5.15 What the eleventh review found: the gate that nothing ran
+
+The eleventh review asked the question the tenth round's design had
+not: **is the harness's own gate exercised by anything at all?** The
+answer was **no**, and the answer was worse than it looked.
+
+Every invocation of the harness in the repository used `--selftest`,
+which returns before `main()` is ever called. **No CI workflow and no
+Makefile target ran the harness at all.** So nine single-edit mutations
+of `main()`'s verdict path left every test in the tree green — the
+reviewer confirmed it by simulating the Go matrix's external observer
+against each one, and the matrix caught **none** of them.
+
+| the finding | what it was | the fix |
+|---|---|---|
+| the harness's gate was exercised by **nothing** | `--selftest` returns before `main()` is called, and no workflow or make target ran the harness | `make test-continuity-controls` exists, and CI's gate job runs it as its own step |
+| `main()`'s per-control arithmetic was **inline** | `hit` and `total` were computed in the loop, and nothing but the real controls exercised them — and the real controls were not in anyone's test run | `_measure()` is a **function**, and a **probe** drives it with a known control and a known run: the control declares two tests, the run fails one, and the measurement must be the one that failed |
+| `main()`'s **return value was thrown away** | the drive called `main()` and kept the exit code, so a gate that accepted whatever it was given was invisible | the drive observes the **gate's verdict**, with a stub whose control **breaks the gate** — so the gate must refuse and `main()` must return 1 |
+| the **process's** exit code was unobserved | `sys.exit(main())` is at module level, so nothing in the tree could see it | `--selfcheck-gate` stubs the suite and the controls and then goes through `sys.exit(main())`, and a Go test requires a **non-zero** exit |
+
+**TWO MATRICES, FOR TWO SUBJECTS.** The self-test's matrix covers the
+**summary's** mechanisms — the gate's three questions, the patterns,
+the bounds, the predicates and the log. The gate's matrix covers
+**`main()`'s own path** — the measurement arithmetic, the verdict, the
+exit code and the module-level exit. Each entry in the gate's matrix
+must make the harness **ACCEPT** the measurement — exit 0 where it must
+exit non-zero.
+
+Thirty entries in the first, four in the second, and every one of
+them is caught.
+
+**THE SELF-TEST IS NOW SEVENTY-ONE CHECKS**, and the number is published
+in two places that check each other: the harness's own literal, and the
+Go test that compares the harness's *printed* count against the same
+figure.
+
+**WHAT THE MATRICES STILL DO NOT SAY.** Two things, stated rather than
+claimed away. The `^` anchor on the **FAIL** pattern is not a behaviour
+change — Go reports a parent whose subtest failed as `--- FAIL:` on a
+top-level line, so the parent's name is in the set either way. And both
+matrices are lists of **single-edit** mutations: a two-edit mutation
+that removes a mechanism *and* the check that watches it is outside
+them.
 
 ## 6. What PR 2 leaves to PRs 3–5
 

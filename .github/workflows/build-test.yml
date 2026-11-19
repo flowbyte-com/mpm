@@ -339,6 +339,24 @@ jobs:
       - name: Nested tools module (internal/core/tools)
         run: make test-tools-race
 
+      # The negative-control harness for Continuity 001 PR 2.
+      #
+      # It removes one invariant from the service's SOURCE at a time
+      # and requires the acceptance suite to notice. The harness's exit
+      # code is the gate, and it can fail.
+      #
+      # Until this step the harness ran in NO CI job at all. The only
+      # invocation was the Go pinning test's --selftest, which returns
+      # before main() is ever called — so a green CI result said
+      # nothing about the harness's own gate, and a mutation of the
+      # gate's verdict path left every test in the tree green.
+      #
+      # It MUTATES the working tree in place and restores it, so it
+      # runs after the Go steps that depend on a pristine tree. The
+      # cost is one full acceptance-suite run per control.
+      - name: Negative-control harness (Continuity 001 PR 2)
+        run: make test-continuity-controls
+
       - name: Generate Workflow Step Summary
         # shell: bash for the same reason as the full-suite sweep: this
         # step pipes `go tool cover` into `tail`, and without pipefail a

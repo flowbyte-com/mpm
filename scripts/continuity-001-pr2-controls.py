@@ -855,15 +855,8 @@ def main():
             print(f"\n=== {name}: {control['invariant']} ===")
             control["mutate"]()
             failed, detail, passed, skipped = run_tests()
-            inconclusive = [f for f in failed if f in INCONCLUSIVE]
-            specific = [f for f in failed if f not in INCONCLUSIVE]
-            hit = [t for t in control["expect"] if t in specific]
-            # The total counts every test the run PRODUCED — the ones
-            # that passed, the ones that failed, and the ones that
-            # skipped. A skip counts towards the total because the
-            # test was selected and did not run, which is what the
-            # comparison against the baseline is watching for.
-            total = len(specific) + passed + len(skipped)
+            result = _measure(control, failed, passed, skipped)
+            specific, hit = result.specific, result.hit
             print(f"    failing tests: {specific or '(none)'}")
             if detail:
                 print(f"    detail: {detail}")
@@ -871,8 +864,7 @@ def main():
                 print(f"    NOT LOAD-BEARING: {control['expect']} did not fail")
             if not control["load_bearing"] and specific:
                 print(f"    UNEXPECTED: {specific} failed, but this control removes only one half")
-            results.append(Result(control, hit, specific, inconclusive,
-                                  total, skipped))
+            results.append(result)
     finally:
         restore()
         print("\nthe tree is restored")
@@ -1165,30 +1157,79 @@ def _sample_ok(needle, sample, calls):
     return needle in sample
 
 
-def _wiring_ok(proceeded, exited, ran, want_proceeded, want_exit, calls):
+def _wiring_ok(proceeded, exited, gate, ran, want_proceeded, want_exit,
+               want_gate, calls):
     """The verdict on whether main()'s wiring behaved.
 
     It is a FUNCTION so that the self-test can prove that it CAN fail:
     a verdict that is inlined cannot be driven with a deliberately
     wrong expectation, and so a neutered inlined verdict would leave
     the self-test green with no way to notice.
+
+    It checks FOUR things, and the fourth is the one the eleventh
+    review found missing: the gate's VERDICT — main()'s return value.
+    A gate that accepts whatever it is given returns 0, and a gate
+    that refuses returns 1, so the difference between them is the
+    gate's.
     """
     calls.append("wiring")
-    # The three are evaluated SEPARATELY, not as one `and` chain: a
+    # The four are evaluated SEPARATELY, not as one `and` chain: a
     # short-circuiting chain would log a different number of checks
     # depending on the values, and the count must be a DETERMINISTIC
     # number or it is not a number at all.
     ok_proceeded = _equal(proceeded, want_proceeded, calls)
     ok_exited = _equal(exited, want_exit, calls)
+    ok_gate = _equal(gate, want_gate, calls)
     ok_ran = _equal(bool(ran), want_proceeded, calls)
-    return ok_proceeded and ok_exited and ok_ran
+    return ok_proceeded and ok_exited and ok_gate and ok_ran
 
 
-def _drive_main_with_baseline(base_failed, base_skipped, ran):
+def _measure(control, failed, passed, skipped):
+    """Measure one control from the run it produced.
+
+    It is a FUNCTION so that the self-test can drive it with a known
+    control and a known run and check the NUMBERS. It used to be
+    arithmetic inline in main()'s loop, and a mutation there left every
+    test in the tree green: nothing but the real controls exercised it,
+    and the real controls were not in anyone's test run.
+    """
+    inconclusive = [f for f in failed if f in INCONCLUSIVE]
+    specific = [f for f in failed if f not in INCONCLUSIVE]
+    hit = [t for t in control["expect"] if t in specific]
+    # The total counts every test the run PRODUCED — the ones that
+    # passed, the ones that failed, and the ones that skipped. A skip
+    # counts towards the total because the test was selected and did
+    # not run, which is what the comparison against the baseline is
+    # watching for.
+    total = len(specific) + passed + len(skipped)
+    return Result(control, hit, specific, inconclusive, total, skipped)
+
+
+def _measurement_ok(result, want_hit, want_specific, want_total, calls):
+    """Whether a measurement is the one the probe expects."""
+    calls.append("measurement")
+    return (result.hit == want_hit
+            and result.specific == want_specific
+            and result.total == want_total)
+
+
+def _drive_main_with_baseline(base_failed, base_skipped, ran, expect=(),
+                               run_failed=()):
     """Call main() with a STUBBED suite, and report what it did.
 
-    It returns (proceeded, exit_code): whether main() got past the
-    baseline to the controls, and what it exited with.
+    It returns (proceeded, exit_code, gate): whether main() got past
+    the baseline to the controls, what it exited with, and what it
+    RETURNED.
+
+    The third is the gate's VERDICT, and it is the thing the eleventh
+    review found unobserved: main()'s return value used to be thrown
+    away, so a mutation that made the gate accept whatever it was
+    given left every test in the tree green.
+
+    `expect` is what the stub control DECLARES and `run_failed` is
+    what the stubbed run FAILS. A stub that declares a test the run
+    does not fail BREAKS the gate — the named test must fail — so the
+    gate must REFUSE and main() must return 1.
 
     `ran` is a list the CALLER owns, and the stub control appends to
     it. That is deliberate: the record of what the stub did lives with
@@ -1208,7 +1249,7 @@ def _drive_main_with_baseline(base_failed, base_skipped, ran):
     stub = {
         "name": "stub",
         "invariant": "a stub control",
-        "expect": [],
+        "expect": list(expect),
         "load_bearing": True,
         "breaks": [],
         "mutate": lambda: ran.append(True),
@@ -1216,22 +1257,62 @@ def _drive_main_with_baseline(base_failed, base_skipped, ran):
     originals = {k: globals()[k] for k in
                  ("run_tests", "snapshot", "restore", "CONTROLS")}
     argv = sys.argv
+    # The FIRST call is the baseline and the rest are the controls, so
+    # the baseline and a control can be made to differ.
+    calls_to_run = []
+
+    def stub_run_tests():
+        calls_to_run.append(True)
+        if len(calls_to_run) == 1:
+            return (list(base_failed), [], 36, list(base_skipped))
+        return (list(run_failed), [], 36, [])
+
     try:
-        globals()["run_tests"] = lambda: (base_failed, [], 36,
-                                          list(base_skipped))
+        globals()["run_tests"] = stub_run_tests
         globals()["snapshot"] = lambda: None
         globals()["restore"] = lambda: None
         globals()["CONTROLS"] = [stub]
         sys.argv = ["continuity-001-pr2-controls.py", "--only", "stub"]
         try:
-            main()
+            code = main()
         except SystemExit as e:
-            return (bool(ran), e.code)
-        return (bool(ran), None)
+            return (bool(ran), e.code, None)
+        return (bool(ran), None, code)
     finally:
         for k, v in originals.items():
             globals()[k] = v
         sys.argv = argv
+
+
+def _install_gate_stub():
+    """Replace the suite and the controls with stubs, for --selfcheck-gate.
+
+    The stub control DECLARES a test that the stubbed run does NOT
+    fail, so the gate must REFUSE the measurement and main() must
+    return 1. That is what makes the PROCESS's exit code observable
+    from outside: a gate that accepted would exit 0, and the difference
+    between the two is the gate's.
+
+    Nothing is written: snapshot() and restore() are stubbed as well,
+    so the mode cannot touch the tree.
+    """
+    ran = []
+    stub = {
+        # The name is its OWN: the pinning test requires every control
+        # name in the harness to be declared exactly once, and the
+        # drive's stub already carries the name "stub".
+        "name": "gate-stub",
+        "invariant": "a stub control",
+        "expect": ["TestAPIRootCreationSucceeds"],
+        "load_bearing": True,
+        "breaks": [],
+        "mutate": lambda: ran.append(True),
+    }
+    globals()["run_tests"] = lambda: ([], [], 36, [])
+    globals()["snapshot"] = lambda: None
+    globals()["restore"] = lambda: None
+    globals()["CONTROLS"] = [stub]
+    sys.argv = ["continuity-001-pr2-controls.py", "--only", "gate-stub"]
 
 
 def selftest():
@@ -1256,7 +1337,7 @@ def selftest():
     # mutation that removes both a mechanism and the guard that watches
     # it is not in the matrix, and the note says so rather than
     # claiming more.
-    expected_self_test_cases = 60
+    expected_self_test_cases = 71
 
     # Each case carries a MODE. The mode decides how the gate is
     # driven; the name is only the label. Dispatching on the label
@@ -1413,17 +1494,22 @@ def selftest():
     # suite: a source search would be satisfied by a COMMENT, and
     # main() could swallow the raise that was introduced so it could
     # not be ignored.
-    for label, stub_failed, stub_skipped, want_proceeded, want_exit in (
-            ("a not-green baseline", ["TestSomethingFailed"], [], False, 1),
-            ("a baseline that skipped a test", [], ["TestSomethingSkipped"], False, 1),
-            ("a green baseline", [], [], True, None)):
+    for label, stub_failed, stub_skipped, expect, run_failed, \
+            want_proceeded, want_exit, want_gate in (
+            ("a not-green baseline", ["TestSomethingFailed"], [], (), (),
+             False, 1, None),
+            ("a baseline that skipped a test", [], ["TestSomethingSkipped"],
+             (), (), False, 1, None),
+            ("a green baseline", [], [], (), (), True, None, 0),
+            ("a green baseline whose control breaks the gate", [], [],
+             ("TestNeverFails",), (), True, None, 1)):
         # The record of what the stub did belongs to THIS frame: the
-        # driver appends to the list it is handed, so a mutation that
+        # driver appends to the list it was handed, so a mutation that
         # substitutes the expectation for the observation cannot forge
         # it.
         ran = []
-        proceeded, exited = _drive_main_with_baseline(stub_failed, stub_skipped,
-                                                       ran)
+        proceeded, exited, gate = _drive_main_with_baseline(
+            stub_failed, stub_skipped, ran, expect, run_failed)
         # ONE boolean, so that the mutation matrix can neuter the whole
         # verdict with one edit — and so that the three things it
         # checks are checked together rather than in a chain where a
@@ -1437,18 +1523,55 @@ def selftest():
         # driver appends to the list it was handed, so a mutation that
         # substitutes the expectation for the observation cannot forge
         # it.
-        wiring_ok = _wiring_ok(proceeded, exited, ran, want_proceeded,
-                               want_exit, calls)
+        wiring_ok = _wiring_ok(proceeded, exited, gate, ran, want_proceeded,
+                               want_exit, want_gate, calls)
         if not wiring_ok:
             failures += 1
             print(f"\nSELF-TEST FAILED: main() with {label} "
                   f"{'proceeded' if proceeded else 'refused'} and exited {exited}, "
-                  f"running the control {bool(ran)} — want "
+                  f"returning {gate}, running the control {bool(ran)} — want "
                   f"{'proceeded' if want_proceeded else 'refused'}, exited "
-                  f"{want_exit}, running the control {want_proceeded}")
+                  f"{want_exit}, returning {want_gate}, running the control "
+                  f"{want_proceeded}")
         else:
             print(f"\nSELF-TEST OK: main() with {label} "
                   f"{'proceeded to the controls' if proceeded else 'refused the measurement'}.")
+
+    # The MEASUREMENT is arithmetic, and it used to live inline in
+    # main()'s loop, where nothing but the real controls exercised it —
+    # and the real controls were not in anyone's test run. So it is
+    # driven here, with a known control and a known run.
+    probe_control = {
+        "name": "probe",
+        "invariant": "a probe control",
+        # The control DECLARES two tests and the run fails only one of
+        # them, so the hit must be the ONE that failed. A measurement
+        # that took the whole declaration would be wrong, and the
+        # probe sees it.
+        #
+        # Both names are REAL tests: the pinning test requires every
+        # test the harness names to exist, and it is right to.
+        "expect": ["TestAPIRootCreationSucceeds",
+                   "TestAPIRootCreationRequiresTheOperatorAuthority"],
+        "load_bearing": True,
+        "breaks": [],
+    }
+    # The run fails one test AND times out: an INCONCLUSIVE failure
+    # says nothing about the invariant, so it must not count towards
+    # the specific set or the total. 1 failed + 30 passed + 1 skipped
+    # = 32 tests produced.
+    probe_measurement = _measure(
+        probe_control,
+        ["TestAPIRootCreationSucceeds", "<TIMEOUT>"], 30, ["TestSkipped"])
+    if not _measurement_ok(probe_measurement,
+                           ["TestAPIRootCreationSucceeds"],
+                           ["TestAPIRootCreationSucceeds"], 32, calls):
+        failures += 1
+        print("\nSELF-TEST FAILED: the measurement is not the one the probe "
+              "expects — the arithmetic that turns a run into a measurement "
+              "is wrong")
+    else:
+        print("\nSELF-TEST OK: the measurement is the one the probe expects.")
 
     # Every PREDICATE can FAIL — and that is proved, not assumed.
     #
@@ -1463,7 +1586,11 @@ def selftest():
              "this suite", calls)),
             ("the isolation predicate", lambda: _isolation_ok(2, calls)),
             ("the sample predicate",
-             lambda: _sample_ok("nothing", "sample", calls))):
+             lambda: _sample_ok("nothing", "sample", calls)),
+            ("the measurement predicate",
+             lambda: _measurement_ok(probe_measurement, ["wrong"],
+                                     ["TestAPIRootCreationSucceeds"], 32,
+                                     calls))):
         if predicate():
             failures += 1
             print(f"\nSELF-TEST FAILED: {label} accepted a value it must "
@@ -1478,9 +1605,10 @@ def selftest():
     # self-test green with nothing to notice it. The function can be
     # driven, so it is.
     probe_ran = []
-    probe_proceeded, probe_exited = _drive_main_with_baseline(
+    probe_proceeded, probe_exited, probe_gate = _drive_main_with_baseline(
         ["TestSomethingFailed"], [], probe_ran)
-    if _wiring_ok(probe_proceeded, probe_exited, probe_ran, True, 1, calls):
+    if _wiring_ok(probe_proceeded, probe_exited, probe_gate, probe_ran,
+                  True, 1, None, calls):
         failures += 1
         print("\nSELF-TEST FAILED: the wiring verdict accepted a deliberately "
               "wrong expectation, so it cannot fail")
@@ -1616,4 +1744,8 @@ def selftest():
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.exit(selftest())
+    if "--selfcheck-gate" in sys.argv:
+        # The gate's own verdict, with the suite stubbed, so that the
+        # PROCESS's exit code is the gate's and not the suite's cost.
+        _install_gate_stub()
     sys.exit(main())
