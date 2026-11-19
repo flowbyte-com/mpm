@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -340,7 +341,7 @@ func TestControls_TheHarnessGateCanFail(t *testing.T) {
 // EVALUATED, not the number of lines it printed. Every check in the
 // harness is a predicate, and every predicate records that it ran, so
 // a check that stops running leaves the count short.
-const publishedSelfTestCases = 71
+const publishedSelfTestCases = 74
 
 // TestControls_TheHarnessPublishesItsOwnCaseCount pins the published
 // figure to the harness's own.
@@ -466,13 +467,27 @@ var harnessMutations = []struct {
 		`if False:`,
 	},
 	{
+		// The INCONCLUSIVE set names the failures that say nothing
+		// about the invariant: a build that failed to compile and a
+		// run that timed out. Both are excluded from the specific
+		// set, and the set is pinned on BOTH members.
+		"the inconclusive set's build failure",
+		`    "<BUILD FAILED>",`,
+		``,
+	},
+	{
+		"the inconclusive set's timeout",
+		`    "<TIMEOUT>",`,
+		``,
+	},
+	{
 		// The count's own CHECK is pinned by
 		// TestControls_TheHarnessCountsItsOwnCases, which removes it.
 		// This entry pins the PUBLISHED FIGURE: a copy whose count no
 		// longer matches the literal must fail.
 		"the published case count",
-		`expected_self_test_cases = 71`,
-		`expected_self_test_cases = 70`,
+		`expected_self_test_cases = 74`,
+		`expected_self_test_cases = 73`,
 	},
 	{
 		"main()'s use of the baseline verdict",
@@ -678,23 +693,40 @@ func TestControls_TheHarnessGateRefusesAndExitsNonZero(t *testing.T) {
 		t.Fatalf("read the control harness: %v", err)
 	}
 
-	run := func(t *testing.T, script string) int {
+	// The mode must not touch the tree. Its stubs replace snapshot()
+	// and restore(), and the observable consequence is that it leaves
+	// NO pristine copy behind — so TMPDIR is a fresh directory and it
+	// must still be EMPTY afterwards. And the mode's output must
+	// carry the gate's REFUSAL, not the pristine-copy error, so
+	// restore() cannot have run either.
+	run := func(t *testing.T, script string) (int, string) {
 		t.Helper()
+		tmp := t.TempDir()
 		cmd := exec.Command(python, script, "--selfcheck-gate")
 		cmd.Env = []string{
 			"PATH=" + os.Getenv("PATH"),
 			"HOME=" + t.TempDir(),
 			"MPM_WORKSPACE=" + t.TempDir(),
+			"TMPDIR=" + tmp,
 		}
 		out, err := cmd.CombinedOutput()
 		if err == nil {
-			return 0
+			return 0, string(out)
 		}
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) {
 			t.Fatalf("run the harness's gate: %v\n%s", err, out)
 		}
-		return exitErr.ExitCode()
+		entries, readErr := os.ReadDir(tmp)
+		if readErr != nil {
+			t.Fatalf("read the harness's TMPDIR: %v", readErr)
+		}
+		if len(entries) != 0 {
+			t.Errorf("the harness's gate mode left %d entr(ies) in TMPDIR "+
+				"(%v) — it snapshotted the tree, so its stubs are not in "+
+				"place", len(entries), entries)
+		}
+		return exitErr.ExitCode(), string(out)
 	}
 
 	// The unmutated harness: the gate must refuse, and the process
@@ -704,9 +736,18 @@ func TestControls_TheHarnessGateRefusesAndExitsNonZero(t *testing.T) {
 	if err := os.WriteFile(pristine, original, 0o600); err != nil {
 		t.Fatalf("write the harness copy: %v", err)
 	}
-	if code := run(t, pristine); code == 0 {
+	code, out := run(t, pristine)
+	if code == 0 {
 		t.Errorf("the harness's gate ACCEPTED a measurement it must refuse, " +
 			"and the process exited 0 — the exit code is the gate")
+	}
+	if !strings.Contains(out, "THE HARNESS FAILED") {
+		t.Errorf("the harness's gate mode did not report the gate's refusal "+
+			"in its output, so it did not get as far as the gate:\n%s", out)
+	}
+	if strings.Contains(out, "pristine copy") {
+		t.Errorf("the harness's gate mode tried to RESTORE the tree, so its "+
+			"restore() stub is not in place:\n%s", out)
 	}
 
 	for _, m := range gateMutations {
@@ -721,13 +762,79 @@ func TestControls_TheHarnessGateRefusesAndExitsNonZero(t *testing.T) {
 			if err := os.WriteFile(script, []byte(mutated), 0o600); err != nil {
 				t.Fatalf("write the mutated copy: %v", err)
 			}
-			if code := run(t, script); code != 0 {
+			code, _ := run(t, script)
+			if code != 0 {
 				t.Errorf("the gate still REFUSED with %s changed, so the "+
 					"mutation does not touch the gate's verdict — the matrix "+
 					"no longer tests what it claims", m.name)
 			}
 		})
 	}
+}
+
+// TestControls_TheHarnessSuiteSizeMatchesTheSuite pins the harness's
+// SUITE_SIZE — and the bound's line — against the suite that exists.
+//
+// SUITE_SIZE is the denominator of the harness's bound: the number of
+// tests the `-run TestAPI` selection runs. If it drifts from the real
+// suite, the bound is measured against a suite that does not exist,
+// and every case that used it is measuring nothing.
+//
+// The bound's LINE is pinned with it, and it is pinned as a literal
+// against the suite's size rather than derived from the harness's own
+// constant — a case that derived its boundary from the constant under
+// test moves with it and pins nothing.
+func TestControls_TheHarnessSuiteSizeMatchesTheSuite(t *testing.T) {
+	root := repoRoot(t)
+	b, err := os.ReadFile(filepath.Join(root, controlsScript))
+	if err != nil {
+		t.Fatalf("read the control harness: %v", err)
+	}
+	// The acceptance suite's own count, by name.
+	count := 0
+	for name := range suiteTestNames(t) {
+		if strings.HasPrefix(name, "TestAPI") {
+			count++
+		}
+	}
+	if count == 0 {
+		t.Fatal("the acceptance suite has no TestAPI functions at all, so " +
+			"the harness's `-run TestAPI` selection would run nothing")
+	}
+	for _, c := range []struct {
+		constant string
+		want     int
+	}{
+		{"SUITE_SIZE", count},
+		{"BOUND_AT_THE_LINE", count / 3},
+		{"BOUND_ONE_PAST_THE_LINE", count/3 + 1},
+	} {
+		declared := harnessConstant(t, string(b), c.constant)
+		if declared != c.want {
+			t.Errorf("the harness's %s is %d, and the suite has %d "+
+				"TestAPI functions — the harness's bound is measured against "+
+				"a suite that does not exist", c.constant, declared, c.want)
+		}
+	}
+}
+
+// harnessConstant reads a module-level integer constant out of the
+// harness. It is a SCAN, not an evaluation: the harness is Python and
+// this is Go, so the constant is read the way it is written.
+func harnessConstant(t *testing.T, harness, name string) int {
+	t.Helper()
+	pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) +
+		` = ([0-9]+)$`)
+	match := pattern.FindStringSubmatch(harness)
+	if match == nil {
+		t.Fatalf("the harness does not declare %s as a module-level integer "+
+			"constant — the pinning test no longer tests what it claims", name)
+	}
+	n, err := strconv.Atoi(match[1])
+	if err != nil {
+		t.Fatalf("read the harness's %s: %v", name, err)
+	}
+	return n
 }
 
 // TestControls_TheHarnessCountsItsOwnCases pins that the harness's

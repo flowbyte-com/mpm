@@ -1001,10 +1001,24 @@ def summarise(results, baseline, baseline_skipped=()):
 # The synthetic results only need it to compute the broken-suite bound.
 SUITE_SIZE = 36
 
+# The bound's own LINE, in failures. The bound is a THIRD of the
+# baseline, so the line is twelve: a control that broke twelve of the
+# thirty-six is still a MEASUREMENT, and one that broke thirteen
+# broke the build.
+#
+# The numbers are LITERALS on purpose. A case that derived its
+# boundary from BROKEN_SUITE_FRACTION moved with the constant, so a
+# change to the constant moved the case with it and pinned nothing —
+# and a Go test checks the literals against the suite size, so they
+# cannot drift either.
+BOUND_AT_THE_LINE = 12
+BOUND_ONE_PAST_THE_LINE = 13
+
 
 def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
                        undeclared=False, broken_suite=False, aborted=False,
                        skipped=False, more_tests=False, redundant_aborted=False,
+                       at_the_bound=None,
                        detected_nothing=False, redundant_skipped=False,
                        swapped_skip=False, redundant_swapped_skip=False,
                        baseline_skips=None):
@@ -1035,6 +1049,25 @@ def _synthetic_results(broken_load_bearing=None, broken_redundant=None,
                 # The named test DID fail, and something else broke
                 # too — and the control never said it would.
                 specific = list(hit) + ["TestSomethingElseBroke"]
+            if at_the_bound is not None and control["name"] == first_lb:
+                # EXACTLY at the bound. The gate's third question is
+                # "did it break more than a third of the baseline?", so
+                # a control that broke a third of the suite is still a
+                # MEASUREMENT and one that broke a third AND ONE broke
+                # the build.
+                #
+                # The bound's CONSTANT and its COMPARISON are both
+                # pinned by the PAIR of cases: the case at the line
+                # must be accepted, and the case one past it must be
+                # refused. Before this, the only case near the bound
+                # was 37 failures — far past a third — so a change to
+                # either the constant or the comparison moved nothing
+                # that any case could see.
+                extra = max(0, at_the_bound - len(hit))
+                broken = [f"TestBroke{i}" for i in range(extra)]
+                specific = list(hit) + broken
+                control = dict(control)
+                control["breaks"] = list(control.get("breaks", [])) + broken
             if broken_suite and control["name"] == first_lb:
                 # The EXACT attack the review described: the mutation
                 # took the suite with it, AND the control DECLARES
@@ -1337,7 +1370,7 @@ def selftest():
     # mutation that removes both a mechanism and the guard that watches
     # it is not in the matrix, and the note says so rather than
     # claiming more.
-    expected_self_test_cases = 71
+    expected_self_test_cases = 74
 
     # Each case carries a MODE. The mode decides how the gate is
     # driven; the name is only the label. Dispatching on the label
@@ -1372,6 +1405,24 @@ def selftest():
         {"name": f"the load-bearing control {first_lb} produced MORE tests than the baseline",
          "results": _synthetic_results(more_tests=True),
          "want": False, "mode": "more_tests", "isolates": True},
+        # The bound's own LINE. A control that broke EXACTLY a third
+        # of the baseline is still a measurement, and one that broke a
+        # third AND ONE broke the build. The pair pins the constant
+        # and the comparison together: a change to either moves one
+        # of the two cases, and neither case can be satisfied by both
+        # a weaker and a stricter bound.
+        # The case at the line is ACCEPTED, so it refuses nothing —
+        # and the isolation assertion is for cases that refuse exactly
+        # one control. What catches a leak into the other controls here
+        # is the verdict itself: a case that refused a bystander would
+        # not be accepted.
+        {"name": f"the load-bearing control {first_lb} broke EXACTLY a third of the baseline",
+         "results": _synthetic_results(at_the_bound=BOUND_AT_THE_LINE),
+         "want": True, "mode": "normal"},
+        {"name": f"the load-bearing control {first_lb} broke a third AND ONE of the baseline",
+         "results": _synthetic_results(
+             at_the_bound=BOUND_ONE_PAST_THE_LINE),
+         "want": False, "mode": "normal", "isolates": True},
         # N20: the defence-in-depth branch's own checks. A run that
         # produced a different number of tests is a broken
         # measurement there too, and nothing else catches it.
@@ -1556,13 +1607,16 @@ def selftest():
         "load_bearing": True,
         "breaks": [],
     }
-    # The run fails one test AND times out: an INCONCLUSIVE failure
-    # says nothing about the invariant, so it must not count towards
-    # the specific set or the total. 1 failed + 30 passed + 1 skipped
-    # = 32 tests produced.
+    # The run fails one test AND produces BOTH inconclusive failures: a
+    # build that failed to compile and a run that timed out. Neither
+    # says anything about the invariant, so neither may count towards
+    # the specific set or the total — and the probe carries both, so
+    # losing EITHER member of the set is visible. 1 failed + 30 passed
+    # + 1 skipped = 32 tests produced.
     probe_measurement = _measure(
         probe_control,
-        ["TestAPIRootCreationSucceeds", "<TIMEOUT>"], 30, ["TestSkipped"])
+        ["TestAPIRootCreationSucceeds", "<TIMEOUT>", "<BUILD FAILED>"],
+        30, ["TestSkipped"])
     if not _measurement_ok(probe_measurement,
                            ["TestAPIRootCreationSucceeds"],
                            ["TestAPIRootCreationSucceeds"], 32, calls):

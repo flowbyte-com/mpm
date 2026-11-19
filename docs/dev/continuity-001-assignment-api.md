@@ -964,8 +964,8 @@ this note's own**.
 | the SKIP anchor's catchability rested on an unpinned sample line | removing the line from the sample would make the anchor unobservable | the sample's load-bearing shapes are **asserted** |
 | the mode dispatch was protected by a counter rather than by itself | the same shape as the guard above | the count is derived from the counter, so the dispatch is pinned by the count |
 
-**THE SELF-TEST IS NOW FORTY-THREE CASES** (and seventy-one after the
-eleventh round — §5.15), and the number is published in two places that
+**THE SELF-TEST IS NOW FORTY-THREE CASES** (and seventy-four after the
+twelfth round — §5.16), and the number is published in two places that
 check each other: the harness's own literal, and the Go test that
 compares the harness's printed count.
 
@@ -1044,7 +1044,7 @@ the **published literal** in a copy and requires the self-test to fail,
 so a copy whose count check has been disabled passes and the Go test
 says so by name.
 
-**THE COUNT IS SEVENTY-ONE CHECKS**, published in two places that check
+**THE COUNT IS SEVENTY-FOUR CHECKS**, published in two places that check
 each other: the harness's own literal, and the Go test that compares the
 harness's *printed* count against the same figure. The three checks that
 are not predicate calls — the baseline verdict, the three output
@@ -1102,6 +1102,57 @@ top-level line, so the parent's name is in the set either way. And both
 matrices are lists of **single-edit** mutations: a two-edit mutation
 that removes a mechanism *and* the check that watches it is outside
 them.
+
+### 5.16 What the twelfth review found: a constant that carried a claim
+
+The twelfth review closed the eleventh's findings by mutation — every
+one of round eleven's nine survivors is now caught — and found three
+more. All three share one shape: **a constant or a pin carrying a
+published claim that was not itself checked.**
+
+| the finding | what it was | the fix |
+|---|---|---|
+| the new CI pin asserted a **string** in the workflow's raw text | commenting the step out left the pin passing — CI would no longer run the harness and the pin would say nothing | the pin strips the **comments** first, the way its sibling checks in the same file do |
+| the gate's third question — "more than a third of the baseline" — lived in `BROKEN_SUITE_FRACTION` and a `>` comparison | **two** single edits changed the published bound and nothing noticed: the only synthetic case near the bound had 37 failures, far past a third, so the **line itself** was never exercised | there is now a case landing a control **exactly at the line** — which must be ACCEPTED — and one **exactly one past it** — which must be REFUSED. The pair pins the constant and the comparison together |
+| the note's "what the matrices still do not say" was silent about the bound | the framing read as though single-edit mutations were covered | the note says what the matrices cover and what they do not |
+
+**AND THE FIRST ATTEMPT AT THE BOUND'S LINE DID NOT WORK.** The case
+derived its boundary from `SUITE_SIZE // BROKEN_SUITE_FRACTION`, so a
+change to the constant **moved the case with it** and pinned nothing —
+the case was measuring the constant against itself. The line is now a
+**LITERAL** — twelve of thirty-six is still a measurement, thirteen
+broke the build — and a Go test checks the literal against the suite's
+real size, so it cannot drift either.
+
+That is the same lesson the log taught, one level up: **a case that
+derives its boundary from the thing under test is not a case.**
+
+**THE THREE NITS.**
+
+* `INCONCLUSIVE` was **half-pinned**: losing `<BUILD FAILED>` was green,
+  because the measurement probe carried only `<TIMEOUT>`. The probe now
+  carries **both**, and the matrix covers both members.
+* the gate mode's **tree-safety stubs** were unpinned. The Go test now
+  runs it with a fresh `TMPDIR` and requires that directory to be
+  **EMPTY** afterwards — so the mode cannot have snapshotted the tree —
+  and requires the output to carry the gate's **refusal** rather than
+  the pristine-copy error, so `restore()` cannot have run either.
+* `SUITE_SIZE` was unpinned against the real suite size. A Go test now
+  compares it with the number of `TestAPI` functions the acceptance
+  suite actually has.
+
+**THE MATRICES ARE NOW THIRTY-TWO AND FOUR ENTRIES**, and every one of
+them is caught.
+
+**WHAT THE MATRICES STILL DO NOT SAY.** Three things, stated rather
+than claimed away. The `^` anchor on the **FAIL** pattern is not a
+behaviour change — Go reports a parent whose subtest failed as
+`--- FAIL:` on a top-level line, so the parent's name is in the set
+either way. The matrices cover **single-edit** mutations only: a
+two-edit mutation that removes a mechanism *and* the check that watches
+it is outside them. And the matrices enumerate the mechanisms they
+name — a constant or a pin that nothing checks is outside them, which
+is exactly what the twelfth round found and fixed.
 
 ## 6. What PR 2 leaves to PRs 3–5
 

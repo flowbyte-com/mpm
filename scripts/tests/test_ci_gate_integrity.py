@@ -257,9 +257,12 @@ class TestGatingJobsStillExist(unittest.TestCase):
         every test green. A step that is added and then quietly removed
         is the same class of gap as the ones this file already pins.
         """
+        # The COMMENTS are stripped first: a step that is commented
+        # out is not run, and a pin that cannot tell the difference
+        # between a step and a comment about a step pins nothing.
         self.assertIn(
             "make test-continuity-controls",
-            _job_block(_workflow_text(), "gate"),
+            _strip_comments(_job_block(_workflow_text(), "gate")),
             "the negative-control harness is no longer run by the gate job",
         )
 
