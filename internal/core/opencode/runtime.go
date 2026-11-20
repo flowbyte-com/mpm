@@ -163,8 +163,14 @@ type Runtime struct {
 
 // NewRuntime validates and returns a Runtime.
 func NewRuntime(cfg Config) (*Runtime, error) {
-	if cfg.Root == "" || cfg.OpenCodeBin == "" || cfg.MPMBin == "" {
-		return nil, errors.New("opencode: the runtime needs a root, a binary and the MPM binary")
+	if cfg.Root == "" || cfg.OpenCodeBin == "" {
+		return nil, errors.New("opencode: the runtime needs a root and a binary")
+	}
+	// The MPM binary is the RELAY, which only the WORKER path needs. A
+	// review does not run the worker containment, so it has no relay —
+	// requiring one made `execute-review` impossible to construct.
+	if cfg.RepoPath == "" && cfg.MPMBin == "" {
+		return nil, errors.New("opencode: the worker runtime needs the MPM binary for its relay")
 	}
 	if cfg.Model == "" {
 		return nil, errors.New("opencode: the runtime needs a model")

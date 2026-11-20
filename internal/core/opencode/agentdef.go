@@ -23,3 +23,14 @@ var WorkerAgentDefinition []byte
 // WorkerAgentName is the definition's name, and the only name the worker's
 // allow-list contains.
 const WorkerAgentName = "mpm-worker"
+
+// ReviewerAgentDefinition is the canonical reviewer definition, embedded.
+//
+// EMBEDDED, NOT READ FROM A PATH. The first version read it from a
+// CWD-relative template file and swallowed the read error — so a review
+// launched from the tree under review would have let the REVIEWED PARTY
+// supply the reviewer's own permission definition. The binary carries the
+// definition, and a test pins it to the template.
+//
+//go:embed mpm-reviewer.md
+var ReviewerAgentDefinition []byte

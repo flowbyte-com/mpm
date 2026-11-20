@@ -124,10 +124,15 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 		return nil, fmt.Errorf("%w: the plugin at %s is not built: %v",
 			ErrReviewerUnavailable, cfg.PluginPath, err)
 	}
-	if err := r.verifyReviewer(ctx); err != nil {
+	// ORDER MATTERS, for the same reason the worker path's does: the
+	// check asks the ISOLATED runtime what the definition's effective
+	// permissions are, and the runtime can only answer about a definition
+	// it has been given. Writing the configuration first is what makes the
+	// check mean anything.
+	if err := r.writeReviewConfig(); err != nil {
 		return nil, err
 	}
-	if err := r.writeReviewConfig(); err != nil {
+	if err := r.verifyReviewer(ctx); err != nil {
 		return nil, err
 	}
 
@@ -230,26 +235,40 @@ func (r *Runtime) verifyReviewer(ctx context.Context) error {
 		return fmt.Errorf("%w: the runtime does not know an agent named %q",
 			ErrReviewerUnavailable, ReviewerAgentName)
 	}
-	allowed := map[string]bool{}
-	for _, p := range found.Permissions {
-		if p.Effect == "allow" {
-			allowed[p.Action] = true
+	// THE HOST PREPENDS A WILDCARD ALLOW, so "no wildcard allow exists"
+	// is impossible to assert. What CAN be asserted is what the host
+	// actually evaluates under last-match-wins: the LAST rule matching
+	// action "*" must be a DENY, and no sensitive action may be allowed.
+	lastWildcardDeny := false
+	for i := len(found.Permissions) - 1; i >= 0; i-- {
+		p := found.Permissions[i]
+		if p.Action != "*" {
+			continue
 		}
+		lastWildcardDeny = p.Effect == "deny"
+		break
 	}
-	// The ONLY permitted execution path, and no widening beside it.
-	if !allowed["sandbox_exec"] {
+	if !lastWildcardDeny {
+		return fmt.Errorf("%w: %q's resolved rules do not END in a wildcard deny, so "+
+			"every action it does not name explicitly is open",
+			ErrReviewerUnavailable, ReviewerAgentName)
+	}
+
+	hasSandbox := false
+	for _, p := range found.Permissions {
+		if p.Effect != "allow" || p.Action == "*" {
+			continue
+		}
+		if p.Action == "sandbox_exec" {
+			hasSandbox = true
+			continue
+		}
+		return fmt.Errorf("%w: %q allows %q beside `sandbox_exec`",
+			ErrReviewerUnavailable, ReviewerAgentName, p.Action)
+	}
+	if !hasSandbox {
 		return fmt.Errorf("%w: %q does not allow `sandbox_exec`, so it has no confined "+
 			"execution path", ErrReviewerUnavailable, ReviewerAgentName)
-	}
-	for action := range allowed {
-		switch action {
-		case "sandbox_exec", "*":
-			// "*" is the host's own prepended default; the agent's
-			// wildcard deny shadows it under last-match-wins.
-		default:
-			return fmt.Errorf("%w: %q allows %q beside `sandbox_exec`",
-				ErrReviewerUnavailable, ReviewerAgentName, action)
-		}
 	}
 	return nil
 }
@@ -272,15 +291,16 @@ func (r *Runtime) writeReviewConfig() error {
 	if err := os.WriteFile(filepath.Join(dir, "opencode.json"), body, 0o600); err != nil {
 		return fmt.Errorf("opencode: write the review config: %w", err)
 	}
-	// The reviewer definition is copied in beside it, so the disposable
-	// configuration is self-contained and the operator's is untouched.
-	src, err := os.ReadFile(filepath.Join("agent_installation", "mpm-opencode",
-		"templates", "agents", ReviewerAgentName+".md"))
-	if err == nil {
-		agents := filepath.Join(dir, "agents")
-		if err := os.MkdirAll(agents, 0o700); err == nil {
-			_ = os.WriteFile(filepath.Join(agents, ReviewerAgentName+".md"), src, 0o600)
-		}
+	// THE DEFINITION COMES FROM THE BINARY. Reading it from a path would
+	// let the party under review supply its reviewer's permissions.
+	agents := filepath.Join(dir, "agents")
+	if err := os.MkdirAll(agents, 0o700); err != nil {
+		return fmt.Errorf("opencode: create the review agent directory: %w", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(agents, ReviewerAgentName+".md"),
+		ReviewerAgentDefinition, 0o600); err != nil {
+		return fmt.Errorf("opencode: write the reviewer definition: %w", err)
 	}
 	return nil
 }

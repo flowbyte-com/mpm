@@ -556,3 +556,30 @@ func TestSidecarReclaimsAStaleSocket(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 }
+
+// TestReviewerDefinitionIsPinnedToTheTemplate is the reviewer half of the
+// worker's pin (finding 3c).
+//
+// The adapter writes the EMBEDDED definition into every review configuration.
+// If the embedded copy drifted from the canonical template, a review would run
+// a surface nobody reviewed — and because the definition is a permission
+// boundary, nothing else in the suite would notice.
+func TestReviewerDefinitionIsPinnedToTheTemplate(t *testing.T) {
+	tpl := filepath.Join("..", "..", "..",
+		"agent_installation", "mpm-opencode", "templates", "agents", "mpm-reviewer.md")
+	onDisk, err := os.ReadFile(tpl)
+	if err != nil {
+		t.Fatalf("read the canonical reviewer template: %v", err)
+	}
+	if !bytes.Equal(onDisk, ReviewerAgentDefinition) {
+		t.Fatalf("the embedded reviewer definition differs from %s", tpl)
+	}
+	// And it is the one the check expects: sandbox_exec allowed, shell
+	// denied, mpm_assignment denied.
+	b := string(ReviewerAgentDefinition)
+	for _, want := range []string{"action: sandbox_exec", "action: shell", "action: mpm_assignment"} {
+		if !strings.Contains(b, want) {
+			t.Errorf("the reviewer definition is missing %q", want)
+		}
+	}
+}
