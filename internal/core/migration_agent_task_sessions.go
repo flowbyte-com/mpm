@@ -164,6 +164,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_task_sessions_task_attempt
 -- coincidence.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_task_sessions_native
     ON agent_task_sessions(runtime, native_session_id);
+-- SINGLE-FLIGHT ADMISSION.
+--
+-- At most ONE non-terminal attempt per task PER CLAIM EPOCH, enforced by the
+-- engine. Two concurrent invocations both read "no live attempt" outside a
+-- transaction and both try to write their intent; only one INSERT can
+-- succeed, so exactly one obtains permission to launch. A service-level check
+-- cannot do this — the read and the write are not one critical section.
+--
+-- SCOPED TO THE EPOCH on purpose. A worker whose lease was reclaimed leaves a
+-- stale intent behind, and an index on (task_id) alone would then block every
+-- future attempt of that assignment forever. Two writers under DIFFERENT
+-- epochs are already refused by the reconciler, which can inspect the old
+-- session; this index is the atomic half, and it only needs to cover the
+-- epoch the caller claims.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_task_sessions_one_live
+    ON agent_task_sessions(task_id, claim_epoch)
+    WHERE launch_state IN ('intent','launched','running');
 -- The reconciler's hot path: the live attempt for a task.
 CREATE INDEX IF NOT EXISTS idx_agent_task_sessions_task_state
     ON agent_task_sessions(task_id, launch_state, attempt DESC);

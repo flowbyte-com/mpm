@@ -174,13 +174,23 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 
 	// THE NATIVE MESSAGE STREAM, not the process's stdout. The stream is
 	// what the runtime recorded, and it is what a later reader can check.
-	findings, state, err := r.captureMessages(ctx, req.SessionID)
+	//
+	// ONLY ASSISTANT-AUTHORED TEXT COUNTS AS FINDINGS. A session that
+	// contains nothing but the submitted prompt echo, an empty assistant
+	// turn or a diagnostic envelope has produced NO REVIEW — counting it
+	// would let a prompt be mistaken for a verdict.
+	findings, authored, state, err := r.captureMessages(ctx, req.SessionID)
 	if err != nil {
 		return nil, err
 	}
 	if state == nil {
 		return nil, fmt.Errorf("%w: the reviewer produced no session state (%v)",
 			ErrReviewerUnavailable, runErr)
+	}
+	if !authored {
+		return nil, fmt.Errorf(
+			"%w: the reviewer session produced no assistant-authored findings "+
+				"(only the submitted prompt, empty output or diagnostics)", ErrReviewerUnavailable)
 	}
 	if len(state.Permissions) > 0 {
 		return nil, fmt.Errorf(
@@ -317,43 +327,62 @@ func (r *Runtime) writeReviewConfig() error {
 //
 // The errors and the tool results are included: a review that refused to run
 // is not a review that found nothing.
-func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string, *SessionState, error) {
+func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string, bool, *SessionState, error) {
 	out, err := r.runIsolated(ctx, r.cfg.OpenCodeBin, "--standalone", "api",
 		"session.message.list", "--param", "sessionID="+sessionID)
 	if err != nil {
-		return "", nil, fmt.Errorf("opencode: read the reviewer's messages: %w", err)
+		return "", false, nil, fmt.Errorf("opencode: read the reviewer's messages: %w", err)
 	}
 	var env struct {
-		Data []struct {
-			Type    string          `json:"type"`
-			Text    string          `json:"text"`
-			Content json.RawMessage `json:"content"`
-			Error   json.RawMessage `json:"error"`
-		} `json:"data"`
+		Data []reviewMessage `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(out), &env); err != nil {
-		return "", nil, fmt.Errorf("opencode: parse the reviewer's messages: %w", err)
+		return "", false, nil, fmt.Errorf("opencode: parse the reviewer's messages: %w", err)
 	}
 
-	var b strings.Builder
-	for _, m := range env.Data {
+	transcript, authored := findingsFromMessages(env.Data)
+	state, err := r.Inspect(ctx, sessionID)
+	if err != nil {
+		return "", false, nil, err
+	}
+	// The returned text is the full transcript, so the capture is a faithful
+	// record — but `authored` is what gates completion.
+	return transcript, authored, state, nil
+}
+
+// reviewMessage is the shape findingsFromMessages consumes.
+type reviewMessage struct {
+	Type    string          `json:"type"`
+	Text    string          `json:"text"`
+	Content json.RawMessage `json:"content"`
+	Error   json.RawMessage `json:"error"`
+}
+
+// findingsFromMessages decides whether a session produced an ACTUAL REVIEW.
+//
+// The transcript includes the prompt and the runtime's diagnostics so a reader
+// has the whole exchange, but `authored` is true only when the ASSISTANT wrote
+// something. A session containing nothing but the submitted prompt, an empty
+// assistant turn or a diagnostic envelope has produced no review, and counting
+// it would let a prompt be mistaken for a verdict.
+func findingsFromMessages(msgs []reviewMessage) (transcript string, authored bool) {
+	var all, assistant strings.Builder
+	for _, m := range msgs {
 		switch m.Type {
 		case "assistant":
-			b.WriteString(assistantText(m.Content))
-			b.WriteString("\n")
+			text := assistantText(m.Content)
+			all.WriteString(text)
+			all.WriteString("\n")
+			assistant.WriteString(text)
 		case "user":
-			b.WriteString("[user] " + m.Text + "\n")
+			all.WriteString("[user] " + m.Text + "\n")
 		case "idle":
 			if len(m.Error) > 0 && string(m.Error) != "null" {
-				b.WriteString("[idle] " + string(m.Error) + "\n")
+				all.WriteString("[idle] " + string(m.Error) + "\n")
 			}
 		}
 	}
-	state, err := r.Inspect(ctx, sessionID)
-	if err != nil {
-		return "", nil, err
-	}
-	return b.String(), state, nil
+	return all.String(), strings.TrimSpace(assistant.String()) != ""
 }
 
 // assistantText flattens an assistant message's content parts.

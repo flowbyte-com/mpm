@@ -25,6 +25,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	oc "github.com/flowbyte-com/mpm-core/opencode"
@@ -917,9 +919,13 @@ func TestExecuteReviewRefusesWhenTheReviewerCannotRun(t *testing.T) {
 type fakeReviewRuntime struct {
 	result *oc.ReviewResult
 	err    error
+	calls  int32
 }
 
+func (f *fakeReviewRuntime) Calls() int { return int(atomic.LoadInt32(&f.calls)) }
+
 func (f *fakeReviewRuntime) Review(_ context.Context, req oc.ReviewRequest) (*oc.ReviewResult, error) {
+	atomic.AddInt32(&f.calls, 1)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -1072,5 +1078,104 @@ func TestExecuteReviewAllowsARetryAfterATerminalFailure(t *testing.T) {
 	}
 	if attempts[1].Attempt != 2 {
 		t.Errorf("the retry is attempt %d, want 2", attempts[1].Attempt)
+	}
+}
+
+// TestExecuteReviewRefusesARepeatBeforeInvokingOpenCode is finding 1.
+//
+// The capture is write-once, so a second run would spend a whole model session
+// and only then be refused at the recording step. The refusal must therefore
+// happen BEFORE the runtime is invoked — asserted by the call counter, not by
+// the error text alone.
+func TestExecuteReviewRefusesARepeatBeforeInvokingOpenCode(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	implID, _ := claimedAssignment(t, store, projectID, "alpha")
+	rev := reviewFixture(t, store, implID, "charlie")
+
+	first := &fakeReviewRuntime{result: &oc.ReviewResult{
+		ReviewedRevision: strings.Repeat("1", 40),
+		FindingsSHA256:   strings.Repeat("e", 64),
+		Outcome:          "succeeded",
+		Agent:            "mpm-reviewer",
+		Findings:         "findings",
+		EvidencePath:     "/evidence/one.json",
+	}}
+	if _, err := store.ExecuteReview(context.Background(), first, ExecuteReviewParams{
+		ID: rev.id, Epoch: rev.epoch, Brief: "b",
+	}); err != nil {
+		t.Fatalf("the first review: %v", err)
+	}
+
+	second := &fakeReviewRuntime{result: first.result}
+	_, err := store.ExecuteReview(context.Background(), second, ExecuteReviewParams{
+		ID: rev.id, Epoch: rev.epoch, Brief: "b",
+	})
+	if err == nil {
+		t.Fatal("a completed review was run a second time")
+	}
+	if second.Calls() != 0 {
+		t.Errorf("the runtime was invoked %d times for a refused review", second.Calls())
+	}
+	if !strings.Contains(err.Error(), "already carries captured evidence") {
+		t.Errorf("refused, but not as a completed review: %v", err)
+	}
+}
+
+// TestExecuteReviewAdmitsExactlyOneConcurrentInvocation is finding 2.
+//
+// Two invocations on the same assignment and epoch must not both obtain
+// permission to launch. The guarantee is the DB's partial unique index on
+// non-terminal attempts, so this races real goroutines against a real
+// database — a service-level check could not make the read and the write one
+// critical section.
+func TestExecuteReviewAdmitsExactlyOneConcurrentInvocation(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	implID, _ := claimedAssignment(t, store, projectID, "alpha")
+	rev := reviewFixture(t, store, implID, "charlie")
+
+	const racers = 6
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, racers)
+	ok := make([]bool, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			fake := &fakeReviewRuntime{result: &oc.ReviewResult{
+				ReviewedRevision: strings.Repeat("1", 40),
+				FindingsSHA256:   strings.Repeat("e", 64),
+				Outcome:          "succeeded",
+				Agent:            "mpm-reviewer",
+				Findings:         "findings",
+				EvidencePath:     "/evidence/race.json",
+			}}
+			_, err := store.ExecuteReview(context.Background(), fake, ExecuteReviewParams{
+				ID: rev.id, Epoch: rev.epoch, Brief: "b",
+			})
+			errs[i], ok[i] = err, err == nil
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	admitted := 0
+	for i := range ok {
+		if ok[i] {
+			admitted++
+		}
+	}
+	if admitted != 1 {
+		t.Fatalf("%d concurrent invocations were admitted, want exactly 1 (errors: %v)",
+			admitted, errs)
+	}
+	// And the record shows ONE attempt: the losers never wrote an intent.
+	attempts, err := store.AttemptsFor(rev.id)
+	if err != nil {
+		t.Fatalf("attempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Errorf("%d attempts were recorded, want 1", len(attempts))
 	}
 }

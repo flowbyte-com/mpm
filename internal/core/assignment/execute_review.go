@@ -89,6 +89,19 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		return nil, err
 	}
 
+	// A REVIEW THAT ALREADY CAPTURED ITS EVIDENCE CANNOT BE RUN AGAIN.
+	//
+	// The capture is write-once, so a second run would spend a full model
+	// session and then be refused at the recording step — after paying for
+	// it. The refusal therefore happens HERE, before OpenCode is invoked.
+	// A review that FAILED recorded no evidence, and is retryable.
+	if rev.ReviewedSHA != "" || rev.FindingsSHA256 != "" {
+		return nil, fmt.Errorf(
+			"%w: %s already carries captured evidence (%s); a completed review "+
+				"is not re-run — the rework is a NEW assignment delegated from the "+
+				"subject", ErrConstraint, rev.ID, rev.ReviewedSHA)
+	}
+
 	// PRIOR REVIEW ATTEMPTS ARE RECONCILED BEFORE A NEW ONE STARTS.
 	//
 	// A review is the most expensive thing this package runs, and running

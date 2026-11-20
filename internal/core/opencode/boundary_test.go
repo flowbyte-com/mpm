@@ -23,6 +23,7 @@ package opencode
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -714,5 +715,43 @@ func TestSnapshotRevisionRefusesADirtyWorktree(t *testing.T) {
 		t.Error("a dirty worktree was accepted for review")
 	} else if !strings.Contains(err.Error(), "uncommitted") {
 		t.Errorf("refused, but not as a dirty worktree: %v", err)
+	}
+}
+
+// TestFindingsRequireAssistantAuthorship is finding 3.
+//
+// A successful session that contains only the submitted prompt, an empty
+// assistant turn or a diagnostic must not count as a completed review — and
+// the transcript is still recorded so a reader sees what happened.
+func TestFindingsRequireAssistantAuthorship(t *testing.T) {
+	cases := []struct {
+		name     string
+		msgs     []reviewMessage
+		authored bool
+	}{
+		{"only the prompt", []reviewMessage{
+			{Type: "user", Text: "please review this"},
+		}, false},
+		{"empty assistant", []reviewMessage{
+			{Type: "user", Text: "please review this"},
+			{Type: "assistant", Content: json.RawMessage(`[{"type":"text","text":"   "}]`)},
+		}, false},
+		{"diagnostics only", []reviewMessage{
+			{Type: "user", Text: "please review this"},
+			{Type: "idle", Error: json.RawMessage(`{"type":"unknown","message":"boom"}`)},
+		}, false},
+		{"real findings", []reviewMessage{
+			{Type: "user", Text: "please review this"},
+			{Type: "assistant", Content: json.RawMessage(`[{"type":"text","text":"F1: the fence is wrong"}]`)},
+		}, true},
+	}
+	for _, tc := range cases {
+		transcript, authored := findingsFromMessages(tc.msgs)
+		if authored != tc.authored {
+			t.Errorf("%s: authored = %v, want %v", tc.name, authored, tc.authored)
+		}
+		if transcript == "" {
+			t.Errorf("%s: the transcript was not recorded", tc.name)
+		}
 	}
 }

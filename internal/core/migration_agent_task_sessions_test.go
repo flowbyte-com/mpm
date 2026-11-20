@@ -37,7 +37,7 @@ import (
 // deliberately re-pinning, which is the same discipline PR 1's storage
 // carries.
 func TestAgentTaskSessionDDLIsPinned(t *testing.T) {
-	const want = "f785a0d0b2e7aec0413f3eae61ad5ce9a8d209d26daef39e6fb5ed3bcd28022c"
+	const want = "e9fcb2bbb43fc2823989afb33283de8ec121aa79fe1e95fc03c87f7b9e5b6803"
 	sum := sha256.Sum256([]byte(agentTaskSessionDDL))
 	got := hex.EncodeToString(sum[:])
 	if want != "PLACEHOLDER" && got != want {
@@ -197,7 +197,10 @@ func TestSessionLaunchStateMovesForwardOnly(t *testing.T) {
 // "attempt 1" and "attempt 4" with the middle executions unrecorded.
 func TestSessionAttemptsAreConsecutive(t *testing.T) {
 	dm, taskID, epoch := sessionTestFixture(t)
-	if err := insertSessionAttempt(dm, "ats-a1", taskID, 1, epoch, "ses_a1", "intent"); err != nil {
+	// ATTEMPT 1 IS TERMINAL, so the single-flight index does not apply:
+	// this test is about the NUMBERING, and two live attempts at one epoch
+	// are now refused by design (see TestSingleFlight... below).
+	if err := insertSessionAttempt(dm, "ats-a1", taskID, 1, epoch, "ses_a1", "failed"); err != nil {
 		t.Fatalf("seed attempt 1: %v", err)
 	}
 
@@ -391,5 +394,37 @@ func TestSessionAttemptIDIsImmutable(t *testing.T) {
 	_, err := dm.SQLDB().Exec(`UPDATE agent_task_sessions SET id = 'ats-renamed' WHERE id = 'ats-idimm'`)
 	if err == nil {
 		t.Fatal("the attempt's primary key was rewritten")
+	}
+}
+
+// TestSingleFlightAdmissionIsEnforcedByTheEngine pins the atomic half of
+// reviewer admission.
+//
+// Two invocations that both read "no live attempt" outside a transaction must
+// still not both obtain permission to launch. The read and the write are not
+// one critical section in the service, so the guarantee has to be the
+// database's.
+func TestSingleFlightAdmissionIsEnforcedByTheEngine(t *testing.T) {
+	dm, taskID, epoch := sessionTestFixture(t)
+
+	if err := insertSessionAttempt(dm, "ats-live-1", taskID, 1, epoch, "ses_live_1", "intent"); err != nil {
+		t.Fatalf("first live attempt: %v", err)
+	}
+	// A SECOND live attempt at the SAME epoch is refused by the index.
+	err := insertSessionAttempt(dm, "ats-live-2", taskID, 2, epoch, "ses_live_2", "launched")
+	if err == nil {
+		t.Fatal("two non-terminal attempts coexist at one epoch")
+	}
+	if !strings.Contains(err.Error(), "UNIQUE") {
+		t.Errorf("refused, but not by the single-flight index: %v", err)
+	}
+
+	// Once the first is TERMINAL, another is allowed.
+	if _, err := dm.SQLDB().Exec(
+		`UPDATE agent_task_sessions SET launch_state = 'failed' WHERE id = 'ats-live-1'`); err != nil {
+		t.Fatalf("retire the first: %v", err)
+	}
+	if err := insertSessionAttempt(dm, "ats-live-3", taskID, 2, epoch, "ses_live_3", "intent"); err != nil {
+		t.Errorf("a new attempt was refused after the previous one ended: %v", err)
 	}
 }

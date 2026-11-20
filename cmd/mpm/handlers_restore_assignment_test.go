@@ -94,8 +94,9 @@ var assignmentRestoreIndexes = []string{
 	"idx_agent_tasks_recipient_state",
 	"idx_agent_tasks_root",
 	"idx_agent_tasks_state_updated",
-	// PR 3's four indexes.
+	// PR 3's five indexes.
 	"idx_agent_task_sessions_epoch",
+	"idx_agent_task_sessions_one_live",
 	"idx_agent_task_sessions_native",
 	"idx_agent_task_sessions_task_attempt",
 	"idx_agent_task_sessions_task_state",
