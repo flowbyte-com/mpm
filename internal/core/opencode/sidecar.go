@@ -52,6 +52,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -98,6 +99,9 @@ type Sidecar struct {
 	srv      *http.Server
 	requests atomic.Int64
 	refusals atomic.Int64
+	// lock is held for the sidecar's LIFETIME. Ownership of the socket is
+	// not a moment-in-time check; it is a lease that lasts until Close.
+	lock *os.File
 }
 
 // NewSidecar validates the configuration and binds the socket.
@@ -127,6 +131,33 @@ func NewSidecar(cfg SidecarConfig) (*Sidecar, error) {
 		cfg.Timeout = DefaultSidecarTimeout
 	}
 
+	// A LIFETIME LOCK MAKES OWNERSHIP ATOMIC.
+	//
+	// Dialling before removing is necessary but NOT sufficient: two
+	// constructors racing on the same stale path both see "connection
+	// refused", both unlink, and both bind — one of them silently taking
+	// the socket the other just created. The check and the bind have to be
+	// one critical section, and it has to last as long as the sidecar does.
+	//
+	// So an advisory lock is taken on a sibling file and held for the
+	// sidecar's LIFETIME, across bind, stale cleanup and shutdown.
+	lockPath := cfg.SocketPath + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: open the sidecar lock: %w", err)
+	}
+	// NON-BLOCKING. A blocking lock would make the loser HANG rather than
+	// be refused, and a constructor that hangs is worse than one that
+	// says no: the caller has no way to tell "slow" from "never".
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf(
+				"opencode: another sidecar holds %s; refusing to take it over", cfg.SocketPath)
+		}
+		return nil, fmt.Errorf("opencode: lock the sidecar: %w", err)
+	}
+
 	// OWNERSHIP BEFORE REMOVAL.
 	//
 	// The first version unlinked the path unconditionally, so a second
@@ -148,12 +179,16 @@ func NewSidecar(cfg SidecarConfig) (*Sidecar, error) {
 				cfg.SocketPath)
 		}
 		if rmErr := os.Remove(cfg.SocketPath); rmErr != nil {
+			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+			_ = lockFile.Close()
 			return nil, fmt.Errorf("opencode: remove the stale sidecar socket: %w", rmErr)
 		}
 	}
 
 	ln, err := net.Listen("unix", cfg.SocketPath)
 	if err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
 		return nil, fmt.Errorf("opencode: bind the sidecar socket: %w", err)
 	}
 	// Only this user may reach the socket.
@@ -162,7 +197,7 @@ func NewSidecar(cfg SidecarConfig) (*Sidecar, error) {
 		return nil, fmt.Errorf("opencode: restrict the sidecar socket: %w", err)
 	}
 
-	s := &Sidecar{cfg: cfg, ln: ln}
+	s := &Sidecar{cfg: cfg, ln: ln, lock: lockFile}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	s.srv = &http.Server{
@@ -190,10 +225,19 @@ func (s *Sidecar) Serve(ctx context.Context) error {
 	return err
 }
 
-// Close releases the socket.
+// Close releases the socket AND the lifetime lock.
+//
+// The order matters: the listener goes first (so nothing new connects), then
+// the socket file, then the lock — releasing the lock earlier would let a
+// second sidecar reclaim the path while this one is still serving it.
 func (s *Sidecar) Close() error {
 	_ = s.ln.Close()
 	_ = os.Remove(s.cfg.SocketPath)
+	if s.lock != nil {
+		_ = syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
+		_ = s.lock.Close()
+		s.lock = nil
+	}
 	return nil
 }
 

@@ -862,6 +862,7 @@ func TestExecuteReviewRecordsOnlyHostDerivedEvidence(t *testing.T) {
 		EvidencePath:     "/evidence/review.json",
 		Findings:         "the findings",
 		Outcome:          "succeeded",
+		Agent:            "mpm-reviewer",
 	}}
 
 	res, err := store.ExecuteReview(context.Background(), fake, ExecuteReviewParams{
@@ -925,4 +926,101 @@ func (f *fakeReviewRuntime) Review(_ context.Context, req oc.ReviewRequest) (*oc
 	r := *f.result
 	r.SessionID = req.SessionID
 	return &r, nil
+}
+
+// TestExecuteReviewRefusesWhileAnEarlierReviewIsLive is finding 3.
+//
+// Two reviewers against one assignment would produce two findings captures for
+// a single verdict, so a live attempt refuses — and so does an AMBIGUOUS one,
+// because whether it produced findings is unknowable.
+func TestExecuteReviewRefusesWhileAnEarlierReviewIsLive(t *testing.T) {
+	for _, state := range []string{SessionLaunched, SessionAmbiguous} {
+		t.Run(state, func(t *testing.T) {
+			store, _, _, projectID := newTestStore(t)
+			implID, _ := claimedAssignment(t, store, projectID, "alpha")
+			rev := reviewFixture(t, store, implID, "charlie")
+
+			prior, err := store.BeginAttempt(BeginAttemptParams{
+				TaskID: rev.id, Epoch: rev.epoch, Runtime: RuntimeOpenCode,
+				IntendedAgent: "mpm-reviewer", NativeSessionID: "ses_mpm_review_prior",
+				CorrelationRef: "corr-r", WorkspaceID: "review", WorkspacePath: rev.id,
+			})
+			if err != nil {
+				t.Fatalf("prior intent: %v", err)
+			}
+			if _, err := store.MarkAttemptLaunched(SessionStateParams{
+				AttemptID: prior.ID, Epoch: rev.epoch,
+			}); err != nil {
+				t.Fatalf("mark launched: %v", err)
+			}
+			if state == SessionAmbiguous {
+				if _, err := store.MarkAttemptAmbiguous(SessionStateParams{
+					AttemptID: prior.ID, Epoch: rev.epoch, Error: "lost",
+				}); err != nil {
+					t.Fatalf("mark ambiguous: %v", err)
+				}
+			}
+
+			fake := &fakeReviewRuntime{result: &oc.ReviewResult{
+				ReviewedRevision: "1111111111111111111111111111111111111111",
+				FindingsSHA256:   strings.Repeat("e", 64),
+				Outcome:          "succeeded",
+				Agent:            "mpm-reviewer",
+				Findings:         "f",
+			}}
+			_, err = store.ExecuteReview(context.Background(), fake, ExecuteReviewParams{
+				ID: rev.id, Epoch: rev.epoch, Brief: "review it",
+			})
+			if err == nil {
+				t.Fatalf("a second reviewer started while the first was %s", state)
+			}
+			if !strings.Contains(err.Error(), "previous review attempt") {
+				t.Errorf("refused, but not as a duplicate review: %v", err)
+			}
+		})
+	}
+}
+
+// TestExecuteReviewRequiresARealSuccessfulReviewer pins the identity and the
+// terminal-outcome checks.
+func TestExecuteReviewRequiresARealSuccessfulReviewer(t *testing.T) {
+	cases := []struct {
+		name string
+		res  *oc.ReviewResult
+	}{
+		{"wrong agent", &oc.ReviewResult{
+			ReviewedRevision: strings.Repeat("1", 40), FindingsSHA256: strings.Repeat("e", 64),
+			Outcome: "succeeded", Agent: "mpm-worker", Findings: "f",
+		}},
+		{"non-terminal outcome", &oc.ReviewResult{
+			ReviewedRevision: strings.Repeat("1", 40), FindingsSHA256: strings.Repeat("e", 64),
+			Outcome: "failed", Agent: "mpm-reviewer", Findings: "f",
+		}},
+		{"no findings", &oc.ReviewResult{
+			ReviewedRevision: strings.Repeat("1", 40), FindingsSHA256: strings.Repeat("e", 64),
+			Outcome: "succeeded", Agent: "mpm-reviewer", Findings: "   ",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, _, _, projectID := newTestStore(t)
+			implID, _ := claimedAssignment(t, store, projectID, "alpha")
+			rev := reviewFixture(t, store, implID, "charlie")
+
+			_, err := store.ExecuteReview(context.Background(),
+				&fakeReviewRuntime{result: tc.res}, ExecuteReviewParams{
+					ID: rev.id, Epoch: rev.epoch, Brief: "review it",
+				})
+			if err == nil {
+				t.Fatalf("%s was accepted as a completed review", tc.name)
+			}
+			got, _ := store.Get(rev.id)
+			if got.ReviewedSHA != "" || got.FindingsSHA256 != "" {
+				t.Errorf("%s recorded evidence", tc.name)
+			}
+			if got.State == StateReviewPassed {
+				t.Errorf("%s recorded a verdict", tc.name)
+			}
+		})
+	}
 }

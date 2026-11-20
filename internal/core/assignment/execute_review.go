@@ -89,6 +89,18 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		return nil, err
 	}
 
+	// PRIOR REVIEW ATTEMPTS ARE RECONCILED BEFORE A NEW ONE STARTS.
+	//
+	// A review is the most expensive thing this package runs, and running
+	// two of them against one assignment would produce two findings
+	// captures for a single verdict. So: a LIVE attempt refuses; an
+	// AMBIGUOUS one refuses (whether it did work is unknowable, and
+	// re-running could double the evidence); a terminal one is history and
+	// a new attempt follows it. Draining ambiguity is PR 4's job.
+	if err := s.reconcileReviewAttempts(rev.ID, p.Epoch); err != nil {
+		return nil, err
+	}
+
 	// The session id is minted HERE and the intent persisted BEFORE the
 	// launch, so an interrupted review is recoverable by id.
 	sessionID, err := mintSessionID()
@@ -126,6 +138,31 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 			AttemptID: attempt.ID, Epoch: p.Epoch, Error: boundedReason(err),
 		})
 		return nil, err
+	}
+
+	// WHAT THE REVIEWER ACTUALLY WAS, before its output is believed.
+	if res.Agent != "mpm-reviewer" {
+		_, _ = s.MarkAttemptFailed(SessionStateParams{
+			AttemptID: attempt.ID, Epoch: p.Epoch,
+			Error: "the review ran as agent " + res.Agent,
+		})
+		return nil, fmt.Errorf("%w: the review ran as agent %q, not mpm-reviewer",
+			ErrConstraint, res.Agent)
+	}
+	if res.Outcome != "succeeded" {
+		_, _ = s.MarkAttemptFailed(SessionStateParams{
+			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: res.Outcome,
+			Error: "the reviewer did not report a successful terminal outcome",
+		})
+		return nil, fmt.Errorf("%w: the reviewer's terminal outcome is %q, not %q",
+			ErrConstraint, res.Outcome, "succeeded")
+	}
+	if strings.TrimSpace(res.Findings) == "" {
+		_, _ = s.MarkAttemptFailed(SessionStateParams{
+			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: res.Outcome,
+			Error: "the reviewer produced no findings",
+		})
+		return nil, fmt.Errorf("%w: the reviewer produced no findings", ErrConstraint)
 	}
 
 	// THE EVIDENCE IS DERIVED, NOT SUPPLIED.
@@ -204,4 +241,34 @@ func (s *Store) validateReviewable(rev *Assignment, p ExecuteReviewParams) error
 		return fmt.Errorf("%w: %s is not reviewable", ErrConstraint, subject.ID)
 	}
 	return nil
+}
+
+// reconcileReviewAttempts refuses a review while an earlier one is live or
+// ambiguous.
+func (s *Store) reconcileReviewAttempts(taskID string, epoch int64) error {
+	attempts, err := s.AttemptsFor(taskID)
+	if err != nil {
+		return err
+	}
+	if len(attempts) == 0 {
+		return nil
+	}
+	last := attempts[len(attempts)-1]
+	switch last.LaunchState {
+	case SessionCompleted, SessionFailed:
+		// History. A new attempt follows it, visibly.
+		return nil
+	case SessionCancelled:
+		return nil
+	case SessionIntent, SessionLaunched, SessionRunning:
+		return fmt.Errorf("%w: a previous review attempt (%s) is still %s; "+
+			"refusing to start a second reviewer", ErrConstraint, last.ID, last.LaunchState)
+	case SessionAmbiguous:
+		return fmt.Errorf("%w: a previous review attempt (%s) is AMBIGUOUS — whether it "+
+			"produced findings cannot be determined, so a second reviewer could "+
+			"double the evidence", ErrConstraint, last.ID)
+	default:
+		return fmt.Errorf("%w: a previous review attempt (%s) is in an unknown state %q",
+			ErrConstraint, last.ID, last.LaunchState)
+	}
 }

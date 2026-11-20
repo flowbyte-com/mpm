@@ -30,8 +30,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -581,5 +583,118 @@ func TestReviewerDefinitionIsPinnedToTheTemplate(t *testing.T) {
 		if !strings.Contains(b, want) {
 			t.Errorf("the reviewer definition is missing %q", want)
 		}
+	}
+}
+
+// TestSidecarReclaimsAStaleSocketConcurrently is finding 4's second half.
+//
+// Sequential reclamation is not the interesting case: two constructors racing
+// on one stale path both see "connection refused", both unlink, and both bind
+// — one silently taking the socket the other just created. The lifetime lock
+// is what makes that impossible, and this test starts the race.
+func TestSidecarReclaimsAStaleSocketConcurrently(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sidecar.sock")
+
+	// Leave a STALE socket: a crashed sidecar does not unlink.
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ln.SetUnlinkOnClose(false)
+	_ = ln.Close()
+
+	const racers = 8
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make([]*Sidecar, racers)
+	errs := make([]error, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // fire together
+			results[i], errs[i] = NewSidecar(SidecarConfig{
+				SocketPath:      path,
+				UpstreamBaseURL: "http://127.0.0.1:1",
+				APIKey:          "k",
+				ModelAllowList:  map[string]string{"m": "m"},
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	winners := 0
+	for i := range results {
+		if errs[i] == nil {
+			winners++
+			t.Cleanup(func() { _ = results[i].Close() })
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d constructors won the stale socket, want exactly 1", winners)
+	}
+}
+
+// TestSnapshotRevisionRefusesADirtyWorktree is finding 2's dirty half.
+//
+// Uncommitted changes are not a revision: a review of them cannot be described
+// by an object id, so the evidence would name a commit that does not contain
+// what was read.
+func TestSnapshotRevisionRefusesADirtyWorktree(t *testing.T) {
+	repo := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-q", ".")
+	run("config", "user.email", "a@b.c")
+	run("config", "user.name", "a")
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".")
+	run("commit", "-qm", "initial")
+
+	rt, err := NewRuntime(Config{
+		Root: t.TempDir(), OpenCodeBin: "/bin/true", RepoPath: repo,
+		Model: "m", AllowedAgents: []string{"mpm-reviewer"},
+	})
+	if err != nil {
+		t.Fatalf("runtime: %v", err)
+	}
+
+	// CLEAN: pinned, and the snapshot IS the revision.
+	rev, snapshot, err := rt.snapshotRevision()
+	if err != nil {
+		t.Fatalf("clean snapshot: %v", err)
+	}
+	if at, _ := observeRevision(snapshot); at != rev {
+		t.Errorf("the snapshot is at %q, not the pinned %q", at, rev)
+	}
+
+	// THE TREE MOVES AFTER THE PIN. The snapshot must not.
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("commit", "-qam", "second")
+	if at, _ := observeRevision(snapshot); at != rev {
+		t.Error("the snapshot followed the moving HEAD instead of staying pinned")
+	}
+	if now, _ := observeRevision(repo); now == rev {
+		t.Error("the repository did not actually move; the test proves nothing")
+	}
+
+	// DIRTY: refused.
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("uncommitted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := rt.snapshotRevision(); err == nil {
+		t.Error("a dirty worktree was accepted for review")
+	} else if !strings.Contains(err.Error(), "uncommitted") {
+		t.Errorf("refused, but not as a dirty worktree: %v", err)
 	}
 }

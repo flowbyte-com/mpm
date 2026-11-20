@@ -132,6 +132,23 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 	if err := r.writeReviewConfig(); err != nil {
 		return nil, err
 	}
+
+	// THE REVISION IS PINNED BEFORE ANYTHING RUNS.
+	//
+	// Observing HEAD after the run records whatever the tree happened to
+	// be at capture time — so a tree that advanced mid-review would be
+	// credited with a revision the reviewer never saw. The review runs
+	// against an IMMUTABLE SNAPSHOT at an exact SHA instead, and that same
+	// SHA is what the evidence names.
+	pinned, snapshot, err := r.snapshotRevision()
+	if err != nil {
+		return nil, err
+	}
+	if req.ExpectedRevision != "" && pinned != req.ExpectedRevision {
+		return nil, fmt.Errorf(
+			"%w: the repository is at %s but the review was requested for %s",
+			ErrReviewerUnavailable, pinned, req.ExpectedRevision)
+	}
 	if err := r.verifyReviewer(ctx); err != nil {
 		return nil, err
 	}
@@ -147,7 +164,7 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 	runCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, cfg.OpenCodeBin, argv...)
-	cmd.Dir = cfg.RepoPath
+	cmd.Dir = snapshot
 	cmd.Env = IsolatedEnv(cfg)
 	var buf boundedBuffer
 	buf.limit = maxCapturedOutput
@@ -182,18 +199,8 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 		Permissions:    state.Permissions,
 	}
 
-	// THE REVISION IS READ BY THE HOST.
-	rev, err := observeRevision(cfg.RepoPath)
-	if err != nil {
-		return nil, fmt.Errorf("%w: the reviewed revision could not be observed: %v",
-			ErrReviewerUnavailable, err)
-	}
-	if req.ExpectedRevision != "" && rev != req.ExpectedRevision {
-		return nil, fmt.Errorf(
-			"%w: the repository is at %s but the review was requested for %s",
-			ErrReviewerUnavailable, rev, req.ExpectedRevision)
-	}
-	res.ReviewedRevision = rev
+	// THE REVISION IS THE PINNED ONE, not a fresh observation.
+	res.ReviewedRevision = pinned
 
 	// THE CAPTURE IS WRITTEN BY THE HOST, beside the disposable config.
 	path := filepath.Join(cfg.Root, "findings", "review-"+req.SessionID+".json")
@@ -386,4 +393,53 @@ func observeRevision(repo string) (string, error) {
 		return "", fmt.Errorf("not an object id: %q", rev)
 	}
 	return rev, nil
+}
+
+// snapshotRevision pins the revision a review will examine.
+//
+// It REFUSES a dirty worktree: uncommitted changes are not a revision, so a
+// review of them cannot be described by an object id, and the evidence would
+// name a commit that does not contain what was read.
+//
+// It then materialises an IMMUTABLE snapshot at that exact SHA and returns the
+// path the runtime should run in. The snapshot is a separate clone, so the
+// tree under review can keep moving without changing what is being examined.
+func (r *Runtime) snapshotRevision() (string, string, error) {
+	repo := r.cfg.RepoPath
+
+	status, err := exec.Command("git", "-C", repo, "status", "--porcelain", "--untracked-files=normal").Output()
+	if err != nil {
+		return "", "", fmt.Errorf("%w: the repository could not be inspected: %v",
+			ErrReviewerUnavailable, err)
+	}
+	if strings.TrimSpace(string(status)) != "" {
+		return "", "", fmt.Errorf(
+			"%w: the worktree has uncommitted changes, so there is no revision to review",
+			ErrReviewerUnavailable)
+	}
+
+	rev, err := observeRevision(repo)
+	if err != nil {
+		return "", "", fmt.Errorf("%w: the revision could not be observed: %v",
+			ErrReviewerUnavailable, err)
+	}
+
+	snapshot := filepath.Join(r.cfg.Root, "snapshot")
+	_ = os.RemoveAll(snapshot)
+	if out, err := exec.Command("git", "clone", "--quiet", "--no-checkout",
+		"--shared", repo, snapshot).CombinedOutput(); err != nil {
+		return "", "", fmt.Errorf("%w: the snapshot could not be created: %v: %s",
+			ErrReviewerUnavailable, err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("git", "-C", snapshot, "checkout", "--quiet", rev).CombinedOutput(); err != nil {
+		return "", "", fmt.Errorf("%w: the snapshot could not be checked out at %s: %v: %s",
+			ErrReviewerUnavailable, rev, err, strings.TrimSpace(string(out)))
+	}
+	// THE SNAPSHOT MUST BE THE PINNED REVISION, verified rather than assumed.
+	at, err := observeRevision(snapshot)
+	if err != nil || at != rev {
+		return "", "", fmt.Errorf("%w: the snapshot is at %q, not the pinned %q",
+			ErrReviewerUnavailable, at, rev)
+	}
+	return rev, snapshot, nil
 }
