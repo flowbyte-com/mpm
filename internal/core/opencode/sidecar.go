@@ -259,8 +259,16 @@ func (s *Sidecar) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// The completion length is bounded. Both spellings are checked
 	// because providers differ and a limit enforced on one is not a
 	// limit.
+	//
+	// AND A CEILING IS INJECTED WHEN THE CALLER SUPPLIES NONE. Checking
+	// only the supplied field would leave an omitted field unbounded —
+	// which is the ordinary case, since a client that does not care about
+	// length simply omits it. An omitted limit is therefore replaced with
+	// the ceiling rather than trusted.
+	sawLengthField := false
 	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
 		if v, present := req[key]; present {
+			sawLengthField = true
 			n, isNum := v.(float64)
 			if !isNum || n < 0 {
 				s.refuse(w, http.StatusBadRequest, "the completion length is not a number")
@@ -271,6 +279,9 @@ func (s *Sidecar) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 		}
+	}
+	if !sawLengthField {
+		req["max_tokens"] = s.cfg.MaxTokens
 	}
 
 	// No caller-supplied destination. These fields are removed rather

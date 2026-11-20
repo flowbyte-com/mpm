@@ -115,7 +115,8 @@ func (s *Store) CaptureReviewEvidence(p ReviewEvidenceParams) (*Assignment, erro
 		res, err := node.ExecTracked(`
 			UPDATE agent_tasks
 			   SET reviewed_sha = ?, findings_sha256 = ?, evidence_ref = ?, updated_at = ?
-			 WHERE id = ? AND claim_epoch = ? AND role = 'reviewer' AND state = ?`,
+			 WHERE id = ? AND claim_epoch = ? AND role = 'reviewer' AND state = ?
+			   AND reviewed_sha IS NULL AND findings_sha256 IS NULL`,
 			5, p.ReviewedSHA, p.FindingsSHA256, p.EvidenceRef, now,
 			p.ReviewerID, p.Epoch, StateInProgress)
 		if err != nil {
@@ -126,6 +127,16 @@ func (s *Store) CaptureReviewEvidence(p ReviewEvidenceParams) (*Assignment, erro
 			return fmt.Errorf("assignment: read the affected rows: %w", err)
 		}
 		if affected != 1 {
+			// THREE DIFFERENT CAUSES, and the caller needs to know which.
+			// A review that already carries evidence is not stale — it is
+			// already recorded, and a second capture would REPLACE the
+			// record of what was examined with a claim about something
+			// else.
+			if rev.ReviewedSHA != "" || rev.FindingsSHA256 != "" {
+				return fmt.Errorf("%w: %s already carries captured evidence (%s); "+
+					"the record of what was examined is write-once",
+					ErrConstraint, rev.ID, rev.ReviewedSHA)
+			}
 			return fmt.Errorf("%w: %s moved while the evidence was being captured",
 				ErrStaleClaim, p.ReviewerID)
 		}

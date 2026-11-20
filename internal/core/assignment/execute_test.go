@@ -108,7 +108,7 @@ func claimedAssignment(t *testing.T, store *Store, projectID, recipient string) 
 		Recipient:           recipient,
 		IdempotencyKey:      "idem:" + recipient,
 		PermittedOperations: []string{"deliver", "accept", "claim", "start", "complete"},
-		EligibleRecipients:  []string{recipient},
+		EligibleRecipients:  []string{recipient, "charlie"},
 		MaxDepth:            1,
 		MaxTasks:            4,
 		MaxConcurrency:      2,
@@ -525,4 +525,203 @@ func TestExecuteWorksForAChildAssignment(t *testing.T) {
 		t.Errorf("child launch state %q, want %q (reason %q)",
 			res.LaunchState, SessionCompleted, res.Attempt.LastError)
 	}
+}
+
+// TestExecuteDoesNotRepromptATerminalSession is the reviewer's F1.
+//
+// A session that already reported an outcome has FINISHED. The adapter must
+// record what the runtime said, not launch the same objective into the same
+// conversation a second time. The attempt row would still show one attempt,
+// so the duplicate would be invisible in the record — which is exactly why
+// this needs its own test.
+func TestExecuteDoesNotRepromptATerminalSession(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	ws := t.TempDir()
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+
+	intent, err := store.BeginAttempt(BeginAttemptParams{
+		TaskID: id, Epoch: epoch, Runtime: RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses_mpm_terminal_0001",
+		CorrelationRef: "corr-terminal", WorkspaceID: "ws", WorkspacePath: ws,
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+
+	// The session already succeeded, but the adapter never recorded it.
+	rt := &fakeRuntime{
+		allowed:  map[string]bool{"mpm-worker": true},
+		sessions: map[string]*oc.SessionState{intent.NativeSessionID: okState(ws, "permitted-model", "mpm-worker")},
+	}
+
+	res, err := store.Execute(context.Background(), rt, executeParams(id, epoch, ws))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if rt.launches != 0 {
+		t.Fatalf("the adapter re-prompted a TERMINAL session (%d launches)", rt.launches)
+	}
+	if res.LaunchState != SessionCompleted {
+		t.Errorf("launch state %q, want %q", res.LaunchState, SessionCompleted)
+	}
+	if res.Assignment.State != StateCompleted {
+		t.Errorf("the assignment is %q; the observed success was not recorded", res.Assignment.State)
+	}
+}
+
+// TestExecuteStartsANewAttemptAfterTheEpochAdvances is the reviewer's F2.
+//
+// An attempt stamped with the OLD epoch can never record its result: the
+// state write is fenced on both the attempt's epoch and the assignment's
+// current one. Resuming it would launch a session whose outcome could not be
+// recorded, and every retry would launch again. A new epoch is a new attempt.
+func TestExecuteStartsANewAttemptAfterTheEpochAdvances(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	ws := t.TempDir()
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+
+	// An attempt under the OLD epoch, still at `intent`.
+	old, err := store.BeginAttempt(BeginAttemptParams{
+		TaskID: id, Epoch: epoch, Runtime: RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses_mpm_old_epoch_01",
+		CorrelationRef: "corr-old", WorkspaceID: "ws", WorkspacePath: ws,
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+
+	// The claim is renewed: the epoch advances.
+	renewed, err := store.Renew(RenewParams{
+		ID: id, ExpectedEpoch: epoch, Owner: "alpha", LeaseSeconds: 7200,
+		Actor: Actor{Address: "alpha", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	if renewed.ClaimEpoch == epoch {
+		t.Fatal("the renewal did not advance the epoch; the fixture is wrong")
+	}
+
+	rt := &fakeRuntime{
+		allowed:     map[string]bool{"mpm-worker": true},
+		launchState: okState(ws, "permitted-model", "mpm-worker"),
+	}
+	res, err := store.Execute(context.Background(), rt, executeParams(id, renewed.ClaimEpoch, ws))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Attempt.NativeSessionID == old.NativeSessionID {
+		t.Error("the adapter RESUMED an attempt from an older claim instead of starting a new one")
+	}
+	if res.Attempt.Attempt != 2 {
+		t.Errorf("attempt number %d, want 2 (a visible retry)", res.Attempt.Attempt)
+	}
+	if res.LaunchState != SessionCompleted {
+		t.Errorf("launch state %q, want %q (reason %q)",
+			res.LaunchState, SessionCompleted, res.Attempt.LastError)
+	}
+}
+
+// TestCaptureReviewEvidenceRefusesNonReviewersAndIsWriteOnce is the
+// reviewer's F7: the path had no tests at all.
+//
+// The separation from the VERDICT is structural (the verb is absent from the
+// tool registry), but the evidence itself must also be fenced and
+// write-once, or "the record of what was examined" could be replaced after
+// the fact.
+func TestCaptureReviewEvidenceRefusesNonReviewersAndIsWriteOnce(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	implID, implEpoch := claimedAssignment(t, store, projectID, "alpha")
+
+	goodSHA := strings.Repeat("a", 40)
+	goodDigest := strings.Repeat("b", 64)
+
+	// 1. An IMPLEMENTER has no review to evidence.
+	_, err := store.CaptureReviewEvidence(ReviewEvidenceParams{
+		ReviewerID: implID, Epoch: implEpoch,
+		ReviewedSHA: goodSHA, FindingsSHA256: goodDigest, EvidenceRef: "evidence/x",
+	})
+	if err == nil {
+		t.Error("an implementer's assignment accepted review evidence")
+	}
+
+	// 2. A REVIEWER, in progress, at the right epoch: accepted once.
+	rev := reviewFixture(t, store, implID, "charlie")
+	if _, err := store.CaptureReviewEvidence(ReviewEvidenceParams{
+		ReviewerID: rev.id, Epoch: rev.epoch,
+		ReviewedSHA: goodSHA, FindingsSHA256: goodDigest, EvidenceRef: "evidence/x",
+	}); err != nil {
+		t.Fatalf("a well-formed capture was refused: %v", err)
+	}
+
+	// 3. A SECOND capture is refused: the record is write-once.
+	if _, err := store.CaptureReviewEvidence(ReviewEvidenceParams{
+		ReviewerID: rev.id, Epoch: rev.epoch,
+		ReviewedSHA: strings.Repeat("c", 40), FindingsSHA256: strings.Repeat("d", 64),
+		EvidenceRef: "evidence/y",
+	}); err == nil {
+		t.Error("the captured evidence was rewritten")
+	}
+
+	// 4. A malformed digest is refused, so a placeholder cannot be stored.
+	if _, err := store.CaptureReviewEvidence(ReviewEvidenceParams{
+		ReviewerID: rev.id, Epoch: rev.epoch,
+		ReviewedSHA: "not-a-sha", FindingsSHA256: goodDigest, EvidenceRef: "e",
+	}); err == nil {
+		t.Error("a malformed reviewed revision was accepted")
+	}
+
+	// 5. And the row still carries the FIRST capture.
+	got, err := store.Get(rev.id)
+	if err != nil {
+		t.Fatalf("read the reviewer: %v", err)
+	}
+	if got.ReviewedSHA != goodSHA || got.FindingsSHA256 != goodDigest {
+		t.Errorf("the evidence is %q/%q, want %q/%q",
+			got.ReviewedSHA, got.FindingsSHA256, goodSHA, goodDigest)
+	}
+}
+
+type reviewFixtureResult struct {
+	id    string
+	epoch int64
+}
+
+// reviewFixture builds a delegated REVIEWER assignment for subjectID, in
+// progress and claimed.
+func reviewFixture(t *testing.T, store *Store, subjectID, recipient string) reviewFixtureResult {
+	t.Helper()
+	rev, _, err := store.Delegate(DelegateParams{
+		ParentID:       subjectID,
+		Title:          "independent review",
+		Objective:      "review the work",
+		Recipient:      recipient,
+		Role:           RoleReviewer,
+		IdempotencyKey: "idem:reviewer",
+		Actor:          Actor{Address: "alpha", Kind: "agent"},
+		Payload:        map[string]interface{}{PayloadKeyReviewTarget: subjectID},
+	})
+	if err != nil {
+		t.Fatalf("delegate the reviewer: %v", err)
+	}
+	actor := Actor{Address: recipient, Kind: "agent"}
+	for _, step := range []func(FencedParams) (*Assignment, error){
+		store.Deliver, store.Acknowledge, store.Accept,
+	} {
+		if _, err := step(FencedParams{ID: rev.ID, Actor: actor}); err != nil {
+			t.Fatalf("advance the reviewer: %v", err)
+		}
+	}
+	claimed, err := store.Claim(ClaimParams{
+		ID: rev.ID, Owner: recipient, LeaseSeconds: 3600, Actor: actor,
+	})
+	if err != nil {
+		t.Fatalf("claim the reviewer: %v", err)
+	}
+	if _, err := store.Start(FencedParams{
+		ID: rev.ID, Epoch: claimed.ClaimEpoch, Actor: actor,
+	}); err != nil {
+		t.Fatalf("start the reviewer: %v", err)
+	}
+	return reviewFixtureResult{id: rev.ID, epoch: claimed.ClaimEpoch}
 }

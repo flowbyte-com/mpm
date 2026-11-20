@@ -37,7 +37,7 @@ import (
 // deliberately re-pinning, which is the same discipline PR 1's storage
 // carries.
 func TestAgentTaskSessionDDLIsPinned(t *testing.T) {
-	const want = "1f857378179b83948be83ceb552758a3f491ac0403aebf044f315094b59b5a03"
+	const want = "688435c3120be124d227719af0686405a41442c53966240e4eaa995f44a1915e"
 	sum := sha256.Sum256([]byte(agentTaskSessionDDL))
 	got := hex.EncodeToString(sum[:])
 	if want != "PLACEHOLDER" && got != want {
@@ -299,5 +299,59 @@ func TestSessionMigrationIsIdempotentAndLocalOnly(t *testing.T) {
 	}
 	if !found {
 		t.Error("agent_task_sessions is missing from CanonicalMPMSchema, so a legitimate restore dump would be refused")
+	}
+}
+
+// TestSessionRecordSurvivesReplace is the reviewer's F4.
+//
+// `INSERT OR REPLACE` resolves its uniqueness conflict by DELETING the
+// conflicting row, and SQLite does not fire DELETE triggers for that implicit
+// delete while `recursive_triggers` is OFF — which is the default, and which
+// this project never changes. So ONE statement could delete an attempt, defeat
+// write-once and defeat the forward-only state graph at the same time.
+//
+// The fix is an INSERT trigger, because an INSERT trigger DOES fire for a
+// REPLACE. This test fails without it.
+func TestSessionRecordSurvivesReplace(t *testing.T) {
+	dm, taskID, epoch := sessionTestFixture(t)
+	if err := insertSessionAttempt(dm, "ats-replace", taskID, 1, epoch, "ses_original", "intent"); err != nil {
+		t.Fatalf("seed the attempt: %v", err)
+	}
+
+	_, err := dm.SQLDB().Exec(`
+		INSERT OR REPLACE INTO agent_task_sessions (
+			id, task_id, attempt, claim_epoch, runtime, intended_agent,
+			native_session_id, correlation_ref, workspace_id, workspace_path,
+			launch_state, created_at, updated_at
+		) VALUES ('ats-replace', ?, 1, ?, 'opencode', 'mpm-worker',
+			'ses_REPLACED', 'corr-x', 'ws', '/tmp/ws', 'intent', 100, 100)`, taskID, epoch)
+	if err == nil {
+		t.Fatal("INSERT OR REPLACE rewrote the attempt; the identity is not write-once")
+	}
+
+	// And the row is INTACT — the values that were there are still there.
+	var native, state string
+	if err := dm.SQLDB().QueryRow(
+		`SELECT native_session_id, launch_state FROM agent_task_sessions WHERE id = 'ats-replace'`,
+	).Scan(&native, &state); err != nil {
+		t.Fatalf("the attempt row was destroyed: %v", err)
+	}
+	if native != "ses_original" {
+		t.Errorf("the native session id became %q", native)
+	}
+	if state != "intent" {
+		t.Errorf("the launch state became %q", state)
+	}
+}
+
+// TestSessionAttemptIDIsImmutable is the reviewer's F8.
+func TestSessionAttemptIDIsImmutable(t *testing.T) {
+	dm, taskID, epoch := sessionTestFixture(t)
+	if err := insertSessionAttempt(dm, "ats-idimm", taskID, 1, epoch, "ses_idimm", "intent"); err != nil {
+		t.Fatalf("seed the attempt: %v", err)
+	}
+	_, err := dm.SQLDB().Exec(`UPDATE agent_task_sessions SET id = 'ats-renamed' WHERE id = 'ats-idimm'`)
+	if err == nil {
+		t.Fatal("the attempt's primary key was rewritten")
 	}
 }

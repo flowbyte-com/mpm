@@ -190,13 +190,32 @@ END;
 -- ── Rule 2: the identity is WRITE-ONCE ───────────────────────────────────
 -- The epoch and the native session id are what recovery and fencing
 -- reconcile on. Rewriting either makes the recovery record lie.
+CREATE TRIGGER IF NOT EXISTS trg_agent_task_sessions_id_is_not_reused
+BEFORE INSERT ON agent_task_sessions
+FOR EACH ROW
+WHEN EXISTS (SELECT 1 FROM agent_task_sessions WHERE id = NEW.id)
+BEGIN
+    -- AN INSERT TRIGGER FIRES FOR INSERT OR REPLACE TOO.
+    --
+    -- PR 1's fifth review found this exact hole on agent_tasks: REPLACE
+    -- resolves its conflict by DELETING the conflicting row, and SQLite
+    -- does not fire DELETE triggers for that implicit delete when
+    -- recursive_triggers is OFF (it is OFF by default, and this project
+    -- never sets it). So a REPLACE would delete an attempt — defeating
+    -- the not-deletable rule — and re-insert it — defeating write-once
+    -- and the forward-only state graph — in ONE statement. Refusing the
+    -- insert is what closes all three at once.
+    SELECT RAISE(ABORT, 'agent_task_sessions: the attempt id is not reusable');
+END;
+
 CREATE TRIGGER IF NOT EXISTS trg_agent_task_sessions_identity_is_immutable
-BEFORE UPDATE OF task_id, claim_epoch, native_session_id, runtime, attempt,
+BEFORE UPDATE OF id, task_id, claim_epoch, native_session_id, runtime, attempt,
                  intended_agent, correlation_ref, workspace_id, workspace_path,
                  created_at
 ON agent_task_sessions
 FOR EACH ROW
-WHEN NEW.task_id IS NOT OLD.task_id
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.task_id IS NOT OLD.task_id
   OR NEW.claim_epoch IS NOT OLD.claim_epoch
   OR NEW.native_session_id IS NOT OLD.native_session_id
   OR NEW.runtime IS NOT OLD.runtime

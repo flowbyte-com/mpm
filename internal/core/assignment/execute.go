@@ -194,6 +194,8 @@ func (s *Store) Execute(ctx context.Context, rt Runtime, p ExecuteParams) (*Exec
 			Reconciled:  true,
 			Evidence:    evidenceFromAttempt(att, nil, decision.reason),
 		}, nil
+	case reconcileRecordOnly:
+		return s.recordObserved(task, decision.attempt, decision.state, p), nil
 	case reconcileResume:
 		attempt = decision.attempt
 	case reconcileNew:
@@ -278,7 +280,15 @@ type reconcileKind int
 
 const (
 	reconcileNew reconcileKind = iota
+	// reconcileResume launches with the recorded id. It is used ONLY when
+	// the runtime has not reported a terminal outcome.
 	reconcileResume
+	// reconcileRecordOnly records what the runtime ALREADY reported,
+	// without launching anything. A session that has finished is
+	// finished: re-prompting it would run the objective a second time
+	// inside the same conversation, and the attempt record would still
+	// show one attempt.
+	reconcileRecordOnly
 	reconcileRecordAmbiguous
 	reconcileRefuseConcurrent
 )
@@ -288,6 +298,9 @@ type reconcileDecision struct {
 	attempt   *SessionAttempt
 	attemptID string
 	reason    string
+	// state is what the runtime ALREADY reported, when the decision is to
+	// record rather than launch.
+	state *oc.SessionState
 }
 
 // reconcile decides, from EVIDENCE, what a retry may do.
@@ -320,6 +333,16 @@ func (s *Store) reconcile(task *Assignment, p ExecuteParams, rt Runtime) (reconc
 	}
 	last := attempts[len(attempts)-1]
 
+	// THE ATTEMPT BELONGS TO ITS CLAIM. After a claim or a renew the
+	// assignment's epoch advances, and an attempt stamped with the OLD
+	// epoch can never write its result: the state write is fenced on
+	// both the attempt's epoch and the assignment's current one. Resuming
+	// it would launch a session whose outcome could not be recorded, and
+	// every retry would launch it again. So a new epoch is a new attempt.
+	if last.ClaimEpoch != p.Epoch {
+		return reconcileDecision{kind: reconcileNew}, nil
+	}
+
 	switch last.LaunchState {
 	case SessionIntent:
 		// The intent is durable and the id is known. Whether the runtime
@@ -340,8 +363,19 @@ func (s *Store) reconcile(task *Assignment, p ExecuteParams, rt Runtime) (reconc
 				reason:    "the runtime could not be asked about the session recorded in the launch intent",
 			}, nil
 		}
-		if state == nil {
-			return reconcileDecision{kind: reconcileResume, attempt: last}, nil
+		// THE INSPECTED STATE IS USED, NOT DISCARDED. An intent whose
+		// session already reported an outcome is FINISHED — the runtime
+		// may have completed the work before the adapter could record it.
+		// Re-launching would run the objective again.
+		if state != nil {
+			if state.Outcome != "" {
+				return reconcileDecision{kind: reconcileRecordOnly, attempt: last, state: state}, nil
+			}
+			return reconcileDecision{
+				kind:      reconcileRefuseConcurrent,
+				attemptID: last.ID,
+				reason:    "the recorded session exists and has not reported an outcome",
+			}, nil
 		}
 		return reconcileDecision{kind: reconcileResume, attempt: last}, nil
 
@@ -354,15 +388,6 @@ func (s *Store) reconcile(task *Assignment, p ExecuteParams, rt Runtime) (reconc
 				reason:    "the runtime could not be asked about a launched attempt",
 			}, nil
 		}
-		if state != nil && state.Outcome == "" {
-			// A running session: launching a second one would be the
-			// duplicate this whole record exists to prevent.
-			return reconcileDecision{
-				kind:      reconcileRefuseConcurrent,
-				attemptID: last.ID,
-				reason:    "an attempt is still running",
-			}, nil
-		}
 		if state == nil {
 			// The runtime lost it. That is ambiguous, not a licence to
 			// launch again.
@@ -372,7 +397,26 @@ func (s *Store) reconcile(task *Assignment, p ExecuteParams, rt Runtime) (reconc
 				reason:    "a launched attempt's session is no longer known to the runtime",
 			}, nil
 		}
-		return reconcileDecision{kind: reconcileResume, attempt: last}, nil
+		if state.Outcome != "" {
+			// TERMINAL. Record what it said; do NOT re-prompt.
+			return reconcileDecision{kind: reconcileRecordOnly, attempt: last, state: state}, nil
+		}
+		// A running session: launching a second one would be the
+		// duplicate this whole record exists to prevent.
+		return reconcileDecision{
+			kind:      reconcileRefuseConcurrent,
+			attemptID: last.ID,
+			reason:    "an attempt is still running",
+		}, nil
+
+	case SessionCompleted, SessionFailed, SessionAmbiguous:
+		// A terminal attempt whose own session reported an outcome. Record
+		// it rather than launching again.
+		state, err := inspectQuietly(rt, last.NativeSessionID)
+		if err == nil && state != nil && state.Outcome != "" {
+			return reconcileDecision{kind: reconcileRecordOnly, attempt: last, state: state}, nil
+		}
+		return reconcileDecision{kind: reconcileNew}, nil
 
 	default:
 		// A terminal attempt. A retry is a NEW attempt, with its own
@@ -463,38 +507,68 @@ func (s *Store) launchAndRecord(
 		}, nil
 	}
 
+	return s.recordState(task, attempt, res.State, p, reconciled, res), nil
+}
+
+// recordObserved records what the runtime ALREADY reported, without
+// launching. It is the path for a session that finished before the adapter
+// could observe it — a crash between the launch and the record.
+func (s *Store) recordObserved(
+	task *Assignment, attempt *SessionAttempt, state *oc.SessionState, p ExecuteParams,
+) *ExecuteResult {
+	// The SAME prerequisite the launch path has: a completion is only legal
+	// from `in_progress`. Recording an observed result therefore advances
+	// the assignment first, so the record and the state agree.
+	if task.State == StateAccepted {
+		started, err := s.Start(FencedParams{ID: task.ID, Epoch: p.Epoch, Actor: p.Actor})
+		if err == nil {
+			task = started
+		}
+	}
+	return s.recordState(task, attempt, state, p, true, nil)
+}
+
+// recordState is the ONE place an outcome is believed and recorded.
+func (s *Store) recordState(
+	task *Assignment,
+	attempt *SessionAttempt,
+	state *oc.SessionState,
+	p ExecuteParams,
+	reconciled bool,
+	res *oc.LaunchResult,
+) *ExecuteResult {
 	// THE SESSION'S OWN CLAIMS ARE CHECKED BEFORE ITS OUTCOME IS BELIEVED.
-	if refusal := verifySession(res.State, p); refusal != "" {
+	if refusal := verifySession(state, p); refusal != "" {
 		att, err := s.MarkAttemptFailed(SessionStateParams{
 			AttemptID: attempt.ID, Epoch: p.Epoch,
-			Outcome: res.State.Outcome, Error: refusal,
+			Outcome: state.Outcome, Error: refusal,
 		})
 		if err != nil {
-			return nil, err
+			return &ExecuteResult{Assignment: task, Attempt: attempt, LaunchState: attempt.LaunchState, Evidence: evidenceFromAttempt(attempt, res, refusal)}
 		}
 		return &ExecuteResult{
 			Assignment: task, Attempt: att, LaunchState: att.LaunchState,
-			RuntimeOutcome: res.State.Outcome, Reconciled: reconciled,
+			RuntimeOutcome: state.Outcome, Reconciled: reconciled,
 			Evidence: evidenceFromAttempt(att, res, refusal),
-		}, nil
+		}
 	}
 
 	var att *SessionAttempt
 	var err error
-	switch res.State.Outcome {
+	switch state.Outcome {
 	case "succeeded":
 		att, err = s.MarkAttemptCompleted(SessionStateParams{
 			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: "succeeded",
 		})
 		if err != nil {
-			return nil, err
+			return &ExecuteResult{Assignment: task, Attempt: attempt, LaunchState: attempt.LaunchState}
 		}
 		// THE COMPLETION IS FENCED. It carries the presented epoch, so a
 		// worker whose lease was reclaimed cannot publish this as the
 		// current holder's completion.
 		completed, cerr := s.Complete(FencedParams{
 			ID: task.ID, Epoch: p.Epoch, Actor: p.Actor,
-			Note: "runtime session " + res.SessionID + " reported succeeded",
+			Note: "runtime session " + state.ID + " reported succeeded",
 		})
 		if cerr == nil {
 			task = completed
@@ -505,10 +579,10 @@ func (s *Store) launchAndRecord(
 	case "failed":
 		att, err = s.MarkAttemptFailed(SessionStateParams{
 			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: "failed",
-			Error: boundedReason(launchErr),
+			Error: "the runtime reported failure",
 		})
 		if err != nil {
-			return nil, err
+			return &ExecuteResult{Assignment: task, Attempt: attempt, LaunchState: attempt.LaunchState}
 		}
 	default:
 		// The runtime said nothing. Recording success would be an
@@ -518,7 +592,7 @@ func (s *Store) launchAndRecord(
 			Error: "the runtime reported no outcome",
 		})
 		if err != nil {
-			return nil, err
+			return &ExecuteResult{Assignment: task, Attempt: attempt, LaunchState: attempt.LaunchState}
 		}
 	}
 
@@ -529,7 +603,7 @@ func (s *Store) launchAndRecord(
 		RuntimeOutcome: att.RuntimeOutcome,
 		Reconciled:     reconciled,
 		Evidence:       evidenceFromAttempt(att, res, ""),
-	}, nil
+	}
 }
 
 // verifySession checks what a session claims about itself.
@@ -567,10 +641,16 @@ func verifySession(state *oc.SessionState, p ExecuteParams) string {
 	if state.Agent != p.Agent {
 		return fmt.Sprintf("the session used agent %q, not %q", state.Agent, p.Agent)
 	}
-	if p.Model != "" && state.Model.ID != "" {
+	if p.Model != "" {
 		want := p.Model
 		if i := strings.LastIndex(want, "/"); i >= 0 {
 			want = want[i+1:]
+		}
+		// A session that names NO model has not verified the selection,
+		// so it is refused rather than waved through — the check exists
+		// so the model is verified rather than assumed.
+		if state.Model.ID == "" {
+			return "the session did not report which model it ran, so the selection is unverified"
 		}
 		if state.Model.ID != want {
 			return fmt.Sprintf("the session ran model %q, not %q", state.Model.ID, want)

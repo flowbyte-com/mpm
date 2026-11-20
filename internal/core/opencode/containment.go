@@ -60,6 +60,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -228,9 +229,16 @@ func (spec Spec) Argv() ([]string, error) {
 			inner = append(inner, "--ro-bind", p, p)
 		}
 	}
-	for link, target := range mergedSymlinks {
+	// SORTED, because a map's iteration order varies and the argv must be
+	// deterministic — the same reason sortedKeys exists.
+	links := make([]string, 0, len(mergedSymlinks))
+	for link := range mergedSymlinks {
+		links = append(links, link)
+	}
+	sort.Strings(links)
+	for _, link := range links {
 		if fi, err := os.Lstat(link); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			inner = append(inner, "--symlink", target, link)
+			inner = append(inner, "--symlink", mergedSymlinks[link], link)
 		}
 	}
 	inner = append(inner,
@@ -303,7 +311,10 @@ func (spec Spec) Argv() ([]string, error) {
 			"i=$((i+1)); sleep 0.05; done\n"
 	}
 	innerScript += "exec " + shellQuote(spec.Command) + "\n"
-	inner = append(inner, "/bin/bash", "-c", innerScript)
+	// `/usr/bin/bash`, not `/bin/bash`: /usr is ALWAYS bound, whereas /bin
+	// is recreated only on merged-/usr hosts. The readiness probe below
+	// needs bash's /dev/tcp, so sh will not do.
+	inner = append(inner, mergedPath("/usr/bin/bash", "/bin/bash"), "-c", innerScript)
 
 	// The outer launcher. It brings loopback up in a network namespace
 	// owned by the new user namespace, starts the relay in the
@@ -347,6 +358,18 @@ func shellQuote(argv []string) string {
 		parts = append(parts, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
 	}
 	return strings.Join(parts, " ")
+}
+
+// mergedPath returns the first of the candidates that exists on the HOST.
+// It is used for binaries inside the namespace, where only /usr is
+// guaranteed to be bound.
+func mergedPath(candidates ...string) string {
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return candidates[0]
 }
 
 func sortedKeys(m map[string]string) []string {

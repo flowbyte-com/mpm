@@ -57,7 +57,7 @@ import (
 func IsolatedEnv(cfg Config) []string {
 	return []string{
 		"HOME=" + filepath.Join(cfg.Root, "home"),
-		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"PATH=" + sandboxPath,
 		"XDG_CONFIG_HOME=" + filepath.Join(cfg.Root, "ocfg"),
 		"XDG_DATA_HOME=" + filepath.Join(cfg.Root, "odata"),
 		"XDG_CACHE_HOME=" + filepath.Join(cfg.Root, "ocache"),
@@ -284,7 +284,7 @@ func (r *Runtime) Launch(ctx context.Context, req LaunchRequest) (*LaunchResult,
 		Env: map[string]string{
 			"HOME":            PrefixHome,
 			"TMPDIR":          PrefixTmp,
-			"PATH":            "/usr/local/bin:/usr/bin:/bin",
+			"PATH":            sandboxPath,
 			"XDG_CONFIG_HOME": PrefixOCfg,
 			"XDG_DATA_HOME":   PrefixOData,
 			"XDG_CACHE_HOME":  PrefixOCache,
@@ -321,10 +321,18 @@ func (r *Runtime) Launch(ctx context.Context, req LaunchRequest) (*LaunchResult,
 	// otherwise leave the adapter's whole environment readable at
 	// /proc/1/environ inside the namespace.
 	cmd.Env = []string{
-		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"PATH=" + sandboxPath,
 		"HOME=" + filepath.Join(r.cfg.Root, "home"),
 	}
-	out, runErr := cmd.CombinedOutput()
+	// A BOUNDED capture. The output is used only for a size and a digest,
+	// so an unbounded buffer would let a looping runtime drive the
+	// adapter's memory for no benefit.
+	var buf boundedBuffer
+	buf.limit = maxCapturedOutput
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	runErr := cmd.Run()
+	out := buf.Bytes()
 
 	res := &LaunchResult{
 		SessionID: req.SessionID,
@@ -449,3 +457,37 @@ func (r *Runtime) modelID() string {
 	}
 	return r.cfg.Model
 }
+
+// sandboxPath is the PATH the containment and the isolated read commands
+// receive.
+//
+// IT INCLUDES /usr/sbin AND /sbin. The first version did not, and `ip` lives
+// in /usr/sbin on Debian, Ubuntu and RHEL-family hosts — so on a
+// non-merged-/usr host the launcher's `ip link set lo up` would not be found
+// and the containment would exit before bubblewrap ever ran. (On a
+// merged-/usr host /usr/bin/ip exists, which is why the omission was
+// invisible here.)
+const sandboxPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// maxCapturedOutput bounds the runtime output the adapter keeps.
+const maxCapturedOutput = 1 << 20
+
+// boundedBuffer keeps at most limit bytes and silently discards the rest.
+// It is used where the output is only digested, never interpreted.
+type boundedBuffer struct {
+	buf   []byte
+	limit int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	room := b.limit - len(b.buf)
+	if room > 0 {
+		if len(p) < room {
+			room = len(p)
+		}
+		b.buf = append(b.buf, p[:room]...)
+	}
+	return len(p), nil
+}
+
+func (b *boundedBuffer) Bytes() []byte { return b.buf }
