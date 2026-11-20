@@ -1024,3 +1024,53 @@ func TestExecuteReviewRequiresARealSuccessfulReviewer(t *testing.T) {
 		})
 	}
 }
+
+// TestExecuteReviewAllowsARetryAfterATerminalFailure is the reviewer's
+// finding 4: the allow-branches of reconcileReviewAttempts were unexercised.
+//
+// A review that FAILED recorded no evidence, so a second review is legitimate
+// and must be a NEW attempt — visibly attempt 2. (A review that SUCCEEDED has
+// already captured its evidence, and the capture is write-once, so it cannot
+// be re-run at all.)
+func TestExecuteReviewAllowsARetryAfterATerminalFailure(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	implID, _ := claimedAssignment(t, store, projectID, "alpha")
+	rev := reviewFixture(t, store, implID, "charlie")
+
+	// 1. A review that could not run.
+	_, err := store.ExecuteReview(context.Background(),
+		&fakeReviewRuntime{err: oc.ErrReviewerUnavailable}, ExecuteReviewParams{
+			ID: rev.id, Epoch: rev.epoch, Brief: "b",
+		})
+	if err == nil {
+		t.Fatal("the first review was accepted")
+	}
+	attempts, err := store.AttemptsFor(rev.id)
+	if err != nil || len(attempts) != 1 || attempts[0].LaunchState != SessionFailed {
+		t.Fatalf("the failed review did not leave a terminal attempt: %v %+v", err, attempts)
+	}
+
+	// 2. A retry succeeds, as a NEW attempt.
+	res, err := store.ExecuteReview(context.Background(),
+		&fakeReviewRuntime{result: &oc.ReviewResult{
+			ReviewedRevision: strings.Repeat("1", 40),
+			FindingsSHA256:   strings.Repeat("e", 64),
+			Outcome:          "succeeded",
+			Agent:            "mpm-reviewer",
+			Findings:         "findings",
+			EvidencePath:     "/evidence/review-2.json",
+		}}, ExecuteReviewParams{ID: rev.id, Epoch: rev.epoch, Brief: "b"})
+	if err != nil {
+		t.Fatalf("the retry was refused: %v", err)
+	}
+	if res.ReviewedRevision != strings.Repeat("1", 40) {
+		t.Errorf("reviewed revision %q", res.ReviewedRevision)
+	}
+	attempts, err = store.AttemptsFor(rev.id)
+	if err != nil || len(attempts) != 2 {
+		t.Fatalf("the retry did not create a second attempt: %v (%d)", err, len(attempts))
+	}
+	if attempts[1].Attempt != 2 {
+		t.Errorf("the retry is attempt %d, want 2", attempts[1].Attempt)
+	}
+}

@@ -625,15 +625,33 @@ func TestSidecarReclaimsAStaleSocketConcurrently(t *testing.T) {
 	close(start)
 	wg.Wait()
 
+	// ASSERT THE REFUSAL, NOT THE RACE OUTCOME.
+	//
+	// Counting winners alone is a property of the SCHEDULE, not of the
+	// lock: without the lock the dominant interleaving is "one racer wins
+	// os.Remove, the rest get ENOENT/EADDRINUSE", which also yields exactly
+	// one winner — measured at a 65-77% pass rate. The lock's actual
+	// guarantee is that every loser is REFUSED BY NAME, so that is what
+	// this test asserts, and it fails 100% without the lock.
 	winners := 0
+	refused := 0
 	for i := range results {
 		if errs[i] == nil {
 			winners++
 			t.Cleanup(func() { _ = results[i].Close() })
+			continue
+		}
+		if strings.Contains(errs[i].Error(), "another sidecar holds") {
+			refused++
 		}
 	}
 	if winners != 1 {
 		t.Fatalf("%d constructors won the stale socket, want exactly 1", winners)
+	}
+	if refused != racers-1 {
+		t.Fatalf("only %d of %d losers were refused by the lifetime lock; the rest "+
+			"failed for an incidental reason, so this test would pass without it",
+			refused, racers-1)
 	}
 }
 

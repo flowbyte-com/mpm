@@ -174,26 +174,31 @@ func NewSidecar(cfg SidecarConfig) (*Sidecar, error) {
 		conn, dialErr := net.DialTimeout("unix", cfg.SocketPath, 2*time.Second)
 		if dialErr == nil {
 			_ = conn.Close()
+			// RELEASE BEFORE RETURNING. A leaked lock would brick the
+			// path: the next constructor would see "another sidecar
+			// holds it" until a GC finalizer closed the descriptor, and
+			// the socket path is stable per assignment.
+			releaseLock(lockFile)
 			return nil, fmt.Errorf(
 				"opencode: another sidecar is already listening on %s; refusing to take it over",
 				cfg.SocketPath)
 		}
 		if rmErr := os.Remove(cfg.SocketPath); rmErr != nil {
-			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-			_ = lockFile.Close()
+			releaseLock(lockFile)
 			return nil, fmt.Errorf("opencode: remove the stale sidecar socket: %w", rmErr)
 		}
 	}
 
 	ln, err := net.Listen("unix", cfg.SocketPath)
 	if err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = lockFile.Close()
+		releaseLock(lockFile)
 		return nil, fmt.Errorf("opencode: bind the sidecar socket: %w", err)
 	}
 	// Only this user may reach the socket.
 	if err := os.Chmod(cfg.SocketPath, 0o600); err != nil {
 		_ = ln.Close()
+		_ = os.Remove(cfg.SocketPath)
+		releaseLock(lockFile)
 		return nil, fmt.Errorf("opencode: restrict the sidecar socket: %w", err)
 	}
 
@@ -423,4 +428,16 @@ func (s *Sidecar) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		reason = fmt.Sprintf("upstream_status_%d", resp.StatusCode)
 	}
 	s.audit(outcome, reason, requestedModel, int64(len(body)), written, time.Since(start))
+}
+
+// releaseLock drops the lifetime lock and closes its descriptor.
+//
+// It exists so EVERY constructor failure path uses the same release, rather
+// than each one spelling out the pair and one of them forgetting.
+func releaseLock(f *os.File) {
+	if f == nil {
+		return
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
 }

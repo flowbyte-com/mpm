@@ -254,6 +254,17 @@ func (s *Store) reconcileReviewAttempts(taskID string, epoch int64) error {
 		return nil
 	}
 	last := attempts[len(attempts)-1]
+
+	// AN ATTEMPT FROM AN OLDER CLAIM CANNOT WRITE ITS RESULT — the state
+	// writes are fenced on both the attempt's epoch and the assignment's
+	// current one — so it is HISTORY, not a live review. Without this, a
+	// reviewer whose lease expired and was reclaimed would keep a stale
+	// attempt in `launched` forever and refuse every future review of that
+	// assignment.
+	if last.ClaimEpoch != epoch {
+		return nil
+	}
+
 	switch last.LaunchState {
 	case SessionCompleted, SessionFailed:
 		// History. A new attempt follows it, visibly.
