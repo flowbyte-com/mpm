@@ -195,7 +195,7 @@ func (s *Store) Execute(ctx context.Context, rt Runtime, p ExecuteParams) (*Exec
 			Evidence:    evidenceFromAttempt(att, nil, decision.reason),
 		}, nil
 	case reconcileRecordOnly:
-		return s.recordObserved(task, decision.attempt, decision.state, p), nil
+		return s.recordObserved(task, decision.attempt, decision.state, p)
 	case reconcileResume:
 		attempt = decision.attempt
 	case reconcileNew:
@@ -410,12 +410,13 @@ func (s *Store) reconcile(task *Assignment, p ExecuteParams, rt Runtime) (reconc
 		}, nil
 
 	case SessionCompleted, SessionFailed, SessionAmbiguous:
-		// A terminal attempt whose own session reported an outcome. Record
-		// it rather than launching again.
-		state, err := inspectQuietly(rt, last.NativeSessionID)
-		if err == nil && state != nil && state.Outcome != "" {
-			return reconcileDecision{kind: reconcileRecordOnly, attempt: last, state: state}, nil
-		}
+		// A TERMINAL attempt. The work has been recorded; a retry is a NEW
+		// attempt with its own number, so the record shows two.
+		//
+		// This must NOT re-record: the runtime keeps a finished session in
+		// its list forever, so `recordOnly` here would turn every retry
+		// after a failure into a silent no-op that re-reports the old
+		// result. (The first remediation did exactly that.)
 		return reconcileDecision{kind: reconcileNew}, nil
 
 	default:
@@ -507,7 +508,7 @@ func (s *Store) launchAndRecord(
 		}, nil
 	}
 
-	return s.recordState(task, attempt, res.State, p, reconciled, res), nil
+	return s.recordState(task, attempt, res.State, p, reconciled, res)
 }
 
 // recordObserved records what the runtime ALREADY reported, without
@@ -515,7 +516,7 @@ func (s *Store) launchAndRecord(
 // could observe it — a crash between the launch and the record.
 func (s *Store) recordObserved(
 	task *Assignment, attempt *SessionAttempt, state *oc.SessionState, p ExecuteParams,
-) *ExecuteResult {
+) (*ExecuteResult, error) {
 	// The SAME prerequisite the launch path has: a completion is only legal
 	// from `in_progress`. Recording an observed result therefore advances
 	// the assignment first, so the record and the state agree.
@@ -536,7 +537,7 @@ func (s *Store) recordState(
 	p ExecuteParams,
 	reconciled bool,
 	res *oc.LaunchResult,
-) *ExecuteResult {
+) (*ExecuteResult, error) {
 	// THE SESSION'S OWN CLAIMS ARE CHECKED BEFORE ITS OUTCOME IS BELIEVED.
 	if refusal := verifySession(state, p); refusal != "" {
 		att, err := s.MarkAttemptFailed(SessionStateParams{
@@ -544,13 +545,13 @@ func (s *Store) recordState(
 			Outcome: state.Outcome, Error: refusal,
 		})
 		if err != nil {
-			return &ExecuteResult{Assignment: task, Attempt: attempt, LaunchState: attempt.LaunchState, Evidence: evidenceFromAttempt(attempt, res, refusal)}
+			return nil, err
 		}
 		return &ExecuteResult{
 			Assignment: task, Attempt: att, LaunchState: att.LaunchState,
 			RuntimeOutcome: state.Outcome, Reconciled: reconciled,
 			Evidence: evidenceFromAttempt(att, res, refusal),
-		}
+		}, nil
 	}
 
 	var att *SessionAttempt
@@ -561,7 +562,7 @@ func (s *Store) recordState(
 			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: "succeeded",
 		})
 		if err != nil {
-			return &ExecuteResult{Assignment: task, Attempt: attempt, LaunchState: attempt.LaunchState}
+			return nil, err
 		}
 		// THE COMPLETION IS FENCED. It carries the presented epoch, so a
 		// worker whose lease was reclaimed cannot publish this as the
@@ -582,7 +583,7 @@ func (s *Store) recordState(
 			Error: "the runtime reported failure",
 		})
 		if err != nil {
-			return &ExecuteResult{Assignment: task, Attempt: attempt, LaunchState: attempt.LaunchState}
+			return nil, err
 		}
 	default:
 		// The runtime said nothing. Recording success would be an
@@ -592,7 +593,7 @@ func (s *Store) recordState(
 			Error: "the runtime reported no outcome",
 		})
 		if err != nil {
-			return &ExecuteResult{Assignment: task, Attempt: attempt, LaunchState: attempt.LaunchState}
+			return nil, err
 		}
 	}
 
@@ -603,7 +604,7 @@ func (s *Store) recordState(
 		RuntimeOutcome: att.RuntimeOutcome,
 		Reconciled:     reconciled,
 		Evidence:       evidenceFromAttempt(att, res, ""),
-	}
+	}, nil
 }
 
 // verifySession checks what a session claims about itself.

@@ -37,7 +37,7 @@ import (
 // deliberately re-pinning, which is the same discipline PR 1's storage
 // carries.
 func TestAgentTaskSessionDDLIsPinned(t *testing.T) {
-	const want = "688435c3120be124d227719af0686405a41442c53966240e4eaa995f44a1915e"
+	const want = "f785a0d0b2e7aec0413f3eae61ad5ce9a8d209d26daef39e6fb5ed3bcd28022c"
 	sum := sha256.Sum256([]byte(agentTaskSessionDDL))
 	got := hex.EncodeToString(sum[:])
 	if want != "PLACEHOLDER" && got != want {
@@ -233,8 +233,11 @@ func TestSessionNativeIDIsGloballyUnique(t *testing.T) {
 	if err == nil {
 		t.Fatal("the same native session was attached to a second attempt")
 	}
-	if !strings.Contains(err.Error(), "UNIQUE") {
-		t.Errorf("refused, but not by the uniqueness rule: %v", err)
+	// Either the reuse guard or the unique index may refuse it; both are
+	// the uniqueness rule, and the guard fires first because an INSERT
+	// trigger also catches a REPLACE.
+	if !strings.Contains(err.Error(), "UNIQUE") && !strings.Contains(err.Error(), "not reusable") {
+		t.Errorf("refused, but not by a uniqueness rule: %v", err)
 	}
 }
 
@@ -310,38 +313,73 @@ func TestSessionMigrationIsIdempotentAndLocalOnly(t *testing.T) {
 // this project never changes. So ONE statement could delete an attempt, defeat
 // write-once and defeat the forward-only state graph at the same time.
 //
-// The fix is an INSERT trigger, because an INSERT trigger DOES fire for a
-// REPLACE. This test fails without it.
+// THE STATEMENT MUST NOT TRIP ANOTHER RULE. The first version of this test
+// used `attempt = 1`, which the attempt-ordering trigger refuses — so the test
+// passed identically with the guard removed, and proved nothing. Both cases
+// below use values the OTHER rules accept, so the refusal can only come from
+// the reuse guard.
 func TestSessionRecordSurvivesReplace(t *testing.T) {
-	dm, taskID, epoch := sessionTestFixture(t)
-	if err := insertSessionAttempt(dm, "ats-replace", taskID, 1, epoch, "ses_original", "intent"); err != nil {
-		t.Fatalf("seed the attempt: %v", err)
-	}
+	goodSHA := strings.Repeat("a", 40)
+	_ = goodSHA
 
-	_, err := dm.SQLDB().Exec(`
-		INSERT OR REPLACE INTO agent_task_sessions (
-			id, task_id, attempt, claim_epoch, runtime, intended_agent,
-			native_session_id, correlation_ref, workspace_id, workspace_path,
-			launch_state, created_at, updated_at
-		) VALUES ('ats-replace', ?, 1, ?, 'opencode', 'mpm-worker',
-			'ses_REPLACED', 'corr-x', 'ws', '/tmp/ws', 'intent', 100, 100)`, taskID, epoch)
-	if err == nil {
-		t.Fatal("INSERT OR REPLACE rewrote the attempt; the identity is not write-once")
-	}
+	t.Run("conflict on the id", func(t *testing.T) {
+		dm, taskID, epoch := sessionTestFixture(t)
+		if err := insertSessionAttempt(dm, "ats-replace", taskID, 1, epoch, "ses_original", "intent"); err != nil {
+			t.Fatalf("seed the attempt: %v", err)
+		}
+		// attempt = MAX+1 (2), so the ordering rule is satisfied and the
+		// only rule that can refuse this is the reuse guard.
+		_, err := dm.SQLDB().Exec(`
+			INSERT OR REPLACE INTO agent_task_sessions (
+				id, task_id, attempt, claim_epoch, runtime, intended_agent,
+				native_session_id, correlation_ref, workspace_id, workspace_path,
+				launch_state, created_at, updated_at
+			) VALUES ('ats-replace', ?, 2, ?, 'opencode', 'mpm-worker',
+				'ses_REPLACED', 'corr-x', 'ws', '/tmp/ws', 'intent', 100, 100)`, taskID, epoch)
+		if err == nil {
+			t.Fatal("INSERT OR REPLACE rewrote the attempt; the identity is not write-once")
+		}
+		if !strings.Contains(err.Error(), "not reusable") {
+			t.Errorf("refused, but not by the reuse guard: %v", err)
+		}
+		var native string
+		if err := dm.SQLDB().QueryRow(
+			`SELECT native_session_id FROM agent_task_sessions WHERE id = 'ats-replace'`,
+		).Scan(&native); err != nil {
+			t.Fatalf("the attempt row was destroyed: %v", err)
+		}
+		if native != "ses_original" {
+			t.Errorf("the native session id became %q", native)
+		}
+	})
 
-	// And the row is INTACT — the values that were there are still there.
-	var native, state string
-	if err := dm.SQLDB().QueryRow(
-		`SELECT native_session_id, launch_state FROM agent_task_sessions WHERE id = 'ats-replace'`,
-	).Scan(&native, &state); err != nil {
-		t.Fatalf("the attempt row was destroyed: %v", err)
-	}
-	if native != "ses_original" {
-		t.Errorf("the native session id became %q", native)
-	}
-	if state != "intent" {
-		t.Errorf("the launch state became %q", state)
-	}
+	t.Run("conflict on the native session index", func(t *testing.T) {
+		dm, taskID, epoch := sessionTestFixture(t)
+		if err := insertSessionAttempt(dm, "ats-native", taskID, 1, epoch, "ses_shared", "intent"); err != nil {
+			t.Fatalf("seed the attempt: %v", err)
+		}
+		// A DIFFERENT id, the SAME native session: the conflict target is
+		// the (runtime, native_session_id) index, and a REPLACE would
+		// delete the OTHER row.
+		_, err := dm.SQLDB().Exec(`
+			INSERT OR REPLACE INTO agent_task_sessions (
+				id, task_id, attempt, claim_epoch, runtime, intended_agent,
+				native_session_id, correlation_ref, workspace_id, workspace_path,
+				launch_state, created_at, updated_at
+			) VALUES ('ats-other', ?, 2, ?, 'opencode', 'mpm-worker',
+				'ses_shared', 'corr-y', 'ws', '/tmp/ws', 'intent', 100, 100)`, taskID, epoch)
+		if err == nil {
+			t.Fatal("a REPLACE took over another attempt's native session")
+		}
+		var count int
+		if err := dm.SQLDB().QueryRow(
+			`SELECT COUNT(*) FROM agent_task_sessions WHERE id = 'ats-native'`).Scan(&count); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if count != 1 {
+			t.Error("the original attempt was deleted by the REPLACE")
+		}
+	})
 }
 
 // TestSessionAttemptIDIsImmutable is the reviewer's F8.

@@ -194,6 +194,9 @@ CREATE TRIGGER IF NOT EXISTS trg_agent_task_sessions_id_is_not_reused
 BEFORE INSERT ON agent_task_sessions
 FOR EACH ROW
 WHEN EXISTS (SELECT 1 FROM agent_task_sessions WHERE id = NEW.id)
+  OR EXISTS (SELECT 1 FROM agent_task_sessions
+              WHERE runtime = NEW.runtime
+                AND native_session_id = NEW.native_session_id)
 BEGIN
     -- AN INSERT TRIGGER FIRES FOR INSERT OR REPLACE TOO.
     --
@@ -205,6 +208,10 @@ BEGIN
     -- the not-deletable rule — and re-insert it — defeating write-once
     -- and the forward-only state graph — in ONE statement. Refusing the
     -- insert is what closes all three at once.
+    --
+    -- BOTH UNIQUENESS CONFLICTS ARE GUARDED. A REPLACE whose conflict
+    -- target is the (runtime, native_session_id) index would otherwise
+    -- delete a DIFFERENT attempt's row and take its identity with it.
     SELECT RAISE(ABORT, 'agent_task_sessions: the attempt id is not reusable');
 END;
 
