@@ -240,7 +240,17 @@ func (s *Store) validateExecutable(task *Assignment, p ExecuteParams) error {
 	// THE TREE'S OPERATIONS. The adapter performs `start` and `complete`,
 	// so a tree that does not permit them is a tree this execution would
 	// step outside of.
-	if err := requireOperations(task, "start", "complete"); err != nil {
+	//
+	// A CHILD carries no list of its own — the schema says so, and the
+	// bound is the ROOT's. So the operations are read from the root, which
+	// is what a child actually inherits. (The first version checked the
+	// child's own empty list and therefore refused every child
+	// assignment.)
+	root, err := s.Get(task.RootID)
+	if err != nil {
+		return err
+	}
+	if err := requireOperations(root, "start", "complete"); err != nil {
 		return err
 	}
 	return nil
@@ -250,20 +260,10 @@ func (s *Store) validateExecutable(task *Assignment, p ExecuteParams) error {
 //
 // A child carries no list of its own — its bound is the ROOT's — so the
 // check walks to the root, which is the same rule the schema states.
-func requireOperations(task *Assignment, ops ...string) error {
+func requireOperations(root *Assignment, ops ...string) error {
 	permitted := map[string]bool{}
-	if task.Depth == 0 {
-		for _, o := range task.PermittedOperations {
-			permitted[o] = true
-		}
-	}
-	// A child inherits; the caller resolves the root before calling this
-	// when depth > 0. The Store's public Execute path always loads the
-	// root, so reaching here with depth > 0 and no list means the caller
-	// used the internal seam — refuse rather than assume.
-	if task.Depth > 0 && len(permitted) == 0 {
-		return fmt.Errorf("%w: the root's permitted operations were not resolved for %s",
-			ErrConstraint, task.ID)
+	for _, o := range root.PermittedOperations {
+		permitted[o] = true
 	}
 	for _, o := range ops {
 		if !permitted[o] {

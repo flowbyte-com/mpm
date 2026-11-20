@@ -463,3 +463,66 @@ func TestExecuteRecordsAmbiguityWhenALaunchedSessionIsLost(t *testing.T) {
 		t.Error("an ambiguous record completed the assignment")
 	}
 }
+
+// TestExecuteWorksForAChildAssignment pins that the tree's operations are
+// read from the ROOT.
+//
+// A child carries no `permitted_operations` of its own — the schema says so,
+// and the bound it inherits is the ROOT's. The first version of the adapter
+// checked the child's own empty list and therefore refused every child
+// assignment; this test fails without the fix.
+func TestExecuteWorksForAChildAssignment(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	rootID, rootEpoch := claimedAssignment(t, store, projectID, "alpha")
+	ws := t.TempDir()
+
+	// The root is `accepted` and claimed; delegate a child from it.
+	child, _, err := store.Delegate(DelegateParams{
+		ParentID:       rootID,
+		Title:          "child work",
+		Objective:      "do the child work",
+		Recipient:      "alpha",
+		Role:           RoleImplementer,
+		IdempotencyKey: "idem:child",
+		Actor:          Actor{Address: "alpha", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("delegate: %v", err)
+	}
+	if child.Depth == 0 {
+		t.Fatal("the delegated assignment is not a child")
+	}
+	if len(child.PermittedOperations) != 0 {
+		t.Fatalf("the child carries its own operation list; the schema should forbid that")
+	}
+
+	actor := Actor{Address: "alpha", Kind: "agent"}
+	for _, step := range []func(FencedParams) (*Assignment, error){
+		store.Deliver, store.Acknowledge, store.Accept,
+	} {
+		if _, err := step(FencedParams{ID: child.ID, Actor: actor}); err != nil {
+			t.Fatalf("advance the child: %v", err)
+		}
+	}
+	claimed, err := store.Claim(ClaimParams{
+		ID: child.ID, Owner: "alpha", LeaseSeconds: 3600, Actor: actor,
+	})
+	if err != nil {
+		t.Fatalf("claim the child: %v", err)
+	}
+	_ = rootEpoch
+
+	rt := &fakeRuntime{
+		allowed:     map[string]bool{"mpm-worker": true},
+		launchState: okState(ws, "permitted-model", "mpm-worker"),
+	}
+	res, err := store.Execute(context.Background(), rt,
+		executeParams(child.ID, claimed.ClaimEpoch, ws))
+	if err != nil {
+		t.Fatalf("execute the child: %v", err)
+	}
+	if res.LaunchState != SessionCompleted {
+		t.Errorf("child launch state %q, want %q (reason %q)",
+			res.LaunchState, SessionCompleted, res.Attempt.LastError)
+	}
+}
