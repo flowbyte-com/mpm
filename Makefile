@@ -1063,6 +1063,34 @@ test-agent-installation: build
 	  if [ $$status -ne 0 ]; then exit $$status; fi; \
 	  exit $$ad_status
 
+# The negative-control harness for Continuity 001 PR 2.
+#
+# It removes one invariant from the service's SOURCE at a time and
+# requires the acceptance suite to notice. The harness's exit code is
+# the gate: it asks three questions of every load-bearing control — the
+# named test must fail, the control must break nothing it did not
+# declare it would break, and it must not have broken more than a third
+# of the baseline.
+#
+# WHY THIS TARGET EXISTS
+#
+# Until this target and the matching CI step, the harness ran in NO
+# CI job and in NO make target. The only invocation was the Go
+# pinning test's --selftest, which returns before main() is ever
+# called — so a green CI result said nothing about the harness's own
+# gate, and a mutation of the gate's verdict path left every test in
+# the tree green.
+#
+# It is deliberately NOT wired into `make test`: it MUTATES the
+# working tree in place, and a gate that leaves the tree dirty when it
+# is interrupted is a worse hazard than a gate that is slow. It has its
+# own target, and CI runs it as its own step.
+#
+# The cost is one full acceptance-suite run per control: sixteen
+# controls plus a baseline.
+test-continuity-controls:
+	@python3 scripts/continuity-001-pr2-controls.py
+
 # Runner for the per-adapter suites under agent_installation/mpm-*/tests/.
 #
 # Each agent adapter ships its own installer with its own contract. The

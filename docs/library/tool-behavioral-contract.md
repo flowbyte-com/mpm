@@ -204,7 +204,7 @@ A new tool or action must:
 5. **Pass the existing gates**: `TestSchemaSupersetOfHandlerPayloadReads`, `TestRegistry_AllToolsExecuteWithoutPanic`, the per-tool regression tests, the §6.4 threshold-table gate, the §8 CLI-side-limits gate, and `make test-race`.
 6. **Get a `assertParityForTool` lock** in `registry_dispatcher_parity_test.go` to prevent future dispatcher/registry drift.
 
-If a new action appears to need behaviour that doesn't fit the rules above, **update this document first**, then write the action — don't mass-rewrite the existing 21 tools' behavior to match a one-off exception. The rules are intentional defaults with named exceptions (see §3 for the legitimate silent-default cases).
+If a new action appears to need behaviour that doesn't fit the rules above, **update this document first**, then write the action — don't mass-rewrite the existing tools' behavior to match a one-off exception. The rules are intentional defaults with named exceptions (see §3 for the legitimate silent-default cases).
 
 ---
 

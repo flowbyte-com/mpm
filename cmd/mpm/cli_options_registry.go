@@ -155,6 +155,21 @@ func init() {
 		"decisions":       cognitiveVerbOptions,
 		"gc":              {"json", "j", "dry-run", "aggressive", "review", "purge", "shred-negative", "max-age"},
 		"handoff":         {"json", "j", "session-id", "summary", "tag", "unread"},
+		// Continuity 001 PR 2. The vocabulary is the flag registrations
+		// in cmd/mpm/assignment_cmds.go; the drift test derives it
+		// from that source, so the two cannot disagree.
+		"assignment": {
+			"action", "actor", "actor-kind", "awaiting-action", "base-sha",
+			"eligible-recipient", "epoch", "evidence", "evidence-ref",
+			"findings-sha256", "head-sha", "id", "idempotency-key",
+			"issue-ref", "json", "lease-seconds", "limit", "max-concurrency",
+			"max-depth", "max-resource-units", "max-tasks", "note",
+			"objective", "owner", "parent-id", "payload",
+			"permitted-operation",
+			"pr-ref", "project-id", "recipient", "resource-units",
+			"reviewed-sha", "revision", "role", "root-id", "source", "state",
+			"title", "verdict",
+		},
 		"hint":            {"json", "max"},
 		"ingest":          ingestOptionNames,
 		"lifecycle":       {},
@@ -371,6 +386,7 @@ var cliOptionDeferred = map[string]bool{
 var cliOptionSubcommandFamilies = map[string]bool{
 	// The families of the router's own dispatch table.
 	"work": true, "session": true, "handoff": true, "lesson": true,
+	"assignment": true,
 	"skill": true, "ops": true, "call": true, "kb": true, "topic": true,
 	"reference": true, "memory": true, "mode": true, "persona": true,
 	"integration": true, "self-heal": true, "why": true, "config": true,

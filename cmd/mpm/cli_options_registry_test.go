@@ -129,11 +129,46 @@ func collectOptionVocabulary(f *ast.File, vocab sourceOptionVocabulary) {
 // flagRegistrationMethods are the FlagSet methods that register an
 // option under a name.
 //
-// The name is always the FIRST argument, as a string literal.
+// The name is the FIRST argument, as a string literal — EXCEPT for the
+// `Var` family, where the first argument is the value and the name is
+// the second.
+//
+// The set is the stdlib's own — all twenty registration methods Go's
+// `flag` package has: `String`, `Bool`, `Int`, `Int64`, `Float64`,
+// `Uint`, `Uint64`, `Duration`, `Func` and `BoolFunc` name the option
+// first; `Var`, `TextVar` and the `*Var` family name it second. There
+// is no `VarX` in Go's `flag` package, and a map whose whole purpose is
+// to be right about the stdlib has no business naming one.
+//
+// It is all twenty because a MISSING name hides an option in the
+// DANGEROUS direction: the registry would reject an invocation the
+// code accepts. `BoolFunc` is not used today; it is here so that it
+// cannot be missed the day it is.
 var flagRegistrationMethods = map[string]bool{
 	"String": true, "Bool": true, "Int": true, "Int64": true,
 	"Float64": true, "Uint": true, "Uint64": true, "Duration": true,
-	"Var": true, "VarX": true, "TextVar": true,
+	"Func": true, "BoolFunc": true,
+	"Var": true, "TextVar": true,
+	"BoolVar": true, "StringVar": true, "IntVar": true, "Int64Var": true,
+	"Float64Var": true, "UintVar": true, "Uint64Var": true,
+	"DurationVar": true,
+}
+
+// flagRegistrationNameIndex is the argument position of the option's
+// NAME for each registration method.
+//
+// `fs.String("json", ...)` names the option first. `fs.Var(&v, "json",
+// ...)` names the VALUE first, because `Var` takes an already-built
+// value — so its name is the second argument. The same is true of the
+// `*Var` family.
+//
+// Getting this wrong makes the drift guard report a phantom: the
+// registry names an option that the source does not declare, and the
+// guard refuses the tree for a flag that is really there.
+var flagRegistrationNameIndex = map[string]int{
+	"Var": 1, "TextVar": 1,
+	"BoolVar": 1, "StringVar": 1, "IntVar": 1, "Int64Var": 1,
+	"Float64Var": 1, "UintVar": 1, "Uint64Var": 1, "DurationVar": 1,
 }
 
 // collectFlagRegistration reads one FlagSet registration call.
@@ -141,8 +176,8 @@ var flagRegistrationMethods = map[string]bool{
 //	fs.Int("max-iterations", 0, "...")
 //	fs.BoolVar(&o.json, "json", false, "...")
 //
-// The bare form registers a name; the Var form registers a name AND
-// binds a variable. Both put the name first.
+// The bare form registers a name and puts it FIRST; the Var form
+// registers a name AND binds a variable, and puts the name SECOND.
 func collectFlagRegistration(call *ast.CallExpr, vocab sourceOptionVocabulary) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
@@ -154,7 +189,14 @@ func collectFlagRegistration(call *ast.CallExpr, vocab sourceOptionVocabulary) {
 	if len(call.Args) == 0 {
 		return
 	}
-	name, ok := stringLiteral(call.Args[0])
+	idx := 0
+	if i, ok := flagRegistrationNameIndex[sel.Sel.Name]; ok {
+		idx = i
+	}
+	if len(call.Args) <= idx {
+		return
+	}
+	name, ok := stringLiteral(call.Args[idx])
 	if !ok {
 		return
 	}

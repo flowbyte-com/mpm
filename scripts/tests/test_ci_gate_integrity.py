@@ -243,6 +243,97 @@ class TestGatingJobsStillExist(unittest.TestCase):
             "the installer-contract suite is no longer run by the gate job",
         )
 
+    def test_the_gate_job_still_runs_the_negative_control_harness(self):
+        """The Continuity 001 PR 2 harness must run in the gate job.
+
+        It removes one invariant from the service's SOURCE at a time and
+        requires the acceptance suite to notice; the harness's exit code
+        is the gate.
+
+        Until this step existed, the only invocation of the harness was
+        the Go pinning test's --selftest, which returns before main() is
+        ever called. So the harness's own gate was exercised by NOTHING
+        in the tree, and a mutation of the gate's verdict path left
+        every test green. A step that is added and then quietly removed
+        is the same class of gap as the ones this file already pins.
+        """
+        # The COMMENTS are stripped first: a step that is commented
+        # out is not run, and a pin that cannot tell the difference
+        # between a step and a comment about a step pins nothing.
+        self.assertIn(
+            "make test-continuity-controls",
+            _strip_comments(_job_block(_workflow_text(), "gate")),
+            "the negative-control harness is no longer run by the gate job",
+        )
+
+    def test_the_gate_job_cannot_swallow_the_harness_exit_status(self):
+        """The harness's exit code IS the gate. A step that discards it
+        is not running a gate.
+
+        The step that runs the harness pins the harness's own gate: the
+        harness refuses a measurement it cannot establish, and its exit
+        code is what says so. A step whose body ends in `|| true`, or
+        in `exit 0`, reports success whatever the harness said — and the
+        integrity file's own purpose is that "a gate that cannot fail is
+        not a gate".
+
+        `|| true` was caught before this test, but only incidentally,
+        as a "pipeline" — the message named the wrong problem, and
+        `; exit 0` was not caught at all.
+        """
+        block = ""
+        for step_name, step_text in _step_blocks(
+                _job_block(_workflow_text(), "gate")):
+            if step_name == "Negative-control harness (Continuity 001 PR 2)":
+                block = step_text
+                break
+        self.assertTrue(
+            block,
+            "the gate job no longer has a 'Negative-control harness' step",
+        )
+        body = _strip_comments(block)
+        for pattern, what in (
+            (r"\|\|\s*(true|:)\b", "`|| true` discards the exit status"),
+            # `exit 0` ANYWHERE, not only at the start of a line. The
+            # inline form -- `run: make test-continuity-controls; exit
+            # 0` -- is the shape the sixteenth round's verification
+            # claimed to catch and did not: that round's mutation put
+            # `exit 0` on its OWN line, which is the one spelling a
+            # line-anchored pattern can see. The seventeenth review
+            # found the inline form, and found two more shapes beside
+            # it.
+            (r"\bexit\s+0\b", "`exit 0` discards the exit status"),
+            (r"set\s+\+e\b", "`set +e` discards the exit status"),
+            # A backgrounded command discards the exit status outright:
+            # the shell reports 0 for a job it did not wait for.
+            (r"(?m)&(?!&)\s*$", "a trailing `&` discards the exit status"),
+            # A step-level condition means the step may never run at
+            # all, while the job still reads green.
+            (r"(?m)^\s*if:\s*\S", "a step-level `if:` means the harness "
+                                   "may never run, while the job reads "
+                                   "green"),
+            # `continue-on-error` on THIS step makes GitHub ignore the
+            # step's failure: the same swallow, by another name.
+            (r"(?mi)^\s*continue-on-error:\s*[\"']?true[\"']?\s*$",
+             "`continue-on-error: true` discards the exit status"),
+        ):
+            self.assertNotRegex(
+                body, pattern,
+                f"the negative-control harness's step contains {what}, so "
+                f"the step reports success whatever the harness said — "
+                f"and the harness's exit code is the gate",
+            )
+        # The step must run the TARGET, not the script: the target is
+        # what the invocation pin checks, and a step that calls the
+        # script directly is a second, unpinned invocation.
+        self.assertIn("make test-continuity-controls", body,
+                      "the step no longer runs the Makefile target")
+        self.assertNotIn(
+            "--only", body,
+            "the step asks the harness for a single control, so it "
+            "measures one control out of sixteen and certifies it",
+        )
+
     def test_the_gate_job_still_runs_the_race_sweep_with_coverage(self):
         block = _job_block(_workflow_text(), "gate")
         self.assertIn("-race", block,
@@ -267,7 +358,7 @@ class TestGatingJobsStillExist(unittest.TestCase):
         text = _strip_comments(_workflow_text())
         self.assertNotRegex(
             text,
-            r"(?m)^\s*continue-on-error:\s*true\s*$",
+            r"(?mi)^\s*continue-on-error:\s*[\"']?true[\"']?\s*$",
             "a job or step is marked continue-on-error; its conclusion "
             "would read success while its log shows a failure",
         )

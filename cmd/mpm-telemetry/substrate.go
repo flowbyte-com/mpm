@@ -8,7 +8,7 @@
 // It used to shell out to `mpm call mpm_provenance --payload
 // {"action":"count_by_session"}`. TWO things were wrong with that:
 //
-//  1. THE TOOL DOES NOT EXIST. The registry publishes 21 tools and no
+//  1. THE TOOL DOES NOT EXIST. The registry publishes 22 tools and no
 //     mpm_provenance, so the hunt failed on every qualifying session
 //     ("mpm_provenance: exit status 1") and the command exited 1.
 //  2. EVEN IF IT EXISTED, IT COULD NOT HAVE BEEN READ-ONLY. Every

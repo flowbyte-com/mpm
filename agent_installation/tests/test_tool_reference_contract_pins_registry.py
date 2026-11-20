@@ -133,7 +133,18 @@ def _contract_rows() -> dict[str, set[str] | None]:
         if action_cell.startswith("(no "):
             rows[name] = None
             continue
-        rows[name] = set(re.findall(r"`([a-z_]+)`", action_cell))
+        # The action cell holds backticked action names. The character
+        # class includes the HYPHEN because the registry publishes
+        # hyphenated actions — `record-review` is the first — and a
+        # reader that could not name one would make such a tool
+        # UNDOCUMENTABLE: the row would have to omit the action, and
+        # this file's equality check would then fail forever.
+        #
+        # The class is still closed: lowercase, underscore and hyphen
+        # only, inside backticks. A companion row's PARAMETERS are not
+        # parsed — only the action cell is — so widening it cannot
+        # capture prose.
+        rows[name] = set(re.findall(r"`([a-z_-]+)`", action_cell))
     return rows
 
 
