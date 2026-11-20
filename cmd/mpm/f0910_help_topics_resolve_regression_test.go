@@ -18,9 +18,9 @@ import (
 // advertised in the cognitive help output (the `Need more?`
 // section's `mpm help <topic>` entries) and asserts each one is
 // resolved by either:
-//   • sectionHelpContent (a coherent help section)
-//   • the per-command router (`handleHelp`)
-//   • the tool-introspection fallback (`printToolHelp`)
+//   - sectionHelpContent (a coherent help section)
+//   - the per-command router (`handleHelp`)
+//   - the tool-introspection fallback (`printToolHelp`)
 //
 // Pre-fix this test would have caught `mpm help observability` /
 // `mpm help advanced` / `mpm help debug` (all advertised in the

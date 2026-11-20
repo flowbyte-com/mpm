@@ -104,6 +104,14 @@ type ExecuteResult struct {
 	// Reconciled reports that an existing session/attempt was reused
 	// rather than a new one launched.
 	Reconciled bool `json:"reconciled"`
+	// RuntimeSucceeded says the RUNTIME reported success. It is NOT the
+	// same as the assignment completing: a fenced completion can be
+	// refused while the runtime's work still happened, and the two facts
+	// are reported separately rather than collapsed.
+	RuntimeSucceeded bool `json:"runtime_succeeded"`
+	// CompletionError names why the assignment did not complete even
+	// though the runtime succeeded. Empty when it did complete.
+	CompletionError string `json:"completion_error,omitempty"`
 	// Evidence is the bounded, credential-free record of the run.
 	Evidence ExecutionEvidence `json:"evidence"`
 }
@@ -340,6 +348,40 @@ func (s *Store) reconcile(task *Assignment, p ExecuteParams, rt Runtime) (reconc
 	// it would launch a session whose outcome could not be recorded, and
 	// every retry would launch it again. So a new epoch is a new attempt.
 	if last.ClaimEpoch != p.Epoch {
+		// AN OLDER EPOCH IS NOT A LICENCE TO START A SECOND WRITER.
+		//
+		// The epoch advancing does not prove the previous holder's session
+		// stopped. If any earlier attempt's session is still working — or
+		// cannot be asked — then a new attempt would put TWO runtimes into
+		// the same worktree, which is exactly the duplicate this record
+		// exists to prevent. Refuse, and leave the drain policy to PR 4's
+		// recovery loop, which is the component that will own long-lived
+		// attempts.
+		for i := len(attempts) - 1; i >= 0; i-- {
+			prev := attempts[i]
+			if prev.ClaimEpoch == p.Epoch {
+				continue
+			}
+			st, err := inspectQuietly(rt, prev.NativeSessionID)
+			if err != nil {
+				if errors.Is(err, oc.ErrSessionNotFound) {
+					continue // nothing was created; safe
+				}
+				return reconcileDecision{
+					kind:      reconcileRefuseConcurrent,
+					attemptID: prev.ID,
+					reason: "an earlier claim's session cannot be inspected, so a second " +
+						"writer cannot be ruled out",
+				}, nil
+			}
+			if st != nil && st.Outcome == "" {
+				return reconcileDecision{
+					kind:      reconcileRefuseConcurrent,
+					attemptID: prev.ID,
+					reason:    "an earlier claim's session is still running",
+				}, nil
+			}
+		}
 		return reconcileDecision{kind: reconcileNew}, nil
 	}
 
@@ -522,9 +564,11 @@ func (s *Store) recordObserved(
 	// the assignment first, so the record and the state agree.
 	if task.State == StateAccepted {
 		started, err := s.Start(FencedParams{ID: task.ID, Epoch: p.Epoch, Actor: p.Actor})
-		if err == nil {
-			task = started
+		if err != nil {
+			return nil, fmt.Errorf("%w: the observed result could not be recorded because "+
+				"the assignment could not be started: %w", ErrStaleClaim, err)
 		}
+		task = started
 	}
 	return s.recordState(task, attempt, state, p, true, nil)
 }
@@ -571,12 +615,26 @@ func (s *Store) recordState(
 			ID: task.ID, Epoch: p.Epoch, Actor: p.Actor,
 			Note: "runtime session " + state.ID + " reported succeeded",
 		})
-		if cerr == nil {
-			task = completed
+		if cerr != nil {
+			// RUNTIME SUCCESS IS NOT ASSIGNMENT COMPLETION.
+			//
+			// The runtime did the work and reported it; the ASSIGNMENT did
+			// not move. Returning nil here would report a completion that
+			// never happened, so the caller is told both facts and gets an
+			// error.
+			return &ExecuteResult{
+				Assignment:       task,
+				Attempt:          att,
+				LaunchState:      att.LaunchState,
+				RuntimeOutcome:   att.RuntimeOutcome,
+				RuntimeSucceeded: true,
+				CompletionError:  boundedReason(cerr),
+				Reconciled:       reconciled,
+				Evidence:         evidenceFromAttempt(att, res, "the runtime succeeded but the assignment did not complete: "+boundedReason(cerr)),
+			}, fmt.Errorf("%w: the runtime session succeeded but the assignment did not complete: %w",
+				ErrStaleClaim, cerr)
 		}
-		// A stale claim here is expected and is NOT a launch failure: the
-		// attempt record is truthful, and the assignment simply did not
-		// move. The caller sees the assignment unchanged.
+		task = completed
 	case "failed":
 		att, err = s.MarkAttemptFailed(SessionStateParams{
 			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: "failed",
@@ -598,12 +656,13 @@ func (s *Store) recordState(
 	}
 
 	return &ExecuteResult{
-		Assignment:     task,
-		Attempt:        att,
-		LaunchState:    att.LaunchState,
-		RuntimeOutcome: att.RuntimeOutcome,
-		Reconciled:     reconciled,
-		Evidence:       evidenceFromAttempt(att, res, ""),
+		Assignment:       task,
+		Attempt:          att,
+		LaunchState:      att.LaunchState,
+		RuntimeOutcome:   att.RuntimeOutcome,
+		RuntimeSucceeded: state.Outcome == "succeeded",
+		Reconciled:       reconciled,
+		Evidence:         evidenceFromAttempt(att, res, ""),
 	}, nil
 }
 

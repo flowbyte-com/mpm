@@ -171,8 +171,8 @@ func TestRough_Item3_MemoryShowJSONFlagFirst(t *testing.T) {
 //     as a result (documented in `mpm call --help`).
 func TestRough_Item2_ExitContract(t *testing.T) {
 	cases := []struct {
-		name    string
-		args    []string
+		name     string
+		args     []string
 		wantExit int
 	}{
 		{"friendly missing id", []string{"memory", "show", "rough2-no-such-id"}, 1},
@@ -231,6 +231,7 @@ func TestRough_Item5_WorkSessionContract(t *testing.T) {
 		t.Errorf("pinned session id should surface in status:\n%s", pinned)
 	}
 }
+
 // Item 2 (CONTRACT): bare `mpm call` documents the contract on stderr
 // (stdout keeps carrying only the JSON envelope) and exits non-zero.
 // NOTE: `mpm call --help` is intercepted by the router's generic command
@@ -250,5 +251,3 @@ func TestRough_Item2_CallHelp(t *testing.T) {
 		}
 	}
 }
-
-

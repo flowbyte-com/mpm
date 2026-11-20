@@ -2,17 +2,17 @@
 //
 // Pins the contract of `mpm capability grant-operator`:
 //
-//   * With a capability id, stamps metadata.operator_approved_at
+//   - With a capability id, stamps metadata.operator_approved_at
 //     and writes the audit row (DB state verified via direct SQL).
-//   * With --actor, the actor name is preserved in metadata +
+//   - With --actor, the actor name is preserved in metadata +
 //     event row.
-//   * With --reason, the reason is preserved in the event row's
+//   - With --reason, the reason is preserved in the event row's
 //     metadata (audit-trail fidelity).
-//   * Without a capability id, prints help + exits 1.
-//   * With --help / -h / help, exits 0 with no DB writes.
-//   * Unknown flag exits 1 with no DB writes.
-//   * On a non-existent id, exits 1 with "not found" message.
-//   * On a retired capability, exits 1 with refusal message.
+//   - Without a capability id, prints help + exits 1.
+//   - With --help / -h / help, exits 0 with no DB writes.
+//   - Unknown flag exits 1 with no DB writes.
+//   - On a non-existent id, exits 1 with "not found" message.
+//   - On a retired capability, exits 1 with refusal message.
 //
 // Pattern mirrors capability_seed_test.go: installTestDM replaces
 // the package-level dbManager singleton so we don't touch the

@@ -6,11 +6,11 @@
 // so the default value was used.
 //
 // W-008: the same Go-type mismatch is the underlying hazard. Now resolved by:
-//   1. GetMemoriesForExport returns int64 (INTEGER cols) and float64 (REAL
-//      weight) — matching the SQL schema types.
-//   2. simple_cmds.go reads via float64FromMap / int64FromMap (strict helpers
-//      in handlers_helpers.go) which warn instead of silently defaulting.
-//   3. maint_cmds.go export CSV uses the same helpers.
+//  1. GetMemoriesForExport returns int64 (INTEGER cols) and float64 (REAL
+//     weight) — matching the SQL schema types.
+//  2. simple_cmds.go reads via float64FromMap / int64FromMap (strict helpers
+//     in handlers_helpers.go) which warn instead of silently defaulting.
+//  3. maint_cmds.go export CSV uses the same helpers.
 //
 // These tests pin the public-boundary behaviour: every stored weight value
 // must appear verbatim in the WEIGHT column of `mpm ls` and in the weight
@@ -147,8 +147,8 @@ func TestD001_ExportCSVShowsActualWeight(t *testing.T) {
 // recurring.
 func TestD001_StrictHelperSurfacesMismatch(t *testing.T) {
 	m := map[string]interface{}{
-		"weight":               "not a number", // string, not int64/float64
-		"reinforcement_count":  complex64(0),    // weird type
+		"weight":              "not a number", // string, not int64/float64
+		"reinforcement_count": complex64(0),   // weird type
 	}
 
 	// Weight helper expects float64. String is a contract violation.

@@ -485,3 +485,74 @@ func contains(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestSidecarRefusesToTakeOverALiveSocket is finding 4.
+//
+// Unlinking the socket path unconditionally would orphan the socket a live
+// sidecar is still serving, and the relay would connect to whichever inode
+// it resolved. Ownership is established by CONNECTING, not by the file
+// existing.
+func TestSidecarRefusesToTakeOverALiveSocket(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sidecar.sock")
+
+	// A live listener standing in for another sidecar.
+	live, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	_, err = NewSidecar(SidecarConfig{
+		SocketPath:      path,
+		UpstreamBaseURL: "http://127.0.0.1:1",
+		APIKey:          "k",
+		ModelAllowList:  map[string]string{"m": "m"},
+	})
+	if err == nil {
+		_ = live.Close()
+		t.Fatal("a second sidecar took over a live socket")
+	}
+	if !strings.Contains(err.Error(), "already listening") {
+		t.Errorf("refused, but not by the ownership rule: %v", err)
+	}
+
+	// The live listener is UNDISTURBED: its socket was not unlinked.
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Errorf("the live sidecar's socket was removed: %v", statErr)
+	}
+	_ = live.Close()
+}
+
+// TestSidecarReclaimsAStaleSocket is the restart half of finding 4.
+//
+// A crashed sidecar leaves the inode behind. Nobody is listening, so the
+// next start must reclaim it — otherwise a restart after a crash would be
+// impossible without manual cleanup.
+func TestSidecarReclaimsAStaleSocket(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sidecar.sock")
+
+	// Create a socket and close it, leaving a STALE inode. Go unlinks on
+	// close by default, which is what a clean shutdown does; a CRASH does
+	// not, so the test turns that off to reproduce the crash.
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ln.SetUnlinkOnClose(false)
+	_ = ln.Close()
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("the stale socket did not survive the close: %v", statErr)
+	}
+
+	s, err := NewSidecar(SidecarConfig{
+		SocketPath:      path,
+		UpstreamBaseURL: "http://127.0.0.1:1",
+		APIKey:          "k",
+		ModelAllowList:  map[string]string{"m": "m"},
+	})
+	if err != nil {
+		t.Fatalf("a stale socket was not reclaimed: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+}

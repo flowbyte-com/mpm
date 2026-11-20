@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/flowbyte-com/mpm/internal/blobstore"
 	"github.com/flowbyte-com/mpm-core/tools"
+	"github.com/flowbyte-com/mpm/internal/blobstore"
 )
 
 // TestCall_BlobStoreInitialized is the F8 regression test (2026-08-27).

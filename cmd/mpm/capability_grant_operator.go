@@ -63,8 +63,8 @@ func handleCapabilityGrantOperator(args []string) int {
 	}
 
 	var (
-		capID string
-		actor string
+		capID  string
+		actor  string
 		reason string
 	)
 

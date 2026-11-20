@@ -13,22 +13,22 @@
 //
 // Accepted forms (after stripping leading/trailing whitespace):
 //
-//   "d72058d7e8e71b44"               → "d72058d7e8e71b44"
-//   "mpm://work/d72058d7e8e71b44"    → "d72058d7e8e71b44"
-//   "mpm://work/d72058d7e8e71b44/"   → "d72058d7e8e71b44"  (trailing slash)
-//   ""                                → ""
+//	"d72058d7e8e71b44"               → "d72058d7e8e71b44"
+//	"mpm://work/d72058d7e8e71b44"    → "d72058d7e8e71b44"
+//	"mpm://work/d72058d7e8e71b44/"   → "d72058d7e8e71b44"  (trailing slash)
+//	""                                → ""
 //
 // Rejected forms (return the input unchanged so the handler can
 // surface a clean "work not found" error rather than a stripped
 // empty string):
 //
-//   "mpm://memory/d72058d7e8e71b44"   — wrong artifact type; NOT
-//                                        silently coerced. Callers
-//                                        that want pointer-aware
-//                                        routing must use
-//                                        `mpm_resolve` instead.
-//   "mpm://work/"                      — empty id component
-//   "mpm://blob/d72058d7e8e71b44"      — wrong artifact type
+//	"mpm://memory/d72058d7e8e71b44"   — wrong artifact type; NOT
+//	                                     silently coerced. Callers
+//	                                     that want pointer-aware
+//	                                     routing must use
+//	                                     `mpm_resolve` instead.
+//	"mpm://work/"                      — empty id component
+//	"mpm://blob/d72058d7e8e71b44"      — wrong artifact type
 //
 // Bare IDs that don't include the canonical pointer prefix are
 // returned as-is; the resolution boundary stays a single chokepoint.

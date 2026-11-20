@@ -11,8 +11,6 @@ import (
 	"testing"
 )
 
-
-
 // Item 4 (FIX): recall must find documents whose verbatim text breaks FTS5
 // MATCH syntax (e.g. `-` parsed as NOT, or multi-KB token runs), via the
 // same zero-row LIKE fallback `memory search` (FullTextSearch) uses.
@@ -102,4 +100,3 @@ func TestRough_Item9_StatusAllListOnly(t *testing.T) {
 		t.Errorf("list --status bogus exited 0, want rejection")
 	}
 }
-

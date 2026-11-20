@@ -42,6 +42,9 @@ const (
 	// ("permitted-model"); the sidecar translates it. That way the
 	// worker's configuration never names a real provider model.
 	envUpstreamModel = "MPM_OPENCODE_SIDECAR_MODEL"
+	// Where the MPM OpenCode plugin lives. The REVIEWER's `sandbox_exec`
+	// comes from it, so a review cannot start without it.
+	envOpenCodePlugin = "MPM_OPENCODE_PLUGIN"
 	// The fallback credential source. It is the operator's own provider
 	// key, and it stays in this process.
 	envDeepSeekKey = "DEEPSEEK_API_KEY"
@@ -188,9 +191,11 @@ func assignmentVerbCaptureReviewEvidence(store *assignment.Store, f *assignmentF
 }
 
 const (
-	workerAgentDefinition = "mpm-worker"
-	defaultSidecarModel   = "permitted-model"
-	defaultUpstreamModel  = "deepseek-chat"
+	workerAgentDefinition   = "mpm-worker"
+	defaultSidecarModel     = "permitted-model"
+	defaultUpstreamModel    = "deepseek-chat"
+	defaultReviewModel      = "minimax-coding-plan/MiniMax-M3.1-Flash"
+	reviewerAgentDefinition = "mpm-reviewer"
 )
 
 // resolveExecutable finds a binary on PATH or at an absolute path.
@@ -217,4 +222,73 @@ func auditSink(root string) *os.File {
 		return nil
 	}
 	return f
+}
+
+// assignmentVerbExecuteReview runs one INDEPENDENT REVIEW in the reviewer's
+// own isolation and records the evidence the HOST captured.
+func assignmentVerbExecuteReview(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
+	if strings.TrimSpace(f.id) == "" {
+		return nil, fmt.Errorf("execute-review needs --id (the REVIEWER assignment)")
+	}
+	if strings.TrimSpace(f.brief) == "" {
+		return nil, fmt.Errorf("execute-review needs --brief")
+	}
+	if !filepath.IsAbs(f.workspace) {
+		return nil, fmt.Errorf("the repository under review must be an absolute path, got %q", f.workspace)
+	}
+
+	mpmDir := config.GetMPMDir()
+	root := filepath.Join(mpmDir, "opencode", "reviews", f.id)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, fmt.Errorf("create the review root: %w", err)
+	}
+
+	opencodeBin := os.Getenv(envOpenCodeBin)
+	if opencodeBin == "" {
+		opencodeBin = "opencode"
+	}
+	var err error
+	opencodeBin, err = resolveExecutable(opencodeBin)
+	if err != nil {
+		return nil, err
+	}
+
+	// The plugin is where `sandbox_exec` comes from. `resolveExecutable`
+	// already found the runtime, so the plugin is resolved from the MPM
+	// install beside this binary.
+	pluginPath := os.Getenv(envOpenCodePlugin)
+	if pluginPath == "" {
+		pluginPath = filepath.Join(filepath.Dir(filepath.Dir(mpmDir)),
+			"agent_installation", "mpm-opencode")
+		if _, statErr := os.Stat(pluginPath); statErr != nil {
+			pluginPath = filepath.Join(mpmDir, "agent_installation", "mpm-opencode")
+		}
+	}
+
+	model := f.model
+	if model == "" {
+		model = defaultReviewModel
+	}
+
+	rt, err := oc.NewRuntime(oc.Config{
+		Root:          root,
+		OpenCodeBin:   opencodeBin,
+		MPMBin:        "",
+		Model:         model,
+		RepoPath:      f.workspace,
+		PluginPath:    pluginPath,
+		AllowedAgents: []string{reviewerAgentDefinition},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return store.ExecuteReview(context.Background(), rt, assignment.ExecuteReviewParams{
+		ID:               f.id,
+		Epoch:            f.epoch,
+		Actor:            assignmentActorFrom(f),
+		Brief:            f.brief,
+		Title:            "review " + f.id,
+		ExpectedRevision: f.reviewedSHA,
+	})
 }

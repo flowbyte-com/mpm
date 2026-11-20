@@ -89,16 +89,16 @@ func (r RoleDecision) String() string {
 // and is documented as embedding-only on its official model
 // card. Substring match is case-insensitive.
 var fallbackEmbeddingModelNames = []string{
-	"all-minilm",     // sentence-transformers / Ollama
-	"nomic-embed",    // Ollama nomic-embed-text family
-	"mxbai-embed",    // mixedbread-ai via Ollama
-	"bge-embed",      // BAAI BGE family via Ollama
-	"e5-",            // intfloat/e5 family
-	"gte-",           // Alibaba GTE family
+	"all-minilm",  // sentence-transformers / Ollama
+	"nomic-embed", // Ollama nomic-embed-text family
+	"mxbai-embed", // mixedbread-ai via Ollama
+	"bge-embed",   // BAAI BGE family via Ollama
+	"e5-",         // intfloat/e5 family
+	"gte-",        // Alibaba GTE family
 	"snowflake-arctic-embed",
 	"text-embedding-", // OpenAI embedding family (e.g. text-embedding-3-small)
-	"embed-",         // generic Ollama embed prefix
-	"embedding",      // last-resort: explicit "embedding" in name
+	"embed-",          // generic Ollama embed prefix
+	"embedding",       // last-resort: explicit "embedding" in name
 }
 
 // ValidateLLMRole inspects provider / model / baseURL and
@@ -107,13 +107,13 @@ var fallbackEmbeddingModelNames = []string{
 //
 // Inputs:
 //
-//   provider — "ollama" or "custom" (or any other value). The
-//              probe is only attempted for ollama / custom
-//              with an http(s) base URL.
-//   model    — the model name (e.g. "all-minilm", "llama3").
-//   baseURL  — provider endpoint URL. Empty is allowed; we
-//              skip the probe and fall through to the fallback
-//              name list.
+//	provider — "ollama" or "custom" (or any other value). The
+//	           probe is only attempted for ollama / custom
+//	           with an http(s) base URL.
+//	model    — the model name (e.g. "all-minilm", "llama3").
+//	baseURL  — provider endpoint URL. Empty is allowed; we
+//	           skip the probe and fall through to the fallback
+//	           name list.
 //
 // The probe is best-effort. Network errors, timeouts, and
 // non-Ollama endpoints all return RoleUnknown (not an error).
@@ -176,13 +176,13 @@ func isOllamaLikeEndpoint(provider, baseURL string) bool {
 // when ValidateLLMRole returns RoleEmbeddingOnly. The wording
 // follows the canonical CLI grammar:
 //
-//   "X" is an embedding model, not a generative LLM.
-//   LLM provider    → synthesis / generative features
-//   Embedding model → semantic / vector retrieval
-//   Use:
-//     mpm config profile add <name> --model <id> --base-url <url>
-//     mpm config profile set <name> provider custom
-//     mpm config component set embedding <name>
+//	"X" is an embedding model, not a generative LLM.
+//	LLM provider    → synthesis / generative features
+//	Embedding model → semantic / vector retrieval
+//	Use:
+//	  mpm config profile add <name> --model <id> --base-url <url>
+//	  mpm config profile set <name> provider custom
+//	  mpm config component set embedding <name>
 //
 // The model argument is the rejected model name (verbatim).
 // Returned as a single multi-line string so callers can print

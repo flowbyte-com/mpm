@@ -220,27 +220,27 @@ func TestBackfillCollectionFilterComposes(t *testing.T) {
 // assert directly and it documents the schema-fallback branch.
 func TestMemoryNeedsEmbeddingPredicate(t *testing.T) {
 	cases := []struct {
-		name       string
-		force      bool
+		name        string
+		force       bool
 		hasModelCol bool
 		mustMention []string
 		mustNot     []string
 	}{
 		{
-			name: "default with column selects unlabelled",
+			name:        "default with column selects unlabelled",
 			hasModelCol: true,
 			mustMention: []string{"embedding_model"},
 			mustNot:     []string{},
 		},
 		{
-			name: "legacy schema falls back to null-only",
+			name:        "legacy schema falls back to null-only",
 			hasModelCol: false,
 			mustNot:     []string{"embedding_model"},
 			mustMention: []string{"embedding IS NULL"},
 		},
 		{
-			name: "force selects everything",
-			force: true,
+			name:    "force selects everything",
+			force:   true,
 			mustNot: []string{"embedding IS NULL", "embedding_model"},
 		},
 	}
@@ -260,6 +260,7 @@ func TestMemoryNeedsEmbeddingPredicate(t *testing.T) {
 		})
 	}
 }
+
 // TestBackfillPaginationVisitsEveryRowOnce is the regression for the
 // pagination bug, and it is why the loop uses a keyset cursor.
 //

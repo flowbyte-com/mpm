@@ -111,6 +111,7 @@ type assignmentFlags struct {
 	workspace   string
 	workspaceID string
 	model       string
+	brief       string
 	references  []string
 
 	// output
@@ -169,6 +170,8 @@ func handleAssignment(args []string) int {
 		return assignmentVerb(rest, assignmentVerbExecute)
 	case "capture-review-evidence":
 		return assignmentVerb(rest, assignmentVerbCaptureReviewEvidence)
+	case "execute-review":
+		return assignmentVerb(rest, assignmentVerbExecuteReview)
 	case "help", "-h", "--help":
 		printAssignmentHelp()
 		return 0
@@ -299,6 +302,7 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 	workspace := fs.String("workspace", "", "execute: the authorised worktree (absolute)")
 	workspaceID := fs.String("workspace-id", "", "execute: a stable label for the workspace")
 	model := fs.String("model", "", "execute: the runtime model, provider/model")
+	brief := fs.String("brief", "", "execute-review: the bounded review brief")
 	references := &assignmentListFlag{}
 	fs.Var(references, "reference",
 		"execute: a bounded pointer appended to the objective (comma-separated, or repeated)")
@@ -351,6 +355,7 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 		workspace:        *workspace,
 		workspaceID:      *workspaceID,
 		model:            *model,
+		brief:            *brief,
 		references:       references.values,
 		jsonOutput:       *jsonOutput,
 	}, nil
@@ -736,6 +741,8 @@ THE WORK
 
 EXECUTION (PR 3, explicit invocation only)
   execute           run an assignment in a contained OpenCode session
+  execute-review    run an assignment's REVIEWER in its isolated sandbox
+                    and capture the findings
   capture-review-evidence
                     record the reviewed revision and the findings digest a
                     HOST captured

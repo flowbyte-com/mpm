@@ -127,9 +127,30 @@ func NewSidecar(cfg SidecarConfig) (*Sidecar, error) {
 		cfg.Timeout = DefaultSidecarTimeout
 	}
 
-	// Remove a stale socket. A socket that another process still owns is
-	// a live conflict, not staleness, and bind will say so.
-	_ = os.Remove(cfg.SocketPath)
+	// OWNERSHIP BEFORE REMOVAL.
+	//
+	// The first version unlinked the path unconditionally, so a second
+	// sidecar would silently orphan the socket a live first one was still
+	// serving — and the worker's relay would then connect to whichever
+	// inode it happened to resolve. A socket file is not evidence of
+	// staleness; being able to CONNECT to it is evidence of ownership.
+	//
+	// So: dial it. A successful connection means somebody is listening and
+	// this constructor refuses. A failed one means the path is stale (a
+	// crashed sidecar leaves the inode behind), and only then is it
+	// removed.
+	if _, statErr := os.Stat(cfg.SocketPath); statErr == nil {
+		conn, dialErr := net.DialTimeout("unix", cfg.SocketPath, 2*time.Second)
+		if dialErr == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf(
+				"opencode: another sidecar is already listening on %s; refusing to take it over",
+				cfg.SocketPath)
+		}
+		if rmErr := os.Remove(cfg.SocketPath); rmErr != nil {
+			return nil, fmt.Errorf("opencode: remove the stale sidecar socket: %w", rmErr)
+		}
+	}
 
 	ln, err := net.Listen("unix", cfg.SocketPath)
 	if err != nil {

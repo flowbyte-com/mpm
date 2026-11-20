@@ -238,8 +238,8 @@ func TestHandleRestoreDB_ResetsSingletonOnSuccess(t *testing.T) {
 	postSingleton := getDBConcrete()
 	require.NotNil(t, postSingleton)
 	if postSingleton == preSingleton {
-		t.Errorf("singleton was not reset — "+
-			"post-reset getDB() returned the same *DatabaseManager as pre-reset. "+
+		t.Errorf("singleton was not reset — " +
+			"post-reset getDB() returned the same *DatabaseManager as pre-reset. " +
 			"This is the H-4 §12 defect: the singleton still points to the OLD inode.")
 	}
 

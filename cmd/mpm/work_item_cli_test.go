@@ -107,17 +107,17 @@ func TestWorkItemCLI_GrammarContract(t *testing.T) {
 	// the user-facing contract is "these invocations must work".
 	invocations := [][]string{
 		{"--limit", "5"},                  // flags-only → defaults to list
-		{"list", "--limit", "5"},           // canonical
-		{"--status", "all"},                // status before subcommand
-		{"list", "--status", "all"},        // canonical
-		{"list"},                           // bare list
-		{},                                 // bare work item → help
-		{"help"},                           // explicit help
-		{"-h"},                             // short help
-		{"--help"},                         // long help (RECOMMENDED 12)
-		{"list", "--help"},                 // help-after-subcommand
-		{"create", "My Title", "content"},  // create with positional content
-		{"create", "Just Title"},           // create title-only
+		{"list", "--limit", "5"},          // canonical
+		{"--status", "all"},               // status before subcommand
+		{"list", "--status", "all"},       // canonical
+		{"list"},                          // bare list
+		{},                                // bare work item → help
+		{"help"},                          // explicit help
+		{"-h"},                            // short help
+		{"--help"},                        // long help (RECOMMENDED 12)
+		{"list", "--help"},                // help-after-subcommand
+		{"create", "My Title", "content"}, // create with positional content
+		{"create", "Just Title"},          // create title-only
 	}
 	for _, args := range invocations {
 		got := runWorkItemArgsForTest(args)

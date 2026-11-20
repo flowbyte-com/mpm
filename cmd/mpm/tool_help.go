@@ -13,30 +13,30 @@
 //
 // Output for `mpm help mpm_memory`:
 //
-//   mpm help mpm_memory — Persistent memory for facts, ...
+//	mpm help mpm_memory — Persistent memory for facts, ...
 //
-//   Usage:
-//     mpm call mpm_memory --payload '<json>'
-//     mpm-mcp (stdio) → tool name "mpm_memory"
+//	Usage:
+//	  mpm call mpm_memory --payload '<json>'
+//	  mpm-mcp (stdio) → tool name "mpm_memory"
 //
-//   Valid actions: ...
+//	Valid actions: ...
 //
-//   Parameters per action:
+//	Parameters per action:
 //
-//     save
-//       fact            string   required
-//       collection      string   default "general"
-//       weight          number   default 5.0
-//       tags            array    default []
-//       ...
+//	  save
+//	    fact            string   required
+//	    collection      string   default "general"
+//	    weight          number   default 5.0
+//	    tags            array    default []
+//	    ...
 //
-//     query
-//       query           string   required
-//       limit           integer  default 10
-//       ...
+//	  query
+//	    query           string   required
+//	    limit           integer  default 10
+//	    ...
 //
-//   Full JSON schema (machine-readable):
-//   { ... }
+//	Full JSON schema (machine-readable):
+//	{ ... }
 //
 // The format is designed to be greppable by an agent — `mpm help
 // mpm_memory | grep required` surfaces every required field in one
@@ -56,7 +56,7 @@ import (
 // for human reading.
 type paramDoc struct {
 	Name        string
-	Type        string   // "string" | "integer" | "number" | "boolean" | "array" | "object"
+	Type        string // "string" | "integer" | "number" | "boolean" | "array" | "object"
 	Required    bool
 	Default     string   // string form, "" if absent
 	Description string   // first sentence of the schema description

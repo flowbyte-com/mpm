@@ -2,20 +2,22 @@
 // in CLI surfaces.
 //
 // F-G1: `mpm reference ls` did not show staleness — a backdated 5-year-old
-//       reference looked identical to a fresh one. The DB layer had the
-//       freshness classifier (F19-1) but the CLI didn't surface it.
+//
+//	reference looked identical to a fresh one. The DB layer had the
+//	freshness classifier (F19-1) but the CLI didn't surface it.
 //
 // F-G2: `mpm reference ls` could not mark references as historical because
-//       the CLI didn't surface the freshness field at all. Tagging was the
-//       only signal, and there was no header telling the operator "this is
-//       historical — don't treat as current authority".
+//
+//	the CLI didn't surface the freshness field at all. Tagging was the
+//	only signal, and there was no header telling the operator "this is
+//	historical — don't treat as current authority".
 //
 // The fix:
-//   1. handleRefList JSON envelope includes `freshness` per entry.
-//   2. handleRefList human output appends `{freshness}` when not current.
-//   3. handleRefShow JSON envelope includes `freshness` at top level.
-//   4. handleRefShow human output prints a `⚠️ Freshness: <X>` header line
-//      when freshness is not current.
+//  1. handleRefList JSON envelope includes `freshness` per entry.
+//  2. handleRefList human output appends `{freshness}` when not current.
+//  3. handleRefShow JSON envelope includes `freshness` at top level.
+//  4. handleRefShow human output prints a `⚠️ Freshness: <X>` header line
+//     when freshness is not current.
 //
 // These tests exercise the public handlers and the substrate's freshness
 // classifier directly so the contract is pinned end-to-end.

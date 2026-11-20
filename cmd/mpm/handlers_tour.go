@@ -42,12 +42,12 @@ import (
 
 // tourStep is one row in the mpm tour walkthrough.
 //
-//   Title: the cognitive verb being demonstrated (e.g., "remember")
-//   Description: one-line explanation of what it does
-//   Command: the exact command an operator types
-//   DemoArg: when non-empty, the tour passes this as the first arg
-//            to handle<Verb>(args) when --demo is set. The demo
-//            output is captured-to-stdout-and-streamed inline.
+//	Title: the cognitive verb being demonstrated (e.g., "remember")
+//	Description: one-line explanation of what it does
+//	Command: the exact command an operator types
+//	DemoArg: when non-empty, the tour passes this as the first arg
+//	         to handle<Verb>(args) when --demo is set. The demo
+//	         output is captured-to-stdout-and-streamed inline.
 type tourStep struct {
 	Title       string
 	Description string
@@ -103,8 +103,8 @@ var tourSteps = []tourStep{
 
 // handleTour runs the mpm tour walkthrough. Flags:
 //
-//   --demo      Auto-runs each step's demo argument (skips manual trial).
-//   --step <n>  Jump to step n (1-indexed); useful for re-running a step.
+//	--demo      Auto-runs each step's demo argument (skips manual trial).
+//	--step <n>  Jump to step n (1-indexed); useful for re-running a step.
 //
 // TTY detection: when stdin is a TTY AND --demo is NOT set, the
 // tour pauses for an enter keypress between steps. When stdin is

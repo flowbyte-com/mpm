@@ -18,16 +18,16 @@ import (
 // configHelpSafetyMatrix enumerates the newly-fixed nested help
 // surfaces and the assertions each must satisfy:
 //
-//   1. Exit code 0.
-//   2. Output mentions the subcommand name (so a reader knows
-//      which subcommand they're looking at).
-//   3. Output does NOT contain the legacy `Configure AI provider`
-//      heading — that wording conflates LLM provider with
-//      embedding model configuration.
+//  1. Exit code 0.
+//  2. Output mentions the subcommand name (so a reader knows
+//     which subcommand they're looking at).
+//  3. Output does NOT contain the legacy `Configure AI provider`
+//     heading — that wording conflates LLM provider with
+//     embedding model configuration.
 type configHelpSafetyCase struct {
-	Command       []string
-	ExpectedSubs  string // substring that must appear in output
-	Disallowed    string // substring that must NOT appear in output
+	Command      []string
+	ExpectedSubs string // substring that must appear in output
+	Disallowed   string // substring that must NOT appear in output
 }
 
 var configHelpSafetyMatrix = []configHelpSafetyCase{

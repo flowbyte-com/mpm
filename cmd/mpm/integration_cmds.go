@@ -3,7 +3,7 @@
 // `mpm integration <sub>` cross-framework config emitters. The flagship
 // command is `export-mcp`:
 //
-//   mpm integration export-mcp [--framework claude-code|hermes|opencl] [--json]
+//	mpm integration export-mcp [--framework claude-code|hermes|opencl] [--json]
 //
 // Prints the exact JSON snippet to paste into the target framework's
 // MCP-servers config. The snippet always references the canonical

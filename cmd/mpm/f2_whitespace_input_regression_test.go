@@ -16,9 +16,9 @@
 //
 // The invariant:
 //
-//   For each demonstrated required field (fact, choice), whitespace-only
-//   input must be rejected at the CLI boundary with a non-zero exit
-//   code and an error message. No row may be persisted.
+//	For each demonstrated required field (fact, choice), whitespace-only
+//	input must be rejected at the CLI boundary with a non-zero exit
+//	code and an error message. No row may be persisted.
 package main
 
 import (

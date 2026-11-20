@@ -6,10 +6,10 @@
 // backlog that `mpm doctor` reports. It has three jobs, and it used to
 // do only one of them honestly:
 //
-//   1. LIST the memories whose review is due.
-//   2. RECORD the operator's review of one — the acknowledgment that
-//      actually clears the backlog.
-//   3. Say the same thing about "due" that the doctor says.
+//  1. LIST the memories whose review is due.
+//  2. RECORD the operator's review of one — the acknowledgment that
+//     actually clears the backlog.
+//  3. Say the same thing about "due" that the doctor says.
 //
 // WHAT WAS WRONG
 // --------------
@@ -590,7 +590,7 @@ func toTime(v interface{}) time.Time {
 		if t <= 0 {
 			return time.Time{}
 		}
-		return time.Unix(t,  0)
+		return time.Unix(t, 0)
 	case float64:
 		if t <= 0 {
 			return time.Time{}

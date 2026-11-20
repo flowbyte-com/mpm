@@ -24,8 +24,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/flowbyte-com/mpm-core/config"
 	mpminternal "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 

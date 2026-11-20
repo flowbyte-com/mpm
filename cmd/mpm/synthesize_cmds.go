@@ -20,6 +20,7 @@ import (
 //	mpm synthesize status         Show recent synthesis telemetry (last 20)
 //	mpm synthesize failures       Show only failed/skipped synthesis events
 //	mpm synthesize --dry-run      Scan without calling the LLM
+//
 // synthesizeOptions declares every option `mpm synthesize` accepts.
 //
 // The command read its arguments by SCANNING for known spellings, so an

@@ -22,9 +22,9 @@
 package main
 
 import (
-	stdlibexec "os/exec"
 	"database/sql"
 	"os"
+	stdlibexec "os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -166,7 +166,7 @@ func TestRunawaySafeguard_NoDiagnosticLeaksSecrets(t *testing.T) {
 //
 // Invariant (verified for the same unit, in the same run):
 //
-//   processed + remaining == initial eligible count
+//	processed + remaining == initial eligible count
 //
 // We do NOT assume `tc.seed == initial eligible count`. The
 // substrate's seed catalog auto-loads additional memories into
@@ -178,7 +178,7 @@ func TestRunawaySafeguard_NoDiagnosticLeaksSecrets(t *testing.T) {
 // CLI's own query surface (`mpm memory list`) before running
 // `mpm synthesize`. Both surfaces hit the same SQL:
 //
-//   SELECT id FROM memories WHERE deleted_at IS NULL AND is_long_term = 0
+//	SELECT id FROM memories WHERE deleted_at IS NULL AND is_long_term = 0
 //
 // so `list-count == scan-total` by construction; the test
 // asserts the scan's reported `processed + remaining` matches

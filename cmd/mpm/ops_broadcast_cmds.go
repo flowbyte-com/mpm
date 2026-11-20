@@ -131,11 +131,11 @@ func doOpsBroadcast(args []string, dryRun, jsonOut bool) int {
 
 	dm := getDB()
 	report, err := dm.BroadcastMemory(memoryID, mpminternal.BroadcastOpts{
-		Kind:           kind,
-		Rationale:      rationale,
-		ToAgents:       toAgents,
-		DryRun:         dryRun,
-		SourceAgent:    resolveAgentID(),
+		Kind:            kind,
+		Rationale:       rationale,
+		ToAgents:        toAgents,
+		DryRun:          dryRun,
+		SourceAgent:     resolveAgentID(),
 		SourceSessionID: getOrMakeSessionID(),
 	})
 	if err != nil {

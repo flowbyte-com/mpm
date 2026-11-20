@@ -25,9 +25,10 @@ import (
 // artifact id, runs WhyService.Explain, and renders the report.
 //
 // Args:
-//   mpm why <id>           (kind auto-detected)
-//   mpm why --kind theory <id>
-//   mpm why skill:agentshell-v1.0.0   (prefix auto-routes to skill)
+//
+//	mpm why <id>           (kind auto-detected)
+//	mpm why --kind theory <id>
+//	mpm why skill:agentshell-v1.0.0   (prefix auto-routes to skill)
 //
 // 2026-09-14 release-pass: --help / -h / "help" short-circuits to
 // printWhyHelp() so asking for help is never a mutation or lookup.

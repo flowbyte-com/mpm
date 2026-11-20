@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/flowbyte-com/mpm-core/config"
 	_ "github.com/flowbyte-com/mpm-core"
+	"github.com/flowbyte-com/mpm-core/config"
 )
 
 // buildMpmForFlagTest compiles the mpm binary into a per-test temp dir.
@@ -74,8 +74,8 @@ func TestHandleAdd_FlagAfterContent(t *testing.T) {
 			// flag name; the pre-fix --tag (singular) is replaced so
 			// the help text matches the parser and the documented
 			// muscle-memory form actually works.
-			wantWeight:  5,
-			wantTags:    `["foo","bar"]`,
+			wantWeight: 5,
+			wantTags:   `["foo","bar"]`,
 		},
 		{
 			name:        "remember alias: --weight after content",
@@ -97,7 +97,7 @@ func TestHandleAdd_FlagAfterContent(t *testing.T) {
 			// content` above — the canonical CLI default is now
 			// column=5 (via 0.5 float scale), matching the tool
 			// surface.
-			wantWeight:  5,
+			wantWeight: 5,
 		},
 	}
 

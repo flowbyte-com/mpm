@@ -14,7 +14,6 @@ import (
 	"strings"
 	"testing"
 
-
 	"github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/tools"
 )

@@ -6,10 +6,10 @@
 // and last_accessed_at moved forward by 1 day instead of 1 hour.
 //
 // The fix:
-//   1. Recognize `--duration <n><unit>` where unit ∈ {m, h, d, w}
-//   2. Reject unknown units with an explicit error (no silent fallback)
-//   3. Reject unknown flags entirely (no silent fallback)
-//   4. Cap duration at 1 year (parity with the --days cap)
+//  1. Recognize `--duration <n><unit>` where unit ∈ {m, h, d, w}
+//  2. Reject unknown units with an explicit error (no silent fallback)
+//  3. Reject unknown flags entirely (no silent fallback)
+//  4. Cap duration at 1 year (parity with the --days cap)
 //
 // These tests exercise the public `mpm snooze` handler directly.
 package main

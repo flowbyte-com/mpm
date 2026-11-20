@@ -77,6 +77,13 @@ type Config struct {
 	MPMBin string
 	// Model is the runtime model identifier, "provider/model".
 	Model string
+	// RepoPath is the repository a REVIEW examines. Unused by the worker
+	// path, whose workspace comes from the launch request.
+	RepoPath string
+	// PluginPath is the MPM OpenCode plugin build. The REVIEWER's
+	// `sandbox_exec` comes from it, so an empty value means a review
+	// cannot start.
+	PluginPath string
 	// AllowedAgents is the explicit allow-list. An agent not in it is
 	// refused BEFORE any session is created, regardless of whether the
 	// runtime would have failed anyway.

@@ -101,20 +101,20 @@ func TestHelpParity_LifecycleCommandsAreReachable(t *testing.T) {
 	}
 
 	required := []string{
-		"lifecycle",          // mpm lifecycle [family]
-		"handoff list",       // handoff lifecycle
-		"handoff write",      // handoff lifecycle
-		"skill list",         // skill lifecycle
-		"memory list",        // memory
-		"memory show",        // memory
-		"lesson list",        // lesson
-		"decision list",      // decisions
-		"theories list",      // theories
-		"work list",          // work
-		"topic list",         // topic
-		"reference list",     // reference
-		"task list",          // tasks
-		"evidence list",      // evidence
+		"lifecycle",      // mpm lifecycle [family]
+		"handoff list",   // handoff lifecycle
+		"handoff write",  // handoff lifecycle
+		"skill list",     // skill lifecycle
+		"memory list",    // memory
+		"memory show",    // memory
+		"lesson list",    // lesson
+		"decision list",  // decisions
+		"theories list",  // theories
+		"work list",      // work
+		"topic list",     // topic
+		"reference list", // reference
+		"task list",      // tasks
+		"evidence list",  // evidence
 	}
 
 	for _, cmdstr := range required {

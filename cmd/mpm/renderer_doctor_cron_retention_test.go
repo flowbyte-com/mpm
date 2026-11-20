@@ -46,17 +46,17 @@ func TestRenderer_DoctorReport_CronRetentionFields_JSON(t *testing.T) {
 
 	// Each field must appear with the canonical snake_case name.
 	wantFields := map[string]any{
-		"pending":                          float64(86),
-		"eligible_backlog":                 float64(26),
-		"retention_window_seconds":         float64(scheduler.CronRetentionWindow.Seconds()),
-		"sweep_cadence_seconds":            float64(scheduler.CronRetentionCadence.Seconds()),
-		"normal_limit":                     float64(scheduler.CronRetentionNormalLimit),
-		"catchup_limit":                    float64(scheduler.CronRetentionCatchUpLimit),
-		"phase":                            "startup_stabilization",
-		"scheduler_uptime_seconds":         float64(5100),
+		"pending":                           float64(86),
+		"eligible_backlog":                  float64(26),
+		"retention_window_seconds":          float64(scheduler.CronRetentionWindow.Seconds()),
+		"sweep_cadence_seconds":             float64(scheduler.CronRetentionCadence.Seconds()),
+		"normal_limit":                      float64(scheduler.CronRetentionNormalLimit),
+		"catchup_limit":                     float64(scheduler.CronRetentionCatchUpLimit),
+		"phase":                             "startup_stabilization",
+		"scheduler_uptime_seconds":          float64(5100),
 		"last_expected_sweep_ago_seconds":   float64(1500),
 		"seconds_until_next_expected_sweep": float64(2100),
-		"interpretation":                   "Test interpretation.",
+		"interpretation":                    "Test interpretation.",
 	}
 	for k, want := range wantFields {
 		if got[k] != want {
@@ -92,14 +92,14 @@ func TestRenderer_DoctorReport_CronRetentionPhaseBlock(t *testing.T) {
 
 	// Required substrings — the operator-facing surface.
 	wantSubstrings := []string{
-		"startup_stabilization",                          // phase name
-		"Pending cron wakes: 86",                         // pending
-		"eligible backlog: 26",                           // eligible backlog
-		"retention window: 1h 0m",                        // retention window
-		"cadence: 1h 0m",                                 // cadence (1h)
-		"Last expected sweep: 25m 0s ago",                // sweep timing
-		"next expected sweep: 35m 0s",                    // next sweep timing
-		"Scheduler uptime: 1h 25m",                       // uptime
+		"startup_stabilization",           // phase name
+		"Pending cron wakes: 86",          // pending
+		"eligible backlog: 26",            // eligible backlog
+		"retention window: 1h 0m",         // retention window
+		"cadence: 1h 0m",                  // cadence (1h)
+		"Last expected sweep: 25m 0s ago", // sweep timing
+		"next expected sweep: 35m 0s",     // next sweep timing
+		"Scheduler uptime: 1h 25m",        // uptime
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(out, want) {

@@ -187,9 +187,9 @@ search and never execute a neighbouring command.
 		invocationID = uuid.NewString()
 	}
 	ac := mpminternal.ActiveContext{
-		Mode:       activeMode,
-		Persona:    activePersona,
-		SessionID:  getOrMakeSessionID(),
+		Mode:      activeMode,
+		Persona:   activePersona,
+		SessionID: getOrMakeSessionID(),
 		// MPMSessionID is the MPM-owned session identity (active.json
 		// authoritative). Read-only here — wake/context/doctor paths
 		// never allocate. Empty string is the normal fresh-workspace
@@ -203,11 +203,11 @@ search and never execute a neighbouring command.
 		// native sessionKey, etc.). Empty when absent. Never
 		// synthesized from MPMSessionID.
 		FrameworkSessionID: os.Getenv("MPM_PROVENANCE_FRAMEWORK_SESSION_ID"),
-		Agent:      resolveAgentID(),
-		Hostname:   resolveHostname(),
-		Model:      os.Getenv("MPM_PROVENANCE_MODEL"),
-		FrameworkName: frameworkName,
-		InvocationID: invocationID,
+		Agent:              resolveAgentID(),
+		Hostname:           resolveHostname(),
+		Model:              os.Getenv("MPM_PROVENANCE_MODEL"),
+		FrameworkName:      frameworkName,
+		InvocationID:       invocationID,
 		ParentInvocationID: os.Getenv("MPM_PROVENANCE_PARENT_INVOCATION_ID"),
 	}
 

@@ -725,3 +725,204 @@ func reviewFixture(t *testing.T, store *Store, subjectID, recipient string) revi
 	}
 	return reviewFixtureResult{id: rev.ID, epoch: claimed.ClaimEpoch}
 }
+
+// TestExecuteRefusesASecondWriterAcrossEpochs is finding 1.
+//
+// The epoch advancing does not prove the previous holder's session stopped.
+// Renewing while an attempt is still running is exactly that situation, and a
+// new dispatch would put TWO runtimes into the same worktree.
+func TestExecuteRefusesASecondWriterAcrossEpochs(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	ws := t.TempDir()
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+
+	running := okState(ws, "permitted-model", "mpm-worker")
+	running.Outcome = "" // still working
+
+	first, err := store.BeginAttempt(BeginAttemptParams{
+		TaskID: id, Epoch: epoch, Runtime: RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses_mpm_epoch1_running",
+		CorrelationRef: "corr-1", WorkspaceID: "ws", WorkspacePath: ws,
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	if _, err := store.MarkAttemptLaunched(SessionStateParams{AttemptID: first.ID, Epoch: epoch}); err != nil {
+		t.Fatalf("mark launched: %v", err)
+	}
+
+	// The lease is renewed: the epoch advances while the first run lives.
+	renewed, err := store.Renew(RenewParams{
+		ID: id, ExpectedEpoch: epoch, Owner: "alpha", LeaseSeconds: 7200,
+		Actor: Actor{Address: "alpha", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+
+	rt := &fakeRuntime{
+		allowed:  map[string]bool{"mpm-worker": true},
+		sessions: map[string]*oc.SessionState{first.NativeSessionID: running},
+	}
+	res, err := store.Execute(context.Background(), rt, executeParams(id, renewed.ClaimEpoch, ws))
+	if err == nil {
+		t.Fatalf("a second writer was dispatched while the first was running (state %q)", res.LaunchState)
+	}
+	if !strings.Contains(err.Error(), "still running") {
+		t.Errorf("refused, but not as a concurrent writer: %v", err)
+	}
+	if rt.launches != 0 {
+		t.Errorf("the runtime was launched %d times", rt.launches)
+	}
+}
+
+// TestExecuteReportsCompletionFailureSeparately is finding 2.
+//
+// The runtime can succeed while the ASSIGNMENT fails to complete. Reporting
+// nil there would claim a completion that never happened, so the two facts
+// are reported separately and the call errors.
+func TestExecuteReportsCompletionFailureSeparately(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	ws := t.TempDir()
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+
+	// A DETERMINISTIC fault: the completion's transition fails, and only
+	// that one. Start is allowed to succeed first.
+	started := false
+	store.fault = func(stage string) error {
+		if stage == "transition" && started {
+			return errors.New("injected completion failure")
+		}
+		if stage == "transition" {
+			started = true
+		}
+		return nil
+	}
+	t.Cleanup(func() { store.fault = nil })
+
+	rt := &fakeRuntime{
+		allowed:     map[string]bool{"mpm-worker": true},
+		launchState: okState(ws, "permitted-model", "mpm-worker"),
+	}
+	res, err := store.Execute(context.Background(), rt, executeParams(id, epoch, ws))
+	if err == nil {
+		t.Fatal("a completion failure was reported as success")
+	}
+	if res == nil {
+		t.Fatal("the result was discarded, so the runtime's success is invisible")
+	}
+	if !res.RuntimeSucceeded {
+		t.Error("the result does not record that the RUNTIME succeeded")
+	}
+	if res.CompletionError == "" {
+		t.Error("the result does not name why the assignment did not complete")
+	}
+	if res.Assignment.State == StateCompleted {
+		t.Error("the assignment completed despite the injected failure")
+	}
+}
+
+// TestExecuteReviewRequiresAnInProgressReviewer pins the review preconditions.
+func TestExecuteReviewRequiresAnInProgressReviewer(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	implID, _ := claimedAssignment(t, store, projectID, "alpha")
+
+	// An IMPLEMENTER is not a reviewer.
+	_, err := store.ExecuteReview(context.Background(), &fakeReviewRuntime{}, ExecuteReviewParams{
+		ID: implID, Epoch: 1, Brief: "b",
+	})
+	if err == nil {
+		t.Error("an implementer was asked to review")
+	}
+
+	rev := reviewFixture(t, store, implID, "charlie")
+	// A STALE epoch is refused.
+	_, err = store.ExecuteReview(context.Background(), &fakeReviewRuntime{}, ExecuteReviewParams{
+		ID: rev.id, Epoch: rev.epoch - 1, Brief: "b",
+	})
+	if err == nil {
+		t.Error("a stale review epoch was accepted")
+	}
+}
+
+// TestExecuteReviewRecordsOnlyHostDerivedEvidence is finding 3.
+//
+// The digest and the revision come FROM THE RESULT, never from a parameter.
+// This test gives the adapter no way to supply either.
+func TestExecuteReviewRecordsOnlyHostDerivedEvidence(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	implID, _ := claimedAssignment(t, store, projectID, "alpha")
+	rev := reviewFixture(t, store, implID, "charlie")
+
+	const hostRev = "1111111111111111111111111111111111111111"
+	fake := &fakeReviewRuntime{result: &oc.ReviewResult{
+		SessionID:        "ses_mpm_review_01",
+		ReviewedRevision: hostRev,
+		FindingsSHA256:   strings.Repeat("e", 64),
+		EvidencePath:     "/evidence/review.json",
+		Findings:         "the findings",
+		Outcome:          "succeeded",
+	}}
+
+	res, err := store.ExecuteReview(context.Background(), fake, ExecuteReviewParams{
+		ID: rev.id, Epoch: rev.epoch, Brief: "review it",
+	})
+	if err != nil {
+		t.Fatalf("execute-review: %v", err)
+	}
+	if res.ReviewedRevision != hostRev {
+		t.Errorf("reviewed revision %q, want the host-observed %q", res.ReviewedRevision, hostRev)
+	}
+	if res.FindingsSHA256 != strings.Repeat("e", 64) {
+		t.Errorf("digest %q, want the host-derived one", res.FindingsSHA256)
+	}
+	// And the row carries it.
+	got, err := store.Get(rev.id)
+	if err != nil {
+		t.Fatalf("read the reviewer: %v", err)
+	}
+	if got.ReviewedSHA != hostRev || got.FindingsSHA256 != strings.Repeat("e", 64) {
+		t.Errorf("the row carries %q/%q", got.ReviewedSHA, got.FindingsSHA256)
+	}
+	// The verdict is untouched: evidence is not a verdict.
+	if got.State == StateReviewPassed {
+		t.Error("capturing evidence recorded a review verdict")
+	}
+}
+
+// TestExecuteReviewRefusesWhenTheReviewerCannotRun pins the fail-closed rule.
+func TestExecuteReviewRefusesWhenTheReviewerCannotRun(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	implID, _ := claimedAssignment(t, store, projectID, "alpha")
+	rev := reviewFixture(t, store, implID, "charlie")
+
+	fake := &fakeReviewRuntime{err: oc.ErrReviewerUnavailable}
+	_, err := store.ExecuteReview(context.Background(), fake, ExecuteReviewParams{
+		ID: rev.id, Epoch: rev.epoch, Brief: "review it",
+	})
+	if err == nil {
+		t.Fatal("a review with no available reviewer was accepted")
+	}
+	if !errors.Is(err, oc.ErrReviewerUnavailable) {
+		t.Errorf("refused, but not as an unavailable reviewer: %v", err)
+	}
+	// The assignment carries NO evidence.
+	got, _ := store.Get(rev.id)
+	if got.ReviewedSHA != "" || got.FindingsSHA256 != "" {
+		t.Error("evidence was recorded for a review that never ran")
+	}
+}
+
+type fakeReviewRuntime struct {
+	result *oc.ReviewResult
+	err    error
+}
+
+func (f *fakeReviewRuntime) Review(_ context.Context, req oc.ReviewRequest) (*oc.ReviewResult, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	r := *f.result
+	r.SessionID = req.SessionID
+	return &r, nil
+}

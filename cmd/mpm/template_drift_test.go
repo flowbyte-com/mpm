@@ -271,9 +271,9 @@ func lineNoString(n int) string {
 //     or substring; flagging them is the defect the new matcher fixes.
 func TestIsStandaloneIdentified_BoundaryContract(t *testing.T) {
 	cases := []struct {
-		name  string
-		line  string
-		want  bool
+		name string
+		line string
+		want bool
 	}{
 		// MUST match — bare retired name in prose.
 		{"bare-name", "the retired mpm_session tool must not appear", true},

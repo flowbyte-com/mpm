@@ -676,7 +676,7 @@ func TestDoctorService_checkMemoryLLM_RemediationNeverIncludesPositionalSecret(t
 			}
 			// Catch the disallowed shape: `api_key sk-...` etc.
 			// The canonical helper always uses the no-arg / --stdin form.
-			if strings.Contains(d, "api_key \"" ) || strings.Contains(d, "api_key $") {
+			if strings.Contains(d, "api_key \"") || strings.Contains(d, "api_key $") {
 				t.Errorf("Details must not include positional api_key argv form: %q", d)
 			}
 		}
@@ -795,6 +795,7 @@ func TestDoctorService_checkMemoryLLM_NoConfigFile(t *testing.T) {
 		t.Errorf("absent config message = %q, want %q", check.Message, "no config file present")
 	}
 }
+
 // pins the semantic: when Components["memory"] is empty but
 // Profiles["default"] exists, the runtime falls through to the
 // default profile — and Doctor must report that resolution, not

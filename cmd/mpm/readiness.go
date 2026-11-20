@@ -55,20 +55,20 @@ import (
 
 // ReadinessItem is one row in the readiness check.
 //
-//   Name:    the subsystem being checked (e.g. "Database connected").
-//   OK:      true when the subsystem is ready (or the absence is
-//            an acceptable default state — e.g. no working context
-//            is not a failure, it's just an operator hint).
-//   Detail:  short human-readable summary; appears inline next to
-//            the marker on the dashboard.
-//   Hint:    optional next-action hint — used when the operator
-//            should run a specific command to resolve the issue
-//            (typically `mpm doctor`).
-//   Level:   0=OK (renders ✓), 1=INFO (renders ○ neutral), 2=WARN
-//            (renders ⚠). Absent → 0 for backwards compatibility.
-//            INFO distinguishes "optional subsystem absent" from
-//            "OK" so the dashboard can use the neutral marker
-//            instead of implying "missing = success".
+//	Name:    the subsystem being checked (e.g. "Database connected").
+//	OK:      true when the subsystem is ready (or the absence is
+//	         an acceptable default state — e.g. no working context
+//	         is not a failure, it's just an operator hint).
+//	Detail:  short human-readable summary; appears inline next to
+//	         the marker on the dashboard.
+//	Hint:    optional next-action hint — used when the operator
+//	         should run a specific command to resolve the issue
+//	         (typically `mpm doctor`).
+//	Level:   0=OK (renders ✓), 1=INFO (renders ○ neutral), 2=WARN
+//	         (renders ⚠). Absent → 0 for backwards compatibility.
+//	         INFO distinguishes "optional subsystem absent" from
+//	         "OK" so the dashboard can use the neutral marker
+//	         instead of implying "missing = success".
 //
 // Hint is intentionally separate from Detail because the two
 // serve different reading modes: Detail explains the state,
@@ -463,11 +463,11 @@ func checkDatabase(dm *mpminternal.DatabaseManager) ReadinessItem {
 // alone is not a defect. Only configured-but-unreachable and
 // configured-but-misconfigured remain warnings.
 //
-//   absent             → OK=true, "not configured · optional"
-//   disabled           → OK=true, "intentionally disabled"
-//   configured         → OK=true, "<model> · <provider>"
-//   unavailable        → OK=false, "configured but unreachable"
-//   misconfigured      → OK=false, "misconfigured: <reason>"
+//	absent             → OK=true, "not configured · optional"
+//	disabled           → OK=true, "intentionally disabled"
+//	configured         → OK=true, "<model> · <provider>"
+//	unavailable        → OK=false, "configured but unreachable"
+//	misconfigured      → OK=false, "misconfigured: <reason>"
 //
 // The configured message is rendered as `<model> · <provider>` via
 // formatProviderModel — NOT `model=<provider-name>`. The canonical

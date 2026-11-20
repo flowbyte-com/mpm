@@ -99,8 +99,7 @@ type BeginAttemptParams struct {
 // BeginAttempt persists a launch INTENT and returns the row.
 //
 // It requires:
-//   - the assignment to exist and to be an implementer (a reviewer's
-//     execution is driven by the review path, not by this one);
+//   - the assignment to exist and to have a role that executes;
 //   - the presented epoch to BE the assignment's current claim;
 //   - the assignment to be in a state that may be executed;
 //   - a non-empty, allow-listed runtime and session id.
@@ -127,9 +126,13 @@ func (s *Store) BeginAttempt(p BeginAttemptParams) (*SessionAttempt, error) {
 		if err != nil {
 			return err
 		}
-		if task.Role != RoleImplementer {
-			return fmt.Errorf("%w: %s is a %s; its execution belongs to the review path",
-				ErrConstraint, task.ID, task.Role)
+		// BOTH ROLES HAVE EXECUTION PATHS: an implementer runs in the
+		// worker containment, a reviewer in its own sandbox. The WORKER
+		// path refuses a reviewer in Execute; the mapping itself does not
+		// care which, because a review is executed and recovered the same
+		// way.
+		if task.Role != RoleImplementer && task.Role != RoleReviewer {
+			return fmt.Errorf("%w: %s is a %s", ErrConstraint, task.ID, task.Role)
 		}
 		if p.Epoch != task.ClaimEpoch {
 			return fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, task.ID, task.ClaimEpoch)
