@@ -255,8 +255,8 @@ func handleEvidenceList(args []string) int {
 		rows = []mpminternal.Evidence{}
 	}
 	resp := map[string]interface{}{
-		"success":  true,
-		"count":    len(rows),
+		"success": true,
+		"count":   len(rows),
 		"evidence": rows,
 	}
 	if artifactID != "" {

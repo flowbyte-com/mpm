@@ -189,3 +189,4 @@ func scrubKeyLikePairs(s string) string {
 	}
 	return keyLikePattern.ReplaceAllString(s, "$1=[REDACTED]")
 }
+

@@ -1,17 +1,15 @@
 // f_c3_f_c4_challenge_semantics_test.go — F-C3/F-C4 challenge semantics.
 //
 // F-C3: `mpm challenge <id> ""` (empty evidence) silently produced
-//
-//	a challenge with no rationale, leaving the audit trail
-//	without any justification for the weight demotion. The fix
-//	rejects empty/whitespace-only evidence with a usage error.
+//       a challenge with no rationale, leaving the audit trail
+//       without any justification for the weight demotion. The fix
+//       rejects empty/whitespace-only evidence with a usage error.
 //
 // F-C4: re-challenging an already-challenged memory stacked weight
-//
-//	demotions (-2 per call) and overwrote the prior
-//	challenged_theory_id in metadata, destroying the audit trail.
-//	The fix refuses the second challenge and points the operator
-//	at the restore-then-rechallenge workflow.
+//       demotions (-2 per call) and overwrote the prior
+//       challenged_theory_id in metadata, destroying the audit trail.
+//       The fix refuses the second challenge and points the operator
+//       at the restore-then-rechallenge workflow.
 package main
 
 import (

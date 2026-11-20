@@ -235,9 +235,7 @@ func TestHandleWhy_KindValidation(t *testing.T) {
 func TestPromoteTopicToMemory_ShapeContract(t *testing.T) {
 	// Compile-time pin: a future signature regression here is a hard
 	// break. The function must return two values (string, error).
-	if _ = (interface {
-		PromoteTopicToMemory(string, string, []string) (string, error)
-	}(nil)); false {
+	if _ = (interface{ PromoteTopicToMemory(string, string, []string) (string, error) }(nil)); false {
 		t.Fatalf("PromoteTopicToMemory signature regressed — must return (string, error)")
 	}
 }

@@ -92,8 +92,7 @@ func TestPrintWhyHelp_CanonicalHeading(t *testing.T) {
 // TestWhyHelp_KindVocabulary pins the exact `--kind` vocabulary
 // that handleWhy accepts. Update this test if the canonical set
 // changes. The verified set is:
-//
-//	memory, decision, theory, skill, lesson, work
+//   memory, decision, theory, skill, lesson, work
 func TestWhyHelp_KindVocabulary(t *testing.T) {
 	wantVocabulary := []string{"memory", "decision", "theory", "skill", "lesson", "work"}
 	for _, kind := range wantVocabulary {

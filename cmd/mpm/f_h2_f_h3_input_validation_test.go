@@ -1,15 +1,13 @@
 // f_h2_f_h3_input_validation_test.go — F-H2/F-H3 strict input validation.
 //
 // F-H2: `mpm memory add --expires-in garbage` silently produced a memory
-//
-//	with no TTL. The parseDuration error was swallowed by the handler.
-//	The fix surfaces the error and returns exit 1.
+//       with no TTL. The parseDuration error was swallowed by the handler.
+//       The fix surfaces the error and returns exit 1.
 //
 // F-H3: `mpm memory add --tags {"a":1}` stored the literal string as a
-//
-//	single tag, producing `["{\"a\":1}"]` in the database (a nested-
-//	JSON array wrapper that downstream consumers couldn't parse).
-//	The fix rejects JSON-shaped --tags explicitly and points at CSV.
+//       single tag, producing `["{\"a\":1}"]` in the database (a nested-
+//       JSON array wrapper that downstream consumers couldn't parse).
+//       The fix rejects JSON-shaped --tags explicitly and points at CSV.
 //
 // These tests exercise the public handler directly.
 package main

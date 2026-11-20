@@ -85,13 +85,13 @@ func NewRouter() *CommandRouter {
 		"review": {Name: "review", Description: "Start spaced-repetition review", MinArgs: 0, Help: printReviewHelp},
 
 		// Feature namespaces
-		"switch":     {Name: "switch", Description: "Switch persona/mode interactively", MinArgs: 0},
-		"reference":  {Name: "reference", Description: "Manage reference documents", MinArgs: 1},
-		"topic":      {Name: "topic", Description: "Manage topics", MinArgs: 1},
-		"session":    {Name: "session", Description: "Manage sessions", MinArgs: 1},
-		"handoff":    {Name: "handoff", Description: "Manage handoffs (write|read|list|shred)"},
-		"lesson":     {Name: "lesson", Description: "Manage lessons", MinArgs: 1},
-		"memory":     {Name: "memory", Description: "Manage memories", MinArgs: 1},
+		"switch":    {Name: "switch", Description: "Switch persona/mode interactively", MinArgs: 0},
+		"reference": {Name: "reference", Description: "Manage reference documents", MinArgs: 1},
+		"topic":     {Name: "topic", Description: "Manage topics", MinArgs: 1},
+		"session":   {Name: "session", Description: "Manage sessions", MinArgs: 1},
+		"handoff":   {Name: "handoff", Description: "Manage handoffs (write|read|list|shred)"},
+		"lesson":    {Name: "lesson", Description: "Manage lessons", MinArgs: 1},
+		"memory":    {Name: "memory", Description: "Manage memories", MinArgs: 1},
 		"assignment": {Name: "assignment", Description: "Manage assignments (inbox|show|history|deliver|claim|delegate|record-review|handoff|create-root|record-approval)", MinArgs: 1, Help: printAssignmentHelp},
 
 		// Ingest / cascade / migrate

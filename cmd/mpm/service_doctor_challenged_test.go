@@ -227,13 +227,13 @@ func TestIssue20_DoctorChallenged_ClampedRowIsWeightIncrease(t *testing.T) {
 // as `noRecordedBaseline` and conflated them. This test seeds
 // one of each and asserts that:
 //
-//  1. Both rows are counted in noPriorWeight (the coarser
-//     "weight-delta is undefined" bucket).
-//  2. ONLY the row with no prior retrieval_priority is counted
-//     in unrestorable (the strict subset).
-//  3. The doctor message surfaces the unrestorable count
-//     separately from the no-prior-weight count, so the
-//     operator can act on the distinction.
+//   1. Both rows are counted in noPriorWeight (the coarser
+//      "weight-delta is undefined" bucket).
+//   2. ONLY the row with no prior retrieval_priority is counted
+//      in unrestorable (the strict subset).
+//   3. The doctor message surfaces the unrestorable count
+//      separately from the no-prior-weight count, so the
+//      operator can act on the distinction.
 func TestIssue20_DoctorChallenged_MissingPriorVsUnrestorable(t *testing.T) {
 	dm := newTestDMForCmd(t)
 	svc := NewDoctorService(dm)

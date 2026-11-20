@@ -53,9 +53,9 @@ func TestF1_MalformedPayloadEmitsParseableEnvelope(t *testing.T) {
 
 func TestF1_LegacySessionAliasMapping(t *testing.T) {
 	cases := []struct {
-		action     string
-		wantTool   string
-		wantAction string
+		action      string
+		wantTool    string
+		wantAction  string
 	}{
 		{"end", "mpm_handoff", "write"},
 		{"handoff", "mpm_handoff", "read"},

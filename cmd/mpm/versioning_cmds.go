@@ -123,8 +123,8 @@ func handleDiff(args []string) int {
 // This second pass writes one prefix per decoded line and appends a
 // newline after each so the rendered shape is:
 //
-//	-alpha
-//	+beta
+//   -alpha
+//   +beta
 //
 // which is what `mpm debug diff-lines` documented as producing.
 //

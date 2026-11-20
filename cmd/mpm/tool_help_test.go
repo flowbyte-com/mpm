@@ -109,7 +109,7 @@ func TestExtractProperties_HandlesEnumConstraints(t *testing.T) {
 		}
 	}`)
 	props := extractProperties(schema)
-	if got := props["scope"].EnumValues; !equalStrings(got, []string{"local", "all", "shared"}) {
+	if got := props["scope"].EnumValues; !equalStrings(got, []string{"local","all","shared"}) {
 		t.Errorf("scope.EnumValues=%v, want [local all shared]", got)
 	}
 }

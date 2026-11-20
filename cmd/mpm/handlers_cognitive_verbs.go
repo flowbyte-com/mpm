@@ -76,13 +76,13 @@ func handleTheorize(args []string) int {
 // The substrate has record_decision, supersede, invalidate, show, list,
 // query — the CLI front door mirrors that vocabulary:
 //
-//	mpm decision add         → record_decision
-//	mpm decision supersede   → supersede an existing decision with a replacement
-//	mpm decision invalidate  → retire a decision without a replacement
-//	mpm decision show        → fetch a single decision by id (mirrors mpm call mpm_decisions show)
-//	mpm decision resolve     → (deprecated 2026-09-10) use 'supersede' instead
-//	mpm decision list        → list decisions (mirrors mpm decisions)
-//	mpm decision search      → keyword search (F-A2)
+//   mpm decision add         → record_decision
+//   mpm decision supersede   → supersede an existing decision with a replacement
+//   mpm decision invalidate  → retire a decision without a replacement
+//   mpm decision show        → fetch a single decision by id (mirrors mpm call mpm_decisions show)
+//   mpm decision resolve     → (deprecated 2026-09-10) use 'supersede' instead
+//   mpm decision list        → list decisions (mirrors mpm decisions)
+//   mpm decision search      → keyword search (F-A2)
 //
 // The `supersede` and `invalidate` subcommands route through the
 // substrate's mpm_decisions tool, which is the canonical source of
@@ -211,12 +211,12 @@ func handleTheory(args []string) int {
 // The substrate has save-skill (--file <path> | --stdin), list-skills,
 // and read-skill. Wave 3 adds cognitive-verb subcommands:
 //
-//	mpm skill add      ≡ mpm save-skill --file <path>
-//	mpm skill list     ≡ mpm list-skills
-//	mpm skill show     ≡ mpm read-skill <name>
-//	mpm skill search   ≡ mpm search-references (best-effort; if no
-//	                     standalone skill search exists, the
-//	                     command prints a guidance message)
+//   mpm skill add      ≡ mpm save-skill --file <path>
+//   mpm skill list     ≡ mpm list-skills
+//   mpm skill show     ≡ mpm read-skill <name>
+//   mpm skill search   ≡ mpm search-references (best-effort; if no
+//                        standalone skill search exists, the
+//                        command prints a guidance message)
 //
 // The internal MCP tool names (save_skill, list_skills, read_skill)
 // are stable per RFC §1. The cognitive-verb surface here is the

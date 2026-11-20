@@ -180,11 +180,11 @@ func TestUnquoteBareValue(t *testing.T) {
 	}{
 		{"\"hello\"", "hello"},
 		{"\"trailing space \"", "trailing space "}, // both quotes → strip
-		{"\"only-leading", "\"only-leading"},       // only leading → preserved
-		{"trailing-only\"", "trailing-only\""},     // only trailing → preserved
-		{"'single'", "'single'"},                   // single quotes preserved
+		{"\"only-leading", "\"only-leading"},        // only leading → preserved
+		{"trailing-only\"", "trailing-only\""},      // only trailing → preserved
+		{"'single'", "'single'"},                    // single quotes preserved
 		{"no-quotes", "no-quotes"},
-		{"\"\"", ""}, // empty quoted
+		{"\"\"", ""},                                 // empty quoted
 		{"", ""},
 	}
 	for _, c := range cases {
@@ -227,9 +227,9 @@ func TestParseTheoryArgs_PipePositional(t *testing.T) {
 // mapping the switch statement in handleResolveTheory uses.
 func TestResolveConclusionMapping(t *testing.T) {
 	cases := []struct {
-		in         string
+		in        string
 		wantStatus string
-		wantError  bool
+		wantError bool
 	}{
 		{"confirmed", "proven", false},
 		{"proven", "proven", false},

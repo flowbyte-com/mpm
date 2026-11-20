@@ -529,16 +529,16 @@ func handleLessonProposals(args []string) int {
 
 	if jsonOutput {
 		type proposalEntry struct {
-			ID            string   `json:"id"`
-			Type          string   `json:"type"`
-			Content       string   `json:"content"`
-			Tags          []string `json:"tags"`
-			Created       string   `json:"created"`
-			Status        string   `json:"status"`
-			ProposedBy    string   `json:"proposed_by_framework"`
-			ProposedModel string   `json:"proposed_by_model"`
-			SessionID     string   `json:"source_session_id"`
-			PromotedID    string   `json:"promoted_lesson_id"`
+			ID           string   `json:"id"`
+			Type         string   `json:"type"`
+			Content      string   `json:"content"`
+			Tags         []string `json:"tags"`
+			Created      string   `json:"created"`
+			Status       string   `json:"status"`
+			ProposedBy   string   `json:"proposed_by_framework"`
+			ProposedModel string  `json:"proposed_by_model"`
+			SessionID    string   `json:"source_session_id"`
+			PromotedID   string   `json:"promoted_lesson_id"`
 		}
 		entries := make([]proposalEntry, 0, len(proposals))
 		for _, p := range proposals {

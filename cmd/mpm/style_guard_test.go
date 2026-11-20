@@ -10,9 +10,9 @@
 // Allowlist:
 //   - cmd/mpm/render/    — the shared renderer itself, where styles live
 //   - cmd/mpm/handlers_help.go — uses Unicode-box help grammar;
-//     covered separately by the help visual test
+//                              covered separately by the help visual test
 //   - cmd/mpm/handlers_tour.go — uses lipgloss for the in-product tour;
-//     intentional, documented exemption
+//                              intentional, documented exemption
 package main
 
 import (
@@ -48,13 +48,13 @@ var styleGuardAllowlist = map[string]string{
 	"help_safety_router_test.go":  "test scaffolding",
 	"help_parity_test.go":         "test scaffolding",
 	"error_matrix_test.go":        "test scaffolding",
-	"renderer_dashboard.go":       "compatibility shim for legacy dashboard renderers; not a public handler",
-	"renderer_terminal.go":        "compatibility shim for legacy terminal helpers; not a public handler",
-	"route_render.go":             "legacy route-rendering helper; not a public handler",
-	"render_manual_route.go":      "legacy manual-route rendering; not a public handler",
-	"main.go":                     "owns the cognitive-interface help panel and the TUI selector",
-	"tty_select.go":               "TUI selector for the cognitive-interface panel",
-	"handlers_memory.go":          "doc comments reference historical 808 PRIME branding as removed — not user-facing output",
+	"renderer_dashboard.go":      "compatibility shim for legacy dashboard renderers; not a public handler",
+	"renderer_terminal.go":       "compatibility shim for legacy terminal helpers; not a public handler",
+	"route_render.go":            "legacy route-rendering helper; not a public handler",
+	"render_manual_route.go":     "legacy manual-route rendering; not a public handler",
+	"main.go":                    "owns the cognitive-interface help panel and the TUI selector",
+	"tty_select.go":              "TUI selector for the cognitive-interface panel",
+	"handlers_memory.go":         "doc comments reference historical 808 PRIME branding as removed — not user-facing output",
 }
 
 // structuralLipglossAllowlist lists SPECIFIC lipgloss.NewStyle

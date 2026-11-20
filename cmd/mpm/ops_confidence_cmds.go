@@ -14,15 +14,15 @@ import (
 // Confidence is intentionally NOT a top-level `mpm confidence`
 // command. The canonical public surface is:
 //
-//	mpm ops confidence <show|recompute|changes|trend|explain|history> --artifact <id>
-//	  — JSON-only engine-room surface (machine-friendly).
+//   mpm ops confidence <show|recompute|changes|trend|explain|history> --artifact <id>
+//     — JSON-only engine-room surface (machine-friendly).
 //
-//	mpm why <id> [--kind <memory|decision|theory|skill|lesson|work>]
-//	  — human-readable per-event confidence + provenance for any
-//	    artifact.
+//   mpm why <id> [--kind <memory|decision|theory|skill|lesson|work>]
+//     — human-readable per-event confidence + provenance for any
+//       artifact.
 //
-//	mpm call mpm_confidence --payload '{"action":"...","params":{...}}'
-//	  — universal machine interface via the MCP substrate.
+//   mpm call mpm_confidence --payload '{"action":"...","params":{...}}'
+//     — universal machine interface via the MCP substrate.
 //
 // The CLI is a thin adapter over the substrate's mpm_confidence
 // tool (internal/core/tools); it is JSON-only by design so the

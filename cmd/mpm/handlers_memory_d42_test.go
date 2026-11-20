@@ -28,11 +28,10 @@ import (
 
 // TestExtractLimitFlag_AllForms pins the parser's contract for the
 // four supported forms:
-//
-//	--limit 5      (space-separated, long)
-//	--limit=5      (equals, long)
-//	-l 5           (space-separated, short)
-//	-l=5           (equals, short)
+//   --limit 5      (space-separated, long)
+//   --limit=5      (equals, long)
+//   -l 5           (space-separated, short)
+//   -l=5           (equals, short)
 func TestExtractLimitFlag_AllForms(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -139,9 +138,9 @@ func TestHandleMemorySearch_RespectsLimitFlag(t *testing.T) {
 	}
 
 	var env struct {
-		Success  bool                     `json:"success"`
-		Query    string                   `json:"query"`
-		Count    int                      `json:"count"`
+		Success  bool `json:"success"`
+		Query    string `json:"query"`
+		Count    int `json:"count"`
 		Memories []map[string]interface{} `json:"memories"`
 	}
 	if err := json.Unmarshal([]byte(buf.String()), &env); err != nil {

@@ -3,9 +3,9 @@
 // F-H4: `mpm memory add --json` and `mpm call mpm_memory save` returned
 // envelopes with disjoint field sets:
 //
-//	CLI:    {success, id, content, tags, weight, suggested_topics}
-//	MCP:    {success, id, content, tags, weight, pointer,
-//	         content_truncated, content_bytes, note}
+//   CLI:    {success, id, content, tags, weight, suggested_topics}
+//   MCP:    {success, id, content, tags, weight, pointer,
+//            content_truncated, content_bytes, note}
 //
 // Both surfaces wrote to the same Memory row but emitted different JSON.
 // An agent that automated against the CLI surface and the MCP surface had
@@ -122,16 +122,16 @@ func TestF_H4_CLIEnvelopeShapeMatchesMCP(t *testing.T) {
 	//   - the shared parity set
 	//   - the CLI-only suggested_topics field
 	allowed := map[string]bool{
-		"success":           true,
-		"id":                true,
-		"content":           true,
-		"tags":              true,
-		"weight":            true,
-		"pointer":           true,
+		"success":          true,
+		"id":               true,
+		"content":          true,
+		"tags":             true,
+		"weight":           true,
+		"pointer":          true,
 		"content_truncated": true,
-		"content_bytes":     true,
-		"note":              true,
-		"suggested_topics":  true, // CLI-only hint
+		"content_bytes":    true,
+		"note":             true,
+		"suggested_topics": true, // CLI-only hint
 	}
 	for k := range env {
 		if !allowed[k] {

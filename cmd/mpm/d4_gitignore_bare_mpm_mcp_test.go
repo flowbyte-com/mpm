@@ -10,10 +10,10 @@
 //
 // Reproducer (pre-fix):
 //
-//	$ git check-ignore -v cmd/mpm-mcp/call.go
-//	.gitignore:109:mpm-mcp    cmd/mpm-mcp/call.go
-//	$ git check-ignore -v cmd/mpm-mcp/main.go
-//	.gitignore:109:mpm-mcp    cmd/mpm-mcp/main.go
+//   $ git check-ignore -v cmd/mpm-mcp/call.go
+//   .gitignore:109:mpm-mcp    cmd/mpm-mcp/call.go
+//   $ git check-ignore -v cmd/mpm-mcp/main.go
+//   .gitignore:109:mpm-mcp    cmd/mpm-mcp/main.go
 //
 // A bare pattern (no leading slash, no slashes, no wildcards) is the
 // exact shape that gitignore matches ANY path with that basename.

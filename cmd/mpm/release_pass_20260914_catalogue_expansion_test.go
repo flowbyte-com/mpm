@@ -132,15 +132,15 @@ func TestSimplify_RegistryResolvesBrandedIDsByString(t *testing.T) {
 // exposes the canonical base URLs that wire inference consults.
 func TestSimplify_BrandedProvidersKeepCanonicalBaseURL(t *testing.T) {
 	cases := map[string]string{
-		"openai":            "https://api.openai.com/v1",
-		"anthropic":         "https://api.anthropic.com/v1",
-		"cohere":            "https://api.cohere.com/v1",
-		"google-gemini":     "https://generativelanguage.googleapis.com/v1beta/openai",
-		"minimax":           "https://api.minimax.io/anthropic/v1",
-		"mistral":           "https://api.mistral.ai/v1",
-		"openrouter":        "https://openrouter.ai/api/v1",
-		"xai":               "https://api.x.ai/v1",
-		"ollama":            "http://localhost:11434",
+		"openai":          "https://api.openai.com/v1",
+		"anthropic":       "https://api.anthropic.com/v1",
+		"cohere":          "https://api.cohere.com/v1",
+		"google-gemini":   "https://generativelanguage.googleapis.com/v1beta/openai",
+		"minimax":         "https://api.minimax.io/anthropic/v1",
+		"mistral":         "https://api.mistral.ai/v1",
+		"openrouter":      "https://openrouter.ai/api/v1",
+		"xai":             "https://api.x.ai/v1",
+		"ollama":          "http://localhost:11434",
 		"openai-compatible": "http://localhost:1234/v1",
 	}
 	for pid, wantURL := range cases {

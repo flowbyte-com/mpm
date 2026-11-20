@@ -213,7 +213,6 @@ func TestWorkItemList_HumanModeNotJSON(t *testing.T) {
 // runs:
 //   - default human mode → counts rows by ` : ` label separator
 //   - JSON mode → parses envelope and counts `works[*]`
-//
 // and asserts both counts equal N.
 func TestWorkItemList_HumanAndJsonShareData(t *testing.T) {
 	bin := mpmBinForTest()

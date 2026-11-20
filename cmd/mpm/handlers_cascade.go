@@ -7,10 +7,9 @@
 // cascade thread.
 //
 // Exit codes:
-//
-//	0 = drained (queue empty)
-//	1 = runtime error
-//	2 = timeout (--max-iterations exceeded)
+//   0 = drained (queue empty)
+//   1 = runtime error
+//   2 = timeout (--max-iterations exceeded)
 package main
 
 import (
@@ -51,9 +50,9 @@ func cascadeInvocationProvenance() *mpminternal.InvocationProvenance {
 		fw = "mpm-cli"
 	}
 	return &mpminternal.InvocationProvenance{
-		InvocationID:       invID,
-		MPMSessionID:       mpminternal.CurrentMPMSessionID(),
-		FrameworkName:      fw,
+		InvocationID:      invID,
+		MPMSessionID:      mpminternal.CurrentMPMSessionID(),
+		FrameworkName:     fw,
 		FrameworkSessionID: os.Getenv("MPM_PROVENANCE_FRAMEWORK_SESSION_ID"),
 	}
 }
@@ -316,9 +315,9 @@ func handleListDeadLetters(args []string) int {
 			id, eventID, deadArtifactID, deadArtifactType string
 			downstreamArtifactID, downstreamArtifactType  string
 			cascadeDepth                                  int
-			reason, status, terminalError                 string
-			attemptCount                                  int
-			createdAt, updatedAt                          int64
+			reason, status, terminalError                string
+			attemptCount                                 int
+			createdAt, updatedAt                         int64
 		)
 		if err := rows.Scan(&id, &eventID, &deadArtifactID, &deadArtifactType,
 			&downstreamArtifactID, &downstreamArtifactType,

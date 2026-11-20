@@ -119,11 +119,11 @@ func (s *WorkingContextService) GetCurrent(sessionID string) (*WorkingContext, e
 // Promote converts an ephemeral working context into a permanent
 // memory. Behaviour:
 //
-//  1. Read current scratchpad via Store.
-//  2. Build content from Thesis + Supporting.
-//  3. Save via canonical MemoryWriter (which routes through
-//     SaveMemoryWithExtras → scanner → atomic INSERT).
-//  4. Delete scratchpad via Store.
+//   1. Read current scratchpad via Store.
+//   2. Build content from Thesis + Supporting.
+//   3. Save via canonical MemoryWriter (which routes through
+//      SaveMemoryWithExtras → scanner → atomic INSERT).
+//   4. Delete scratchpad via Store.
 //
 // Step 1 happens BEFORE Step 4 — if 3 fails the scratchpad is
 // preserved for retry. The atomicity guarantees are inherited from

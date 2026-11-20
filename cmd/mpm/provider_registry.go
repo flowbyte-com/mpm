@@ -117,11 +117,11 @@ func (p ProviderDefinition) Has(c Capability) bool {
 //
 // Classification (per the release-pass brief):
 //
-//	A. fully supported by an existing adapter
-//	B. supportable through an existing generic/OpenAI-compatible
-//	   adapter
-//	C. requires a small adapter in this pass
-//	D. unsupported / future work (deliberately not exposed)
+//   A. fully supported by an existing adapter
+//   B. supportable through an existing generic/OpenAI-compatible
+//      adapter
+//   C. requires a small adapter in this pass
+//   D. unsupported / future work (deliberately not exposed)
 //
 // Exposed entries are A/B/C only. D entries are NOT added to the
 // public menu even if their name is familiar — the brief
@@ -129,12 +129,12 @@ func (p ProviderDefinition) Has(c Capability) bool {
 var canonicalProviders = []ProviderDefinition{
 	// A: first-class adapters already wired in substrate.
 	{
-		ID:             "ollama",
-		DisplayName:    "Ollama (local)",
-		Capabilities:   CapGenerate | CapEmbed,
-		DefaultModel:   "llama3",
-		DefaultBaseURL: "http://localhost:11434",
-		NeedsAPIKey:    false,
+		ID:              "ollama",
+		DisplayName:     "Ollama (local)",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "llama3",
+		DefaultBaseURL:  "http://localhost:11434",
+		NeedsAPIKey:     false,
 	},
 
 	// A: OpenAI-compatible. The canonical "wire" abstraction
@@ -145,12 +145,12 @@ var canonicalProviders = []ProviderDefinition{
 	// example only (LM Studio on 1234 is the most common local
 	// endpoint); operators override per their stack.
 	{
-		ID:             "openai-compatible",
-		DisplayName:    "OpenAI-compatible (LocalAI / LM Studio / vLLM)",
-		Capabilities:   CapGenerate | CapEmbed,
-		DefaultModel:   "", // operator-supplied; no single flagship
-		DefaultBaseURL: "http://localhost:1234/v1",
-		NeedsAPIKey:    false,
+		ID:              "openai-compatible",
+		DisplayName:     "OpenAI-compatible (LocalAI / LM Studio / vLLM)",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "", // operator-supplied; no single flagship
+		DefaultBaseURL:  "http://localhost:1234/v1",
+		NeedsAPIKey:     false,
 	},
 
 	// B: Anthropic-protocol. Synthesis supports wireAnthropic;
@@ -160,12 +160,12 @@ var canonicalProviders = []ProviderDefinition{
 	// (operators type any current Anthropic model ID at the
 	// Custom prompt; runtime reads Profiles[...].Model verbatim).
 	{
-		ID:             "anthropic",
-		DisplayName:    "Anthropic",
-		Capabilities:   CapGenerate,
-		DefaultModel:   "",
-		DefaultBaseURL: "https://api.anthropic.com/v1",
-		NeedsAPIKey:    true,
+		ID:              "anthropic",
+		DisplayName:     "Anthropic",
+		Capabilities:    CapGenerate,
+		DefaultModel:    "",
+		DefaultBaseURL:  "https://api.anthropic.com/v1",
+		NeedsAPIKey:     true,
 	},
 
 	// B: Cohere exposes an OpenAI-compat endpoint at
@@ -176,12 +176,12 @@ var canonicalProviders = []ProviderDefinition{
 	// CapGenerate only. DefaultModel is empty per the
 	// simplification rule.
 	{
-		ID:             "cohere",
-		DisplayName:    "Cohere",
-		Capabilities:   CapGenerate,
-		DefaultModel:   "",
-		DefaultBaseURL: "https://api.cohere.com/v1",
-		NeedsAPIKey:    true,
+		ID:              "cohere",
+		DisplayName:     "Cohere",
+		Capabilities:    CapGenerate,
+		DefaultModel:    "",
+		DefaultBaseURL:  "https://api.cohere.com/v1",
+		NeedsAPIKey:     true,
 	},
 
 	// B: OpenAI API proper. Embedding via /v1/embeddings uses
@@ -191,12 +191,12 @@ var canonicalProviders = []ProviderDefinition{
 	// who've set DefaultModel manually continue to use it;
 	// runtime reads Profiles[...].Model verbatim.
 	{
-		ID:             "openai",
-		DisplayName:    "OpenAI",
-		Capabilities:   CapGenerate | CapEmbed,
-		DefaultModel:   "",
-		DefaultBaseURL: "https://api.openai.com/v1",
-		NeedsAPIKey:    true,
+		ID:              "openai",
+		DisplayName:     "OpenAI",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "",
+		DefaultBaseURL:  "https://api.openai.com/v1",
+		NeedsAPIKey:     true,
 	},
 
 	// B: Google Gemini exposes an OpenAI-compat endpoint at
@@ -204,24 +204,24 @@ var canonicalProviders = []ProviderDefinition{
 	// Capability is generate + embed. DefaultModel is empty
 	// per the simplification rule.
 	{
-		ID:             "google-gemini",
-		DisplayName:    "Google Gemini",
-		Capabilities:   CapGenerate | CapEmbed,
-		DefaultModel:   "",
-		DefaultBaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
-		NeedsAPIKey:    true,
+		ID:              "google-gemini",
+		DisplayName:     "Google Gemini",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "",
+		DefaultBaseURL:  "https://generativelanguage.googleapis.com/v1beta/openai",
+		NeedsAPIKey:     true,
 	},
 
 	// B: MiniMax is Anthropic-protocol. DefaultModel is empty per
 	// the simplification rule (operators type any current MiniMax
 	// model ID at the Custom prompt).
 	{
-		ID:             "minimax",
-		DisplayName:    "MiniMax",
-		Capabilities:   CapGenerate,
-		DefaultModel:   "",
-		DefaultBaseURL: "https://api.minimax.io/anthropic/v1",
-		NeedsAPIKey:    true,
+		ID:              "minimax",
+		DisplayName:     "MiniMax",
+		Capabilities:    CapGenerate,
+		DefaultModel:    "",
+		DefaultBaseURL:  "https://api.minimax.io/anthropic/v1",
+		NeedsAPIKey:     true,
 	},
 
 	// B: Mistral AI exposes an OpenAI-compat endpoint at
@@ -231,12 +231,12 @@ var canonicalProviders = []ProviderDefinition{
 	// OpenAICompatibleProvider works against Mistral unchanged.
 	// DefaultModel is empty per the simplification rule.
 	{
-		ID:             "mistral",
-		DisplayName:    "Mistral AI",
-		Capabilities:   CapGenerate | CapEmbed,
-		DefaultModel:   "",
-		DefaultBaseURL: "https://api.mistral.ai/v1",
-		NeedsAPIKey:    true,
+		ID:              "mistral",
+		DisplayName:     "Mistral AI",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "",
+		DefaultBaseURL:  "https://api.mistral.ai/v1",
+		NeedsAPIKey:     true,
 	},
 
 	// B: OpenRouter is the multi-model aggregator. It
@@ -247,34 +247,34 @@ var canonicalProviders = []ProviderDefinition{
 	// recognises OpenRouter for backwards compatibility
 	// with existing profiles by ID.
 	{
-		ID:             "openrouter",
-		DisplayName:    "OpenRouter",
-		Capabilities:   CapGenerate | CapEmbed,
-		DefaultModel:   "",
-		DefaultBaseURL: "https://openrouter.ai/api/v1",
-		NeedsAPIKey:    true,
+		ID:              "openrouter",
+		DisplayName:     "OpenRouter",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "",
+		DefaultBaseURL:  "https://openrouter.ai/api/v1",
+		NeedsAPIKey:     true,
 	},
 
 	// B: xAI exposes an OpenAI-compat endpoint at api.x.ai/v1.
 	// DefaultModel is empty per the simplification rule.
 	{
-		ID:             "xai",
-		DisplayName:    "xAI",
-		Capabilities:   CapGenerate,
-		DefaultModel:   "",
-		DefaultBaseURL: "https://api.x.ai/v1",
-		NeedsAPIKey:    true,
+		ID:              "xai",
+		DisplayName:     "xAI",
+		Capabilities:    CapGenerate,
+		DefaultModel:    "",
+		DefaultBaseURL:  "https://api.x.ai/v1",
+		NeedsAPIKey:     true,
 	},
 
 	// A: Custom is the expert escape hatch. Always first in
 	// every menu. No defaults, no discovery.
 	{
-		ID:             "custom",
-		DisplayName:    "Custom (I know what I'm doing)",
-		Capabilities:   CapGenerate | CapEmbed,
-		DefaultModel:   "",
-		DefaultBaseURL: "",
-		NeedsAPIKey:    false,
+		ID:              "custom",
+		DisplayName:     "Custom (I know what I'm doing)",
+		Capabilities:    CapGenerate | CapEmbed,
+		DefaultModel:    "",
+		DefaultBaseURL:  "",
+		NeedsAPIKey:     false,
 	},
 }
 

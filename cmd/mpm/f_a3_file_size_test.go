@@ -5,11 +5,11 @@
 // landed with length(content)=65536 and the operator got no warning.
 //
 // The fix:
-//  1. Recognize --file <path> as a first-class flag
-//  2. Read the file in full (no 64KB truncation)
-//  3. Cap at memoryMaxFileBytes (100 MiB) with an explicit error
-//  4. Reject --file alongside --fact or positional content
-//  5. Reject --file <missing path> with a stat error
+//   1. Recognize --file <path> as a first-class flag
+//   2. Read the file in full (no 64KB truncation)
+//   3. Cap at memoryMaxFileBytes (100 MiB) with an explicit error
+//   4. Reject --file alongside --fact or positional content
+//   5. Reject --file <missing path> with a stat error
 //
 // These tests exercise the public handler with seeded temp files.
 package main

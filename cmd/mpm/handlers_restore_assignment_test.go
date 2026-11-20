@@ -68,20 +68,12 @@ var assignmentRestoreTables = []string{
 	"projects",
 	"agent_tasks",
 	"agent_task_events",
-	// Continuity 001, PR 3. AFTER agent_tasks, because it holds a
-	// foreign key to it — the dump creates tables in this order.
-	"agent_task_sessions",
 }
 
 // assignmentOwnedTables are the tables this change creates.
 var assignmentOwnedTables = []string{
 	"agent_tasks",
 	"agent_task_events",
-	// Continuity 001, PR 3: the assignment-to-session mapping. It is
-	// owned by the same migration family, so it belongs in the same
-	// restore inventory — a dump that omitted it would restore a
-	// database whose executed assignments had lost their sessions.
-	"agent_task_sessions",
 }
 
 // assignmentRestoreIndexes are the seven indexes the approved DDL
@@ -94,11 +86,6 @@ var assignmentRestoreIndexes = []string{
 	"idx_agent_tasks_recipient_state",
 	"idx_agent_tasks_root",
 	"idx_agent_tasks_state_updated",
-	// PR 3's four indexes.
-	"idx_agent_task_sessions_epoch",
-	"idx_agent_task_sessions_native",
-	"idx_agent_task_sessions_task_attempt",
-	"idx_agent_task_sessions_task_state",
 }
 
 // assignmentRestoreTriggers are the thirty triggers the approved
@@ -143,13 +130,6 @@ var assignmentRestoreTriggers = []string{
 	"trg_agent_tasks_tree_shape",
 	"trg_agent_tasks_tree_shape_on_update",
 	"trg_agent_tasks_unclaimed_at_creation",
-	// PR 3's six triggers.
-	"trg_agent_task_sessions_attempt_is_next",
-	"trg_agent_task_sessions_epoch_is_current",
-	"trg_agent_task_sessions_id_is_not_reused",
-	"trg_agent_task_sessions_identity_is_immutable",
-	"trg_agent_task_sessions_not_deletable",
-	"trg_agent_task_sessions_state_moves_forward",
 }
 
 // seedAssignmentRows writes one project, one well-formed ROOT assignment
@@ -257,18 +237,6 @@ func buildAssignmentDump(t *testing.T, db *sql.DB) string {
 			`SELECT 'INSERT INTO "%s" (%s) VALUES (' || group_concat(%s, ',') || ');' FROM "%s"`,
 			table, strings.Join(quoted, ", "), strings.Join(values, " || ',' || "), table,
 		)
-
-		// AN EMPTY TABLE RENDERS NOTHING. group_concat over zero rows is
-		// NULL, and scanning NULL into a string fails — so a table the
-		// fixture leaves empty (as agent_task_sessions legitimately is)
-		// would abort the dump rather than produce no INSERTs for it.
-		var count int
-		require.NoError(t, db.QueryRow(
-			fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, table)).Scan(&count),
-			"count the rows of %s", table)
-		if count == 0 {
-			continue
-		}
 
 		rows, err := db.Query(q)
 		require.NoError(t, err, "render the rows of %s", table)
@@ -562,18 +530,6 @@ func buildAssignmentDumpInDumpOrder(t *testing.T, db *sql.DB) string {
 			`SELECT 'INSERT INTO "%s" (%s) VALUES (' || group_concat(%s, ',') || ');' FROM "%s"`,
 			table, strings.Join(quoted, ", "), strings.Join(values, " || ',' || "), table,
 		)
-		// AN EMPTY TABLE RENDERS NOTHING. group_concat over zero rows is
-		// NULL, and scanning NULL into a string fails — so a table the
-		// fixture leaves empty (as agent_task_sessions legitimately is)
-		// would abort the dump rather than produce no INSERTs for it.
-		var count int
-		require.NoError(t, db.QueryRow(
-			fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, table)).Scan(&count),
-			"count the rows of %s", table)
-		if count == 0 {
-			continue
-		}
-
 		rows, err := db.Query(q)
 		require.NoError(t, err, "render the rows of %s", table)
 		for rows.Next() {

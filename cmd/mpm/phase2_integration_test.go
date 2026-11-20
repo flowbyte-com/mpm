@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/flowbyte-com/mpm/internal/blobstore"
 	mpmcore "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/tools"
-	"github.com/flowbyte-com/mpm/internal/blobstore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,14 +29,12 @@ import (
 // pointer-native recall path for both memory and lesson projections.
 //
 // Path A: projection → pointer → resolve (memory)
-//
-//	mpm_memory query projection=true → pointer
-//	mpm_resolve(mpm://memory/<id>) → full content
+//   mpm_memory query projection=true → pointer
+//   mpm_resolve(mpm://memory/<id>) → full content
 //
 // Path B: projection → pointer → resolve (lesson)
-//
-//	mpm_lessons search projection=true → pointer
-//	mpm_resolve(mpm://lesson/<id>) → full content
+//   mpm_lessons search projection=true → pointer
+//   mpm_resolve(mpm://lesson/<id>) → full content
 //
 // Invariants verified:
 //   - projection=true returns mode:"projected" and no full content field
@@ -53,10 +51,10 @@ func TestPhase2_ProjectionPointerResolveChain(t *testing.T) {
 	memResult, err := runHandler(dm, "mpm_memory", map[string]interface{}{
 		"action": "save",
 		"params": map[string]interface{}{
-			"fact":       "SQLite uses WAL mode by default for concurrent readers",
+			"fact":      "SQLite uses WAL mode by default for concurrent readers",
 			"collection": "memories",
-			"tags":       []string{"sqlite", "concurrency"},
-			"weight":     8,
+			"tags":      []string{"sqlite", "concurrency"},
+			"weight":    8,
 		},
 	})
 	require.NoError(t, err)
@@ -253,9 +251,9 @@ func (m *mockPhase2Resolver) Resolve(ctx context.Context, p tools.Pointer, opts 
 		return tools.Resolution{
 			Pointer:     "mpm://memory/" + p.ID,
 			ContentType: "text/plain",
-			Reader:      io.NopCloser(strings.NewReader(readerContent)),
-			Metadata:    mem,
-			Bounded:     bounded,
+			Reader:     io.NopCloser(strings.NewReader(readerContent)),
+			Metadata:   mem,
+			Bounded:    bounded,
 		}, nil
 
 	case "lesson":
@@ -266,9 +264,9 @@ func (m *mockPhase2Resolver) Resolve(ctx context.Context, p tools.Pointer, opts 
 		return tools.Resolution{
 			Pointer:     "mpm://lesson/" + p.ID,
 			ContentType: "text/plain",
-			Reader:      io.NopCloser(strings.NewReader(lesson.Content)),
-			Metadata:    map[string]interface{}{"id": lesson.ID, "content": lesson.Content, "type": string(lesson.Type), "tags": lesson.Tags},
-			Bounded:     false,
+			Reader:     io.NopCloser(strings.NewReader(lesson.Content)),
+			Metadata:   map[string]interface{}{"id": lesson.ID, "content": lesson.Content, "type": string(lesson.Type), "tags": lesson.Tags},
+			Bounded:    false,
 		}, nil
 
 	default:
@@ -391,9 +389,9 @@ func (a *testArtifactResolverAdapter) resolveBlob(ctx context.Context, p tools.P
 	return tools.Resolution{
 		Pointer:     "mpm://blob/" + p.ID,
 		ContentType: meta.ContentType,
-		Reader:      io.NopCloser(strings.NewReader(string(content))),
-		Metadata:    nil,
-		Bounded:     false,
+		Reader:     io.NopCloser(strings.NewReader(string(content))),
+		Metadata:   nil,
+		Bounded:    false,
 	}, nil
 }
 
@@ -416,9 +414,9 @@ func (a *testArtifactResolverAdapter) resolveMemory(ctx context.Context, p tools
 	return tools.Resolution{
 		Pointer:     "mpm://memory/" + p.ID,
 		ContentType: "text/plain",
-		Reader:      io.NopCloser(strings.NewReader(readerContent)),
-		Metadata:    mem,
-		Bounded:     bounded,
+		Reader:     io.NopCloser(strings.NewReader(readerContent)),
+		Metadata:   mem,
+		Bounded:    bounded,
 	}, nil
 }
 
@@ -431,13 +429,13 @@ func (a *testArtifactResolverAdapter) resolveLesson(ctx context.Context, p tools
 	return tools.Resolution{
 		Pointer:     "mpm://lesson/" + p.ID,
 		ContentType: "text/plain",
-		Reader:      io.NopCloser(strings.NewReader(lesson.Content)),
+		Reader:     io.NopCloser(strings.NewReader(lesson.Content)),
 		Metadata: map[string]interface{}{
-			"id":                  lesson.ID,
-			"type":                string(lesson.Type),
-			"tags":                lesson.Tags,
+			"id":                 lesson.ID,
+			"type":               string(lesson.Type),
+			"tags":               lesson.Tags,
 			"reinforcement_count": lesson.ReinforcementCount,
-			"created":             lesson.Created,
+			"created":            lesson.Created,
 		},
 		Bounded: false,
 	}, nil
@@ -458,9 +456,9 @@ func (a *testArtifactResolverAdapter) resolveTheory(ctx context.Context, p tools
 	return tools.Resolution{
 		Pointer:     "mpm://theory/" + p.ID,
 		ContentType: "text/plain",
-		Reader:      io.NopCloser(strings.NewReader(content)),
-		Metadata:    mem,
-		Bounded:     false,
+		Reader:     io.NopCloser(strings.NewReader(content)),
+		Metadata:   mem,
+		Bounded:    false,
 	}, nil
 }
 

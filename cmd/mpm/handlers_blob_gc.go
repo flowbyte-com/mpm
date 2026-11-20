@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"time"
 
+	blobstorefs "github.com/flowbyte-com/mpm/internal/blobstore"
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/mpmcli"
 	"github.com/flowbyte-com/mpm-core/usererror"
-	blobstorefs "github.com/flowbyte-com/mpm/internal/blobstore"
 )
 
 // blobGC_DB allows test injection. If nil, handleBlobGC uses getDB().

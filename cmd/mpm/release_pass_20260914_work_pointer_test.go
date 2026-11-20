@@ -36,7 +36,7 @@ func TestWorkPointer_NormalizeStripsPrefix(t *testing.T) {
 		{"mpm://work/d72058d7e8e71b44", "d72058d7e8e71b44"},
 		{"mpm://work/d72058d7e8e71b44/", "d72058d7e8e71b44"},
 		{"  mpm://work/d72058d7e8e71b44  ", "d72058d7e8e71b44"},
-		{"mpm://work/", "mpm://work/"}, // empty id preserved
+		{"mpm://work/", "mpm://work/"},               // empty id preserved
 		{"", ""},
 		{"mpm://memory/d72058d7e8e71b44", "mpm://memory/d72058d7e8e71b44"}, // wrong scheme preserved
 	}

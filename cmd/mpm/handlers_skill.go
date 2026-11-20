@@ -472,7 +472,6 @@ Examples
 MCP equivalent (canonical for agents)
   mpm call mpm_skills --payload '{"action":"workshop","params":{<workshop_request>}}'`)
 }
-
 // handleSkillDelete is `mpm skill delete <id>` — soft delete. The
 // substrate marks the row's deleted_at; the row remains readable
 // (per the soft-delete contract) and is recoverable via

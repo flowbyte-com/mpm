@@ -15,8 +15,8 @@ import (
 	"sync"
 	"testing"
 
-	mpminternal "github.com/flowbyte-com/mpm-core"
 	_ "github.com/mattn/go-sqlite3"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // capturedRespond is the in-memory sink used by captureRespond so the

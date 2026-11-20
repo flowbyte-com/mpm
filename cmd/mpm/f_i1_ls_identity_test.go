@@ -6,10 +6,10 @@
 // has no meaning to `mpm show <id>` (which expects the hex ID).
 //
 // The fix:
-//  1. ID column shows the actual hex ID (truncated to 16 chars to fit
-//     the column width).
-//  2. Column header is "ID" (it always was, but now the column actually
-//     contains IDs).
+//   1. ID column shows the actual hex ID (truncated to 16 chars to fit
+//      the column width).
+//   2. Column header is "ID" (it always was, but now the column actually
+//      contains IDs).
 package main
 
 import (

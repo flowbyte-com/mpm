@@ -39,11 +39,11 @@ func TestF004_SchedulerNudge_SilentInMachineMode(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	state := map[string]interface{}{
-		"last_tick_unix":       time.Now().Unix() - 3600, // 1h ago
-		"last_status":          "ok",
-		"tick_count":           100,
-		"process_started_unix": time.Now().Unix() - 7200,
-		"pid":                  12345,
+		"last_tick_unix":        time.Now().Unix() - 3600, // 1h ago
+		"last_status":           "ok",
+		"tick_count":            100,
+		"process_started_unix":  time.Now().Unix() - 7200,
+		"pid":                   12345,
 	}
 	body, _ := json.Marshal(state)
 	if err := os.WriteFile(filepath.Join(runDir, "scheduler.state"), body, 0o600); err != nil {

@@ -18,8 +18,8 @@
 package main
 
 import (
-	"os"
 	stdlibexec "os/exec"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"

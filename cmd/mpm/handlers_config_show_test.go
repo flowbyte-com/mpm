@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/config"
+	mpminternal "github.com/flowbyte-com/mpm-core"
 )
 
 // TestHandleConfigShow_EmbeddingProfile verifies the output for a

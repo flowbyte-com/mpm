@@ -653,7 +653,7 @@ func (s *DoctorService) cronPendingCount() (int, error) {
 	var n int
 	if err := s.dm.SQLDB().QueryRow(`
 		SELECT COUNT(*) FROM scheduled_wakes
-		WHERE fired = 0 AND ` + mpminternal.WakeCronKindFilter + `
+		WHERE fired = 0 AND `+mpminternal.WakeCronKindFilter+`
 	`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("cron pending count: %w", err)
 	}

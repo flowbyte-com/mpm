@@ -2,12 +2,10 @@
 // discoverability regression coverage.
 //
 // F-A2:  `mpm decision search <query>` returns decisions from the
-//
-//	decisions collection by FTS5 keyword.
+//        decisions collection by FTS5 keyword.
 //
 // F-F1:  `mpm skill search <query>` returns skills from the
-//
-//	skills collection by FTS5 keyword.
+//        skills collection by FTS5 keyword.
 //
 // Both surfaces are tested through the public CLI command path so
 // the wire format stays stable across refactors. The test exercises

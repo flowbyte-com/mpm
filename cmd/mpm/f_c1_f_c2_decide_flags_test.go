@@ -2,15 +2,13 @@
 // regression coverage.
 //
 // F-C1: `mpm decide --context <text> --choice <text> --rationale <text>`
-//
-//	must work — previously the flag form silently produced an
-//	empty decision because the parser only recognised the colon
-//	tokens ("CHOICE: foo").
+//       must work — previously the flag form silently produced an
+//       empty decision because the parser only recognised the colon
+//       tokens ("CHOICE: foo").
 //
 // F-C2: passing flags without --choice must be rejected, not silently
-//
-//	recorded. The pre-fix code created an empty decision memory
-//	whose content was literally "CHOICE: " with no body.
+//       recorded. The pre-fix code created an empty decision memory
+//       whose content was literally "CHOICE: " with no body.
 package main
 
 import (

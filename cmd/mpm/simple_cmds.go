@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"io"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -194,8 +194,8 @@ func handleAdd(args []string) int {
 
 	if *jsonOutput {
 		data, _ := json.Marshal(map[string]interface{}{
-			"id":              id,
-			"success":         true,
+			"id":           id,
+			"success":      true,
 			"already_existed": !isNew,
 		})
 		fmt.Println(string(data))
@@ -583,10 +583,10 @@ func handleRm(args []string) int {
 // mpm patch-memory <id> <json-patch> — Patch metadata JSON in-place (no content change, no FTS re-index).
 //
 // Two forms are supported:
-//  1. mpm patch-memory <id> '{...}'   — full JSON object patch (the canonical form)
-//  2. mpm patch-memory <id> -- <key>=<value> [...]  — ergonomic shortcut; the CLI
-//     builds a JSON patch object from one or more key=value pairs and applies
-//     them via json_patch (upsert semantics). Multiple pairs are merged.
+//   1. mpm patch-memory <id> '{...}'   — full JSON object patch (the canonical form)
+//   2. mpm patch-memory <id> -- <key>=<value> [...]  — ergonomic shortcut; the CLI
+//      builds a JSON patch object from one or more key=value pairs and applies
+//      them via json_patch (upsert semantics). Multiple pairs are merged.
 //
 // T28 (2026-09-11): added the ergonomic -- <key>=<value> form so operators
 // don't have to escape JSON braces on the shell. The legacy positional
@@ -596,10 +596,9 @@ func handleRm(args []string) int {
 // bypassing this handler entirely).
 //
 // Examples:
-//
-//	mpm patch-memory abc123 '{ "status": "proven" }'
-//	mpm patch-memory abc123 -- status=proven resolved_at=2026-09-11T13:00:00Z
-//	mpm patch-memory abc123 -- confidence=0.9
+//   mpm patch-memory abc123 '{ "status": "proven" }'
+//   mpm patch-memory abc123 -- status=proven resolved_at=2026-09-11T13:00:00Z
+//   mpm patch-memory abc123 -- confidence=0.9
 //
 // JSON values: bare values are parsed as JSON literals (numbers, booleans,
 // nulls). For string values with spaces or special characters, wrap the
@@ -951,7 +950,6 @@ func handleWeaken(args []string) int {
 	fmt.Printf("Weakened memory %s (-%d)\n", id, delta)
 	return 0
 }
-
 // mpm set-weight <id> <weight> — Set weight directly
 func handleSetWeight(args []string) int {
 	// Defect class (2026-09-13 acceptance): see handleSnooze's mirror
@@ -1246,7 +1244,7 @@ func handleShredMem(args []string) int {
 	// Say plainly what shred did NOT do. Silence here reads as "gone
 	// forever", and the content demonstrably survives in the audit log,
 	// mirror history and rotations, backups, the WAL and free pages.
-	fmt.Printf("  removed from active state. NOT erased: audit log, mirror history\n" +
+	fmt.Printf("  removed from active state. NOT erased: audit log, mirror history\n"+
 		"  and rotations, database backups, WAL/free pages, filesystem snapshots.\n")
 	return 0
 }
@@ -1553,6 +1551,7 @@ func handleRefImport(args []string) int {
 	}
 	return 0
 }
+
 
 // indexOfFirstPositional returns the index (within args) of the first
 // token that Go's `flag` package treated as a positional argument. Used

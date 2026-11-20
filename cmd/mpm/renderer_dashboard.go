@@ -102,8 +102,8 @@ func (v *WorkingContextView) SupportsExpander() bool {
 // Uses lipgloss styling aligned with the existing `mpm help` output
 // (see main.go:1236+).
 type DashboardRenderer struct {
-	out    io.Writer
-	styles DashboardStyles
+	out     io.Writer
+	styles  DashboardStyles
 }
 
 // DashboardStyles is the small subset of lipgloss styling that
@@ -194,3 +194,4 @@ func (dr *DashboardRenderer) Render(model *DashboardModel) error {
 	}
 	return nil
 }
+

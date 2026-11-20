@@ -10,10 +10,10 @@ import (
 // TestReadinessChecker_checkEmbeddings tests the four-state embedding readiness check.
 func TestReadinessChecker_checkEmbeddings(t *testing.T) {
 	tests := []struct {
-		name     string
-		cfg      *mpminternal.EmbeddingConfig
-		wantOK   bool
-		wantNote string
+		name      string
+		cfg       *mpminternal.EmbeddingConfig
+		wantOK    bool
+		wantNote  string
 	}{
 		{
 			name: "intentionally disabled",

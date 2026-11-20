@@ -31,8 +31,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
+	"strconv"
 	"time"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
@@ -45,9 +45,9 @@ import (
 // substrate call fails, the section surfaces an error string and
 // the rest of the report still renders.
 type WhyReport struct {
-	ArtifactID   string
+	ArtifactID  string
 	ArtifactKind string // "memory", "decision", "theory", "skill"
-	GeneratedAt  time.Time
+	GeneratedAt time.Time
 
 	// Identity — who/what is this artifact.
 	Identity *WhyIdentity
@@ -76,11 +76,11 @@ type WhyIdentity struct {
 // WhyProvenance is the time + agency shape. Rendered as the second
 // section.
 type WhyProvenance struct {
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-	LastAccessed     *time.Time
-	CreatedBy        string
-	SessionID        string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	LastAccessed    *time.Time
+	CreatedBy       string
+	SessionID       string
 	FrameworkName    string // from artifact_provenance.framework_name
 	FrameworkAdapter string // from artifact_provenance.framework_adapter (e.g., "opencode-mcp")
 	ModelName        string // from artifact_provenance.model_name
@@ -89,11 +89,11 @@ type WhyProvenance struct {
 // EvidenceRow is one observation attached to this artifact. Source-
 // shape from the evidence table.
 type EvidenceRow struct {
-	Type        string
-	Strength    float64
-	CreatedBy   string
-	CreatedAt   time.Time
-	Notes       string
+	Type       string
+	Strength   float64
+	CreatedBy  string
+	CreatedAt  time.Time
+	Notes      string
 	SourceGroup string
 	// ReferenceURL is the explicit, user-supplied external reference for
 	// this evidence, or "" when none was supplied. Rendered verbatim and
@@ -104,10 +104,10 @@ type EvidenceRow struct {
 // ConfidenceRow is one confidence-altering event. Output shape from
 // query_confidence_history.
 type ConfidenceRow struct {
-	ComputedAt    time.Time
-	Confidence    float64
+	ComputedAt   time.Time
+	Confidence   float64
 	EvidenceCount int
-	Trigger       string
+	Trigger      string
 }
 
 // WhyRetrieval is the substrate's reuse statistics for an artifact.
@@ -158,9 +158,8 @@ func (s *WhyService) Explain(id string) (*WhyReport, error) {
 // surfaces immediately instead of silently aliasing.
 //
 // Hint semantics (defect H, 2026-09-13 acceptance):
-//
-//	hint=""    → auto-detect (probe collections until first match)
-//	hint="X"   → use X as authoritative kind; probe only that collection
+//   hint=""    → auto-detect (probe collections until first match)
+//   hint="X"   → use X as authoritative kind; probe only that collection
 //
 // Valid hint values are the canonical kinds: memory, decision, theory,
 // skill, lesson, work. Other values return an error from the handler
@@ -207,9 +206,9 @@ func (s *WhyService) ExplainWithHint(id, hint string) (*WhyReport, error) {
 		if report.Provenance == nil {
 			report.Provenance = prov
 		} else {
-			report.Provenance.FrameworkName = prov.FrameworkName
+			report.Provenance.FrameworkName    = prov.FrameworkName
 			report.Provenance.FrameworkAdapter = prov.FrameworkAdapter
-			report.Provenance.ModelName = prov.ModelName
+			report.Provenance.ModelName        = prov.ModelName
 		}
 	}
 
@@ -405,19 +404,18 @@ func (s *WhyService) fetchByKind(id, kind string) (map[string]interface{}, error
 // is the dedicated fallback after the memories loop misses.
 //
 // Lesson schema (verified 2026-09-11 from the restored pre-probe dump):
-//
-//	id TEXT PRIMARY KEY,
-//	type TEXT NOT NULL DEFAULT 'insight',
-//	content TEXT NOT NULL,
-//	tags JSON,
-//	reinforcement_count INTEGER,
-//	source_session_id TEXT,    (nullable)
-//	created TEXT NOT NULL,
-//	content_hash TEXT,         (nullable)
-//	retrieval_priority REAL,
-//	importance REAL,
-//	confidence REAL,
-//	deleted_at INTEGER.        (nullable)
+//   id TEXT PRIMARY KEY,
+//   type TEXT NOT NULL DEFAULT 'insight',
+//   content TEXT NOT NULL,
+//   tags JSON,
+//   reinforcement_count INTEGER,
+//   source_session_id TEXT,    (nullable)
+//   created TEXT NOT NULL,
+//   content_hash TEXT,         (nullable)
+//   retrieval_priority REAL,
+//   importance REAL,
+//   confidence REAL,
+//   deleted_at INTEGER.        (nullable)
 //
 // The `created` column is TEXT (ISO8601), not INTEGER like memories —
 // that's intentional in the lessons schema and we emit it verbatim in
@@ -441,15 +439,15 @@ func (s *WhyService) fetchLesson(id string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("lesson probe scan: %w", err)
 	}
 	out := map[string]interface{}{
-		"id":                  outID,
-		"collection":          "lessons",
-		"type":                lessonType,
-		"content":             content,
-		"weight":              int64(int(retrievalPriority)),
-		"importance":          importance,
-		"confidence":          confidence,
+		"id":             outID,
+		"collection":     "lessons",
+		"type":           lessonType,
+		"content":        content,
+		"weight":         int64(int(retrievalPriority)),
+		"importance":     importance,
+		"confidence":     confidence,
 		"reinforcement_count": reinf,
-		"created":             created,
+		"created":        created,
 	}
 	if sessID.Valid {
 		out["session_id"] = sessID.String
@@ -594,11 +592,11 @@ func (s *WhyService) loadEvidence(id, kind string) ([]EvidenceRow, int, error) {
 	rows := make([]EvidenceRow, 0, len(rawList))
 	for _, m := range rawList {
 		row := EvidenceRow{
-			Type:         stringOf(m["type"]),
-			Strength:     floatOf(m["strength"]),
-			CreatedBy:    stringOf(m["created_by"]),
-			SourceGroup:  stringOf(m["source_group"]),
-			Notes:        stringOf(m["notes"]),
+			Type:        stringOf(m["type"]),
+			Strength:    floatOf(m["strength"]),
+			CreatedBy:   stringOf(m["created_by"]),
+			SourceGroup: stringOf(m["source_group"]),
+			Notes:       stringOf(m["notes"]),
 			ReferenceURL: stringOf(m["reference_url"]),
 		}
 		if v, ok := m["created_at"].(int64); ok {

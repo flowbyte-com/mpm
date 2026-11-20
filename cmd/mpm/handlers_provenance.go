@@ -2,9 +2,9 @@
 //
 // Three commands form the coherent alpha surface:
 //
-//	mpm provenance <artifact_id>            show provenance for one artifact
-//	mpm provenance inspect --invocation <id>  show all artifacts under one invocation
-//	mpm provenance model-yield [--days N]   show model lifecycle analytics
+//   mpm provenance <artifact_id>            show provenance for one artifact
+//   mpm provenance inspect --invocation <id>  show all artifacts under one invocation
+//   mpm provenance model-yield [--days N]   show model lifecycle analytics
 //
 // Spec: docs/library/2026-08-08-artifact-provenance-design.md
 package main
@@ -100,15 +100,15 @@ func handleProvenance(args []string) int {
 
 	// Scan into a map for clean JSON output.
 	var (
-		actorKind, actorID, fwName, fwVersion, fwAdapter  sql.NullString
-		provider, model, revision, apiEP, reasoningMode   sql.NullString
+		actorKind, actorID, fwName, fwVersion, fwAdapter sql.NullString
+		provider, model, revision, apiEP, reasoningMode sql.NullString
 		thinkingLevel                                     sql.NullString
 		sessionID, invocationID, parent, providerMetadata sql.NullString
-		schemaVersion                                     sql.NullString
-		temperature, reasoningEffort                      sql.NullFloat64
-		maxTokens, thinkingTokens                         sql.NullInt64
-		thinkingVisible                                   sql.NullInt64
-		createdAt                                         int64
+		schemaVersion                                    sql.NullString
+		temperature, reasoningEffort                     sql.NullFloat64
+		maxTokens, thinkingTokens                        sql.NullInt64
+		thinkingVisible                                  sql.NullInt64
+		createdAt                                        int64
 	)
 	if err := row.Scan(
 		&actorKind, &actorID, &fwName, &fwVersion, &fwAdapter,
@@ -123,29 +123,29 @@ func handleProvenance(args []string) int {
 
 	// Build the wire-format map.
 	out := map[string]interface{}{
-		"artifact_id":        artifactID,
-		"schema_version":     nullStringToString(schemaVersion),
-		"actor_kind":         nullStringToString(actorKind),
-		"actor_id":           nullStringToString(actorID),
-		"framework":          nullStringToString(fwName),
-		"framework_version":  nullStringToString(fwVersion),
-		"framework_adapter":  nullStringToString(fwAdapter),
-		"provider":           nullStringToString(provider),
-		"model":              nullStringToString(model),
-		"model_revision":     nullStringToString(revision),
-		"api_endpoint":       nullStringToString(apiEP),
-		"temperature":        nullFloatToFloat(temperature),
-		"max_tokens":         nullInt64ToInt(maxTokens),
-		"reasoning_mode":     nullStringToString(reasoningMode),
-		"reasoning_effort":   nullFloatToFloat(reasoningEffort),
-		"thinking_level":     nullStringToString(thinkingLevel),
-		"thinking_tokens":    nullInt64ToInt(thinkingTokens),
-		"thinking_visible":   nullInt64ToInt(thinkingVisible),
-		"session_id":         nullStringToString(sessionID),
-		"invocation_id":      nullStringToString(invocationID),
+		"artifact_id":       artifactID,
+		"schema_version":    nullStringToString(schemaVersion),
+		"actor_kind":        nullStringToString(actorKind),
+		"actor_id":          nullStringToString(actorID),
+		"framework":         nullStringToString(fwName),
+		"framework_version": nullStringToString(fwVersion),
+		"framework_adapter": nullStringToString(fwAdapter),
+		"provider":          nullStringToString(provider),
+		"model":             nullStringToString(model),
+		"model_revision":    nullStringToString(revision),
+		"api_endpoint":      nullStringToString(apiEP),
+		"temperature":       nullFloatToFloat(temperature),
+		"max_tokens":        nullInt64ToInt(maxTokens),
+		"reasoning_mode":    nullStringToString(reasoningMode),
+		"reasoning_effort":  nullFloatToFloat(reasoningEffort),
+		"thinking_level":    nullStringToString(thinkingLevel),
+		"thinking_tokens":   nullInt64ToInt(thinkingTokens),
+		"thinking_visible":  nullInt64ToInt(thinkingVisible),
+		"session_id":        nullStringToString(sessionID),
+		"invocation_id":     nullStringToString(invocationID),
 		"parent_artifact_id": nullStringToString(parent),
-		"provider_metadata":  nullStringToString(providerMetadata),
-		"created_at":         createdAt,
+		"provider_metadata": nullStringToString(providerMetadata),
+		"created_at":        createdAt,
 	}
 
 	if asJSON {
@@ -254,9 +254,9 @@ func handleProvenanceModelYield(args []string) int {
 		"model", "framework", "created", "survived", "survive_%", "reinforced", "challenged")
 	for rows.Next() {
 		var (
-			modelSpec, fwName      sql.NullString
+			modelSpec, fwName sql.NullString
 			totalCreated, survived int64
-			survivalPct            sql.NullFloat64
+			survivalPct          sql.NullFloat64
 			reinforced, challenged sql.NullInt64
 		)
 		if err := rows.Scan(&modelSpec, &fwName, &totalCreated,
