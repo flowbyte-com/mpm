@@ -159,16 +159,21 @@ func init() {
 		// in cmd/mpm/assignment_cmds.go; the drift test derives it
 		// from that source, so the two cannot disagree.
 		"assignment": {
-			"action", "actor", "actor-kind", "awaiting-action", "base-sha",
+			// PR 3 adds the explicit-execution surface: the agent
+			// definition, the authorised worktree, its label, the
+			// runtime model and the bounded references. They are
+			// registered here because an unregistered option is
+			// refused before the verb runs.
+			"action", "actor", "actor-kind", "agent", "awaiting-action", "base-sha",
 			"eligible-recipient", "epoch", "evidence", "evidence-ref",
 			"findings-sha256", "head-sha", "id", "idempotency-key",
 			"issue-ref", "json", "lease-seconds", "limit", "max-concurrency",
-			"max-depth", "max-resource-units", "max-tasks", "note",
+			"max-depth", "max-resource-units", "max-tasks", "model", "note",
 			"objective", "owner", "parent-id", "payload",
 			"permitted-operation",
-			"pr-ref", "project-id", "recipient", "resource-units",
+			"pr-ref", "project-id", "recipient", "reference", "resource-units",
 			"reviewed-sha", "revision", "role", "root-id", "source", "state",
-			"title", "verdict",
+			"title", "verdict", "workspace", "workspace-id",
 		},
 		"hint":            {"json", "max"},
 		"ingest":          ingestOptionNames,

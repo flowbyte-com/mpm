@@ -1,0 +1,487 @@
+// boundary_test.go — Continuity 001, PR 3: the runtime boundary's own
+// tests.
+//
+// # WHAT IS UNDER TEST
+//
+// The pieces that decide the worker's blast radius:
+//
+//   - the CONTAINMENT argv, because its ORDER is what makes loopback exist
+//     while egress does not, and because a credential passed with
+//     `--setenv` would be readable through /proc/<pid>/cmdline;
+//   - the SIDECAR, because it is the only process holding a credential and
+//     it must be a narrow model API rather than a general proxy;
+//   - the AGENT DEFINITION, because a definition that drifts from the
+//     canonical template is a worker with a different surface than the one
+//     that was reviewed.
+//
+// The OS-level containment itself (what is visible from inside the
+// namespace) is a REAL-HOST check, not a unit test: it needs bubblewrap and
+// a kernel, and faking it would prove nothing. It is recorded in the PR's
+// evidence, and it is gated behind an explicit opt-in here.
+package opencode
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestWorkerDefinitionIsPinnedToTheTemplate proves the embedded definition
+// IS the reviewed one.
+//
+// The adapter installs the embedded copy into every sandbox. If the two
+// drifted, the worker would run a surface nobody reviewed, and nothing else
+// in the suite would notice.
+func TestWorkerDefinitionIsPinnedToTheTemplate(t *testing.T) {
+	tpl := filepath.Join("..", "..", "..",
+		"agent_installation", "mpm-opencode", "templates", "agents", "mpm-worker.md")
+	onDisk, err := os.ReadFile(tpl)
+	if err != nil {
+		t.Fatalf("read the canonical template: %v", err)
+	}
+	if !bytes.Equal(onDisk, WorkerAgentDefinition) {
+		t.Fatalf("the embedded worker definition differs from %s; "+
+			"the sandbox would run a surface nobody reviewed", tpl)
+	}
+}
+
+// TestWorkerDefinitionDeniesExecution is the file-edit-only contract.
+//
+// It parses the frontmatter rather than trusting a comment, because the
+// comment is not what the host reads.
+func TestWorkerDefinitionDeniesExecution(t *testing.T) {
+	body := string(WorkerAgentDefinition)
+	for _, want := range []string{
+		"- action: \"*\"",
+		"effect: deny",
+		"- action: shell",
+		"- action: browser",
+		"- action: webfetch",
+		"- action: websearch",
+		"- action: skill",
+		"- action: subagent",
+		"- action: execute",
+		"- action: mpm_*",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the worker definition is missing %q", want)
+		}
+	}
+	// The wildcard deny must be the FIRST agent rule. The host resolves
+	// last-match-wins, so a wildcard deny at the end would be shadowed by
+	// every allow above it.
+	firstAction := strings.Index(body, "- action:")
+	if firstAction < 0 {
+		t.Fatal("the definition has no permission rules")
+	}
+	if !strings.Contains(body[firstAction:firstAction+40], "\"*\"") {
+		t.Errorf("the first permission rule is not the wildcard deny: %q",
+			body[firstAction:firstAction+40])
+	}
+	// And no allow for any execution action.
+	for _, forbidden := range []string{"action: shell\n    resource: \"*\"\n    effect: allow"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("the worker definition ALLOWS execution: %q", forbidden)
+		}
+	}
+}
+
+// TestContainmentArgvKeepsTheOrderingThatMakesLoopbackPossible pins the
+// composition the containment depends on.
+//
+// `bwrap --unshare-net` produces a network namespace owned by the PARENT
+// user namespace, and `ip link set lo up` inside it fails with EPERM — so
+// there is no address for the relay and therefore no inference. The outer
+// `unshare --user --map-root-user --net` is what makes the namespace a
+// child of the NEW user namespace, whose owner CAN bring loopback up.
+func TestContainmentArgvKeepsTheOrderingThatMakesLoopbackPossible(t *testing.T) {
+	root := t.TempDir()
+	spec := Spec{
+		Root:          filepath.Join(root, "sandbox"),
+		Workspace:     filepath.Join(root, "work"),
+		OpenCodeBin:   "/bin/true",
+		MPMBin:        "/bin/true",
+		SidecarSocket: filepath.Join(root, "sidecar.sock"),
+		Env:           map[string]string{"HOME": PrefixHome},
+		RelayCommand:  []string{"/opt/mpm/mpm"},
+		Command:       []string{"/opt/opencode/opencode", "--standalone"},
+	}
+	if err := BuildTree(spec); err != nil {
+		t.Fatalf("build the tree: %v", err)
+	}
+	argv, err := spec.Argv()
+	if err != nil {
+		t.Fatalf("argv: %v", err)
+	}
+
+	joined := strings.Join(argv, " ")
+	if argv[0] != "unshare" {
+		t.Errorf("argv[0] = %q, want the outer unshare", argv[0])
+	}
+	for _, want := range []string{"--user", "--map-root-user", "--net"} {
+		if !contains(argv, want) {
+			t.Errorf("the outer launcher is missing %q", want)
+		}
+	}
+	for _, want := range []string{"--disable-userns", "--assert-userns-disabled", "--unshare-pid"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the inner bubblewrap argv is missing %q", want)
+		}
+	}
+	// `--unshare-net` must NOT be on bubblewrap: it would create the
+	// netns in the wrong user namespace.
+	if strings.Contains(joined, "--unshare-net") {
+		t.Error("bubblewrap is asked to unshare the network; the outer unshare must own it")
+	}
+	// The script must bring loopback up before exec'ing bubblewrap.
+	if !strings.Contains(joined, "ip link set lo up") {
+		t.Error("the launcher does not bring loopback up")
+	}
+	// The sidecar socket must be bound, and the workspace must be the
+	// runtime's working directory.
+	if !strings.Contains(joined, PrefixSocket) {
+		t.Error("the sidecar socket is not bound into the namespace")
+	}
+	// The inner argv is shell-quoted, so the chdir pair arrives as two
+	// quoted words.
+	if !strings.Contains(joined, "'--chdir' '"+PrefixWorker+"'") {
+		t.Errorf("the runtime is not started in the authorised worktree: %s", joined)
+	}
+}
+
+// TestContainmentRefusesARootInsideTheWorkspace pins the one structural
+// refusal in the builder.
+func TestContainmentRefusesARootInsideTheWorkspace(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "work")
+	if err := os.MkdirAll(ws, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := BuildTree(Spec{Root: filepath.Join(ws, "sandbox"), Workspace: ws})
+	if err == nil {
+		t.Fatal("a sandbox root inside the workspace was accepted")
+	}
+	if !strings.Contains(err.Error(), "inside the workspace") {
+		t.Errorf("refused, but not by the containment rule: %v", err)
+	}
+}
+
+// TestContainmentNeverCarriesACredentialInArgv is the measured-leak
+// regression.
+//
+// `--setenv NAME VALUE` puts the value in ARGV. So the containment must
+// never be handed a credential to set: the only secret the runtime needs is
+// the sidecar's socket PATH, and the credential stays in the sidecar's
+// process.
+func TestContainmentNeverCarriesACredentialInArgv(t *testing.T) {
+	root := t.TempDir()
+	spec := Spec{
+		Root:          filepath.Join(root, "s"),
+		Workspace:     filepath.Join(root, "w"),
+		OpenCodeBin:   "/bin/true",
+		SidecarSocket: filepath.Join(root, "sidecar.sock"),
+		Env:           map[string]string{"HOME": PrefixHome, RelayEnvVar: PrefixSocket},
+		Command:       []string{"/opt/opencode/opencode"},
+	}
+	if err := BuildTree(spec); err != nil {
+		t.Fatal(err)
+	}
+	argv, err := spec.Argv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range argv {
+		low := strings.ToLower(a)
+		for _, forbidden := range []string{"sk-", "api_key", "apikey", "bearer "} {
+			if strings.Contains(low, forbidden) {
+				t.Errorf("the containment argv carries a credential-shaped value %q in %q", forbidden, a)
+			}
+		}
+	}
+}
+
+// TestRelayModeFromEnv pins the switch.
+func TestRelayModeFromEnv(t *testing.T) {
+	t.Setenv(RelayEnvVar, "")
+	if _, ok := RelayModeFromEnv(); ok {
+		t.Error("the relay mode is active with no socket set")
+	}
+	t.Setenv(RelayEnvVar, "/run/sidecar.sock")
+	got, ok := RelayModeFromEnv()
+	if !ok || got != "/run/sidecar.sock" {
+		t.Errorf("relay mode = (%q,%v), want (/run/sidecar.sock,true)", got, ok)
+	}
+}
+
+// ── the sidecar ───────────────────────────────────────────────────────────
+
+// fakeUpstream records what the sidecar forwarded and answers with a
+// stream-shaped body.
+type fakeUpstream struct {
+	srv        *httptest.Server
+	gotAuth    string
+	gotBody    []byte
+	gotPath    string
+	statusCode int
+}
+
+func newFakeUpstream(t *testing.T) *fakeUpstream {
+	t.Helper()
+	u := &fakeUpstream{statusCode: 200}
+	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u.gotAuth = r.Header.Get("authorization")
+		u.gotPath = r.URL.Path
+		u.gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(u.statusCode)
+		_, _ = io.WriteString(w, "data: {\"ok\":true}\n\n")
+	}))
+	t.Cleanup(u.srv.Close)
+	return u
+}
+
+func newTestSidecar(t *testing.T, upstream string, audit *bytes.Buffer) *Sidecar {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := SidecarConfig{
+		SocketPath:      filepath.Join(dir, "sidecar.sock"),
+		UpstreamBaseURL: upstream,
+		APIKey:          "test-credential-value",
+		ModelAllowList:  map[string]string{"permitted-model": "upstream-model"},
+		MaxRequestBytes: 4096,
+		MaxTokens:       1024,
+		Timeout:         10 * time.Second,
+	}
+	if audit != nil {
+		cfg.Audit = audit
+	}
+	s, err := NewSidecar(cfg)
+	if err != nil {
+		t.Fatalf("new sidecar: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); _ = s.Close() })
+	go func() { _ = s.Serve(ctx) }()
+	return s
+}
+
+// postToSidecar sends a body over the unix socket and returns the reply.
+func postToSidecar(t *testing.T, socket string, body string) (int, string) {
+	t.Helper()
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socket)
+		},
+	}}
+	resp, err := client.Post("http://unix/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post to the sidecar: %v", err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(out)
+}
+
+// TestSidecarRefusesAModelOffTheAllowList is the allow-list.
+func TestSidecarRefusesAModelOffTheAllowList(t *testing.T) {
+	up := newFakeUpstream(t)
+	s := newTestSidecar(t, up.srv.URL, nil)
+
+	code, body := postToSidecar(t, s.SocketPath(), `{"model":"some-other-model","messages":[]}`)
+	if code != http.StatusForbidden {
+		t.Errorf("status %d, want %d (%s)", code, http.StatusForbidden, body)
+	}
+	if up.gotPath != "" {
+		t.Errorf("a refused request still reached the upstream: %q", up.gotPath)
+	}
+	if s.Refusals() == 0 {
+		t.Error("the refusal was not counted")
+	}
+}
+
+// TestSidecarBoundsTheRequestSize is the size ceiling.
+func TestSidecarBoundsTheRequestSize(t *testing.T) {
+	up := newFakeUpstream(t)
+	s := newTestSidecar(t, up.srv.URL, nil)
+
+	huge := `{"model":"permitted-model","messages":[{"role":"user","content":"` +
+		strings.Repeat("x", 8192) + `"}]}`
+	code, body := postToSidecar(t, s.SocketPath(), huge)
+	if code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status %d, want %d (%s)", code, http.StatusRequestEntityTooLarge, body)
+	}
+}
+
+// TestSidecarBoundsTheCompletionLength is the token ceiling.
+func TestSidecarBoundsTheCompletionLength(t *testing.T) {
+	up := newFakeUpstream(t)
+	s := newTestSidecar(t, up.srv.URL, nil)
+
+	code, body := postToSidecar(t, s.SocketPath(),
+		`{"model":"permitted-model","max_tokens":999999,"messages":[]}`)
+	if code != http.StatusForbidden {
+		t.Errorf("status %d, want %d (%s)", code, http.StatusForbidden, body)
+	}
+}
+
+// TestSidecarIsNotAGeneralProxy is the architectural claim.
+//
+// A caller-supplied destination must not survive. The upstream the sidecar
+// uses is FIXED at construction, so the worker cannot aim it anywhere else.
+func TestSidecarIsNotAGeneralProxy(t *testing.T) {
+	up := newFakeUpstream(t)
+	other := newFakeUpstream(t)
+	s := newTestSidecar(t, up.srv.URL, nil)
+
+	code, _ := postToSidecar(t, s.SocketPath(), fmt.Sprintf(
+		`{"model":"permitted-model","base_url":%q,"baseURL":%q,"messages":[]}`,
+		other.srv.URL, other.srv.URL))
+	if code != http.StatusOK {
+		t.Fatalf("status %d, want 200", code)
+	}
+	if other.gotPath != "" {
+		t.Error("the sidecar forwarded to a caller-supplied destination")
+	}
+	if up.gotPath != "/chat/completions" {
+		t.Errorf("the upstream path is %q, want the fixed one", up.gotPath)
+	}
+	// And the substitute destination was STRIPPED from the body.
+	if bytes.Contains(up.gotBody, []byte("base_url")) || bytes.Contains(up.gotBody, []byte("baseURL")) {
+		t.Errorf("the caller-supplied destination survived into the upstream body: %s", up.gotBody)
+	}
+}
+
+// TestSidecarAttachesTheCredential proves the credential is added by the
+// sidecar and not supplied by the caller.
+func TestSidecarAttachesTheCredential(t *testing.T) {
+	up := newFakeUpstream(t)
+	s := newTestSidecar(t, up.srv.URL, nil)
+
+	if code, body := postToSidecar(t, s.SocketPath(),
+		`{"model":"permitted-model","messages":[]}`); code != http.StatusOK {
+		t.Fatalf("status %d (%s)", code, body)
+	}
+	if up.gotAuth != "Bearer test-credential-value" {
+		t.Errorf("the upstream saw authorization %q", up.gotAuth)
+	}
+}
+
+// TestSidecarAuditCarriesNoContent is the evidence rule.
+func TestSidecarAuditCarriesNoContent(t *testing.T) {
+	up := newFakeUpstream(t)
+	var audit bytes.Buffer
+	s := newTestSidecar(t, up.srv.URL, &audit)
+
+	secretPrompt := "PROMPT_TEXT_THAT_MUST_NOT_BE_LOGGED"
+	if code, body := postToSidecar(t, s.SocketPath(), fmt.Sprintf(
+		`{"model":"permitted-model","messages":[{"role":"user","content":%q}]}`,
+		secretPrompt)); code != http.StatusOK {
+		t.Fatalf("status %d (%s)", code, body)
+	}
+
+	line := audit.String()
+	if strings.Contains(line, secretPrompt) {
+		t.Errorf("the audit log recorded the prompt: %s", line)
+	}
+	if strings.Contains(line, "test-credential-value") {
+		t.Errorf("the audit log recorded the credential: %s", line)
+	}
+	for _, want := range []string{"outcome=ok", "model=permitted-model", "req_bytes="} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the audit line is missing %q: %s", want, line)
+		}
+	}
+}
+
+// TestSidecarRefusesAGet pins the method.
+func TestSidecarRefusesAGet(t *testing.T) {
+	up := newFakeUpstream(t)
+	s := newTestSidecar(t, up.srv.URL, nil)
+
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", s.SocketPath())
+		},
+	}}
+	resp, err := client.Get("http://unix/v1/chat/completions")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("status %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
+// TestSidecarRequiresAConfiguration pins the constructor's refusals, so a
+// misconfigured sidecar is an error rather than an open door.
+func TestSidecarRequiresAConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		cfg  SidecarConfig
+	}{
+		{"no socket", SidecarConfig{UpstreamBaseURL: "http://x", APIKey: "k", ModelAllowList: map[string]string{"a": "b"}}},
+		{"no upstream", SidecarConfig{SocketPath: filepath.Join(dir, "a.sock"), APIKey: "k", ModelAllowList: map[string]string{"a": "b"}}},
+		{"no credential", SidecarConfig{SocketPath: filepath.Join(dir, "b.sock"), UpstreamBaseURL: "http://x", ModelAllowList: map[string]string{"a": "b"}}},
+		{"no models", SidecarConfig{SocketPath: filepath.Join(dir, "c.sock"), UpstreamBaseURL: "http://x", APIKey: "k"}},
+	}
+	for _, tc := range cases {
+		if _, err := NewSidecar(tc.cfg); err == nil {
+			t.Errorf("%s: the sidecar was constructed", tc.name)
+		}
+	}
+}
+
+// TestSidecarSocketIsPrivate pins the socket's mode.
+func TestSidecarSocketIsPrivate(t *testing.T) {
+	up := newFakeUpstream(t)
+	s := newTestSidecar(t, up.srv.URL, nil)
+	fi, err := os.Stat(s.SocketPath())
+	if err != nil {
+		t.Fatalf("stat the socket: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("the sidecar socket is %o, want 600", perm)
+	}
+}
+
+// TestSessionNotFoundIsDistinguishable is the recovery contract's hinge.
+//
+// The adapter's decision differs depending on WHICH failure it sees: a
+// session the runtime does not know is safe to relaunch (nothing was
+// created), while an unreachable runtime is ambiguous and must stop. So the
+// not-found error has to be identifiable with errors.Is through whatever
+// wrapping the caller adds.
+func TestSessionNotFoundIsDistinguishable(t *testing.T) {
+	wrapped := fmt.Errorf("inspect session %q: %w", "ses_x", ErrSessionNotFound)
+	if !errors.Is(wrapped, ErrSessionNotFound) {
+		t.Fatal("ErrSessionNotFound does not survive wrapping, so the adapter " +
+			"cannot tell a missing session from a broken runtime")
+	}
+	other := fmt.Errorf("inspect session %q: %w", "ses_x", fmt.Errorf("connection refused"))
+	if errors.Is(other, ErrSessionNotFound) {
+		t.Fatal("an unrelated failure is reported as a missing session")
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}

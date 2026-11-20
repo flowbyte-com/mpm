@@ -3301,6 +3301,21 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("agent assignments migration failed: %w", err)
 	}
+
+	// Continuity 001, PR 3: the assignment-to-session mapping.
+	//
+	// Same reasoning again: local-only, created here rather than in
+	// BaseTables, idempotent via the agent_task_sessions_v1 sentinel,
+	// and the sentinel is written last inside this same transaction.
+	//
+	// PR 1's hash-pinned DDL is NOT touched by this migration.
+	//
+	// See internal/core/migration_agent_task_sessions.go for the DDL and
+	// for what the triggers enforce.
+	if err := MigrateAgentTaskSessions(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("agent task sessions migration failed: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
 	}

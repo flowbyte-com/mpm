@@ -106,6 +106,13 @@ type assignmentFlags struct {
 	// that can fix it.
 	payload string
 
+	// PR 3's execution flags. They are read only by `execute`.
+	agent       string
+	workspace   string
+	workspaceID string
+	model       string
+	references  []string
+
 	// output
 	jsonOutput bool
 }
@@ -158,6 +165,10 @@ func handleAssignment(args []string) int {
 		return assignmentVerb(rest, assignmentVerbCreateRoot)
 	case "record-approval":
 		return assignmentVerb(rest, assignmentVerbRecordApproval)
+	case "execute":
+		return assignmentVerb(rest, assignmentVerbExecute)
+	case "capture-review-evidence":
+		return assignmentVerb(rest, assignmentVerbCaptureReviewEvidence)
 	case "help", "-h", "--help":
 		printAssignmentHelp()
 		return 0
@@ -284,6 +295,13 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 	source := fs.String("source", "", "where the authorisation came from")
 	evidence := fs.String("evidence", "", "the evidence pointer behind the authorisation")
 	payload := fs.String("payload", "", "a JSON object stored on the assignment (e.g. the reviewer's target)")
+	agent := fs.String("agent", "", "execute: the allow-listed agent definition to run")
+	workspace := fs.String("workspace", "", "execute: the authorised worktree (absolute)")
+	workspaceID := fs.String("workspace-id", "", "execute: a stable label for the workspace")
+	model := fs.String("model", "", "execute: the runtime model, provider/model")
+	references := &assignmentListFlag{}
+	fs.Var(references, "reference",
+		"execute: a bounded pointer appended to the objective (comma-separated, or repeated)")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
 
 	if err := fs.Parse(args); err != nil {
@@ -329,6 +347,11 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 		source:           *source,
 		evidence:         *evidence,
 		payload:          *payload,
+		agent:            *agent,
+		workspace:        *workspace,
+		workspaceID:      *workspaceID,
+		model:            *model,
+		references:       references.values,
 		jsonOutput:       *jsonOutput,
 	}, nil
 }
@@ -710,6 +733,12 @@ THE WORK
   note              append a ledger note
   record-review     record an independent review verdict
   handoff           hand the work to the operator's gate
+
+EXECUTION (PR 3, explicit invocation only)
+  execute           run an assignment in a contained OpenCode session
+  capture-review-evidence
+                    record the reviewed revision and the findings digest a
+                    HOST captured
 
 OPERATOR ONLY
   create-root       create the top-level work order
