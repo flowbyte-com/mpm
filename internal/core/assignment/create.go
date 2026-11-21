@@ -359,10 +359,12 @@ func (s *Store) Delegate(p DelegateParams) (*Assignment, bool, error) {
 				return berr
 			}
 			if budget.Tasks >= budget.MaxTasks {
-				return budgetRefusal("max_tasks", budget.MaxTasks, budget.Tasks)
+				return budgetRefusal("max_tasks", budget.MaxTasks, budget.Tasks,
+					"and this assignment would be one more")
 			}
-			return budgetRefusal("max_resource_units", budget.MaxUnits,
-				budget.Units+p.ResourceUnits)
+			return budgetRefusal("max_resource_units", budget.MaxUnits, budget.Units,
+				fmt.Sprintf("and this assignment costs %d, so the tree would hold %d",
+					p.ResourceUnits, budget.Units+p.ResourceUnits))
 		}
 
 		if err := s.injectFault("delegate-event"); err != nil {

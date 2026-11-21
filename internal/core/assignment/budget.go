@@ -60,14 +60,22 @@ var ErrBudgetExhausted = fmt.Errorf(
 	"assignment: the tree's aggregate budget is exhausted")
 
 // budgetRefusal names the budget that refused, what it allows and what the
-// tree currently uses.
+// tree currently holds.
 //
 // The numbers are part of the message on purpose: an operator reading a
 // dispatch report has to be able to see WHY the tree is full without
 // opening the database.
-func budgetRefusal(budget string, allowed, used int64) error {
-	return fmt.Errorf("%w: %s allows %d and the tree uses %d",
-		ErrBudgetExhausted, budget, allowed, used)
+//
+// The detail adds what the WRITE would have added, when the refusal is
+// about a write that has not happened yet. "The tree holds 90" and "the
+// tree would hold 100" are different facts, and a refusal that mixes
+// them is a refusal an operator cannot act on.
+func budgetRefusal(budget string, allowed, used int64, detail string) error {
+	msg := fmt.Sprintf("%s allows %d and the tree holds %d", budget, allowed, used)
+	if detail != "" {
+		msg += ", " + detail
+	}
+	return fmt.Errorf("%w: %s", ErrBudgetExhausted, msg)
 }
 
 // The three budget conditions, as SQL fragments.

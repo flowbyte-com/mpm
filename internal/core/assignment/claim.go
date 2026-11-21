@@ -117,7 +117,8 @@ func (s *Store) Claim(p ClaimParams) (*Assignment, error) {
 				}
 				if budget.LiveClaims >= budget.MaxConcurrent {
 					return budgetRefusal("max_concurrency", budget.MaxConcurrent,
-						budget.LiveClaims)
+						budget.LiveClaims,
+						"and every one of them holds a live lease on unfinished work")
 				}
 				return fmt.Errorf("%w: %s is %s and holds no claim",
 					ErrConstraint, p.ID, after.State)
