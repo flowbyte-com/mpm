@@ -243,8 +243,17 @@ func assignmentVerbExecuteReview(store *assignment.Store, f *assignmentFlags) (i
 
 	mpmDir := config.GetMPMDir()
 	root := filepath.Join(mpmDir, "opencode", "reviews", f.id)
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return nil, fmt.Errorf("create the review root: %w", err)
+	// THE SANDBOX TREE, and not just the root.
+	//
+	// The runtime's read-only commands run with their working directory
+	// at <root>/home, and the review path reads the reviewer's session
+	// through exactly that command. Without the tree, the capture fails
+	// with "chdir …: no such file or directory" — so the review would
+	// never produce a finding, and a review that cannot be read can only
+	// ever be reported, never recovered.
+	spec := oc.Spec{Root: root, Workspace: f.workspace}
+	if err := oc.BuildTree(spec); err != nil {
+		return nil, err
 	}
 
 	opencodeBin := os.Getenv(envOpenCodeBin)

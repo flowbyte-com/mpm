@@ -51,6 +51,9 @@ func TestABrokenConfigurationFileIsAnError(t *testing.T) {
 		`{not json`,
 		`{"enabled": "yes"}`,
 		`{"concurrency": "many"}`,
+		// A TYPO is an error too. A silently ignored key is a limit the
+		// operator believes they set and the dispatcher does not.
+		`{"enabled": false, "lease_second": 900}`,
 	} {
 		path := filepath.Join(t.TempDir(), "dispatch.json")
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -179,12 +182,42 @@ func TestTheReviewerMayNotBeTheWorker(t *testing.T) {
 	if err == nil {
 		t.Fatal("the worker was accepted as the reviewer")
 	}
-	if !strings.Contains(err.Error(), "same definition") {
+	if !strings.Contains(err.Error(), "pinned to") {
 		t.Errorf("refused, but not as a definition problem: %v", err)
 	}
 }
 
-// TestTheConfigurationIsAPlainJSONObject proves the file is readable.
+// TestAnUnpinnedWorkerAgentIsRefused proves the containment's pin is
+// enforced at the configuration.
+//
+// The runtime's allow-list names exactly the two definitions MPM ships.
+// A configuration naming a third one would be refused by the runtime
+// AFTER the claim and BEFORE any attempt exists — and a refusal that
+// creates no attempt never trips the dispatch-attempt cap, so the
+// assignment would be retried forever while its live claim starved the
+// tree's concurrency budget.
+func TestAnUnpinnedWorkerAgentIsRefused(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.Concurrency = 1
+	cfg.LeaseSeconds = 900
+	cfg.RuntimeTimeoutSeconds = 600
+	cfg.LeaseMarginSeconds = 300
+	cfg.CandidateLimit = 10
+	cfg.WorkspaceRoot = "/tmp/workspaces"
+	cfg.ReviewRepoPath = "/srv/repo"
+	cfg.WorkerAgent = "some-other-agent"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("an unpinned worker agent was accepted")
+	}
+	if !strings.Contains(err.Error(), "pinned to") {
+		t.Errorf("refused, but not as a pinning problem: %v", err)
+	}
+}
+
+// TheConfigurationIsAPlainJSONObject proves the file is readable.
 //
 // A configuration that only a Go program can parse is a configuration an
 // operator cannot inspect.

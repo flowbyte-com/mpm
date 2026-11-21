@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -43,7 +44,8 @@ type Config struct {
 	Enabled bool `json:"enabled"`
 
 	// Concurrency is how many assignments one run dispatches. It must be
-	// at least 1 and at most MaxConcurrency.
+	// at least 1. The tree's own max_concurrency is the DURABLE limit,
+	// and the service enforces it atomically.
 	Concurrency int `json:"concurrency"`
 
 	// Owner is the identity the dispatcher claims under. It names the
@@ -91,11 +93,27 @@ type Config struct {
 	WorkerAgent string `json:"worker_agent"`
 
 	// ReviewerAgent is the agent definition a REVIEWER runs under. It is
-	// the pinned, default-deny `mpm-reviewer`, and nothing else. It is
-	// recorded here so an operator can SEE that the reviewer is not the
-	// worker; the value is not free to be the worker, because the
-	// review path ignores it and uses the pinned definition.
+	// the pinned, default-deny `mpm-reviewer`, and nothing else.
+	//
+	// It is recorded here so an operator can SEE that the reviewer is not
+	// the worker. It is not free to be anything else: the runtime's
+	// allow-list is pinned to the two definitions MPM ships, so a
+	// configuration naming a third one would be refused by the runtime
+	// AFTER the claim — and the assignment would be retried forever,
+	// because a refusal that creates no attempt never trips the
+	// dispatch-attempt cap.
 	ReviewerAgent string `json:"reviewer_agent"`
+
+	// ReviewerModel is the model a REVIEWER runs under.
+	//
+	// It is SEPARATE from the worker's model, and it has to be: the
+	// worker's model is the sidecar's local id ("mpm-sidecar/…"), which
+	// only means anything inside the worker's namespace with the
+	// sidecar's socket. The reviewer's sandbox has no provider and no
+	// sidecar, so it names a real provider/model — and naming the
+	// worker's id there would ask the reviewer for a model its own
+	// configuration does not define.
+	ReviewerModel string `json:"reviewer_model"`
 
 	// ReviewRepoPath is the repository the reviewer examines. It must be
 	// a CLEAN tree, because the review path pins an exact revision and
@@ -127,6 +145,7 @@ func DefaultConfig() Config {
 		WorkspaceRoot:            "",
 		WorkerAgent:              "mpm-worker",
 		ReviewerAgent:            "mpm-reviewer",
+		ReviewerModel:            "minimax-coding-plan/MiniMax-M3.1-Flash",
 		ReviewRepoPath:           "",
 		Model:                    "",
 	}
@@ -202,6 +221,25 @@ func (c Config) Validate() error {
 	if c.ReviewerAgent == "" {
 		return fmt.Errorf("dispatch: the configuration is enabled but names no reviewer agent definition")
 	}
+	// THE TWO DEFINITIONS ARE PINNED, AND THE PIN IS ENFORCED HERE.
+	//
+	// The runtime's allow-list names exactly the two definitions MPM
+	// ships, so a configuration naming a third one would be REFUSED by
+	// the runtime — after the claim, and before any attempt exists. That
+	// refusal never trips the dispatch-attempt cap, so the assignment
+	// would be retried forever and its live claim would starve the
+	// tree's concurrency budget. Refusing the configuration is the same
+	// decision, made before anything is claimed.
+	if c.WorkerAgent != DefaultWorkerAgent {
+		return fmt.Errorf(
+			"dispatch: the worker agent is %q, and the containment's allow-list is pinned to %q",
+			c.WorkerAgent, DefaultWorkerAgent)
+	}
+	if c.ReviewerAgent != DefaultReviewerAgent {
+		return fmt.Errorf(
+			"dispatch: the reviewer agent is %q, and the review path is pinned to %q",
+			c.ReviewerAgent, DefaultReviewerAgent)
+	}
 	if c.WorkerAgent == c.ReviewerAgent {
 		return fmt.Errorf(
 			"dispatch: the worker agent %q and the reviewer agent %q are the same definition; "+
@@ -210,6 +248,9 @@ func (c Config) Validate() error {
 	}
 	if c.ReviewRepoPath == "" {
 		return fmt.Errorf("dispatch: the configuration is enabled but names no repository to review")
+	}
+	if c.ReviewerModel == "" {
+		return fmt.Errorf("dispatch: the configuration is enabled but names no reviewer model")
 	}
 	return nil
 }
@@ -236,9 +277,18 @@ func LoadConfig(path string) (Config, error) {
 		return DefaultConfig(), fmt.Errorf("dispatch: read the configuration at %s: %w", path, err)
 	}
 	cfg := DefaultConfig()
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	// AN UNKNOWN KEY IS AN ERROR.
+	//
+	// A silently ignored key is a typo the operator cannot see: they
+	// wrote "lease_second" and the dispatcher used the default, and the
+	// difference between the two is the difference between a lease that
+	// covers the runtime window and one that does not. So the file has
+	// to say what it means.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
 		return DefaultConfig(), fmt.Errorf(
-			"dispatch: the configuration at %s is not valid JSON: %w", path, err)
+			"dispatch: the configuration at %s is not usable JSON: %w", path, err)
 	}
 	if err := cfg.Validate(); err != nil {
 		return DefaultConfig(), fmt.Errorf("dispatch: the configuration at %s is not usable: %w", path, err)

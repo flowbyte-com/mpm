@@ -269,10 +269,23 @@ func (f *OpenCodeFactory) reviewerRuntime(a *assignment.Assignment) (*oc.Runtime
 		return nil, fmt.Errorf("the reviewer runtime needs a repository to review")
 	}
 	root := filepath.Join(f.mpmDir, "opencode", "reviews", a.ID)
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return nil, fmt.Errorf("create the review root: %w", err)
+	// THE REVIEWER'S SANDBOX TREE.
+	//
+	// The runtime's read-only commands run with their working directory
+	// at <root>/home, and the review path's own capture reads the
+	// session through exactly that command. So the tree has to EXIST:
+	// without it every inspection fails with "chdir …: no such file or
+	// directory", and a review that cannot be inspected can only ever be
+	// reported, never recovered.
+	if err := oc.BuildTree(oc.Spec{Root: root, Workspace: f.cfg.ReviewRepoPath}); err != nil {
+		return nil, err
 	}
-	model := f.cfg.Model
+	// THE REVIEWER'S MODEL IS ITS OWN.
+	//
+	// The worker's model is the sidecar's local id, which means nothing
+	// outside the worker's namespace. The reviewer's sandbox has no
+	// provider and no sidecar, so it names a real one.
+	model := f.cfg.ReviewerModel
 	if model == "" {
 		model = DefaultReviewModel
 	}
