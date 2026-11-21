@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"time"
 )
 
 // The dispatcher's configuration.
@@ -24,12 +23,17 @@ import (
 //
 //	Concurrency        how many assignments ONE run may dispatch
 //	LeaseSeconds      how long the dispatcher's claim lasts
-//	RuntimeTimeout    the longest the runtime may run
-//	LeaseMargin       the headroom the lease keeps beyond that timeout
-//	MaxDispatchAttempts  how many attempts ONE assignment may consume
-//	RetryBackoff      how long a failed assignment waits before it is retried
-//	CandidateLimit    how many assignments ONE run will even look at
-//	Owner             the identity the dispatcher claims under
+//	RuntimeTimeoutSeconds  the longest the runtime may run
+//	LeaseMarginSeconds    the headroom the lease keeps beyond that timeout
+//	MaxDispatchAttempts    how many attempts ONE assignment may consume
+//	RetryBackoffSeconds   how long a failed assignment waits before a retry
+//	CandidateLimit        how many assignments ONE run will even look at
+//	Owner                 the identity the dispatcher claims under
+//
+// EVERY DURATION IS IN SECONDS. A configuration file that mixes seconds
+// with "10m" is a configuration file that half of MPM cannot read, and a
+// duration this file cannot parse is a duration this file does not
+// have.
 //
 // Concurrency is a RUN limit, and the tree's own max_concurrency is the
 // DURABLE one: the service enforces the latter atomically, so a second
@@ -50,31 +54,32 @@ type Config struct {
 	// LeaseSeconds is the lease the dispatcher takes.
 	LeaseSeconds int64 `json:"lease_seconds"`
 
-	// RuntimeTimeout bounds one runtime invocation.
-	RuntimeTimeout time.Duration `json:"runtime_timeout"`
+	// RuntimeTimeoutSeconds bounds one runtime invocation.
+	RuntimeTimeoutSeconds int64 `json:"runtime_timeout_seconds"`
 
-	// LeaseMargin is the headroom the lease keeps beyond the runtime
-	// timeout, so the adapter can observe the outcome and record it.
-	LeaseMargin time.Duration `json:"lease_margin"`
+	// LeaseMarginSeconds is the headroom the lease keeps beyond the
+	// runtime timeout, so the adapter can observe the outcome and
+	// record it.
+	LeaseMarginSeconds int64 `json:"lease_margin_seconds"`
 
 	// MaxDispatchAttempts bounds how many attempts one assignment may
 	// consume, so a repeatedly failing assignment cannot monopolise the
 	// dispatcher. Zero means the dispatcher does not bound it.
 	MaxDispatchAttempts int `json:"max_dispatch_attempts"`
 
-	// RetryBackoff is how long a failed assignment waits before the
-	// dispatcher considers it again.
-	RetryBackoff time.Duration `json:"retry_backoff"`
+	// RetryBackoffSeconds is how long a failed assignment waits before
+	// the dispatcher considers it again.
+	RetryBackoffSeconds int64 `json:"retry_backoff_seconds"`
 
 	// CandidateLimit is how many assignments one run will look at.
 	CandidateLimit int `json:"candidate_limit"`
 
-	// DrainTimeout bounds the wait for a running session to report a
-	// terminal outcome.
-	DrainTimeout time.Duration `json:"drain_timeout"`
+	// DrainTimeoutSeconds bounds the wait for a running session to
+	// report a terminal outcome.
+	DrainTimeoutSeconds int64 `json:"drain_timeout_seconds"`
 
-	// DrainPollInterval is how often that wait looks.
-	DrainPollInterval time.Duration `json:"drain_poll_interval"`
+	// DrainPollIntervalSeconds is how often that wait looks.
+	DrainPollIntervalSeconds int64 `json:"drain_poll_interval_seconds"`
 
 	// WorkspaceRoot is the directory the dispatcher creates per-assignment
 	// worktrees under. It is operator-configured: the dispatcher does not
@@ -108,22 +113,22 @@ type Config struct {
 // dispatcher is off, and turning it on requires an explicit edit.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:             false,
-		Concurrency:         1,
-		Owner:               "mpm-dispatcher",
-		LeaseSeconds:        0,
-		RuntimeTimeout:      0,
-		LeaseMargin:         0,
-		MaxDispatchAttempts: 0,
-		RetryBackoff:        0,
-		CandidateLimit:      50,
-		DrainTimeout:        0,
-		DrainPollInterval:   0,
-		WorkspaceRoot:       "",
-		WorkerAgent:         "mpm-worker",
-		ReviewerAgent:       "mpm-reviewer",
-		ReviewRepoPath:      "",
-		Model:               "",
+		Enabled:                  false,
+		Concurrency:              1,
+		Owner:                    "mpm-dispatcher",
+		LeaseSeconds:             0,
+		RuntimeTimeoutSeconds:    0,
+		LeaseMarginSeconds:       0,
+		MaxDispatchAttempts:      0,
+		RetryBackoffSeconds:      0,
+		CandidateLimit:           50,
+		DrainTimeoutSeconds:      0,
+		DrainPollIntervalSeconds: 0,
+		WorkspaceRoot:            "",
+		WorkerAgent:              "mpm-worker",
+		ReviewerAgent:            "mpm-reviewer",
+		ReviewRepoPath:           "",
+		Model:                    "",
 	}
 }
 
@@ -149,12 +154,13 @@ func (c Config) Validate() error {
 		return fmt.Errorf("dispatch: the configuration is enabled but the lease is %d seconds; it must be positive",
 			c.LeaseSeconds)
 	}
-	if c.RuntimeTimeout <= 0 {
-		return fmt.Errorf("dispatch: the configuration is enabled but the runtime timeout is %s; it must be positive",
-			c.RuntimeTimeout)
+	if c.RuntimeTimeoutSeconds <= 0 {
+		return fmt.Errorf("dispatch: the configuration is enabled but the runtime timeout is %ds; it must be positive",
+			c.RuntimeTimeoutSeconds)
 	}
-	if c.LeaseMargin < 0 {
-		return fmt.Errorf("dispatch: the configuration is enabled but the lease margin is %s", c.LeaseMargin)
+	if c.LeaseMarginSeconds < 0 {
+		return fmt.Errorf("dispatch: the configuration is enabled but the lease margin is %ds",
+			c.LeaseMarginSeconds)
 	}
 	// THE LEASE MUST COVER THE RUNTIME WINDOW.
 	//
@@ -163,27 +169,28 @@ func (c Config) Validate() error {
 	// so a renewal mid-run would make the running attempt unable to
 	// record its result and the next dispatch would duplicate the work.
 	// So the lease is sized ONCE, and it has to cover the whole window.
-	need := int64(c.RuntimeTimeout.Seconds()) + int64(c.LeaseMargin.Seconds())
+	need := c.RuntimeTimeoutSeconds + c.LeaseMarginSeconds
 	if int64(c.LeaseSeconds) < need {
 		return fmt.Errorf(
 			"dispatch: the configuration is enabled but the lease of %ds does not cover the %ds runtime window plus %ds of margin",
-			c.LeaseSeconds, int64(c.RuntimeTimeout.Seconds()), int64(c.LeaseMargin.Seconds()))
+			c.LeaseSeconds, c.RuntimeTimeoutSeconds, c.LeaseMarginSeconds)
 	}
 	if c.MaxDispatchAttempts < 0 {
 		return fmt.Errorf("dispatch: the configuration is enabled but the dispatch-attempt limit is %d",
 			c.MaxDispatchAttempts)
 	}
-	if c.RetryBackoff < 0 {
-		return fmt.Errorf("dispatch: the configuration is enabled but the retry backoff is %s", c.RetryBackoff)
+	if c.RetryBackoffSeconds < 0 {
+		return fmt.Errorf("dispatch: the configuration is enabled but the retry backoff is %ds",
+			c.RetryBackoffSeconds)
 	}
 	if c.CandidateLimit <= 0 {
 		return fmt.Errorf("dispatch: the configuration is enabled but the candidate limit is %d; it must be positive",
 			c.CandidateLimit)
 	}
-	if c.DrainTimeout < 0 || c.DrainPollInterval < 0 {
+	if c.DrainTimeoutSeconds < 0 || c.DrainPollIntervalSeconds < 0 {
 		return fmt.Errorf("dispatch: the configuration is enabled but the drain window is negative")
 	}
-	if c.DrainTimeout > 0 && c.DrainPollInterval <= 0 {
+	if c.DrainTimeoutSeconds > 0 && c.DrainPollIntervalSeconds <= 0 {
 		return fmt.Errorf("dispatch: the configuration is enabled with a drain window but no poll interval")
 	}
 	if c.WorkspaceRoot == "" {

@@ -263,7 +263,7 @@ func (e *Engine) reconcile(ctx context.Context, a *assignment.Assignment,
 func (e *Engine) drain(ctx context.Context, o *assignment.OutstandingAttempt,
 	outcome Outcome) (Outcome, error) {
 
-	if e.cfg.DrainTimeout <= 0 || e.cfg.DrainPollInterval <= 0 {
+	if e.cfg.DrainTimeoutSeconds <= 0 || e.cfg.DrainPollIntervalSeconds <= 0 {
 		if err := e.noteRecovery(o, outcome); err != nil {
 			return outcome, err
 		}
@@ -273,7 +273,7 @@ func (e *Engine) drain(ctx context.Context, o *assignment.OutstandingAttempt,
 		return outcome, nil
 	}
 
-	deadline := e.now().Add(e.cfg.DrainTimeout)
+	deadline := e.now().Add(time.Duration(e.cfg.DrainTimeoutSeconds) * time.Second)
 	for {
 		state, reason, detail := e.inspect(ctx, o.Assignment, o.Attempt.NativeSessionID)
 		if reason != "" {
@@ -293,15 +293,15 @@ func (e *Engine) drain(ctx context.Context, o *assignment.OutstandingAttempt,
 			outcome.Reason = ReasonRecoveryRequired
 			outcome.Detail = "the drain was interrupted before the session reported an outcome"
 			return outcome, nil
-		case <-time.After(e.cfg.DrainPollInterval):
+		case <-time.After(time.Duration(e.cfg.DrainPollIntervalSeconds) * time.Second):
 		}
 	}
 
 	outcome.Reason = ReasonRecoveryRequired
 	outcome.Detail = fmt.Sprintf(
-		"the recorded session was still running after a %s drain window, so its effects "+
+		"the recorded session was still running after a %ds drain window, so its effects "+
 			"are unknown and it blocks another writer into the same workspace",
-		e.cfg.DrainTimeout)
+		e.cfg.DrainTimeoutSeconds)
 	if err := e.noteRecovery(o, outcome); err != nil {
 		return outcome, err
 	}

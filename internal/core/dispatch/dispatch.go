@@ -372,14 +372,14 @@ func (e *Engine) deferReason(a *assignment.Assignment) (string, string) {
 			"the assignment has used its dispatch attempts (%d of %d)",
 			len(attempts), e.cfg.MaxDispatchAttempts)
 	}
-	if e.cfg.RetryBackoff > 0 && len(attempts) > 0 {
+	if e.cfg.RetryBackoffSeconds > 0 && len(attempts) > 0 {
 		last := attempts[len(attempts)-1]
 		if last.LaunchState == assignment.SessionFailed && last.UpdatedAt > 0 {
 			since := e.now().Unix() - last.UpdatedAt
-			if since < int64(e.cfg.RetryBackoff.Seconds()) {
+			if since < int64(e.cfg.RetryBackoffSeconds) {
 				return ReasonDeferred, fmt.Sprintf(
 					"the assignment failed %ds ago and the backoff is %ds",
-					since, int64(e.cfg.RetryBackoff.Seconds()))
+					since, int64(e.cfg.RetryBackoffSeconds))
 			}
 		}
 	}
@@ -427,7 +427,7 @@ func (e *Engine) dispatchOne(ctx context.Context, a *assignment.Assignment) (Out
 		outcome.Reason = ReasonLeaseHeld
 		outcome.Detail = fmt.Sprintf(
 			"the lease ends at %d and the runtime window needs %ds of headroom",
-			leaseExpiry(a), int64(e.cfg.RuntimeTimeout.Seconds()))
+			leaseExpiry(a), int64(e.cfg.RuntimeTimeoutSeconds))
 		return outcome, nil
 	}
 	if !e.holdsLiveLease(a) {
@@ -481,7 +481,7 @@ func (e *Engine) dispatchOne(ctx context.Context, a *assignment.Assignment) (Out
 		outcome.Reason = ReasonLeaseHeld
 		outcome.Detail = fmt.Sprintf(
 			"the lease ends at %d and the runtime window needs %ds of headroom",
-			leaseExpiry(claimed), int64(e.cfg.RuntimeTimeout.Seconds()))
+			leaseExpiry(claimed), int64(e.cfg.RuntimeTimeoutSeconds))
 		return outcome, nil
 	}
 
@@ -543,7 +543,7 @@ func (e *Engine) leaseCovers(a *assignment.Assignment) bool {
 	if a.LeaseExpiresAt == nil {
 		return false
 	}
-	need := int64(e.cfg.RuntimeTimeout.Seconds()) + int64(e.cfg.LeaseMargin.Seconds())
+	need := int64(e.cfg.RuntimeTimeoutSeconds) + int64(e.cfg.LeaseMarginSeconds)
 	return *a.LeaseExpiresAt-e.store.Now() >= need
 }
 

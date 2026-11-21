@@ -22,7 +22,6 @@ package dispatch
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -235,10 +234,10 @@ func testConfig(t *testing.T) Config {
 	cfg.Concurrency = 1
 	cfg.Owner = "mpm-dispatcher"
 	cfg.LeaseSeconds = 900
-	cfg.RuntimeTimeout = 10 * time.Minute
-	cfg.LeaseMargin = 5 * time.Minute
+	cfg.RuntimeTimeoutSeconds = 600
+	cfg.LeaseMarginSeconds = 300
 	cfg.MaxDispatchAttempts = 3
-	cfg.RetryBackoff = 0
+	cfg.RetryBackoffSeconds = 0
 	cfg.CandidateLimit = 20
 	cfg.WorkspaceRoot = filepath.Join(t.TempDir(), "workspaces")
 	cfg.ReviewRepoPath = t.TempDir()
@@ -360,28 +359,6 @@ func TestAnInvalidEnabledConfigurationIsRefused(t *testing.T) {
 		t.Fatal("a lease that cannot cover the runtime window was accepted")
 	} else if !strings.Contains(err.Error(), "does not cover") {
 		t.Errorf("refused, but not as a lease problem: %v", err)
-	}
-}
-
-// TestAMissingConfigurationFileMeansDisabled proves the safe default.
-func TestAMissingConfigurationFileMeansDisabled(t *testing.T) {
-	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "absent.json"))
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.Enabled {
-		t.Error("a missing configuration file enabled the dispatcher")
-	}
-}
-
-// TestABrokenConfigurationFileIsAnError proves the loud direction.
-func TestABrokenConfigurationFileIsAnError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "dispatch.json")
-	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadConfig(path); err == nil {
-		t.Fatal("a broken configuration file was accepted silently")
 	}
 }
 

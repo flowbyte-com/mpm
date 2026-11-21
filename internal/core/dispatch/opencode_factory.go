@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/flowbyte-com/mpm-core/assignment"
 	"github.com/flowbyte-com/mpm-core/config"
@@ -253,7 +254,7 @@ func (f *OpenCodeFactory) workerRuntime(a *assignment.Assignment, workspace stri
 		Sidecar: oc.SidecarConfig{
 			SocketPath: sidecar.SocketPath(),
 		},
-		Timeout: f.cfg.RuntimeTimeout,
+		Timeout: time.Duration(f.cfg.RuntimeTimeoutSeconds) * time.Second,
 	})
 }
 
@@ -283,7 +284,7 @@ func (f *OpenCodeFactory) reviewerRuntime(a *assignment.Assignment) (*oc.Runtime
 		RepoPath:      f.cfg.ReviewRepoPath,
 		PluginPath:    f.plugin,
 		AllowedAgents: []string{DefaultReviewerAgent},
-		Timeout:       f.cfg.RuntimeTimeout,
+		Timeout:       time.Duration(f.cfg.RuntimeTimeoutSeconds) * time.Second,
 	})
 }
 
