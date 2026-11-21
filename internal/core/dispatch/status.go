@@ -127,9 +127,17 @@ func Status(store *assignment.Store, cfg Config) (*StatusReport, error) {
 			item.Detail = "an earlier attempt is outstanding, so a second writer cannot be ruled out"
 			out.Blocked = append(out.Blocked, item)
 
-		case liveLeaseHeldByOther(c, cfg.Owner, now):
+		case liveLeaseHeld(c, now):
+			// A LIVE LEASE BLOCKS, whoever holds it.
+			//
+			// The dispatcher never reclaims a live lease — not another
+			// holder's, and not its own from a run that died after the
+			// claim. An expired lease is not evidence that the old
+			// process stopped, so waiting is the safe direction.
 			item.Reason = ReasonLeaseHeld
-			item.Detail = "another holder holds a live lease on this assignment"
+			item.Detail = fmt.Sprintf(
+				"a live lease held by %s blocks the claim until %d",
+				item.Owner, item.LeaseExpiresAt)
 			out.Blocked = append(out.Blocked, item)
 
 		default:
@@ -186,18 +194,19 @@ func attemptCount(o *assignment.OutstandingAttempt) int {
 	return int(o.Attempt.Attempt)
 }
 
-// liveLeaseHeldByOther says the assignment is leased to somebody who is
-// not this dispatcher.
+// liveLeaseHeld says the assignment is under a lease that has not
+// expired.
 //
-// A lease the DISPATCHER holds is not a blocker: the dispatcher can
-// resume its own work with the epoch it already holds. A lease held by
-// anybody else is a blocker, and the dispatcher never takes it.
-func liveLeaseHeldByOther(a *assignment.Assignment, owner string, now int64) bool {
+// It does not matter WHO holds it. The dispatcher always claims, and a
+// claim under a live lease is refused — so the assignment waits for the
+// lease to expire, whether the holder is another dispatcher or this
+// dispatcher's own name from a run that died after the claim.
+//
+// The alternative — treating the dispatcher's own lease as resumable —
+// was what let two dispatchers prompt the same recorded session.
+func liveLeaseHeld(a *assignment.Assignment, now int64) bool {
 	if a.ClaimEpoch == 0 || a.LeaseExpiresAt == nil {
 		return false
 	}
-	if *a.LeaseExpiresAt <= now {
-		return false
-	}
-	return a.Owner != owner
+	return *a.LeaseExpiresAt > now
 }

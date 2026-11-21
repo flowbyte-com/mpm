@@ -180,13 +180,21 @@ func TestACrashAfterTheClaimIsRecoverable(t *testing.T) {
 
 // ── CRASH AFTER THE INTENT ───────────────────────────────────────────────
 
-// TestACrashAfterTheIntentResumesTheRecordedSession: the session id is
+// TestACrashAfterTheIntentIsInspectedAndThenRunsAgain: the session id is
 // durable and the launch may or may not have happened.
 //
-// The runtime has no record of the session, so nothing was created, and
-// reusing the recorded id cannot duplicate anything. The next run must
-// LAUNCH WITH THE RECORDED ID — not mint a new one.
-func TestACrashAfterTheIntentResumesTheRecordedSession(t *testing.T) {
+// THE FIRST RUN MUST NOT LAUNCH. The previous run's lease is still
+// live, and a live lease is never reclaimed: the assignment waits for
+// it. That is the safe direction, because an expired lease is not
+// evidence that the old process stopped.
+//
+// THE SECOND RUN, AFTER THE LEASE EXPIRES, INSPECTS THE RECORDED SESSION
+// before it starts anything. The runtime has never heard of it, so
+// nothing was created, and re-running the objective cannot duplicate
+// work — but the recorded id is NOT blindly reused: the new attempt
+// gets its own id, because the old attempt's writes are fenced out and
+// its id no longer means anything to this claim.
+func TestACrashAfterTheIntentIsInspectedAndThenRunsAgain(t *testing.T) {
 	store, clock, projectID := clockStore(t)
 	root := dispatchRoot(t, store, projectID)
 	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:rec:intent")
@@ -204,20 +212,112 @@ func TestACrashAfterTheIntentResumesTheRecordedSession(t *testing.T) {
 	engine, fake := clockEngine(t, store, clock, cfg)
 	fake.launchState = okState("mpm-worker", "succeeded")
 
+	// THE FIRST RUN: THE LEASE IS STILL LIVE.
+	report, err := engine.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("the first run: %v", err)
+	}
+	if fake.Launches() != 0 {
+		t.Fatalf("the runtime was launched %d times while a live lease was held",
+			fake.Launches())
+	}
+	outcome, ok := outcomeFor(report, child.ID)
+	if !ok {
+		t.Fatalf("the report has no outcome: %+v", report.Outcomes)
+	}
+	if outcome.Reason != ReasonLeaseHeld {
+		t.Errorf("the outcome is %q, want %q", outcome.Reason, ReasonLeaseHeld)
+	}
+
+	// THE LEASE EXPIRES.
+	clock.Advance(1900 * time.Second)
+
+	// THE SECOND RUN.
 	if _, err := engine.RunOnce(context.Background()); err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("the second run: %v", err)
 	}
 	if fake.Launches() != 1 {
-		t.Fatalf("the runtime was launched %d times, want 1", fake.Launches())
+		t.Fatalf("the runtime was launched %d times after the lease expired, want 1",
+			fake.Launches())
 	}
-	// THE RECORDED ID IS THE ONE USED.
 	attempts := mustAttempts(t, store, child.ID)
-	if len(attempts) != 1 {
-		t.Fatalf("the assignment has %d attempts, want 1", len(attempts))
+	if len(attempts) != 2 {
+		t.Fatalf("the assignment has %d attempts, want 2", len(attempts))
 	}
-	if attempts[0].NativeSessionID != "ses_recorded_intent" {
-		t.Errorf("the launch used the session %q, want the recorded ses_recorded_intent",
-			attempts[0].NativeSessionID)
+	if attempts[1].NativeSessionID == "ses_recorded_intent" {
+		t.Error("the second attempt reused the fenced attempt's session id")
+	}
+	if attempts[1].ClaimEpoch == attempts[0].ClaimEpoch {
+		t.Errorf("the second attempt is at epoch %d, want a NEW epoch",
+			attempts[1].ClaimEpoch)
+	}
+}
+
+// TestTheRecoveryPassBuildsTheWorkspaceBeforeItInspects proves the
+// inspection path asks the factory for a runtime it can actually build.
+//
+// The REAL factory refuses a worker runtime with no authorised
+// workspace, because a runtime with no workspace is a runtime that could
+// run anywhere. So the recovery pass has to build the assignment's
+// workspace BEFORE it inspects — exactly as the dispatch path does.
+//
+// The fake factory here refuses an empty workspace the way the real one
+// does. Without the fix, every inspection of an implementer's session
+// fails with "runtime unavailable", and the whole recovery pass turns
+// into a refusal: no blocker is ever detected, and no note ever reaches
+// the ledger.
+func TestTheRecoveryPassBuildsTheWorkspaceBeforeItInspects(t *testing.T) {
+	store, clock, projectID := clockStore(t)
+	root := dispatchRoot(t, store, projectID)
+	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:rec:workspace")
+
+	claimed, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: 0, Owner: "mpm-dispatcher", LeaseSeconds: 1800,
+		Actor: assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	seedAttempt(t, store, child, claimed.ClaimEpoch, "ses_workspace", assignment.SessionRunning)
+
+	// THE STRICT FACTORY: the real one's refusal, reproduced.
+	var seen []string
+	strict := newFakeRuntime()
+	strict.states["ses_workspace"] = &oc.SessionState{ID: "ses_workspace", Outcome: ""}
+	engine, err := NewEngine(store, testConfig(t), func(_ context.Context, a *assignment.Assignment, workspace string) (
+		assignment.Runtime, assignment.ReviewRuntime, error) {
+		seen = append(seen, workspace)
+		if a.Role != assignment.RoleReviewer && workspace == "" {
+			return nil, nil, errors.New("the worker runtime needs an authorised workspace")
+		}
+		return strict, strict, nil
+	})
+	if err != nil {
+		t.Fatalf("build the engine: %v", err)
+	}
+	engine.now = clock.Now
+
+	report, err := engine.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// THE FACTORY WAS ASKED FOR A WORKSPACE, AND GOT ONE.
+	sawWorkspace := false
+	for _, w := range seen {
+		if w != "" {
+			sawWorkspace = true
+		}
+	}
+	if !sawWorkspace {
+		t.Fatalf("the recovery pass never built a workspace: %v", seen)
+	}
+	// AND THE BLOCKER WAS DETECTED — not turned into "runtime unavailable".
+	outcome, ok := outcomeFor(report, child.ID)
+	if !ok {
+		t.Fatalf("the report has no outcome: %+v", report.Outcomes)
+	}
+	if outcome.Reason != ReasonSessionStillRunning && outcome.Reason != ReasonRecoveryRequired {
+		t.Errorf("the outcome is %q, want the running session to block", outcome.Reason)
 	}
 }
 
@@ -362,14 +462,12 @@ func TestARunningOlderEpochSessionBlocksTheWorkspace(t *testing.T) {
 	}
 	seedAttempt(t, store, child, claimed.ClaimEpoch, "ses_old", assignment.SessionRunning)
 
-	// The lease expires and the assignment is RECLAIMED: a new epoch.
+	// The lease expires. The dispatcher does the reclaiming itself: the
+	// assignment is not pre-claimed here, because a live lease is never
+	// taken over, and the fixture must not hand the dispatcher a claim it
+	// could not have taken. So the ONLY thing that can stop the dispatch
+	// below is the recovery pass finding the old session still running.
 	clock.Advance(1900 * time.Second)
-	if _, err := store.Claim(assignment.ClaimParams{
-		ID: child.ID, ExpectedEpoch: claimed.ClaimEpoch, Owner: "mpm-dispatcher",
-		LeaseSeconds: 900, Actor: assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
-	}); err != nil {
-		t.Fatalf("reclaim: %v", err)
-	}
 
 	cfg := testConfig(t)
 	engine, fake := clockEngine(t, store, clock, cfg)
@@ -395,6 +493,111 @@ func TestARunningOlderEpochSessionBlocksTheWorkspace(t *testing.T) {
 	}
 	if !sawBlock {
 		t.Errorf("the report does not say the older session blocks: %+v", report.Outcomes)
+	}
+}
+
+// TestAnOlderEpochAttemptWhoseSessionIsGoneDoesNotBlock proves the
+// recovery pass asks the RUNTIME rather than doing epoch arithmetic.
+//
+// An expired lease is NOT evidence that the old process stopped, so the
+// dispatcher asks the runtime what became of the session. When the
+// runtime has no record of it, the attempt is HISTORY: it blocks
+// nothing, and the assignment is dispatched.
+//
+// Without this, every reclaimed assignment would be blocked forever by
+// an attempt whose session the runtime had long since forgotten.
+func TestAnOlderEpochAttemptWhoseSessionIsGoneDoesNotBlock(t *testing.T) {
+	store, clock, projectID := clockStore(t)
+	root := dispatchRoot(t, store, projectID)
+	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:rec:gone")
+
+	claimed, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: 0, Owner: "mpm-dispatcher", LeaseSeconds: 1800,
+		Actor: assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	seedAttempt(t, store, child, claimed.ClaimEpoch, "ses_gone", assignment.SessionRunning)
+
+	// The lease expires. The dispatcher itself does the reclaiming — the
+	// assignment is not pre-claimed here, because a live lease is never
+	// taken over and the fixture must not hand the dispatcher a claim it
+	// could not have taken.
+	clock.Advance(1900 * time.Second)
+
+	cfg := testConfig(t)
+	engine, fake := clockEngine(t, store, clock, cfg)
+	// The runtime has NO record of the old session: it is gone.
+	fake.launchState = okState("mpm-worker", "succeeded")
+
+	report, err := engine.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if fake.Launches() != 1 {
+		t.Fatalf("the runtime was launched %d times, want 1; an attempt whose "+
+			"session is gone must not block the work forever", fake.Launches())
+	}
+	// AND THE REPORT SAYS WHY IT WAS NOT A BLOCKER.
+	outcome, ok := outcomeFor(report, child.ID)
+	if !ok {
+		t.Fatalf("the report has no outcome: %+v", report.Outcomes)
+	}
+	if outcome.Reason != ReasonDeferred && outcome.Reason != ReasonCompleted {
+		t.Errorf("the outcome is %q, want the old attempt to be history", outcome.Reason)
+	}
+}
+
+// TestAnUnreachableRuntimeBlocksTheOlderEpochAttempt proves the
+// UNKNOWN case blocks.
+//
+// When the runtime cannot be asked, nobody can say whether the old
+// session is still working. A second writer cannot be ruled out, so the
+// dispatcher refuses rather than guessing.
+func TestAnUnreachableRuntimeBlocksTheOlderEpochAttempt(t *testing.T) {
+	store, clock, projectID := clockStore(t)
+	root := dispatchRoot(t, store, projectID)
+	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:rec:unreachable")
+
+	claimed, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: 0, Owner: "mpm-dispatcher", LeaseSeconds: 1800,
+		Actor: assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	seedAttempt(t, store, child, claimed.ClaimEpoch, "ses_unreachable", assignment.SessionRunning)
+
+	// The lease expires, so the dispatcher CAN claim — and then the
+	// recovery pass asks about the old session and cannot get an answer.
+	clock.Advance(1900 * time.Second)
+
+	cfg := testConfig(t)
+	engine, fake := clockEngine(t, store, clock, cfg)
+	// The runtime cannot be asked.
+	fake.inspectErr = errors.New("the runtime is unreachable")
+	fake.launchState = okState("mpm-worker", "succeeded")
+
+	report, err := engine.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if fake.Launches() != 0 {
+		t.Errorf("the runtime was launched %d times although the older session "+
+			"could not be inspected", fake.Launches())
+	}
+	sawBlock := false
+	for _, o := range report.Outcomes {
+		if o.AssignmentID == child.ID &&
+			(o.Reason == ReasonRuntimeUnavailable ||
+				o.Reason == ReasonSessionStillRunning ||
+				o.Reason == ReasonRecoveryRequired) {
+			sawBlock = true
+		}
+	}
+	if !sawBlock {
+		t.Errorf("the report does not say the unknown session blocks: %+v", report.Outcomes)
 	}
 }
 

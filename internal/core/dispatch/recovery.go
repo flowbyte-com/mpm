@@ -49,18 +49,28 @@ import (
 // recover reconciles the attempts a previous run left behind.
 //
 // It returns one outcome per outstanding attempt it had something to say
-// about. An attempt it recovered silently is not reported — the normal
-// dispatch path will pick the assignment up.
-func (e *Engine) recover(ctx context.Context) ([]Outcome, error) {
+// about, and the set of assignments it BLOCKED. An attempt it recovered
+// silently is not reported — the normal dispatch path will pick the
+// assignment up.
+//
+// # THE ORDER OF THE QUESTIONS
+//
+//  1. What does the runtime say about the recorded session? That answer
+//     comes FIRST, because it is EVIDENCE, and the epoch arithmetic is
+//     not.
+//  2. Is the attempt's epoch the assignment's current epoch?
+//  3. What can be done through the existing fenced paths?
+func (e *Engine) recover(ctx context.Context) ([]Outcome, map[string]Outcome, error) {
 	outstanding, err := e.store.OutstandingAttempts()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(outstanding) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	out := []Outcome{}
+	blocked := map[string]Outcome{}
 	for _, o := range outstanding {
 		if o.Assignment == nil {
 			continue
@@ -74,74 +84,78 @@ func (e *Engine) recover(ctx context.Context) ([]Outcome, error) {
 			Epoch:           o.Attempt.ClaimEpoch,
 		}
 
-		// AN OLDER EPOCH IS A BLOCKER.
-		//
-		// The attempt's writes are fenced on the epoch, so an attempt
-		// from an older claim can never record its own result, and the
-		// session it started may still be working. PR 3's own reconciler
-		// refuses this case; the dispatcher surfaces it rather than
-		// working around it.
-		if o.Attempt.ClaimEpoch != o.Assignment.ClaimEpoch {
-			outcome.Reason = ReasonSessionStillRunning
-			outcome.Detail = fmt.Sprintf(
-				"the attempt is at epoch %d and the assignment is at epoch %d, so the "+
-					"session may still be working and its effects cannot be fenced from "+
-					"here", o.Attempt.ClaimEpoch, o.Assignment.ClaimEpoch)
-			if err := e.noteRecovery(o, outcome); err != nil {
-				return out, err
-			}
-			out = append(out, outcome)
-			continue
-		}
-
-		// WHAT DOES THE RUNTIME SAY?
+		// WHAT DOES THE RUNTIME SAY? FIRST, because it is evidence.
 		state, reason, detail := e.inspect(ctx, o.Assignment, o.Attempt.NativeSessionID)
 		if reason != "" {
+			// THE RUNTIME COULD NOT BE ASKED. That is the UNKNOWN case,
+			// and it is the one that blocks: a session that cannot be
+			// inspected may still be working, and a second writer cannot
+			// be ruled out.
 			outcome.Reason = reason
 			outcome.Detail = detail
-			if reason == ReasonRecoveryRequired {
-				if err := e.noteRecovery(o, outcome); err != nil {
-					return out, err
-				}
+			if err := e.noteRecovery(o, outcome); err != nil {
+				return out, blocked, err
 			}
+			blocked[o.Assignment.ID] = outcome
 			out = append(out, outcome)
 			continue
 		}
 
-		switch {
-		case state == nil:
-			// THE RUNTIME HAS NEVER HEARD OF IT. Nothing was created, so
-			// reusing the recorded id cannot duplicate anything. The
-			// normal dispatch path resumes it.
-			outcome.Reason = ReasonDeferred
-			outcome.Detail = "the runtime has no record of the session, so the recorded " +
-				"id can be reused safely; the assignment will be dispatched normally"
-			out = append(out, outcome)
+		// THE SESSION IS STILL RUNNING.
+		//
+		// It may or may not be — the runtime knows it has not reported
+		// an outcome, and that is the whole of the evidence. It blocks:
+		// a second writer into the same workspace is exactly the
+		// duplicate this record exists to prevent.
+		if state != nil && state.Outcome == "" {
+			outcome.Reason = ReasonSessionStillRunning
+			outcome.Detail = fmt.Sprintf(
+				"the session %s has not reported an outcome, so it may still be working "+
+					"and a second writer cannot be ruled out", o.Attempt.NativeSessionID)
+			drained, derr := e.drain(ctx, o, outcome)
+			if derr != nil {
+				return out, blocked, derr
+			}
+			out = append(out, drained)
+			if drained.Reason == ReasonRecoveryRequired ||
+				drained.Reason == ReasonRuntimeUnavailable ||
+				drained.Reason == ReasonSessionStillRunning {
+				blocked[o.Assignment.ID] = drained
+			}
+			continue
+		}
 
-		case state.Outcome != "":
-			// A TERMINAL OUTCOME. It is reconciled through the existing
-			// fenced path — PR 3's adapter, which records what the
-			// runtime said and nothing else.
+		// A TERMINAL OUTCOME, AT THE ASSIGNMENT'S CURRENT EPOCH.
+		//
+		// It is reconciled through the existing fenced path — PR 3's
+		// adapter, which records what the runtime said and nothing
+		// else.
+		//
+		// An outcome from an OLDER epoch is NOT reconciled: that
+		// attempt's writes are fenced out, so nobody can record it, and
+		// the work has to run again. That is PR 3's at-least-once
+		// choice, and the dispatch path makes it — the assignment is
+		// left alone here so it appears in the report exactly once.
+		if state != nil && state.Outcome != "" &&
+			o.Attempt.ClaimEpoch == o.Assignment.ClaimEpoch {
 			outcome.RuntimeOutcome = state.Outcome
 			reconciled, rerr := e.reconcile(ctx, o.Assignment, outcome)
 			if rerr != nil {
-				return out, rerr
+				return out, blocked, rerr
 			}
 			out = append(out, reconciled)
-
-		default:
-			// STILL RUNNING. The drain: wait, bounded, for the session to
-			// report a terminal outcome.
-			outcome.Reason = ReasonSessionStillRunning
-			outcome.Detail = "the recorded session is still running"
-			drained, derr := e.drain(ctx, o, outcome)
-			if derr != nil {
-				return out, derr
-			}
-			out = append(out, drained)
+			continue
 		}
+
+		// EVERYTHING ELSE IS LEFT TO THE DISPATCH PATH.
+		//
+		// The session does not exist, or it belongs to an older claim.
+		// Nothing was created, or nothing can be recorded, so there is
+		// nothing to reconcile and nothing to block. The assignment is
+		// reported by the dispatch path, which claims it — and a live
+		// lease there is what says the work is still with somebody.
 	}
-	return out, nil
+	return out, blocked, nil
 }
 
 // inspect asks the runtime what it knows about a session.
@@ -150,10 +164,28 @@ func (e *Engine) recover(ctx context.Context) ([]Outcome, error) {
 // asked. The three answers are kept apart, because they mean different
 // things: ABSENT is safe, UNREACHABLE is ambiguous, and RUNNING is a
 // blocker.
+//
+// # THE WORKSPACE IS BUILT HERE, NOT BY THE CALLER
+//
+// The real factory REFUSES a worker runtime with no authorised
+// workspace, because a runtime with no workspace is a runtime that could
+// run anywhere. So the inspection path builds the assignment's workspace
+// exactly as the dispatch path does — the same directory, from the same
+// configured root. An inspection that handed the factory an empty
+// workspace would fail on every implementer, which would silently turn
+// the whole recovery pass into "the runtime is unavailable".
 func (e *Engine) inspect(ctx context.Context, a *assignment.Assignment,
 	sessionID string) (*oc.SessionState, string, string) {
 
-	worker, reviewer, err := e.factory(ctx, a, "")
+	workspace := ""
+	if a.Role != assignment.RoleReviewer {
+		var werr error
+		workspace, werr = e.workspaceFor(a)
+		if werr != nil {
+			return nil, ReasonRuntimeUnavailable, werr.Error()
+		}
+	}
+	worker, reviewer, err := e.factory(ctx, a, workspace)
 	if err != nil {
 		return nil, ReasonRuntimeUnavailable, err.Error()
 	}
@@ -194,11 +226,20 @@ func (e *Engine) inspect(ctx context.Context, a *assignment.Assignment,
 func (e *Engine) reconcile(ctx context.Context, a *assignment.Assignment,
 	outcome Outcome) (Outcome, error) {
 
-	workspace, werr := e.workspaceFor(a)
-	if werr != nil {
-		outcome.Reason = ReasonRuntimeUnavailable
-		outcome.Detail = werr.Error()
-		return outcome, nil
+	// THE WORKSPACE IS BUILT FOR THE IMPLEMENTER, AND ONLY FOR THE
+	// IMPLEMENTER — the same rule the dispatch path follows. A reviewer
+	// has no worktree of its own: it examines the configured
+	// repository, and asking for a worktree would create a directory
+	// nobody works in.
+	workspace := ""
+	if a.Role != assignment.RoleReviewer {
+		var werr error
+		workspace, werr = e.workspaceFor(a)
+		if werr != nil {
+			outcome.Reason = ReasonRuntimeUnavailable
+			outcome.Detail = werr.Error()
+			return outcome, nil
+		}
 	}
 	worker, reviewer, err := e.factory(ctx, a, workspace)
 	if err != nil {
@@ -273,39 +314,47 @@ func (e *Engine) drain(ctx context.Context, o *assignment.OutstandingAttempt,
 		return outcome, nil
 	}
 
-	deadline := e.now().Add(time.Duration(e.cfg.DrainTimeoutSeconds) * time.Second)
+	// THE DRAIN WINDOW IS REAL TIME, NOT THE INJECTED CLOCK.
+	//
+	// The injected clock governs the LEASE — when a claim expires and
+	// when an epoch moves. A drain is a WAIT on an external system, and
+	// a wait bounded by a clock that never advances is a wait that never
+	// ends. So the window is a context timeout, which is real time, and
+	// the caller can cut it short by cancelling the context.
+	waitCtx, cancel := context.WithTimeout(ctx,
+		time.Duration(e.cfg.DrainTimeoutSeconds)*time.Second)
+	defer cancel()
 	for {
 		state, reason, detail := e.inspect(ctx, o.Assignment, o.Attempt.NativeSessionID)
 		if reason != "" {
 			outcome.Reason = reason
 			outcome.Detail = detail
+			// THE RUNTIME WENT AWAY MID-DRAIN. The session's effects are
+			// unknown, so the operator has to be told.
+			if err := e.noteRecovery(o, outcome); err != nil {
+				return outcome, err
+			}
 			return outcome, nil
 		}
 		if state != nil && state.Outcome != "" {
 			outcome.RuntimeOutcome = state.Outcome
 			return e.reconcile(ctx, o.Assignment, outcome)
 		}
-		if !e.now().Before(deadline) {
-			break
-		}
 		select {
-		case <-ctx.Done():
+		case <-waitCtx.Done():
+			// THE WINDOW CLOSED, OR THE CALLER CANCELLED.
 			outcome.Reason = ReasonRecoveryRequired
-			outcome.Detail = "the drain was interrupted before the session reported an outcome"
+			outcome.Detail = fmt.Sprintf(
+				"the recorded session was still running after a %ds drain window, so its "+
+					"effects are unknown and it blocks another writer into the same workspace",
+				e.cfg.DrainTimeoutSeconds)
+			if err := e.noteRecovery(o, outcome); err != nil {
+				return outcome, err
+			}
 			return outcome, nil
 		case <-time.After(time.Duration(e.cfg.DrainPollIntervalSeconds) * time.Second):
 		}
 	}
-
-	outcome.Reason = ReasonRecoveryRequired
-	outcome.Detail = fmt.Sprintf(
-		"the recorded session was still running after a %ds drain window, so its effects "+
-			"are unknown and it blocks another writer into the same workspace",
-		e.cfg.DrainTimeoutSeconds)
-	if err := e.noteRecovery(o, outcome); err != nil {
-		return outcome, err
-	}
-	return outcome, nil
 }
 
 // noteRecovery records the recovery state where an operator will see it.

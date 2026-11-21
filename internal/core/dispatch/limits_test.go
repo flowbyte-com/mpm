@@ -489,6 +489,53 @@ func TestTheStatusReportsPendingBlockedAndRecoverable(t *testing.T) {
 	}
 }
 
+// TestTheStatusBlocksTheDispatchersOwnLiveLease proves the status and
+// the dispatch path AGREE.
+//
+// The dispatcher always claims, and a claim under a live lease is
+// refused — so the assignment waits, whoever holds the lease. A status
+// that showed the dispatcher's OWN live lease as PENDING would promise
+// work that the dispatch would then refuse: the operator would see
+// "nothing to do" while the run said "lease held".
+//
+// The lease here is under the dispatcher's own name — the crash-after-
+// the-claim case.
+func TestTheStatusBlocksTheDispatchersOwnLiveLease(t *testing.T) {
+	store, _, projectID := clockStore(t)
+	root := dispatchRoot(t, store, projectID)
+	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:limits:status:own")
+
+	cfg := testConfig(t)
+	if _, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: 0, Owner: cfg.Owner, LeaseSeconds: 1800,
+		Actor: assignment.Actor{Address: cfg.Owner, Kind: "agent"},
+	}); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	status, err := Status(store, cfg)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	blocked := false
+	for _, item := range status.Blocked {
+		if item.AssignmentID == child.ID {
+			blocked = true
+			if item.Reason != ReasonLeaseHeld {
+				t.Errorf("the reason is %q, want %q", item.Reason, ReasonLeaseHeld)
+			}
+		}
+	}
+	if !blocked {
+		t.Errorf("the dispatcher's own live lease is not blocked: %+v", status.Blocked)
+	}
+	for _, item := range status.Pending {
+		if item.AssignmentID == child.ID {
+			t.Error("the assignment is pending, and the dispatch would refuse it")
+		}
+	}
+}
+
 // ── THE REPORT IS MACHINE-READABLE ───────────────────────────────────────
 
 // TestTheReportIsMachineReadable proves the report is a VALUE with a

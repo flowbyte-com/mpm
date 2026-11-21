@@ -56,8 +56,28 @@ const (
 	// ReasonBudgetExhausted says the tree's aggregate budget is spent.
 	ReasonBudgetExhausted = "budget_exhausted"
 
-	// ReasonLeaseHeld says the assignment is leased to another holder.
+	// ReasonLeaseHeld says a LIVE LEASE blocks the claim.
+	//
+	// The lease may be the dispatcher's own — left behind by a run that
+	// died after the claim — or another holder's. Either way the answer
+	// is the same: the work is not reclaimed while the lease lives, and
+	// the detail says who holds it and until when. The dispatcher does
+	// NOT try to recognise its own lease by the owner string: the
+	// operator's one-shot and the scheduler's tick share that string,
+	// and a second one would then resume an attempt the first one is
+	// still working on.
 	ReasonLeaseHeld = "lease_held"
+
+	// ReasonLeaseInsufficient says the lease the dispatcher holds does
+	// not outlive the runtime window, so the result could not be
+	// recorded.
+	//
+	// It is NOT `lease_held`: that code says the work is under a lease
+	// and must wait, and this one says the dispatcher HAS the work and
+	// cannot do it safely. Two different facts, two different codes —
+	// an operator reading "lease_held" would go looking for a holder
+	// to wait for, and there is none.
+	ReasonLeaseInsufficient = "lease_insufficient"
 
 	// ReasonStaleEpoch says the claim epoch moved under the dispatcher.
 	ReasonStaleEpoch = "stale_epoch"
@@ -249,11 +269,36 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 	}
 
 	// 1. RECOVER.
-	recovery, err := e.recover(ctx)
+	//
+	// The recovery pass runs FIRST, so a crash cannot leave work
+	// half-done and unnoticed. It reports only what it BLOCKED and what
+	// it RECONCILED: an assignment it merely observed is left to the
+	// dispatch path, so every assignment appears in the report once.
+	recovery, blocked, err := e.recover(ctx)
 	if err != nil {
 		return report, err
 	}
 	report.Outcomes = append(report.Outcomes, recovery...)
+	// THE RECOVERED COUNTS.
+	//
+	// A reconciled completion is a `completed` and NOT a `dispatched`:
+	// this run did not hand the work to the adapter — the runtime had
+	// already done it, and the recovery pass only recorded what the
+	// runtime said. So `completed` can be larger than `dispatched` in
+	// a run that only recovered, and that is the point of recovery:
+	// the work finished even though nobody launched it this time.
+	for _, o := range recovery {
+		switch o.Reason {
+		case ReasonCompleted:
+			report.Completed++
+		case ReasonAmbiguous:
+			report.Ambiguous++
+		case ReasonFailed:
+			// The attempt failed. It was not dispatched by this run.
+		default:
+			report.Deferred++
+		}
+	}
 
 	// 2. DISCOVER.
 	candidates, err := e.store.DispatchCandidates(assignment.DispatchQuery{
@@ -271,9 +316,27 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 	}
 
 	// 3. CLAIM AND DISPATCH.
-	dispatched := 0
+	//
+	// `attempts` counts every dispatch this run ATTEMPTED, whatever its
+	// outcome, because a dispatch that FAILED still spent a claim and a
+	// session: counting only the successes would let a run launch
+	// without limit as long as every launch failed.
+	attempts := 0
 	for _, candidate := range candidates {
-		if dispatched >= e.cfg.Concurrency {
+		// THE RECOVERY PASS ALREADY REFUSED THIS ONE.
+		//
+		// A session that may still be working blocks a second writer
+		// into the same workspace, and the recovery pass established
+		// that by asking the runtime. The dispatcher does not try
+		// anyway: PR 3's own fence would refuse the launch, and a
+		// refusal that costs a claim is worse than a clear report.
+		//
+		// It is NOT COUNTED AGAIN here: the recovery pass already
+		// counted it as deferred.
+		if _, ok := blocked[candidate.ID]; ok {
+			continue
+		}
+		if attempts >= e.cfg.Concurrency {
 			report.Deferred++
 			report.Outcomes = append(report.Outcomes, Outcome{
 				AssignmentID: candidate.ID,
@@ -306,22 +369,38 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 			return report, err
 		}
 		report.Outcomes = append(report.Outcomes, outcome)
-		// EVERY ATTEMPT COUNTS AGAINST THE RUN'S CONCURRENCY, whatever
-		// the outcome was. A dispatch that FAILED still spent a claim
-		// and a session, so it is not free to try another one: counting
-		// only the successes would let a run launch without limit as
-		// long as every launch failed.
-		dispatched++
-		report.Dispatched++
+		attempts++
+		// THE COUNTS, AND WHAT EACH ONE MEANS.
+		//
+		//   dispatched  the dispatcher handed the work to the adapter
+		//   completed  the assignment reached its terminal state
+		//   refused    a rule said no; nothing was launched
+		//   deferred   the work was not attempted this round
+		//   ambiguous  the runtime's outcome could not be determined
+		//
+		// A claim that was REFUSED is not a dispatch: nothing was
+		// launched, so it is refused and not dispatched.
+		//
+		// A FAILED attempt is a dispatch that did not complete: the
+		// work WAS handed to the adapter, and it failed. It is not a
+		// refusal — nothing refused it — so it is dispatched and
+		// neither completed nor refused. The per-assignment reason
+		// says `failed`, and that is where an operator reads it.
 		switch outcome.Reason {
+		case ReasonCompleted:
+			report.Dispatched++
+			report.Completed++
 		case ReasonAmbiguous:
+			report.Dispatched++
 			report.Ambiguous++
-		case ReasonRefused, ReasonBudgetExhausted, ReasonReviewerUnavailable:
-			report.Refused++
 		case ReasonFailed:
-			report.Refused++
+			report.Dispatched++
+		case ReasonDispatched:
+			report.Dispatched++
 		case ReasonDeferred:
 			report.Deferred++
+		default:
+			report.Refused++
 		}
 	}
 	return report, nil
@@ -409,43 +488,31 @@ func (e *Engine) dispatchOne(ctx context.Context, a *assignment.Assignment) (Out
 	// spent.
 
 	actor := assignment.Actor{Address: a.Recipient, Kind: "agent"}
-	claimed := a
-	// THE LEASE MUST OUTLAST THE RUN.
+
+	// THE CLAIM IS ALWAYS TAKEN, AND A LIVE LEASE IS NEVER RECLAIMED.
 	//
-	// The dispatcher does NOT renew during execution, and it cannot: PR
-	// 2's Renew advances the claim epoch, and PR 3's attempt writes are
-	// fenced on the epoch — so a renewal in the middle of a run would
-	// make the running attempt unable to record its result, and the next
-	// dispatch would duplicate the work. So the lease is sized ONCE, up
-	// front, to cover the whole runtime window, and work that cannot fit
-	// is refused rather than started.
+	// The dispatcher does not try to recognise "a lease I already hold"
+	// by the OWNER STRING: two dispatchers — the operator's one-shot and
+	// the scheduler's tick — share that string, and a second one would
+	// then resume an attempt the first one is still working on, and
+	// both would prompt the same recorded session.
 	//
-	// A lease the dispatcher ALREADY holds is judged BEFORE it does
-	// anything else, because that lease is the one the run will use: it
-	// was taken by an earlier run and it may not have enough left.
-	if e.holdsLiveLease(a) && !e.leaseCovers(a) {
-		outcome.Reason = ReasonLeaseHeld
-		outcome.Detail = fmt.Sprintf(
-			"the lease ends at %d and the runtime window needs %ds of headroom",
-			leaseExpiry(a), int64(e.cfg.RuntimeTimeoutSeconds))
-		return outcome, nil
-	}
-	if !e.holdsLiveLease(a) {
-		// THE CLAIM IS TAKEN WHEN THE DISPATCHER DOES NOT HOLD IT.
-		//
-		// A live lease is NEVER reclaimed: PR 2's Claim refuses it and
-		// PR 4 does not work around it.
-		var err error
-		claimed, err = e.store.Claim(assignment.ClaimParams{
-			ID:            a.ID,
-			ExpectedEpoch: a.ClaimEpoch,
-			Owner:         e.cfg.Owner,
-			LeaseSeconds:  e.cfg.LeaseSeconds,
-			Actor:         actor,
-		})
-		if err != nil {
-			return e.classifyClaimRefusal(outcome, err), nil
-		}
+	// So the dispatcher always claims, and PR 2's compare-and-swap
+	// decides: one claim per epoch, whoever asks first. A live lease is
+	// REFUSED, and the assignment waits for the lease to expire — which
+	// is the safe direction, because an expired lease is not evidence
+	// that the old process stopped and a live lease is not evidence
+	// that it did.
+	var err error
+	claimed, err := e.store.Claim(assignment.ClaimParams{
+		ID:            a.ID,
+		ExpectedEpoch: a.ClaimEpoch,
+		Owner:         e.cfg.Owner,
+		LeaseSeconds:  e.cfg.LeaseSeconds,
+		Actor:         actor,
+	})
+	if err != nil {
+		return e.classifyClaimRefusal(outcome, err), nil
 	}
 	outcome.Epoch = claimed.ClaimEpoch
 
@@ -478,7 +545,7 @@ func (e *Engine) dispatchOne(ctx context.Context, a *assignment.Assignment) (Out
 	// lease. It is checked anyway: a launch that cannot be recorded is
 	// the one failure this whole design exists to prevent.
 	if !e.leaseCovers(claimed) {
-		outcome.Reason = ReasonLeaseHeld
+		outcome.Reason = ReasonLeaseInsufficient
 		outcome.Detail = fmt.Sprintf(
 			"the lease ends at %d and the runtime window needs %ds of headroom",
 			leaseExpiry(claimed), int64(e.cfg.RuntimeTimeoutSeconds))
@@ -507,31 +574,6 @@ func (e *Engine) dispatchOne(ctx context.Context, a *assignment.Assignment) (Out
 		return e.dispatchReview(ctx, claimed, reviewer, outcome)
 	}
 	return e.dispatchWorker(ctx, claimed, worker, workspace, outcome)
-}
-
-// holdsLiveLease says the dispatcher already holds this assignment.
-//
-// IT IS THE CRASH-AFTER-THE-CLAIM CASE. A dispatcher that died between
-// the claim and the launch left a lease under its OWN name, and the next
-// run is the same dispatcher: it holds that lease, so it must USE the
-// existing epoch rather than claim again. Claiming again would be refused
-// by PR 2 ("leased to X — renew it rather than claiming it"), and renewing
-// would ADVANCE THE EPOCH — which would fence the outstanding attempt
-// out and make the recorded session id unusable.
-//
-// So the dispatcher reuses its own live claim, and PR 3's reconciler can
-// resume the recorded session.
-//
-// A lease held by ANYBODY ELSE is not the dispatcher's, and the claim
-// below refuses it.
-func (e *Engine) holdsLiveLease(a *assignment.Assignment) bool {
-	if a.ClaimEpoch == 0 || a.LeaseExpiresAt == nil {
-		return false
-	}
-	if a.Owner != e.cfg.Owner {
-		return false
-	}
-	return *a.LeaseExpiresAt > e.store.Now()
 }
 
 // leaseCovers says the lease outlives the runtime window.

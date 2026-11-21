@@ -388,6 +388,14 @@ func TestAnEnabledDispatcherDispatchesExactlyThroughTheAdapter(t *testing.T) {
 	if report.Dispatched != 1 {
 		t.Errorf("the report dispatched %d assignments, want 1", report.Dispatched)
 	}
+	// THE COMPLETION IS COUNTED. A report whose "completed" is always
+	// zero is a report that cannot be read.
+	if report.Completed != 1 {
+		t.Errorf("the report completed %d assignments, want 1", report.Completed)
+	}
+	if report.Refused != 0 || report.Deferred != 0 || report.Ambiguous != 0 {
+		t.Errorf("the report counts a refusal, a deferral or an ambiguity: %+v", report)
+	}
 
 	// THE ADAPTER'S OWN RECORD. The attempt row is what makes the launch
 	// recoverable, and its existence proves the adapter ran.
