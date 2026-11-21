@@ -3087,6 +3087,64 @@ The controls are not decoration. Their first run found two defects in PR 2's own
 * the transition's `WHERE` clause bound the row's **current** epoch — read inside the same transaction — so it always matched and fenced **nothing**. The clause now binds the **presented** epoch, which is what makes it a fence at all.
 * two tests presented a stale epoch to an assignment still in `enqueued`, so the **state machine** refused them before the fence was consulted. Both now put the assignment in a state where the transition is legal, so the refusal they observe is the fence's.
 
+### 6.16 The dispatcher (Continuity 001, PR 4 — the bounded autonomous dispatcher)
+
+§6.15 shipped the **service**; PR 3 shipped the **execution path**. Neither of them decides *which* assignment runs next, and neither of them was allowed to: a decision that picks work is a decision to spend real model budget, so it belongs to the operator.
+
+PR 4 ships that decision, and it ships it **off**.
+
+#### It is a coordinator, not a runtime
+
+The dispatcher finds work MPM already knows about, proves the operator's root authorises it, claims it through the fenced claim API, and hands it to PR 3's existing OpenCode adapter. It never runs a model itself, never creates an assignment, and never grants an approval. It is a bounded `run once`: it dispatches at most its configured number of assignments, it never polls, and it never retries inside the call.
+
+#### The switch is a file, and a missing file means off
+
+Autonomous dispatch is off unless an operator writes a configuration file — `~/.mpm/dispatch.json` by default, or wherever `--dispatch-config` points. A **missing** file means off, and the disabled dispatcher reads no row, builds no runtime and starts no session. A file that is **present and enabled** must be **complete**: a configuration that names no lease, no runtime window or no workspace is refused rather than completed with invented values. A file that is **present and broken** is refused too, and the refusal names the file: a broken configuration is not a reason to guess, and it is not a reason to dispatch.
+
+There is no environment variable that turns it on by accident, and "installed" is not "enabled".
+
+#### Two verbs, and they are the operator's alone
+
+`mpm assignment dispatch` performs one bounded pass and prints a machine-readable report. `mpm assignment dispatch-status` shows what is **pending**, what is **blocked** and what is **recoverable**, plus the budget picture of every tree involved, without dispatching anything.
+
+Neither is an agent-facing action and neither is reachable through `mpm call`. Starting inference is the operator's decision, and the dedicated verbs are the boundary: the capability exists, and it exists only in the operator's own front door.
+
+#### The scheduler may run a pass, and does nothing without the file
+
+The scheduler registers one tick handler that runs the **same engine** with the **same configuration**. The handler reads the configuration file on every tick, so an operator can enable or disable the dispatcher without restarting the scheduler, and a missing file means the handler does nothing at all. An installed scheduler never dispatches on its own. The scheduler's own cadence, its existing handlers and its wake semantics are unchanged.
+
+#### The aggregate budgets are now enforced — in the service
+
+PR 2 recorded `max_tasks`, `max_concurrency` and `max_resource_units` on the root and deliberately deferred their enforcement. They are enforced now, and the enforcement lives in `internal/core/assignment`, **not** in the dispatcher: a dispatcher-side check protects only the dispatcher, while the service's check binds every caller — the dispatcher, the CLI and the MCP surface alike.
+
+The count and the write are **one statement**. The `INSERT` that creates a child carries the task and resource conditions in its own `WHERE` clause, and the `UPDATE` that claims an assignment carries the concurrency condition in its own, so the database evaluates the count against the same snapshot the write lands on. A writer whose snapshot goes stale is refused with `SQLITE_BUSY_SNAPSHOT` and the transaction is retried against a fresh snapshot, which re-evaluates the count. A **live claim** is a claim whose lease has not expired and whose work is unfinished — a finished assignment keeps its lease, so counting leases alone would fill a tree with completed work and refuse the next real task.
+
+**`resource_units` is a DECLARED RESERVATION, not a measured spend.** It is fixed once when the assignment is created, and it is what the assignment costs against the root's cumulative budget. MPM does not meter tokens and the sidecar's audit records request and response **sizes**, not cost, so this is a ceiling on the work the operator **authorised** and it must not be described as a verified monetary or token-spend ceiling. A **retry is not charged twice**: a retry is a new attempt on the same row, and the reservation lives on the row.
+
+#### The lease, and why there is no renewal
+
+The dispatcher does not renew during execution, and it cannot: a renewal advances the claim epoch, and PR 3's attempt writes are fenced on the epoch, so a renewal in the middle of a run would make the running attempt unable to record its result — and the next dispatch would duplicate the work. The lease is therefore sized **once**, up front, to cover the whole runtime window plus a margin for the adapter to observe the outcome and write it down; a configuration whose lease cannot cover that window is refused, and work that does not fit is refused rather than started.
+
+#### Recovery observes; it never invents
+
+A run can be interrupted after the claim, after the intent, during the execution, or after the runtime ended, and each leaves a different record. The dispatcher **observes** the recorded session through the runtime and reconciles through the **existing** fenced path — the adapter that owns a runtime's report is the only thing that records it.
+
+What it never does: it never reclaims a **live lease**; it never turns "the runtime could not be asked" into a success — that is **ambiguous**, and an ambiguous attempt stays ambiguous until a human or a later observation resolves it; and it never stops a session. There is no verified host operation that safely ends an OpenCode session, so a session that may still be working is a **blocker**: the dispatcher refuses to put a second writer into the same workspace, records the state where the operator will see it, and says so.
+
+#### The reviewer stays separate
+
+A reviewer runs only through PR 3's review path, under the pinned default-deny `mpm-reviewer` definition, in its own sandbox, with the plugin that provides `sandbox_exec`. It never inherits the worker's context, workspace, model or agent definition, and the dispatcher's configuration refuses to name the same definition for both. Four facts stay apart: the **runtime's** outcome, the review **evidence** the host captured, the review **verdict** the reviewer recorded, and the **operator's** approval. The dispatcher records the first two and never the last.
+
+#### The report is a value with a closed vocabulary
+
+One pass returns a report — no live runtime, no open session — with counts (`dispatched`, `completed`, `refused`, `deferred`, `ambiguous`) and a per-assignment reason drawn from a **closed set**: `dispatch_disabled`, `no_eligible_assignment`, `budget_exhausted`, `lease_held`, `stale_epoch`, `session_still_running`, `runtime_unavailable`, `ambiguous_execution`, `reviewer_unavailable`, `recovery_required`, `operator_gate_pending`, `dispatched`, `completed`, `refused`, `deferred`, `failed`. Every attempt counts against the run's concurrency whatever its outcome was: a dispatch that failed still spent a claim and a session. Nothing in the report carries a credential, a prompt or a transcript.
+
+The selection is deterministic — `(created_at, id)` — so two dispatchers that see the same rows consider them in the same order, and a report is reproducible.
+
+#### What the dispatcher does not do
+
+It does not publish evidence anywhere (that is PR 5), merge, deploy or approve anything, create a root or a project, run a pilot, add a credential manager or a model router, replace OpenCode, or run a loop of its own. The design of record is `docs/dev/continuity-001-dispatcher.md`.
+
 ---
 
 ## 7. Core Stability
