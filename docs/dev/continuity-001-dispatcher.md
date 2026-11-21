@@ -321,9 +321,26 @@ own end, and the CALLER CANCELLING is somebody stopping the run on
 purpose. A cancelled run is checked BEFORE an unreachable runtime,
 because a command on a cancelled context fails, and reporting that as
 "the runtime could not be asked" would be a lie about the runtime. A
-cancelled run writes NO note: a note that says "recovery required" for
-a deliberate stop would train the operator to ignore the notes that
-matter.
+cancelled run writes NO note, in either path: a note that says "recovery
+required" for a deliberate stop would train the operator to ignore the
+notes that matter.
+
+**THE RECOVERY PASS NEVER LAUNCHES.** PR 3's adapter decides for itself
+whether to record an outcome, resume a recorded session, or mint a NEW
+attempt and launch it. The third is what a recovery pass must never do:
+a launch from the recovery path is a second writer into a workspace whose
+earlier session may still be working, and it is the one thing this
+package exists to prevent.
+
+So the recovery pass asks the adapter to **RECORD ONLY**, and the adapter
+**refuses** to resume or to mint an attempt when it cannot record. The
+refusal is loud — a caller that asked for a recording is told that there
+was nothing to record, instead of the adapter quietly doing something
+else.
+
+And only a **recording** is ever described as one: an adapter refusal
+wrote nothing, so a report that says "was reconciled" about a refusal
+would be asserting a durable record that does not exist.
 
 ## 8. One runtime per assignment, per pass
 
@@ -407,10 +424,12 @@ unavailable runtime and a lease too short to record the result are NOT:
 they will not be tried again without the operator changing something. The
 status command agrees — it lists the same states under **blocked**.
 
-**THE MAPPING IS ONE FUNCTION**, used by the dispatch path and the
-recovery path alike, so the same reason cannot count one way in one pass
-and another way in the next — the same live lease would otherwise be a
-refusal in one pass and a deferral in the next.
+**THE MAPPING IS ONE FUNCTION**, used by the dispatch path, the preflight
+and the recovery path alike, so the same reason cannot count one way in
+one pass and another way in the next — the same live lease would
+otherwise be a refusal in one pass and a deferral in the next. It is also
+**TOTAL**: every reason reaches at least one counter, because an outcome
+that no counter reflects is a fact the operator cannot see.
 
 A claim that was REFUSED is not a dispatch: nothing was launched. A
 **failed** attempt is a dispatch that did not complete — the work reached

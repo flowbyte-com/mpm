@@ -3141,7 +3141,11 @@ What it never does: it never reclaims a **live lease**; it never turns "the runt
 
 **One assignment, one outcome — and no attempt is lost to a blocker.** An assignment can carry more than one outstanding attempt: PR 3's reconcile creates a new attempt when the epoch advances, and the older one stays outstanding. Every attempt is inspected, because an older session may still be working, and every reconcilable outcome is recorded — **a blocker is not a reason to lose another attempt's record**, because the reconciliation *is* the write that records a runtime's outcome. The **report** says one thing about the assignment: the blocker, because that is what the operator has to deal with.
 
-The drain's two endings are kept apart too: the window closing is the drain's own end, and the caller cancelling is somebody stopping the run on purpose. A cancelled run is checked BEFORE an unreachable runtime, because a command on a cancelled context fails, and reporting that as "the runtime could not be asked" would be a lie about the runtime. A cancelled run writes **no** note: a note that says "recovery required" for a deliberate stop would train the operator to ignore the notes that matter.
+**THE RECOVERY PASS NEVER LAUNCHES.** The adapter decides for itself whether to record an outcome, resume a recorded session, or mint a **new attempt and launch it** — and the third is what a recovery pass must never do, because a launch from the recovery path is a second writer into a workspace whose earlier session may still be working. So the recovery pass asks the adapter to **record only**, and the adapter **refuses** to resume or to mint an attempt when it cannot record. The refusal is loud.
+
+The drain's two endings are kept apart too: the window closing is the drain's own end, and the caller cancelling is somebody stopping the run on purpose. A cancelled run is checked BEFORE an unreachable runtime, because a command on a cancelled context fails, and reporting that as "the runtime could not be asked" would be a lie about the runtime. A cancelled run writes **no** note, in either path: a note that says "recovery required" for a deliberate stop would train the operator to ignore the notes that matter.
+
+And only a **recording** is ever described as one: an adapter refusal wrote nothing, so a report that says "was reconciled" about a refusal would be asserting a durable record that does not exist.
 
 #### The reviewer stays separate
 
@@ -3170,7 +3174,7 @@ The counts mean what they say, and each one is a fact about the run:
 
 `deferred` and `refused` are the two the operator acts on differently, so they are kept apart: a **live lease**, a **moved epoch** and a **session that may still be working** are WAITS, and a **spent budget** or an **unavailable runtime** are not. The status command says the same thing about the same state by listing it as blocked rather than pending.
 
-The mapping is **one function**, used by the dispatch path and the recovery path alike, so the same reason cannot count one way in one pass and another way in the next — the same live lease would otherwise be a refusal in one pass and a deferral in the next.
+The mapping is **one function**, used by the dispatch path, the preflight and the recovery path alike, so the same reason cannot count one way in one pass and another way in the next — the same live lease would otherwise be a refusal in one pass and a deferral in the next. It is also **total**: every reason reaches at least one counter, because an outcome that no counter reflects is a fact the operator cannot see.
 
 A **failed** attempt is a dispatch that did not complete — the work reached the adapter and failed there — so it is counted as `dispatched` and `failed`, and not as `refused`: nothing refused it. A **recovered** completion is counted as `completed` and not as `dispatched`, because the run that recovered it did not launch it: it only recorded what the runtime had already said. So `completed` can exceed `dispatched` in a run that only recovered. A recovered **failure** is counted as `failed` too — an outcome that no counter reflects is a fact the operator cannot see.
 
