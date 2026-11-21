@@ -88,6 +88,26 @@ type ExecuteParams struct {
 	// References are bounded pointers appended to the objective. They are
 	// POINTERS, never copies, and they never carry a credential.
 	References []string
+	// RecordOnly says the caller has OBSERVED an outcome and wants it
+	// RECORDED — and nothing else.
+	//
+	// # WHY IT EXISTS
+	//
+	// The adapter's own decision has four answers: record what it
+	// inspected, refuse a concurrent writer, resume the recorded session,
+	// or mint a NEW attempt and launch it. The first is what a recovery
+	// pass wants; the last is what it must NEVER do — a recovery pass
+	// that launches is a dispatcher that dispatches from the recovery
+	// path, and it puts a second writer into a workspace whose earlier
+	// session may still be working.
+	//
+	// So a record-only caller gets the recording path or a refusal, and
+	// NEVER a launch, a resume or a new attempt. The refusal is loud:
+	// the caller asked to record an outcome, and the adapter says why it
+	// cannot, instead of quietly doing something else.
+	//
+	// The zero value is false, which is the adapter's ordinary behaviour.
+	RecordOnly bool
 }
 
 // ExecuteResult is what one explicit invocation did.
@@ -176,6 +196,30 @@ func (s *Store) Execute(ctx context.Context, rt Runtime, p ExecuteParams) (*Exec
 	decision, err := s.reconcile(task, p, rt)
 	if err != nil {
 		return nil, err
+	}
+
+	// A RECORD-ONLY CALLER NEVER LAUNCHES.
+	//
+	// The decision to resume a recorded session or to mint a new attempt
+	// is the adapter's, and it is the right decision for a caller that
+	// wants the work DONE. A caller that has OBSERVED an outcome and
+	// wants it recorded is asking for something else entirely, and the
+	// two must not be confused: the second attempt would run the
+	// objective again, in a workspace whose earlier session may still be
+	// working.
+	if p.RecordOnly {
+		switch decision.kind {
+		case reconcileResume:
+			return nil, fmt.Errorf(
+				"%w: %s has a launch intent whose session the runtime has never heard of, "+
+					"so there is no outcome to record and the caller asked for no launch",
+				ErrConstraint, task.ID)
+		case reconcileNew:
+			return nil, fmt.Errorf(
+				"%w: %s has a terminal attempt, so a new attempt would have to be launched, "+
+					"and the caller asked for the outcome to be recorded, not for a launch",
+				ErrConstraint, task.ID)
+		}
 	}
 
 	var attempt *SessionAttempt

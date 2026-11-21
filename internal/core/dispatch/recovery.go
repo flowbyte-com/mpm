@@ -152,8 +152,14 @@ func groupByAssignment(outstanding []*assignment.OutstandingAttempt) []assignmen
 func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 	Outcome, bool, error) {
 
+	// THE BLOCKER is what the operator has to deal with. THE REPORTED
+	// outcome is the first thing the pass had to say about the
+	// assignment — recorded or refused — and `wasRecorded` says whether a
+	// WRITE happened, because a refusal must never be described as a
+	// reconciliation.
 	var blocker *Outcome
-	var reconciled *Outcome
+	var reported *Outcome
+	var wasRecorded bool
 
 	for _, o := range g.attempts {
 		outcome := Outcome{
@@ -203,11 +209,11 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 			outcome.Detail = fmt.Sprintf(
 				"the session %s has not reported an outcome, so it may still be working "+
 					"and a second writer cannot be ruled out", o.Attempt.NativeSessionID)
-			drained, derr := e.drain(ctx, o, outcome)
+			drained, recorded, derr := e.drain(ctx, o, outcome)
 			if derr != nil {
 				return outcome, false, derr
 			}
-			// The drain may have RECONCILED the outcome while it waited,
+			// The drain may have RECORDED the outcome while it waited,
 			// and then it is a completion and not a blocker.
 			if drained.Reason == ReasonRecoveryRequired ||
 				drained.Reason == ReasonRuntimeUnavailable ||
@@ -217,8 +223,9 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 				}
 				continue
 			}
-			if reconciled == nil {
-				reconciled = &drained
+			if reported == nil {
+				reported = &drained
+				wasRecorded = recorded
 			}
 			continue
 		}
@@ -237,12 +244,13 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 		if state != nil && state.Outcome != "" &&
 			o.Attempt.ClaimEpoch == g.assignment.ClaimEpoch {
 			outcome.RuntimeOutcome = state.Outcome
-			result, rerr := e.reconcile(ctx, g.assignment, outcome)
+			result, recorded, rerr := e.reconcile(ctx, g.assignment, outcome)
 			if rerr != nil {
 				return outcome, false, rerr
 			}
-			if reconciled == nil {
-				reconciled = &result
+			if reported == nil {
+				reported = &result
+				wasRecorded = recorded
 			}
 			continue
 		}
@@ -260,21 +268,25 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 		// and that is a blocker too.
 	}
 
-	// THE BLOCKER WINS THE REPORT, AND THE RECONCILIATION IS MENTIONED.
+	// THE BLOCKER WINS THE REPORT, AND THE RECORDING IS MENTIONED.
 	//
 	// The operator has to deal with the blocker, so that is what the
-	// report says — and it says what else was recorded, because a
+	// report says — and it says what else was RECORDED, because a
 	// reconciliation that is not visible is a write nobody can audit.
+	//
+	// ONLY A RECORDING IS MENTIONED AS ONE. A refusal wrote nothing, and
+	// a report that says "was reconciled" about a refusal is asserting a
+	// durable record that does not exist.
 	if blocker != nil {
-		if reconciled != nil {
+		if reported != nil && wasRecorded {
 			blocker.Detail = fmt.Sprintf(
 				"%s; the attempt at epoch %d was reconciled through the existing fenced path",
-				blocker.Detail, reconciled.Epoch)
+				blocker.Detail, reported.Epoch)
 		}
 		return *blocker, true, nil
 	}
-	if reconciled != nil {
-		return *reconciled, false, nil
+	if reported != nil {
+		return *reported, false, nil
 	}
 	return Outcome{}, false, nil
 }
@@ -355,7 +367,7 @@ func (e *Engine) inspect(ctx context.Context, a *assignment.Assignment,
 // attempt's epoch fence. The dispatcher supplies the runtime and lets the
 // adapter do what it already does.
 func (e *Engine) reconcile(ctx context.Context, a *assignment.Assignment,
-	outcome Outcome) (Outcome, error) {
+	outcome Outcome) (Outcome, bool, error) {
 
 	// THE WORKSPACE IS BUILT FOR THE IMPLEMENTER, AND ONLY FOR THE
 	// IMPLEMENTER — the same rule the dispatch path follows. A reviewer
@@ -369,20 +381,20 @@ func (e *Engine) reconcile(ctx context.Context, a *assignment.Assignment,
 		if werr != nil {
 			outcome.Reason = ReasonRuntimeUnavailable
 			outcome.Detail = werr.Error()
-			return outcome, nil
+			return outcome, false, nil
 		}
 	}
 	worker, reviewer, err := e.factory(ctx, a, workspace)
 	if err != nil {
 		outcome.Reason = ReasonRuntimeUnavailable
 		outcome.Detail = err.Error()
-		return outcome, nil
+		return outcome, false, nil
 	}
 	if a.Role == assignment.RoleReviewer {
 		if reviewer == nil {
 			outcome.Reason = ReasonReviewerUnavailable
 			outcome.Detail = "the reviewer runtime was not built"
-			return outcome, nil
+			return outcome, false, nil
 		}
 		// The review path reconciles through its own execution, which
 		// refuses to run a SECOND reviewer over work that may already
@@ -391,13 +403,23 @@ func (e *Engine) reconcile(ctx context.Context, a *assignment.Assignment,
 		outcome.Detail = "the review session reported a terminal outcome; the review " +
 			"path owns the recording of it, and it refuses to run a second reviewer " +
 			"while an attempt is outstanding"
-		return outcome, nil
+		return outcome, false, nil
 	}
 	if worker == nil {
 		outcome.Reason = ReasonRuntimeUnavailable
 		outcome.Detail = "the worker runtime was not built"
-		return outcome, nil
+		return outcome, false, nil
 	}
+	// RECORD ONLY.
+	//
+	// The adapter decides for itself whether to record, resume or mint a
+	// NEW attempt and launch it. The recovery pass wants the first and
+	// must never have the third: a launch from the recovery path is a
+	// second writer into a workspace whose earlier session may still be
+	// working, and it is the one thing this package exists to prevent.
+	//
+	// So the adapter is told to record only, and it REFUSES to resume or
+	// to launch when it cannot record. The refusal is loud.
 	res, err := e.store.Execute(ctx, worker, assignment.ExecuteParams{
 		ID:          a.ID,
 		Epoch:       a.ClaimEpoch,
@@ -407,11 +429,14 @@ func (e *Engine) reconcile(ctx context.Context, a *assignment.Assignment,
 		WorkspaceID: a.ID,
 		Model:       e.cfg.Model,
 		Title:       "assignment " + a.ID,
+		RecordOnly:  true,
 	})
 	if err != nil {
 		outcome.Reason = classifyAdapterRefusal(err)
 		outcome.Detail = err.Error()
-		return outcome, nil
+		// A REFUSAL IS NOT A RECONCILIATION. Nothing was written, so
+		// nothing may say that something was recorded.
+		return outcome, false, nil
 	}
 	outcome.RuntimeOutcome = res.RuntimeOutcome
 	if res.Attempt != nil {
@@ -422,7 +447,10 @@ func (e *Engine) reconcile(ctx context.Context, a *assignment.Assignment,
 		outcome.AssignmentState = res.Assignment.State
 	}
 	outcome.Reason = completionReason(res.LaunchState, res.RuntimeOutcome, res.Assignment)
-	return outcome, nil
+	// `Reconciled` says the adapter RECORDED an observed outcome rather
+	// than launching anything. It is what tells the report whether a
+	// write happened.
+	return outcome, res.Reconciled, nil
 }
 
 // drain waits, bounded, for a running session to report a terminal
@@ -433,16 +461,16 @@ func (e *Engine) reconcile(ctx context.Context, a *assignment.Assignment,
 // safely does that, and it does not assume the session will finish. When
 // the window closes, the attempt is reported as needing an operator.
 func (e *Engine) drain(ctx context.Context, o *assignment.OutstandingAttempt,
-	outcome Outcome) (Outcome, error) {
+	outcome Outcome) (Outcome, bool, error) {
 
 	if e.cfg.DrainTimeoutSeconds <= 0 || e.cfg.DrainPollIntervalSeconds <= 0 {
 		if err := e.noteRecovery(o, outcome); err != nil {
-			return outcome, err
+			return outcome, false, err
 		}
 		outcome.Reason = ReasonRecoveryRequired
 		outcome.Detail = "the recorded session is still running and no drain window is " +
 			"configured, so the operator has to deal with it"
-		return outcome, nil
+		return outcome, false, nil
 	}
 
 	// THE DRAIN WINDOW IS REAL TIME, NOT THE INJECTED CLOCK.
@@ -473,11 +501,15 @@ func (e *Engine) drain(ctx context.Context, o *assignment.OutstandingAttempt,
 				outcome.Detail = detail
 			}
 			// THE SESSION'S EFFECTS ARE UNKNOWN either way, so the
-			// operator has to be told.
-			if err := e.noteRecovery(o, outcome); err != nil {
-				return outcome, err
+			// operator has to be told — UNLESS the run was cancelled, in
+			// which case a note would train the operator to ignore the
+			// notes that matter.
+			if ctx.Err() == nil {
+				if err := e.noteRecovery(o, outcome); err != nil {
+					return outcome, false, err
+				}
 			}
-			return outcome, nil
+			return outcome, false, nil
 		}
 		if state != nil && state.Outcome != "" {
 			outcome.RuntimeOutcome = state.Outcome
@@ -502,10 +534,13 @@ func (e *Engine) drain(ctx context.Context, o *assignment.OutstandingAttempt,
 						"effects are unknown and it blocks another writer into the same workspace",
 					e.cfg.DrainTimeoutSeconds)
 			}
-			if err := e.noteRecovery(o, outcome); err != nil {
-				return outcome, err
+			// NO NOTE FOR A CANCELLED RUN.
+			if ctx.Err() == nil {
+				if err := e.noteRecovery(o, outcome); err != nil {
+					return outcome, false, err
+				}
 			}
-			return outcome, nil
+			return outcome, false, nil
 		case <-time.After(time.Duration(e.cfg.DrainPollIntervalSeconds) * time.Second):
 		}
 	}

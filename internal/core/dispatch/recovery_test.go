@@ -649,6 +649,113 @@ func TestACancelledDrainSaysTheRunWasCancelled(t *testing.T) {
 	}
 }
 
+// TestTheRecoveryPassNeverLaunches proves the recovery pass cannot
+// START work.
+//
+// # THE SEQUENCE THIS REPRODUCES
+//
+// An assignment with TWO outstanding attempts: an older one at epoch 1
+// whose session may still be working, and a newer one at epoch 2 whose
+// session reported "failed". The older session reaches a terminal
+// outcome INSIDE the drain window, so the drain reconciles — and PR 3's
+// adapter acts on the NEWEST attempt, which records "failed". The next
+// iteration then observes the newer attempt's terminal outcome and
+// reconciles it AGAIN — and the adapter, seeing a terminal attempt,
+// would mint a NEW attempt and LAUNCH it.
+//
+// A recovery pass that launches is a dispatcher that dispatches from
+// the recovery path: a second writer into a workspace whose earlier
+// session may still be working. That is the one thing this package
+// exists to prevent.
+//
+// So the recovery pass asks the adapter to RECORD ONLY, and the adapter
+// REFUSES to resume or to mint an attempt when it cannot record.
+func TestTheRecoveryPassNeverLaunches(t *testing.T) {
+	store, clock, projectID := clockStore(t)
+	root := dispatchRoot(t, store, projectID)
+	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:rec:launch")
+
+	// The first attempt, at epoch 1.
+	first, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: 0, Owner: "mpm-dispatcher", LeaseSeconds: 1800,
+		Actor: assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("the first claim: %v", err)
+	}
+	seedAttempt(t, store, child, first.ClaimEpoch, "ses_older", assignment.SessionRunning)
+
+	// The lease expires and a second attempt is made, at epoch 2.
+	clock.Advance(1900 * time.Second)
+	second, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: first.ClaimEpoch, Owner: "mpm-dispatcher",
+		LeaseSeconds: 1800,
+		Actor:        assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("the second claim: %v", err)
+	}
+	seedAttempt(t, store, child, second.ClaimEpoch, "ses_newer", assignment.SessionIntent)
+
+	cfg := testConfig(t)
+	// A DRAIN WINDOW, so the drain waits and can see the older session
+	// report an outcome.
+	cfg.DrainTimeoutSeconds = 5
+	cfg.DrainPollIntervalSeconds = 1
+	engine, fake := clockEngine(t, store, clock, cfg)
+	// The older session reports an outcome only AFTER the first
+	// inspection — which is what the drain waits for.
+	seen := 0
+	fake.inspectHook = func(sessionID string) *oc.SessionState {
+		if sessionID == "ses_older" {
+			seen++
+			if seen == 1 {
+				return &oc.SessionState{ID: "ses_older", Outcome: "", Agent: "mpm-worker"}
+			}
+			return &oc.SessionState{
+				ID: "ses_older", Outcome: "succeeded", Agent: "mpm-worker",
+				Model:    oc.SessionModel{ID: "test", ProviderID: "mpm-sidecar"},
+				Location: oc.SessionLocation{Directory: oc.PrefixWorker},
+			}
+		}
+		if sessionID == "ses_newer" {
+			return &oc.SessionState{
+				ID: "ses_newer", Outcome: "failed", Agent: "mpm-worker",
+				Model:    oc.SessionModel{ID: "test", ProviderID: "mpm-sidecar"},
+				Location: oc.SessionLocation{Directory: oc.PrefixWorker},
+			}
+		}
+		return nil
+	}
+	fake.launchState = okState("mpm-worker", "succeeded")
+
+	report, err := engine.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// NOTHING WAS LAUNCHED.
+	if fake.Launches() != 0 {
+		t.Errorf("the runtime was launched %d times; the recovery pass must never launch",
+			fake.Launches())
+	}
+	// AND NO NEW ATTEMPT WAS MINTED.
+	attempts := mustAttempts(t, store, child.ID)
+	if len(attempts) != 2 {
+		t.Errorf("the assignment has %d attempts, want 2; the recovery pass minted one",
+			len(attempts))
+	}
+	// AND THE REPORT SAYS WHAT HAPPENED.
+	outcome, ok := outcomeFor(report, child.ID)
+	if !ok {
+		t.Fatalf("the report has no outcome: %+v", report.Outcomes)
+	}
+	if outcome.Reason != ReasonFailed && outcome.Reason != ReasonSessionStillRunning &&
+		outcome.Reason != ReasonRecoveryRequired {
+		t.Errorf("the outcome is %q, want the observed outcome", outcome.Reason)
+	}
+}
+
 // ── AN OLDER-EPOCH SESSION BLOCKS THE WORKSPACE ─────────────────────────
 
 // TestARunningOlderEpochSessionBlocksTheWorkspace is requirement 7.
