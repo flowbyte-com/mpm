@@ -48,10 +48,19 @@ import (
 
 // recover reconciles the attempts a previous run left behind.
 //
-// It returns one outcome per outstanding attempt it had something to say
-// about, and the set of assignments it BLOCKED. An attempt it recovered
+// It returns one outcome per ASSIGNMENT it had something to say about,
+// and the set of assignments it BLOCKED. An assignment it recovered
 // silently is not reported — the normal dispatch path will pick the
 // assignment up.
+//
+// # ONE ASSIGNMENT, ONE OUTCOME
+//
+// An assignment can have MORE THAN ONE outstanding attempt: PR 3's
+// reconcile creates a new attempt when the epoch advances, and the older
+// one stays outstanding. EVERY attempt is inspected — an older session
+// may still be working, and that is a blocker — but the assignment is
+// reported ONCE, because a report that says the same thing twice is a
+// report an operator has to reconcile by hand.
 //
 // # THE ORDER OF THE QUESTIONS
 //
@@ -71,21 +80,76 @@ func (e *Engine) recover(ctx context.Context) ([]Outcome, map[string]Outcome, er
 
 	out := []Outcome{}
 	blocked := map[string]Outcome{}
+	for _, g := range groupByAssignment(outstanding) {
+		outcome, isBlocked, rerr := e.recoverAssignment(ctx, g)
+		if rerr != nil {
+			return out, blocked, rerr
+		}
+		if isBlocked {
+			blocked[g.assignment.ID] = outcome
+		}
+		if outcome.Reason != "" {
+			out = append(out, outcome)
+		}
+	}
+	return out, blocked, nil
+}
+
+// assignmentGroup is one assignment's outstanding attempts.
+//
+// The attempts are in the order the store returned them: oldest first.
+type assignmentGroup struct {
+	assignment *assignment.Assignment
+	attempts   []*assignment.OutstandingAttempt
+}
+
+// groupByAssignment groups the outstanding attempts by assignment.
+//
+// The ORDER of the groups is the order the assignments first appeared
+// in, so the recovery pass is deterministic: two runs over the same rows
+// consider them in the same order.
+func groupByAssignment(outstanding []*assignment.OutstandingAttempt) []assignmentGroup {
+	order := []string{}
+	byID := map[string]*assignmentGroup{}
 	for _, o := range outstanding {
 		if o.Assignment == nil {
 			continue
 		}
+		g, ok := byID[o.Assignment.ID]
+		if !ok {
+			g = &assignmentGroup{assignment: o.Assignment}
+			byID[o.Assignment.ID] = g
+			order = append(order, o.Assignment.ID)
+		}
+		g.attempts = append(g.attempts, o)
+	}
+	out := make([]assignmentGroup, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	return out
+}
+
+// recoverAssignment reconciles ONE assignment's outstanding attempts.
+//
+// It returns the outcome for the assignment — empty when the assignment
+// has nothing to say and the dispatch path should pick it up — and
+// whether the assignment is BLOCKED.
+func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
+	Outcome, bool, error) {
+
+	for _, o := range g.attempts {
 		outcome := Outcome{
-			AssignmentID:    o.Assignment.ID,
-			RootID:          o.Assignment.RootID,
-			Role:            o.Assignment.Role,
+			AssignmentID:    g.assignment.ID,
+			RootID:          g.assignment.RootID,
+			Role:            g.assignment.Role,
 			AttemptID:       o.Attempt.ID,
 			NativeSessionID: o.Attempt.NativeSessionID,
 			Epoch:           o.Attempt.ClaimEpoch,
 		}
 
 		// WHAT DOES THE RUNTIME SAY? FIRST, because it is evidence.
-		state, reason, detail := e.inspect(ctx, o.Assignment, o.Attempt.NativeSessionID)
+		state, reason, detail := e.inspect(ctx, g.assignment, o.Attempt.NativeSessionID)
 		if reason != "" {
 			// THE RUNTIME COULD NOT BE ASKED. That is the UNKNOWN case,
 			// and it is the one that blocks: a session that cannot be
@@ -94,11 +158,9 @@ func (e *Engine) recover(ctx context.Context) ([]Outcome, map[string]Outcome, er
 			outcome.Reason = reason
 			outcome.Detail = detail
 			if err := e.noteRecovery(o, outcome); err != nil {
-				return out, blocked, err
+				return outcome, false, err
 			}
-			blocked[o.Assignment.ID] = outcome
-			out = append(out, outcome)
-			continue
+			return outcome, true, nil
 		}
 
 		// THE SESSION IS STILL RUNNING.
@@ -114,15 +176,16 @@ func (e *Engine) recover(ctx context.Context) ([]Outcome, map[string]Outcome, er
 					"and a second writer cannot be ruled out", o.Attempt.NativeSessionID)
 			drained, derr := e.drain(ctx, o, outcome)
 			if derr != nil {
-				return out, blocked, derr
+				return outcome, false, derr
 			}
-			out = append(out, drained)
+			// The drain may have RECONCILED the outcome while it waited,
+			// and then it is a completion and not a blocker.
 			if drained.Reason == ReasonRecoveryRequired ||
 				drained.Reason == ReasonRuntimeUnavailable ||
 				drained.Reason == ReasonSessionStillRunning {
-				blocked[o.Assignment.ID] = drained
+				return drained, true, nil
 			}
-			continue
+			return drained, false, nil
 		}
 
 		// A TERMINAL OUTCOME, AT THE ASSIGNMENT'S CURRENT EPOCH.
@@ -137,14 +200,13 @@ func (e *Engine) recover(ctx context.Context) ([]Outcome, map[string]Outcome, er
 		// choice, and the dispatch path makes it — the assignment is
 		// left alone here so it appears in the report exactly once.
 		if state != nil && state.Outcome != "" &&
-			o.Attempt.ClaimEpoch == o.Assignment.ClaimEpoch {
+			o.Attempt.ClaimEpoch == g.assignment.ClaimEpoch {
 			outcome.RuntimeOutcome = state.Outcome
-			reconciled, rerr := e.reconcile(ctx, o.Assignment, outcome)
+			reconciled, rerr := e.reconcile(ctx, g.assignment, outcome)
 			if rerr != nil {
-				return out, blocked, rerr
+				return outcome, false, rerr
 			}
-			out = append(out, reconciled)
-			continue
+			return reconciled, false, nil
 		}
 
 		// EVERYTHING ELSE IS LEFT TO THE DISPATCH PATH.
@@ -154,8 +216,12 @@ func (e *Engine) recover(ctx context.Context) ([]Outcome, map[string]Outcome, er
 		// nothing to reconcile and nothing to block. The assignment is
 		// reported by the dispatch path, which claims it — and a live
 		// lease there is what says the work is still with somebody.
+		//
+		// THE NEXT ATTEMPT IS STILL INSPECTED: an older attempt's
+		// session may be gone while the current one is still working,
+		// and that is a blocker too.
 	}
-	return out, blocked, nil
+	return Outcome{}, false, nil
 }
 
 // inspect asks the runtime what it knows about a session.
@@ -342,12 +408,23 @@ func (e *Engine) drain(ctx context.Context, o *assignment.OutstandingAttempt,
 		}
 		select {
 		case <-waitCtx.Done():
-			// THE WINDOW CLOSED, OR THE CALLER CANCELLED.
+			// TWO ENDINGS, AND THEY ARE NOT THE SAME FACT.
+			//
+			// The WINDOW CLOSING is the drain's own end: the session was
+			// still running when the window shut, and its effects are
+			// unknown. The CALLER CANCELLING is somebody stopping the
+			// run on purpose, and the operator is the one who did it —
+			// so the message says what happened instead of blaming the
+			// window.
 			outcome.Reason = ReasonRecoveryRequired
-			outcome.Detail = fmt.Sprintf(
-				"the recorded session was still running after a %ds drain window, so its "+
-					"effects are unknown and it blocks another writer into the same workspace",
-				e.cfg.DrainTimeoutSeconds)
+			if ctx.Err() != nil {
+				outcome.Detail = "the drain was interrupted before the session reported an outcome"
+			} else {
+				outcome.Detail = fmt.Sprintf(
+					"the recorded session was still running after a %ds drain window, so its "+
+						"effects are unknown and it blocks another writer into the same workspace",
+					e.cfg.DrainTimeoutSeconds)
+			}
 			if err := e.noteRecovery(o, outcome); err != nil {
 				return outcome, err
 			}

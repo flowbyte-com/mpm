@@ -83,6 +83,31 @@ type OpenCodeFactory struct {
 	upstream string
 	plugin   string
 	sidecars []*oc.Sidecar
+	// runtimes holds the runtime built for each assignment, for the life
+	// of the pass.
+	//
+	// # WHY THE FACTORY CACHES
+	//
+	// The SIDECAR takes an EXCLUSIVE lifetime lock on its socket path,
+	// and the socket path is per ASSIGNMENT: <mpmDir>/opencode/runs/<id>/
+	// sidecar.sock. So a second sidecar for the same assignment in the
+	// same process is refused by the sidecar's own lock — "another
+	// sidecar holds …; refusing to take it over" — even though the first
+	// one is THIS process's own.
+	//
+	// And the dispatcher asks for the same assignment more than once per
+	// pass: the recovery pass inspects it, and the dispatch path may
+	// then launch it. Without the cache the second request would be
+	// refused, the recovery pass could never reconcile an implementer,
+	// and an implementer with an outstanding attempt would be refused
+	// forever — a refusal that creates no attempt, so the
+	// dispatch-attempt cap never trips.
+	//
+	// One runtime per assignment per pass is also what the sidecar was
+	// designed for: the socket path is stable per assignment, and the
+	// tree is stable per assignment, so a retry finds the same data
+	// store and the same relay.
+	runtimes map[string]*oc.Runtime
 	// ctx is the sidecars' lifetime. It is cancelled by Close, so a
 	// sidecar that is still serving stops when the pass that needed it
 	// is over — the goroutine that serves it is bound to this context
@@ -101,6 +126,16 @@ type OpenCodeFactory struct {
 // holds it, and the worker never sees it.
 func NewOpenCodeFactory(cfg Config) (*OpenCodeFactory, error) {
 	mpmDir := config.GetMPMDir()
+	// THE SANDBOX ROOTS ARE BUILT FROM THE MPM DIRECTORY, and the
+	// containment resolves them against the filesystem. A relative MPM
+	// directory would make every sandbox root relative — and the
+	// containment refuses a relative root, so the refusal would arrive
+	// after the claim instead of here.
+	if !filepath.IsAbs(mpmDir) {
+		return nil, fmt.Errorf(
+			"the MPM directory %q is not an absolute path; the sandbox roots are built "+
+				"from it and the containment requires absolute paths", mpmDir)
+	}
 
 	opencodeBin := os.Getenv(EnvOpenCodeBin)
 	if opencodeBin == "" {
@@ -149,6 +184,7 @@ func NewOpenCodeFactory(cfg Config) (*OpenCodeFactory, error) {
 		key:      key,
 		upstream: upstream,
 		plugin:   resolvePluginPath(mpmDir),
+		runtimes: map[string]*oc.Runtime{},
 		ctx:      ctx,
 		cancel:   cancel,
 	}, nil
@@ -174,6 +210,7 @@ func (f *OpenCodeFactory) Close() {
 		s.Close()
 	}
 	f.sidecars = nil
+	f.runtimes = nil
 }
 
 // Factory returns the runtime factory the dispatcher drives.
@@ -187,16 +224,29 @@ func (f *OpenCodeFactory) Factory() RuntimeFactory {
 	return func(ctx context.Context, a *assignment.Assignment, workspace string) (
 		assignment.Runtime, assignment.ReviewRuntime, error) {
 		if a.Role == assignment.RoleReviewer {
+			// THE CACHED RUNTIME. The reviewer has no sidecar, so it
+			// could be rebuilt — but the sandbox tree is per assignment
+			// and rebuilding it would write the same files again for no
+			// reason. One runtime per assignment, one sidecar per
+			// assignment.
+			if rt, ok := f.runtimes[a.ID]; ok {
+				return nil, rt, nil
+			}
 			rt, err := f.reviewerRuntime(a)
 			if err != nil {
 				return nil, nil, err
 			}
+			f.runtimes[a.ID] = rt
 			return nil, rt, nil
+		}
+		if rt, ok := f.runtimes[a.ID]; ok {
+			return rt, nil, nil
 		}
 		rt, err := f.workerRuntime(a, workspace)
 		if err != nil {
 			return nil, nil, err
 		}
+		f.runtimes[a.ID] = rt
 		return rt, nil, nil
 	}
 }

@@ -154,6 +154,63 @@ func TestTheRealFactoryGivesEachRoleItsOwnSurface(t *testing.T) {
 	}
 }
 
+// TestTheRealFactoryGivesOneRuntimePerAssignment proves the factory is
+// RE-ENTRANT per assignment.
+//
+// # WHY THIS MATTERS
+//
+// The SIDECAR takes an EXCLUSIVE lifetime lock on its socket path, and
+// the socket path is per ASSIGNMENT: <mpmDir>/opencode/runs/<id>/
+// sidecar.sock. A second sidecar for the same assignment in the same
+// process is therefore refused by the sidecar's own lock — "another
+// sidecar holds …; refusing to take it over" — even though the first
+// one is THIS process's own.
+//
+// And the dispatcher asks for the same assignment more than once per
+// pass: the recovery pass inspects it, and the dispatch path may then
+// launch it. Without the cache the second request is refused, the
+// recovery pass can never reconcile an implementer, and an implementer
+// with an outstanding attempt is refused FOREVER — a refusal that
+// creates no attempt, so the dispatch-attempt cap never trips.
+//
+// This test drives the REAL factory, so it fails without the cache and
+// passes with it.
+func TestTheRealFactoryGivesOneRuntimePerAssignment(t *testing.T) {
+	t.Setenv("MPM_OPENCODE_BIN", stubOpenCode(t))
+	t.Setenv("MPM_OPENCODE_SIDECAR_KEY", "disposable-not-a-credential")
+	t.Setenv("MPM_WORKSPACE", t.TempDir())
+
+	cfg := testConfig(t)
+	factory, err := NewOpenCodeFactory(cfg)
+	if err != nil {
+		t.Fatalf("build the factory: %v", err)
+	}
+	defer factory.Close()
+
+	implementer := &assignment.Assignment{
+		ID: "at-once", RootID: "at-root", Role: assignment.RoleImplementer,
+	}
+	workspace := filepath.Join(cfg.WorkspaceRoot, implementer.ID)
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	build := factory.Factory()
+	ctx := context.Background()
+
+	first, _, err := build(ctx, implementer, workspace)
+	if err != nil {
+		t.Fatalf("the first runtime: %v", err)
+	}
+	second, _, err := build(ctx, implementer, workspace)
+	if err != nil {
+		t.Fatalf("the second runtime for the SAME assignment: %v", err)
+	}
+	if first != second {
+		t.Error("the factory built a second runtime for the same assignment")
+	}
+}
+
 // TestTheRealFactoryRefusesAMissingCredential proves the credential is
 // required, not defaulted.
 //

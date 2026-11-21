@@ -439,6 +439,136 @@ func TestACrashAfterTheRuntimeEndedIsReconciled(t *testing.T) {
 	}
 }
 
+// TestARecoveredFailureIsCounted proves a recovered FAILURE reaches a
+// counter.
+//
+// The report's counts have to cover every outcome the report carries. A
+// recovered attempt whose runtime said "failed" produces an outcome with
+// the reason `failed` — and before the fix that outcome was reflected in
+// NO counter, so the counts did not add up to the outcomes and an
+// operator could not see the failure at all.
+func TestARecoveredFailureIsCounted(t *testing.T) {
+	store, clock, projectID := clockStore(t)
+	root := dispatchRoot(t, store, projectID)
+	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:rec:failed")
+
+	claimed, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: 0, Owner: "mpm-dispatcher", LeaseSeconds: 1800,
+		Actor: assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	seedAttempt(t, store, child, claimed.ClaimEpoch, "ses_failed", assignment.SessionIntent)
+
+	cfg := testConfig(t)
+	engine, fake := clockEngine(t, store, clock, cfg)
+	// The session FAILED, and the adapter never saw it.
+	fake.states["ses_failed"] = &oc.SessionState{
+		ID: "ses_failed", Outcome: "failed", Agent: "mpm-worker",
+		Model:    oc.SessionModel{ID: "test", ProviderID: "mpm-sidecar"},
+		Location: oc.SessionLocation{Directory: oc.PrefixWorker},
+	}
+
+	report, err := engine.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	outcome, ok := outcomeFor(report, child.ID)
+	if !ok {
+		t.Fatalf("the report has no outcome: %+v", report.Outcomes)
+	}
+	if outcome.Reason != ReasonFailed {
+		t.Errorf("the outcome is %q, want %q", outcome.Reason, ReasonFailed)
+	}
+	// THE FAILURE IS COUNTED.
+	if report.Failed != 1 {
+		t.Errorf("the report failed %d assignments, want 1", report.Failed)
+	}
+	if report.Completed != 0 || report.Ambiguous != 0 {
+		t.Errorf("the report counts a completion or an ambiguity: %+v", report)
+	}
+}
+
+// TestAnAssignmentWithTwoOutstandingAttemptsIsReportedOnce proves the
+// report says one thing about an assignment.
+//
+// PR 3's reconcile creates a NEW attempt when the epoch advances, and
+// the older one stays outstanding. So an assignment can carry two
+// outstanding attempts — and the recovery pass inspected both. Before
+// the fix it emitted TWO outcomes for the same assignment: one for the
+// old session, which may still be working, and one for the new one.
+//
+// EVERY attempt is still inspected — an older session may still be
+// working, and that is a blocker — but the assignment is reported ONCE.
+func TestAnAssignmentWithTwoOutstandingAttemptsIsReportedOnce(t *testing.T) {
+	store, clock, projectID := clockStore(t)
+	root := dispatchRoot(t, store, projectID)
+	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:rec:twice")
+
+	// The first attempt, at epoch 1.
+	first, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: 0, Owner: "mpm-dispatcher", LeaseSeconds: 1800,
+		Actor: assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("the first claim: %v", err)
+	}
+	seedAttempt(t, store, child, first.ClaimEpoch, "ses_older", assignment.SessionRunning)
+
+	// The lease expires and a second attempt is made, at epoch 2.
+	clock.Advance(1900 * time.Second)
+	second, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: first.ClaimEpoch, Owner: "mpm-dispatcher",
+		LeaseSeconds: 1800,
+		Actor:        assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("the second claim: %v", err)
+	}
+	seedAttempt(t, store, child, second.ClaimEpoch, "ses_newer", assignment.SessionIntent)
+	if len(mustAttempts(t, store, child.ID)) != 2 {
+		t.Fatalf("the assignment has %d attempts, want 2",
+			len(mustAttempts(t, store, child.ID)))
+	}
+
+	cfg := testConfig(t)
+	engine, fake := clockEngine(t, store, clock, cfg)
+	// The OLD session is still working; the NEW one reported an outcome.
+	fake.states["ses_older"] = &oc.SessionState{ID: "ses_older", Outcome: "", Agent: "mpm-worker"}
+	fake.states["ses_newer"] = &oc.SessionState{
+		ID: "ses_newer", Outcome: "succeeded", Agent: "mpm-worker",
+		Model:    oc.SessionModel{ID: "test", ProviderID: "mpm-sidecar"},
+		Location: oc.SessionLocation{Directory: oc.PrefixWorker},
+	}
+
+	report, err := engine.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// ONE OUTCOME FOR THE ASSIGNMENT.
+	seen := 0
+	for _, o := range report.Outcomes {
+		if o.AssignmentID == child.ID {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Errorf("the report says %d things about the assignment, want 1: %+v",
+			seen, report.Outcomes)
+	}
+	// AND THE OLD SESSION STILL BLOCKS. The blocker is the safe answer:
+	// the older session may still be working.
+	outcome, ok := outcomeFor(report, child.ID)
+	if !ok {
+		t.Fatalf("the report has no outcome: %+v", report.Outcomes)
+	}
+	if outcome.Reason != ReasonSessionStillRunning &&
+		outcome.Reason != ReasonRecoveryRequired {
+		t.Errorf("the outcome is %q, want the older session to block", outcome.Reason)
+	}
+}
+
 // ── AN OLDER-EPOCH SESSION BLOCKS THE WORKSPACE ─────────────────────────
 
 // TestARunningOlderEpochSessionBlocksTheWorkspace is requirement 7.
