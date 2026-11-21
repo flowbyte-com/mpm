@@ -117,13 +117,14 @@ func assignmentVerbDispatchStatus(store *assignment.Store, f *assignmentFlags) (
 // renderDispatchReport renders one dispatch pass for a human.
 //
 // The counts come first, because they are what the operator asked: how
-// much was dispatched, completed, refused, deferred and ambiguous. The
-// per-assignment reasons follow, because the reason is what says what
+// much was dispatched, completed, failed, refused, deferred and ambiguous.
+// The per-assignment reasons follow, because the reason is what says what
 // to do next.
 func renderDispatchReport(report *dispatch.Report) {
 	fmt.Printf("dispatcher: %s\n", enabledWord(report.Enabled))
-	fmt.Printf("dispatched %d   completed %d   refused %d   deferred %d   ambiguous %d\n",
-		report.Dispatched, report.Completed, report.Refused, report.Deferred, report.Ambiguous)
+	fmt.Printf("dispatched %d   completed %d   failed %d   refused %d   deferred %d   ambiguous %d\n",
+		report.Dispatched, report.Completed, report.Failed, report.Refused,
+		report.Deferred, report.Ambiguous)
 	fmt.Println()
 	for _, o := range report.Outcomes {
 		if o.AssignmentID == "" {

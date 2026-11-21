@@ -167,10 +167,28 @@ type Outcome struct {
 type Report struct {
 	// Enabled says whether the dispatcher was enabled at all.
 	Enabled bool `json:"enabled"`
-	// Dispatched, Completed, Refused, Deferred and Ambiguous are the
-	// counts by outcome.
+	// Dispatched, Completed, Failed, Refused, Deferred and Ambiguous are
+	// the counts by outcome.
+	//
+	// Each count means ONE thing, and the reasons are assigned to them
+	// explicitly rather than by a catch-all:
+	//
+	//   dispatched  the work was handed to the adapter by this pass
+	//   completed   the assignment reached its terminal state
+	//   failed      the attempt failed
+	//   refused     a rule said no, and it will not be tried again
+	//               without the operator changing something
+	//   deferred    nothing was launched, and the work will be
+	//               considered again
+	//   ambiguous   the runtime's outcome could not be determined
+	//
+	// `deferred` and `refused` are the two the operator acts on
+	// differently, so they are kept apart: a live lease, a moved epoch
+	// and a session that may still be working are WAITS, and a spent
+	// budget or an unavailable runtime are NOT.
 	Dispatched int `json:"dispatched"`
 	Completed  int `json:"completed"`
+	Failed     int `json:"failed"`
 	Refused    int `json:"refused"`
 	Deferred   int `json:"deferred"`
 	Ambiguous  int `json:"ambiguous"`
@@ -287,14 +305,18 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 	// runtime said. So `completed` can be larger than `dispatched` in
 	// a run that only recovered, and that is the point of recovery:
 	// the work finished even though nobody launched it this time.
+	//
+	// A recovered FAILURE is a `failed` and not a `dispatched`, for the
+	// same reason — and it is counted, because an outcome that no
+	// counter reflects is a fact the operator cannot see.
 	for _, o := range recovery {
 		switch o.Reason {
 		case ReasonCompleted:
 			report.Completed++
+		case ReasonFailed:
+			report.Failed++
 		case ReasonAmbiguous:
 			report.Ambiguous++
-		case ReasonFailed:
-			// The attempt failed. It was not dispatched by this run.
 		default:
 			report.Deferred++
 		}
@@ -372,11 +394,14 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 		attempts++
 		// THE COUNTS, AND WHAT EACH ONE MEANS.
 		//
-		//   dispatched  the dispatcher handed the work to the adapter
-		//   completed  the assignment reached its terminal state
-		//   refused    a rule said no; nothing was launched
-		//   deferred   the work was not attempted this round
-		//   ambiguous  the runtime's outcome could not be determined
+		//   dispatched  the work was handed to the adapter by this pass
+		//   completed   the assignment reached its terminal state
+		//   failed      the attempt failed
+		//   refused     a rule said no, and it will not be tried again
+		//               without the operator changing something
+		//   deferred    nothing was launched, and the work will be
+		//               considered again
+		//   ambiguous   the runtime's outcome could not be determined
 		//
 		// A claim that was REFUSED is not a dispatch: nothing was
 		// launched, so it is refused and not dispatched.
@@ -384,20 +409,25 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 		// A FAILED attempt is a dispatch that did not complete: the
 		// work WAS handed to the adapter, and it failed. It is not a
 		// refusal — nothing refused it — so it is dispatched and
-		// neither completed nor refused. The per-assignment reason
-		// says `failed`, and that is where an operator reads it.
+		// failed, and neither completed nor refused.
+		//
+		// A LIVE LEASE and a MOVED EPOCH are DEFERRALS, not
+		// refusals: the work is with somebody else, it will be
+		// considered again, and the status command says the same thing
+		// by listing it as blocked.
 		switch outcome.Reason {
 		case ReasonCompleted:
 			report.Dispatched++
 			report.Completed++
+		case ReasonFailed:
+			report.Dispatched++
+			report.Failed++
 		case ReasonAmbiguous:
 			report.Dispatched++
 			report.Ambiguous++
-		case ReasonFailed:
-			report.Dispatched++
 		case ReasonDispatched:
 			report.Dispatched++
-		case ReasonDeferred:
+		case ReasonDeferred, ReasonLeaseHeld, ReasonStaleEpoch:
 			report.Deferred++
 		default:
 			report.Refused++

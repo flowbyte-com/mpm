@@ -64,6 +64,9 @@ func TestAFailedAttemptIsDispatchedAndNotRefused(t *testing.T) {
 	if report.Completed != 0 {
 		t.Errorf("the report completed %d assignments, want 0", report.Completed)
 	}
+	if report.Failed != 1 {
+		t.Errorf("the report failed %d assignments, want 1", report.Failed)
+	}
 	if report.Refused != 0 {
 		t.Errorf("the report refused %d assignments, want 0 — a failure is not a refusal",
 			report.Refused)
