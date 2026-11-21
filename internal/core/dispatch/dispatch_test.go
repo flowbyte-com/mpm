@@ -672,8 +672,7 @@ func TestTheSelectionIsDeterministic(t *testing.T) {
 	second := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:dispatch:order:b")
 
 	candidates, err := store.DispatchCandidates(assignment.DispatchQuery{
-		States: []string{assignment.StateAccepted},
-		Limit:  10,
+		Limit: 10,
 	})
 	if err != nil {
 		t.Fatalf("candidates: %v", err)
@@ -691,8 +690,7 @@ func TestTheSelectionIsDeterministic(t *testing.T) {
 	}
 	// And a second read gives the same order.
 	again, err := store.DispatchCandidates(assignment.DispatchQuery{
-		States: []string{assignment.StateAccepted},
-		Limit:  10,
+		Limit: 10,
 	})
 	if err != nil {
 		t.Fatalf("candidates: %v", err)

@@ -82,6 +82,16 @@ type OpenCodeFactory struct {
 	upstream string
 	plugin   string
 	sidecars []*oc.Sidecar
+	// ctx is the sidecars' lifetime. It is cancelled by Close, so a
+	// sidecar that is still serving stops when the pass that needed it
+	// is over — the goroutine that serves it is bound to this context
+	// rather than detached.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// serveErrs holds each sidecar's serve result. Every channel has a
+	// buffer of one, so the goroutine that serves can always report
+	// without waiting for a reader.
+	serveErrs []chan error
 }
 
 // NewOpenCodeFactory reads the environment the runtimes need.
@@ -128,6 +138,7 @@ func NewOpenCodeFactory(cfg Config) (*OpenCodeFactory, error) {
 		model = "mpm-sidecar/" + DefaultSidecarModel
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	return &OpenCodeFactory{
 		cfg:      cfg,
 		mpmDir:   mpmDir,
@@ -137,11 +148,27 @@ func NewOpenCodeFactory(cfg Config) (*OpenCodeFactory, error) {
 		key:      key,
 		upstream: upstream,
 		plugin:   resolvePluginPath(mpmDir),
+		ctx:      ctx,
+		cancel:   cancel,
 	}, nil
 }
 
-// Close closes the sidecars the factory opened.
+// Close stops the sidecars the factory opened.
+//
+// It cancels the factory's context FIRST, so a sidecar that is still
+// serving is told to stop, and then it closes the sockets. The serve
+// results are drained so a fault is not lost silently.
 func (f *OpenCodeFactory) Close() {
+	if f.cancel != nil {
+		f.cancel()
+	}
+	for _, ch := range f.serveErrs {
+		select {
+		case <-ch:
+		default:
+		}
+	}
+	f.serveErrs = nil
 	for _, s := range f.sidecars {
 		s.Close()
 	}
@@ -204,10 +231,17 @@ func (f *OpenCodeFactory) workerRuntime(a *assignment.Assignment, workspace stri
 	}
 	f.sidecars = append(f.sidecars, sidecar)
 
+	// The sidecar serves for the life of the pass. The goroutine is
+	// BOUND to the factory's context: cancelling it ends the serve, so
+	// the goroutine cannot outlive the work it was opened for.
+	ctx := f.ctx
+	serveErr := make(chan error, 1)
+	f.serveErrs = append(f.serveErrs, serveErr)
 	go func() {
-		// The sidecar serves for the life of the pass. A serve error
-		// after a launch surfaces through the launch itself.
-		_ = sidecar.Serve(context.Background())
+		select {
+		case <-ctx.Done():
+		case serveErr <- sidecar.Serve(ctx):
+		}
 	}()
 
 	return oc.NewRuntime(oc.Config{

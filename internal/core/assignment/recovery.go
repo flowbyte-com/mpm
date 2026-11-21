@@ -2,7 +2,6 @@ package assignment
 
 import (
 	"fmt"
-	"strings"
 )
 
 // The dispatcher's two read paths.
@@ -14,54 +13,45 @@ import (
 
 // DispatchQuery selects the assignments a dispatcher will consider.
 //
+// The STATES ARE FIXED, not a parameter. They are the two states from
+// which work can be dispatched, and a caller that could name its own
+// states could name one that is waiting for the operator — so the
+// vocabulary belongs to the service, not to the caller.
+//
 // The ORDER is deterministic — oldest first, then by id — so two
-// dispatchers that see the same rows consider them in the same order, and
-// a report is reproducible.
+// dispatchers that see the same rows consider them in the same order,
+// and a report is reproducible.
 type DispatchQuery struct {
-	// States are the assignment states the dispatcher will consider. An
-	// empty list means the dispatcher names none, and it is an error: a
-	// dispatcher that considers EVERY state would pick up work that is
-	// waiting for the operator.
-	States []string
 	// Limit bounds how many rows are returned. It must be positive.
 	Limit int
 }
+
+// dispatchableStates are the states work can be dispatched from.
+//
+// `accepted` is work the recipient has committed to and nobody has
+// started; `in_progress` is work that was started and whose session may
+// need recovering. Everything else is not: `enqueued` has not been
+// offered yet, `delivered` and `acknowledged` are not commitments, and
+// the terminal and operator-gated states are finished or waiting for the
+// operator.
+const dispatchableStates = "('accepted', 'in_progress')"
 
 // DispatchCandidates lists the assignments a dispatcher may consider.
 //
 // It does NOT decide eligibility. It returns the rows in a deterministic
 // order and lets the caller apply its own policy — because the caller's
 // policy (a backoff, an attempt cap) is the dispatcher's, and the
-// service's policy (the budget, the lease, the epoch) is enforced by the
-// writes the dispatcher goes on to make.
+// service's policy (the budget, the lease, the epoch) is enforced by
+// the writes the dispatcher goes on to make.
 func (s *Store) DispatchCandidates(q DispatchQuery) ([]*Assignment, error) {
-	if len(q.States) == 0 {
-		return nil, fmt.Errorf("%w: a dispatch query must name the states it considers",
-			ErrConstraint)
-	}
 	if q.Limit <= 0 {
 		return nil, fmt.Errorf("%w: a dispatch query must bound its rows", ErrConstraint)
 	}
-	where := make([]string, 0, len(q.States))
-	args := make([]interface{}, 0, len(q.States)+1)
-	for _, state := range q.States {
-		if state == "" {
-			continue
-		}
-		where = append(where, "state = ?")
-		args = append(args, state)
-	}
-	if len(where) == 0 {
-		return nil, fmt.Errorf("%w: a dispatch query must name the states it considers",
-			ErrConstraint)
-	}
-	args = append(args, q.Limit)
-
 	rows, err := s.db.SQLDB().Query(
 		`SELECT `+assignmentColumns+` FROM agent_tasks
-		  WHERE `+strings.Join(where, " OR ")+`
+		  WHERE state IN `+dispatchableStates+`
 		  ORDER BY created_at ASC, id ASC
-		  LIMIT ?`, args...)
+		  LIMIT ?`, q.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("assignment: read the dispatch candidates: %w", err)
 	}

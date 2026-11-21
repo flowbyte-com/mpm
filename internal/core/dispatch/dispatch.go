@@ -257,8 +257,7 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 
 	// 2. DISCOVER.
 	candidates, err := e.store.DispatchCandidates(assignment.DispatchQuery{
-		States: []string{assignment.StateAccepted, assignment.StateInProgress},
-		Limit:  e.cfg.CandidateLimit,
+		Limit: e.cfg.CandidateLimit,
 	})
 	if err != nil {
 		return report, err

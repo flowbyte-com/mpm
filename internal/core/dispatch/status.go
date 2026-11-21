@@ -105,8 +105,7 @@ func Status(store *assignment.Store, cfg Config) (*StatusReport, error) {
 	}
 
 	candidates, err := store.DispatchCandidates(assignment.DispatchQuery{
-		States: []string{assignment.StateAccepted, assignment.StateInProgress},
-		Limit:  statusCandidateLimit,
+		Limit: statusCandidateLimit,
 	})
 	if err != nil {
 		return nil, err
