@@ -135,8 +135,25 @@ func groupByAssignment(outstanding []*assignment.OutstandingAttempt) []assignmen
 // It returns the outcome for the assignment — empty when the assignment
 // has nothing to say and the dispatch path should pick it up — and
 // whether the assignment is BLOCKED.
+//
+// # EVERY ATTEMPT IS PROCESSED, AND THE BLOCKER WINS THE REPORT
+//
+// The loop does NOT stop at the first blocker. An assignment can carry
+// an older attempt whose session may still be working AND a newer
+// attempt at the current epoch whose outcome nobody recorded — and the
+// newer one's record is DURABLE WORK that must not be lost because the
+// older one is a blocker. So every attempt is inspected and every
+// reconcilable outcome is recorded, and the REPORT says one thing: the
+// blocker, because that is what the operator has to deal with.
+//
+// Stopping at the first blocker would lose the newer record. That is
+// not a reporting nicety: the reconciliation IS the write that records
+// a runtime's outcome, and a write that never happens is work lost.
 func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 	Outcome, bool, error) {
+
+	var blocker *Outcome
+	var reconciled *Outcome
 
 	for _, o := range g.attempts {
 		outcome := Outcome{
@@ -157,10 +174,22 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 			// be ruled out.
 			outcome.Reason = reason
 			outcome.Detail = detail
-			if err := e.noteRecovery(o, outcome); err != nil {
-				return outcome, false, err
+			// NO NOTE FOR A CANCELLED RUN. The operator stopped it, or
+			// their deadline expired, and a note that says "recovery
+			// required" for a deliberate stop would train the operator
+			// to ignore the notes that matter.
+			if ctx.Err() == nil {
+				if err := e.noteRecovery(o, outcome); err != nil {
+					return outcome, false, err
+				}
 			}
-			return outcome, true, nil
+			if blocker == nil {
+				blocker = &outcome
+			}
+			// THE NEXT ATTEMPT IS STILL INSPECTED: this one is a
+			// blocker, and a blocker is not a reason to lose another
+			// attempt's record.
+			continue
 		}
 
 		// THE SESSION IS STILL RUNNING.
@@ -183,9 +212,15 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 			if drained.Reason == ReasonRecoveryRequired ||
 				drained.Reason == ReasonRuntimeUnavailable ||
 				drained.Reason == ReasonSessionStillRunning {
-				return drained, true, nil
+				if blocker == nil {
+					blocker = &drained
+				}
+				continue
 			}
-			return drained, false, nil
+			if reconciled == nil {
+				reconciled = &drained
+			}
+			continue
 		}
 
 		// A TERMINAL OUTCOME, AT THE ASSIGNMENT'S CURRENT EPOCH.
@@ -202,11 +237,14 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 		if state != nil && state.Outcome != "" &&
 			o.Attempt.ClaimEpoch == g.assignment.ClaimEpoch {
 			outcome.RuntimeOutcome = state.Outcome
-			reconciled, rerr := e.reconcile(ctx, g.assignment, outcome)
+			result, rerr := e.reconcile(ctx, g.assignment, outcome)
 			if rerr != nil {
 				return outcome, false, rerr
 			}
-			return reconciled, false, nil
+			if reconciled == nil {
+				reconciled = &result
+			}
+			continue
 		}
 
 		// EVERYTHING ELSE IS LEFT TO THE DISPATCH PATH.
@@ -220,6 +258,23 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 		// THE NEXT ATTEMPT IS STILL INSPECTED: an older attempt's
 		// session may be gone while the current one is still working,
 		// and that is a blocker too.
+	}
+
+	// THE BLOCKER WINS THE REPORT, AND THE RECONCILIATION IS MENTIONED.
+	//
+	// The operator has to deal with the blocker, so that is what the
+	// report says — and it says what else was recorded, because a
+	// reconciliation that is not visible is a write nobody can audit.
+	if blocker != nil {
+		if reconciled != nil {
+			blocker.Detail = fmt.Sprintf(
+				"%s; the attempt at epoch %d was reconciled through the existing fenced path",
+				blocker.Detail, reconciled.Epoch)
+		}
+		return *blocker, true, nil
+	}
+	if reconciled != nil {
+		return *reconciled, false, nil
 	}
 	return Outcome{}, false, nil
 }
@@ -243,6 +298,16 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 func (e *Engine) inspect(ctx context.Context, a *assignment.Assignment,
 	sessionID string) (*oc.SessionState, string, string) {
 
+	// A CANCELLED RUN IS NOT AN UNREACHABLE RUNTIME.
+	//
+	// The inspection is a command, and a command on a cancelled context
+	// fails — so without this check a cancelled run would be reported as
+	// "the runtime could not be asked", which is a lie about the runtime
+	// and a decision the operator would act on wrongly.
+	if err := ctx.Err(); err != nil {
+		return nil, ReasonRecoveryRequired,
+			"the run was cancelled before the session could be inspected"
+	}
 	workspace := ""
 	if a.Role != assignment.RoleReviewer {
 		var werr error
@@ -393,10 +458,22 @@ func (e *Engine) drain(ctx context.Context, o *assignment.OutstandingAttempt,
 	for {
 		state, reason, detail := e.inspect(ctx, o.Assignment, o.Attempt.NativeSessionID)
 		if reason != "" {
-			outcome.Reason = reason
-			outcome.Detail = detail
-			// THE RUNTIME WENT AWAY MID-DRAIN. The session's effects are
-			// unknown, so the operator has to be told.
+			// THE CALLER CANCELLED, OR THE RUNTIME WENT AWAY.
+			//
+			// They are different facts, and the cancellation is checked
+			// FIRST: an inspection that fails because the context was
+			// cancelled is not a runtime that went away, and telling the
+			// operator the runtime vanished when the operator stopped the
+			// run would be a lie.
+			if ctx.Err() != nil {
+				outcome.Reason = ReasonRecoveryRequired
+				outcome.Detail = "the drain was interrupted before the session reported an outcome"
+			} else {
+				outcome.Reason = reason
+				outcome.Detail = detail
+			}
+			// THE SESSION'S EFFECTS ARE UNKNOWN either way, so the
+			// operator has to be told.
 			if err := e.noteRecovery(o, outcome); err != nil {
 				return outcome, err
 			}

@@ -567,6 +567,86 @@ func TestAnAssignmentWithTwoOutstandingAttemptsIsReportedOnce(t *testing.T) {
 		outcome.Reason != ReasonRecoveryRequired {
 		t.Errorf("the outcome is %q, want the older session to block", outcome.Reason)
 	}
+
+	// AND THE NEWER ATTEMPT'S OUTCOME WAS STILL RECORDED.
+	//
+	// THE BLOCKER MUST NOT COST THE OTHER ATTEMPT ITS RECORD. The
+	// reconciliation IS the write that records a runtime's outcome, so
+	// stopping at the first blocker would lose it — and a write that
+	// never happens is work lost, not a report tidied up.
+	got, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.State != assignment.StateCompleted {
+		t.Errorf("the assignment is %q, want %q; the newer attempt's outcome was not "+
+			"reconciled because the older attempt blocked", got.State, assignment.StateCompleted)
+	}
+	attempts := mustAttempts(t, store, child.ID)
+	for _, a := range attempts {
+		if a.ClaimEpoch != got.ClaimEpoch {
+			// The OLDER attempt stays outstanding: its epoch is fenced
+			// out, and its session may still be working. It is a
+			// blocker, not something to force to a terminal state.
+			continue
+		}
+		if a.LaunchState == assignment.SessionRunning ||
+			a.LaunchState == assignment.SessionIntent {
+			t.Errorf("the attempt %s at the current epoch is %q, want a terminal state",
+				a.ID, a.LaunchState)
+		}
+	}
+}
+
+// TestACancelledDrainSaysTheRunWasCancelled proves the cancellation is
+// not mistaken for a runtime that went away.
+//
+// The two are different facts, and the cancellation is checked FIRST: an
+// inspection that fails because the context was cancelled is not a
+// runtime that vanished, and telling the operator the runtime went away
+// when the operator stopped the run would be a lie.
+func TestACancelledDrainSaysTheRunWasCancelled(t *testing.T) {
+	store, clock, projectID := clockStore(t)
+	root := dispatchRoot(t, store, projectID)
+	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:rec:cancelled")
+
+	claimed, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: 0, Owner: "mpm-dispatcher", LeaseSeconds: 1800,
+		Actor: assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	seedAttempt(t, store, child, claimed.ClaimEpoch, "ses_cancelled", assignment.SessionRunning)
+
+	cfg := testConfig(t)
+	// A drain WINDOW, so the drain reaches its wait. Without one it
+	// short-circuits with its own message, and the cancellation would
+	// never be reached.
+	cfg.DrainTimeoutSeconds = 5
+	cfg.DrainPollIntervalSeconds = 1
+	engine, fake := clockEngine(t, store, clock, cfg)
+	// The session has NOT reported an outcome, so the drain runs.
+	fake.states["ses_cancelled"] = &oc.SessionState{ID: "ses_cancelled", Outcome: ""}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	report, err := engine.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	outcome, ok := outcomeFor(report, child.ID)
+	if !ok {
+		t.Fatalf("the report has no outcome: %+v", report.Outcomes)
+	}
+	if !strings.Contains(outcome.Detail, "cancel") {
+		t.Errorf("the detail is %q, want the cancellation to be named", outcome.Detail)
+	}
+	if strings.Contains(outcome.Detail, "went away") ||
+		strings.Contains(outcome.Detail, "could not be asked") {
+		t.Errorf("the detail blames the runtime: %q", outcome.Detail)
+	}
 }
 
 // ── AN OLDER-EPOCH SESSION BLOCKS THE WORKSPACE ─────────────────────────
