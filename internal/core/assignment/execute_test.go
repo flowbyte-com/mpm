@@ -935,6 +935,17 @@ func (f *fakeReviewRuntime) Review(_ context.Context, req oc.ReviewRequest) (*oc
 	return &r, nil
 }
 
+// Inspect reports that the runtime has never heard of the session.
+//
+// PR 4's recovery asks a reviewer what became of a recorded session, so
+// the reviewer boundary has to be INSPECTABLE — an interface that could
+// not be inspected could only ever be reported, never recovered. The
+// fake reports "not found" because that is what a reviewer runtime says
+// about a session it never created.
+func (f *fakeReviewRuntime) Inspect(_ context.Context, _ string) (*oc.SessionState, error) {
+	return nil, oc.ErrSessionNotFound
+}
+
 // TestExecuteReviewRefusesWhileAnEarlierReviewIsLive is finding 3.
 //
 // Two reviewers against one assignment would produce two findings captures for

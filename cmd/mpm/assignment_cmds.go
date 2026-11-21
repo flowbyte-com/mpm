@@ -42,6 +42,7 @@ import (
 	"strings"
 
 	"github.com/flowbyte-com/mpm-core/assignment"
+	"github.com/flowbyte-com/mpm-core/dispatch"
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
@@ -105,6 +106,12 @@ type assignmentFlags struct {
 	// that creates the assignment, because that is the only place
 	// that can fix it.
 	payload string
+
+	// PR 4's dispatcher flags. They are read only by the dispatch verbs.
+	// dispatchConfig is the PATH of the dispatcher's configuration file:
+	// the operator's explicit switch. A missing file means the dispatcher
+	// is off, so an installed binary alone never dispatches.
+	dispatchConfig string
 
 	// PR 3's execution flags. They are read only by `execute`.
 	agent       string
@@ -172,6 +179,10 @@ func handleAssignment(args []string) int {
 		return assignmentVerb(rest, assignmentVerbCaptureReviewEvidence)
 	case "execute-review":
 		return assignmentVerb(rest, assignmentVerbExecuteReview)
+	case "dispatch":
+		return assignmentVerb(rest, assignmentVerbDispatch)
+	case "dispatch-status":
+		return assignmentVerb(rest, assignmentVerbDispatchStatus)
 	case "help", "-h", "--help":
 		printAssignmentHelp()
 		return 0
@@ -179,7 +190,9 @@ func handleAssignment(args []string) int {
 		usererror.Error("mpm assignment: unknown verb %q\n"+
 			"available verbs: inbox, show, history, tree, deliver, acknowledge, accept,\n"+
 			"  refuse, claim, renew, start, complete, delegate, cancel, note,\n"+
-			"  record-review, handoff, create-root, record-approval", sub)
+			"  record-review, handoff, create-root, record-approval,\n"+
+			"  execute, execute-review, capture-review-evidence,\n"+
+			"  dispatch, dispatch-status", sub)
 		return 1
 	}
 }
@@ -306,6 +319,8 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 	references := &assignmentListFlag{}
 	fs.Var(references, "reference",
 		"execute: a bounded pointer appended to the objective (comma-separated, or repeated)")
+	dispatchConfig := fs.String("dispatch-config", "",
+		"dispatch: the dispatcher's configuration file (a missing file means the dispatcher is off)")
 	jsonOutput := fs.Bool("json", false, "emit JSON")
 
 	if err := fs.Parse(args); err != nil {
@@ -313,6 +328,7 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 	}
 
 	return &assignmentFlags{
+		dispatchConfig:   *dispatchConfig,
 		id:               *id,
 		rootID:           *rootID,
 		parentID:         *parentID,
@@ -449,6 +465,10 @@ func assignmentRender(out interface{}, asJSON bool) int {
 			fmt.Printf("%s  %-18s %-12s %s\n", a.ID, a.State, a.Recipient, a.Title)
 		}
 		fmt.Printf("\n%d assignment(s)\n", len(v.Assignments))
+	case *dispatch.Report:
+		renderDispatchReport(v)
+	case *dispatch.StatusReport:
+		renderDispatchStatus(v)
 	case *assignment.EventList:
 		for _, e := range v.Events {
 			to := e.ToState
@@ -750,6 +770,12 @@ EXECUTION (PR 3, explicit invocation only)
 OPERATOR ONLY
   create-root       create the top-level work order
   record-approval   record an externally verified approval
+
+DISPATCH (PR 4, OFF unless the operator enables it)
+  dispatch          perform ONE bounded dispatch pass
+  dispatch-status   show what is pending, blocked and recoverable
+                    --dispatch-config names the configuration file; a
+                    MISSING file means the dispatcher is off
 
 Common flags:
   --id, --root-id, --parent-id, --project-id, --recipient, --actor
