@@ -20,6 +20,7 @@ package dispatch
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -73,6 +74,62 @@ func TestAFailedAttemptIsDispatchedAndNotRefused(t *testing.T) {
 	}
 	if report.Deferred != 0 || report.Ambiguous != 0 {
 		t.Errorf("the report counts a deferral or an ambiguity: %+v", report)
+	}
+}
+
+// countsOf is a report's six counters, in one comparable value.
+func countsOf(r *Report) string {
+	return fmt.Sprintf("dispatched=%d completed=%d failed=%d refused=%d deferred=%d ambiguous=%d",
+		r.Dispatched, r.Completed, r.Failed, r.Refused, r.Deferred, r.Ambiguous)
+}
+
+// TestEveryReasonCountsWhereItSaysItCounts proves the mapping.
+//
+// The dispatch path and the recovery path report the SAME reasons, and
+// a reason that counted one way in one path and another way in the
+// other would make the report depend on where the work happened — the
+// same live lease would be a refusal in one pass and a deferral in the
+// next. So the mapping is ONE function, and this test pins it.
+//
+// `launched` is what separates a dispatch from a recovery: a reconciled
+// outcome was handed over by an EARLIER pass.
+func TestEveryReasonCountsWhereItSaysItCounts(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		want   Report
+	}{
+		{ReasonCompleted, Report{Dispatched: 1, Completed: 1}},
+		{ReasonFailed, Report{Dispatched: 1, Failed: 1}},
+		{ReasonAmbiguous, Report{Dispatched: 1, Ambiguous: 1}},
+		{ReasonDispatched, Report{Dispatched: 1}},
+		{ReasonDeferred, Report{Deferred: 1}},
+		{ReasonLeaseHeld, Report{Deferred: 1}},
+		{ReasonStaleEpoch, Report{Deferred: 1}},
+		{ReasonSessionStillRunning, Report{Deferred: 1}},
+		{ReasonRecoveryRequired, Report{Deferred: 1}},
+		{ReasonBudgetExhausted, Report{Refused: 1}},
+		{ReasonRuntimeUnavailable, Report{Refused: 1}},
+		{ReasonReviewerUnavailable, Report{Refused: 1}},
+		{ReasonOperatorGatePending, Report{Refused: 1}},
+		{ReasonLeaseInsufficient, Report{Refused: 1}},
+		{ReasonRefused, Report{Refused: 1}},
+	} {
+		report := &Report{}
+		countOutcome(report, Outcome{Reason: tc.reason}, true)
+		if countsOf(report) != countsOf(&tc.want) {
+			t.Errorf("the reason %q counted %s, want %s",
+				tc.reason, countsOf(report), countsOf(&tc.want))
+		}
+		// AND THE RECOVERY PATH COUNTS THE SAME WAY, except that it did
+		// not launch anything.
+		recovered := &Report{}
+		countOutcome(recovered, Outcome{Reason: tc.reason}, false)
+		want := tc.want
+		want.Dispatched = 0
+		if countsOf(recovered) != countsOf(&want) {
+			t.Errorf("the reason %q counted %s in the recovery path, want %s",
+				tc.reason, countsOf(recovered), countsOf(&want))
+		}
 	}
 }
 

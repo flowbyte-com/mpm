@@ -136,9 +136,14 @@ func (h *DispatchTickHandler) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// EVERY COUNT IS LOGGED. A count the log omits is a count the
+	// operator cannot find in the scheduler's own log — and the
+	// scheduler's log is where an operator looks when they did not run
+	// the pass themselves.
 	h.logger.Info("the dispatch pass finished",
 		"dispatched", report.Dispatched,
 		"completed", report.Completed,
+		"failed", report.Failed,
 		"refused", report.Refused,
 		"deferred", report.Deferred,
 		"ambiguous", report.Ambiguous)

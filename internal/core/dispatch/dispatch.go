@@ -297,7 +297,7 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 		return report, err
 	}
 	report.Outcomes = append(report.Outcomes, recovery...)
-	// THE RECOVERED COUNTS.
+	// THE RECOVERED COUNTS, THROUGH THE SAME FUNCTION.
 	//
 	// A reconciled completion is a `completed` and NOT a `dispatched`:
 	// this run did not hand the work to the adapter — the runtime had
@@ -306,20 +306,13 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 	// a run that only recovered, and that is the point of recovery:
 	// the work finished even though nobody launched it this time.
 	//
-	// A recovered FAILURE is a `failed` and not a `dispatched`, for the
-	// same reason — and it is counted, because an outcome that no
-	// counter reflects is a fact the operator cannot see.
+	// The counting is the SAME FUNCTION the dispatch path uses, so the
+	// two paths cannot disagree about what a reason means. A reason
+	// that counted one way in the dispatch path and another way in the
+	// recovery path would make the report depend on where the work
+	// happened.
 	for _, o := range recovery {
-		switch o.Reason {
-		case ReasonCompleted:
-			report.Completed++
-		case ReasonFailed:
-			report.Failed++
-		case ReasonAmbiguous:
-			report.Ambiguous++
-		default:
-			report.Deferred++
-		}
+		countOutcome(report, o, false)
 	}
 
 	// 2. DISCOVER.
@@ -392,46 +385,9 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 		}
 		report.Outcomes = append(report.Outcomes, outcome)
 		attempts++
-		// THE COUNTS, AND WHAT EACH ONE MEANS.
-		//
-		//   dispatched  the work was handed to the adapter by this pass
-		//   completed   the assignment reached its terminal state
-		//   failed      the attempt failed
-		//   refused     a rule said no, and it will not be tried again
-		//               without the operator changing something
-		//   deferred    nothing was launched, and the work will be
-		//               considered again
-		//   ambiguous   the runtime's outcome could not be determined
-		//
-		// A claim that was REFUSED is not a dispatch: nothing was
-		// launched, so it is refused and not dispatched.
-		//
-		// A FAILED attempt is a dispatch that did not complete: the
-		// work WAS handed to the adapter, and it failed. It is not a
-		// refusal — nothing refused it — so it is dispatched and
-		// failed, and neither completed nor refused.
-		//
-		// A LIVE LEASE and a MOVED EPOCH are DEFERRALS, not
-		// refusals: the work is with somebody else, it will be
-		// considered again, and the status command says the same thing
-		// by listing it as blocked.
-		switch outcome.Reason {
-		case ReasonCompleted:
-			report.Dispatched++
-			report.Completed++
-		case ReasonFailed:
-			report.Dispatched++
-			report.Failed++
-		case ReasonAmbiguous:
-			report.Dispatched++
-			report.Ambiguous++
-		case ReasonDispatched:
-			report.Dispatched++
-		case ReasonDeferred, ReasonLeaseHeld, ReasonStaleEpoch:
-			report.Deferred++
-		default:
-			report.Refused++
-		}
+		// THE COUNTS. The same function the recovery path uses, so the
+		// two paths cannot disagree.
+		countOutcome(report, outcome, true)
 	}
 	return report, nil
 }
@@ -604,6 +560,64 @@ func (e *Engine) dispatchOne(ctx context.Context, a *assignment.Assignment) (Out
 		return e.dispatchReview(ctx, claimed, reviewer, outcome)
 	}
 	return e.dispatchWorker(ctx, claimed, worker, workspace, outcome)
+}
+
+// countOutcome puts ONE outcome into the report's counters.
+//
+// # THE VOCABULARY
+//
+//   - dispatched: the work was handed to the adapter by this pass
+//   - completed: the assignment reached its terminal state
+//   - failed: the attempt failed
+//   - refused: something must change before it can run — a spent
+//     budget, an unavailable runtime or reviewer, the operator's gate, a
+//     lease too short to record the result
+//   - deferred: nothing was launched, and the work will be considered
+//     again — a live lease, a moved epoch, a session that may still be
+//     working
+//   - ambiguous: the runtime's outcome could not be determined
+//
+// # WHY IT IS ONE FUNCTION
+//
+// The dispatch path and the recovery path report the SAME reasons, and
+// a reason that counted one way in one path and another way in the
+// other would make the report depend on where the work happened — the
+// same live lease would be a refusal in one pass and a deferral in the
+// next. So the mapping lives here, once.
+//
+// `launched` says whether THIS pass handed the work to the adapter. It
+// is what separates a dispatch from a recovery: a reconciled outcome
+// was handed over by an EARLIER pass, so it is counted as completed and
+// not as dispatched.
+func countOutcome(report *Report, outcome Outcome, launched bool) {
+	switch outcome.Reason {
+	case ReasonCompleted:
+		if launched {
+			report.Dispatched++
+		}
+		report.Completed++
+	case ReasonFailed:
+		if launched {
+			report.Dispatched++
+		}
+		report.Failed++
+	case ReasonAmbiguous:
+		if launched {
+			report.Dispatched++
+		}
+		report.Ambiguous++
+	case ReasonDispatched:
+		if launched {
+			report.Dispatched++
+		}
+	case ReasonDeferred, ReasonLeaseHeld, ReasonStaleEpoch,
+		ReasonSessionStillRunning, ReasonRecoveryRequired:
+		report.Deferred++
+	default:
+		// budget_exhausted, runtime_unavailable, reviewer_unavailable,
+		// operator_gate_pending, lease_insufficient, refused.
+		report.Refused++
+	}
 }
 
 // leaseCovers says the lease outlives the runtime window.
