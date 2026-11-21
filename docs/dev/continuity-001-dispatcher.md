@@ -216,6 +216,23 @@ it robust rather than accidentally correct, and the honest claim is
 "the condition is evaluated by the writing statement", not "a
 read-then-write is definitely broken".
 
+**PR 2's negative-control harness follows the change.** PR 2's controls
+pin the claim's SOURCE TEXT — they mutate it and require the acceptance
+suite to notice — so putting the concurrency condition in that statement
+moved two of the pins. The pins follow the new text; the mutation they
+make is unchanged, and the control is still load-bearing:
+
+```
+=== claim-cas: the claim is a compare-and-swap ===
+    failing tests: ['TestAPIClaimPresentingAStaleEpochIsRefused']
+
+14/14 controls are load-bearing; 2 measure the defence in depth
+```
+
+The harness refused the change rather than reporting a misleading zero,
+which is what it is for: a control that cannot find its target is a
+control that measures nothing, and the gate says so instead of passing.
+
 ## 6. The lease, and why there is no renewal
 
 PR 2's `Renew` advances the claim epoch. PR 3's attempt writes are
