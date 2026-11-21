@@ -3139,7 +3139,9 @@ What it never does: it never reclaims a **live lease**; it never turns "the runt
 
 **The inspection decides, not the epoch arithmetic.** A session the runtime has never heard of was never created, so re-running the objective cannot duplicate work; a session that exists and has not reported an outcome may still be working, and that blocks; a runtime that cannot be asked at all blocks too, because nobody can then say whether the session is still running. The drain window is **real** time rather than the injected clock: the injected clock governs the lease, and a wait bounded by a clock that never advances is a wait that never ends.
 
-**One assignment, one outcome.** An assignment can carry more than one outstanding attempt — PR 3's reconcile creates a new attempt when the epoch advances, and the older one stays outstanding. Every attempt is inspected, because an older session may still be working, but the assignment is reported once: a report that says the same thing twice is a report an operator has to reconcile by hand. The drain's two endings are kept apart too: the window closing is the drain's own end, and the caller cancelling is somebody stopping the run on purpose.
+**One assignment, one outcome — and no attempt is lost to a blocker.** An assignment can carry more than one outstanding attempt: PR 3's reconcile creates a new attempt when the epoch advances, and the older one stays outstanding. Every attempt is inspected, because an older session may still be working, and every reconcilable outcome is recorded — **a blocker is not a reason to lose another attempt's record**, because the reconciliation *is* the write that records a runtime's outcome. The **report** says one thing about the assignment: the blocker, because that is what the operator has to deal with.
+
+The drain's two endings are kept apart too: the window closing is the drain's own end, and the caller cancelling is somebody stopping the run on purpose. A cancelled run is checked BEFORE an unreachable runtime, because a command on a cancelled context fails, and reporting that as "the runtime could not be asked" would be a lie about the runtime. A cancelled run writes **no** note: a note that says "recovery required" for a deliberate stop would train the operator to ignore the notes that matter.
 
 #### The reviewer stays separate
 
@@ -3167,6 +3169,8 @@ The counts mean what they say, and each one is a fact about the run:
 | `ambiguous` | the runtime's outcome could not be determined |
 
 `deferred` and `refused` are the two the operator acts on differently, so they are kept apart: a **live lease**, a **moved epoch** and a **session that may still be working** are WAITS, and a **spent budget** or an **unavailable runtime** are not. The status command says the same thing about the same state by listing it as blocked rather than pending.
+
+The mapping is **one function**, used by the dispatch path and the recovery path alike, so the same reason cannot count one way in one pass and another way in the next — the same live lease would otherwise be a refusal in one pass and a deferral in the next.
 
 A **failed** attempt is a dispatch that did not complete — the work reached the adapter and failed there — so it is counted as `dispatched` and `failed`, and not as `refused`: nothing refused it. A **recovered** completion is counted as `completed` and not as `dispatched`, because the run that recovered it did not launch it: it only recorded what the runtime had already said. So `completed` can exceed `dispatched` in a run that only recovered. A recovered **failure** is counted as `failed` too — an outcome that no counter reflects is a fact the operator cannot see.
 

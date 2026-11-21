@@ -304,15 +304,26 @@ The recovery pass reports only what it BLOCKED and what it RECONCILED. An
 assignment it merely observed is left to the dispatch path, so every
 assignment appears in the report exactly once.
 
-**ONE ASSIGNMENT, ONE OUTCOME.** An assignment can carry more than one
-outstanding attempt — PR 3's reconcile creates a new attempt when the
-epoch advances, and the older one stays outstanding. EVERY attempt is
-inspected, because an older session may still be working and that is a
-blocker, but the assignment is reported once.
+**ONE ASSIGNMENT, ONE OUTCOME — AND NO ATTEMPT IS LOST TO A BLOCKER.**
+An assignment can carry more than one outstanding attempt — PR 3's
+reconcile creates a new attempt when the epoch advances, and the older
+one stays outstanding. EVERY attempt is inspected, because an older
+session may still be working, and every reconcilable outcome is
+recorded: **a blocker is not a reason to lose another attempt's
+record**, because the reconciliation IS the write that records a
+runtime's outcome, and a write that never happens is work lost rather
+than a report tidied up. The REPORT says one thing about the
+assignment — the blocker, because that is what the operator has to deal
+with — and it says what else was reconciled.
 
 The drain's two endings are kept apart: the WINDOW CLOSING is the drain's
 own end, and the CALLER CANCELLING is somebody stopping the run on
-purpose.
+purpose. A cancelled run is checked BEFORE an unreachable runtime,
+because a command on a cancelled context fails, and reporting that as
+"the runtime could not be asked" would be a lie about the runtime. A
+cancelled run writes NO note: a note that says "recovery required" for
+a deliberate stop would train the operator to ignore the notes that
+matter.
 
 ## 8. One runtime per assignment, per pass
 
@@ -395,6 +406,11 @@ launched, and the work will be considered again. A spent budget, an
 unavailable runtime and a lease too short to record the result are NOT:
 they will not be tried again without the operator changing something. The
 status command agrees — it lists the same states under **blocked**.
+
+**THE MAPPING IS ONE FUNCTION**, used by the dispatch path and the
+recovery path alike, so the same reason cannot count one way in one pass
+and another way in the next — the same live lease would otherwise be a
+refusal in one pass and a deferral in the next.
 
 A claim that was REFUSED is not a dispatch: nothing was launched. A
 **failed** attempt is a dispatch that did not complete — the work reached
