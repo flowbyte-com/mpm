@@ -116,7 +116,13 @@ func (f *fakeRuntime) Review(_ context.Context, req oc.ReviewRequest) (*oc.Revie
 	}, nil
 }
 
-func (f *fakeRuntime) Inspect(_ context.Context, sessionID string) (*oc.SessionState, error) {
+func (f *fakeRuntime) Inspect(ctx context.Context, sessionID string) (*oc.SessionState, error) {
+	// A CANCELLED CONTEXT FAILS THE INSPECTION, the way a real command
+	// does. A fake that ignored it would hide the difference between
+	// "the runtime went away" and "the caller stopped the run".
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.inspections++

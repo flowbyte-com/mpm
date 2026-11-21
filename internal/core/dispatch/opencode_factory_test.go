@@ -211,6 +211,34 @@ func TestTheRealFactoryGivesOneRuntimePerAssignment(t *testing.T) {
 	}
 }
 
+// TestAClosedFactoryRefuses proves the closed factory says so.
+//
+// Its sidecars are gone and its runtime cache was released, so there is
+// nothing to hand back. It refuses — a runtime whose sidecar no longer
+// serves would fail later and further away, and a nil map would panic.
+func TestAClosedFactoryRefuses(t *testing.T) {
+	t.Setenv("MPM_OPENCODE_BIN", stubOpenCode(t))
+	t.Setenv("MPM_OPENCODE_SIDECAR_KEY", "disposable-not-a-credential")
+	t.Setenv("MPM_WORKSPACE", t.TempDir())
+
+	factory, err := NewOpenCodeFactory(testConfig(t))
+	if err != nil {
+		t.Fatalf("build the factory: %v", err)
+	}
+	build := factory.Factory()
+	factory.Close()
+
+	_, _, err = build(context.Background(),
+		&assignment.Assignment{ID: "at-closed", RootID: "at-root", Role: assignment.RoleImplementer},
+		t.TempDir())
+	if err == nil {
+		t.Fatal("a closed factory handed out a runtime")
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Errorf("the refusal does not say the factory is closed: %v", err)
+	}
+}
+
 // TestTheRealFactoryRefusesAMissingCredential proves the credential is
 // required, not defaulted.
 //

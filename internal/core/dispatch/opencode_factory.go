@@ -108,6 +108,11 @@ type OpenCodeFactory struct {
 	// tree is stable per assignment, so a retry finds the same data
 	// store and the same relay.
 	runtimes map[string]*oc.Runtime
+	// closed says the factory has been closed. A closed factory has no
+	// sidecar and no runtime, and asking it for one would return a
+	// runtime whose sidecar is gone — or write to a nil map and panic.
+	// It refuses instead.
+	closed bool
 	// ctx is the sidecars' lifetime. It is cancelled by Close, so a
 	// sidecar that is still serving stops when the pass that needed it
 	// is over — the goroutine that serves it is bound to this context
@@ -196,6 +201,7 @@ func NewOpenCodeFactory(cfg Config) (*OpenCodeFactory, error) {
 // serving is told to stop, and then it closes the sockets. The serve
 // results are drained so a fault is not lost silently.
 func (f *OpenCodeFactory) Close() {
+	f.closed = true
 	if f.cancel != nil {
 		f.cancel()
 	}
@@ -223,6 +229,13 @@ func (f *OpenCodeFactory) Close() {
 func (f *OpenCodeFactory) Factory() RuntimeFactory {
 	return func(ctx context.Context, a *assignment.Assignment, workspace string) (
 		assignment.Runtime, assignment.ReviewRuntime, error) {
+		if f.closed {
+			// THE FACTORY IS CLOSED. Its sidecars are gone and its
+			// runtime cache was released, so there is nothing to hand
+			// back. It says so, rather than panicking on a nil map or
+			// returning a runtime whose sidecar no longer serves.
+			return nil, nil, fmt.Errorf("the runtime factory is closed")
+		}
 		if a.Role == assignment.RoleReviewer {
 			// THE CACHED RUNTIME. The reviewer has no sidecar, so it
 			// could be rebuilt — but the sandbox tree is per assignment
