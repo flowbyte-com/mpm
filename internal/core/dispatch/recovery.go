@@ -434,9 +434,13 @@ func (e *Engine) reconcile(ctx context.Context, a *assignment.Assignment,
 	if err != nil {
 		outcome.Reason = classifyAdapterRefusal(err)
 		outcome.Detail = err.Error()
-		// A REFUSAL IS NOT A RECONCILIATION. Nothing was written, so
-		// nothing may say that something was recorded.
-		return outcome, false, nil
+		// A REFUSAL IS NOT A RECONCILIATION — UNLESS SOMETHING WAS
+		// WRITTEN. The adapter can record the runtime's outcome and
+		// then fail to move the ASSIGNMENT, and then a write DID
+		// happen. Discarding the result would under-claim it, and the
+		// report's audit trail would lose a record that is in the
+		// ledger.
+		return outcome, res != nil && res.Reconciled, nil
 	}
 	outcome.RuntimeOutcome = res.RuntimeOutcome
 	if res.Attempt != nil {
@@ -464,8 +468,13 @@ func (e *Engine) drain(ctx context.Context, o *assignment.OutstandingAttempt,
 	outcome Outcome) (Outcome, bool, error) {
 
 	if e.cfg.DrainTimeoutSeconds <= 0 || e.cfg.DrainPollIntervalSeconds <= 0 {
-		if err := e.noteRecovery(o, outcome); err != nil {
-			return outcome, false, err
+		// NO NOTE FOR A CANCELLED RUN. This is the branch the DEFAULT
+		// configuration takes — the drain window ships disabled — so it
+		// is the one a cancelled run is most likely to reach.
+		if ctx.Err() == nil {
+			if err := e.noteRecovery(o, outcome); err != nil {
+				return outcome, false, err
+			}
 		}
 		outcome.Reason = ReasonRecoveryRequired
 		outcome.Detail = "the recorded session is still running and no drain window is " +

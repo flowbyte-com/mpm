@@ -140,6 +140,28 @@ func TestEveryReasonCountsWhereItSaysItCounts(t *testing.T) {
 	}
 }
 
+// TestARecordOnlyRefusalIsADeferral proves the refusal is bucketed by
+// what it means.
+//
+// The adapter refused to mint an attempt because the caller asked for no
+// launch. The attempt stays OUTSTANDING and the work is not lost: a
+// later pass may dispatch the assignment normally. So it is a DEFERRAL
+// — "nothing was launched, and the work will be considered again" — and
+// not a refusal, which says the work will not be tried again.
+func TestARecordOnlyRefusalIsADeferral(t *testing.T) {
+	reason := classifyAdapterRefusal(
+		fmt.Errorf("%w: the outcome could not be recorded", assignment.ErrRecordOnlyRefused))
+	if reason != ReasonDeferred {
+		t.Errorf("the reason is %q, want %q", reason, ReasonDeferred)
+	}
+	// And a plain constraint refusal is still a refusal.
+	reason = classifyAdapterRefusal(
+		fmt.Errorf("%w: something else", assignment.ErrConstraint))
+	if reason != ReasonRefused {
+		t.Errorf("the reason is %q, want %q", reason, ReasonRefused)
+	}
+}
+
 // TestALeaseTooShortToRecordTheResultIsNotLeaseHeld proves the two lease
 // reasons are not the same fact.
 //

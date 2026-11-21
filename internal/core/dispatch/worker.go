@@ -151,6 +151,13 @@ func classifyAdapterRefusal(err error) string {
 		return ReasonReviewerUnavailable
 	case errors.Is(err, assignment.ErrIllegalTransition):
 		return ReasonOperatorGatePending
+	case errors.Is(err, assignment.ErrRecordOnlyRefused):
+		// The adapter could not record an observed outcome, and the
+		// caller asked for no launch. The attempt stays OUTSTANDING and
+		// the work is not lost: a later pass may dispatch it normally.
+		// So it is a DEFERRAL — "nothing was launched, and the work will
+		// be considered again" — and not a refusal.
+		return ReasonDeferred
 	default:
 		return ReasonRefused
 	}
@@ -165,6 +172,13 @@ func classifyReviewRefusal(err error) string {
 		return ReasonStaleEpoch
 	case errors.Is(err, oc.ErrReviewerUnavailable):
 		return ReasonReviewerUnavailable
+	case errors.Is(err, assignment.ErrRecordOnlyRefused):
+		// The adapter could not record an observed outcome, and the
+		// caller asked for no launch. The attempt stays OUTSTANDING and
+		// the work is not lost: a later pass may dispatch it normally.
+		// So it is a DEFERRAL — "nothing was launched, and the work will
+		// be considered again" — and not a refusal.
+		return ReasonDeferred
 	case errors.Is(err, assignment.ErrConstraint):
 		// A refused review is most often a refusal to launch a SECOND
 		// reviewer, which is a duplicate, not a malformed request.

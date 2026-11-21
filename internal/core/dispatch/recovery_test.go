@@ -756,6 +756,61 @@ func TestTheRecoveryPassNeverLaunches(t *testing.T) {
 	}
 }
 
+// TestACancelledRunWritesNoNoteInAnyBranch proves the promise holds in
+// the branch the DEFAULT configuration takes.
+//
+// The drain window ships DISABLED, so the "no drain window configured"
+// branch is the one a cancelled run is most likely to reach — and it is
+// the one that had no guard.
+//
+// A note that says "recovery required" for a deliberate stop would train
+// the operator to ignore the notes that matter.
+func TestACancelledRunWritesNoNoteInAnyBranch(t *testing.T) {
+	store, clock, projectID := clockStore(t)
+	root := dispatchRoot(t, store, projectID)
+	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:rec:nonote")
+
+	claimed, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: 0, Owner: "mpm-dispatcher", LeaseSeconds: 1800,
+		Actor: assignment.Actor{Address: "mpm-dispatcher", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	seedAttempt(t, store, child, claimed.ClaimEpoch, "ses_nonote", assignment.SessionRunning)
+
+	cfg := testConfig(t)
+	// The DEFAULT drain: no window configured. This is the branch the
+	// default configuration takes.
+	if cfg.DrainTimeoutSeconds != 0 {
+		t.Fatalf("the test configuration has a drain window (%d); this test is about the "+
+			"branch that has none", cfg.DrainTimeoutSeconds)
+	}
+	engine, fake := clockEngine(t, store, clock, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// The operator stops the run at the moment the session is inspected.
+	fake.inspectHook = func(sessionID string) *oc.SessionState {
+		cancel()
+		return &oc.SessionState{ID: "ses_nonote", Outcome: "", Agent: "mpm-worker"}
+	}
+
+	if _, err := engine.RunOnce(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// NO NOTE WAS WRITTEN.
+	history, err := store.History(child.ID)
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	for _, ev := range history {
+		if ev.EventType == assignment.EventNote {
+			t.Errorf("the cancelled run wrote a note: %q", ev.Note)
+		}
+	}
+}
+
 // ── AN OLDER-EPOCH SESSION BLOCKS THE WORKSPACE ─────────────────────────
 
 // TestARunningOlderEpochSessionBlocksTheWorkspace is requirement 7.

@@ -213,12 +213,16 @@ func (s *Store) Execute(ctx context.Context, rt Runtime, p ExecuteParams) (*Exec
 			return nil, fmt.Errorf(
 				"%w: %s has a launch intent whose session the runtime has never heard of, "+
 					"so there is no outcome to record and the caller asked for no launch",
-				ErrConstraint, task.ID)
+				ErrRecordOnlyRefused, task.ID)
 		case reconcileNew:
+			// The cause is deliberately NOT over-specified: the adapter
+			// answers `reconcileNew` for a terminal attempt, for an
+			// assignment with no attempt at all, and when the epoch
+			// advanced. Naming one of them would be a guess.
 			return nil, fmt.Errorf(
-				"%w: %s has a terminal attempt, so a new attempt would have to be launched, "+
-					"and the caller asked for the outcome to be recorded, not for a launch",
-				ErrConstraint, task.ID)
+				"%w: %s would need a NEW attempt, and launching one is exactly what the "+
+					"caller asked not to happen: it asked for an outcome to be recorded",
+				ErrRecordOnlyRefused, task.ID)
 		}
 	}
 
