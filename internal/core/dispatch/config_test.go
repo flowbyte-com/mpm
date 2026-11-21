@@ -54,6 +54,12 @@ func TestABrokenConfigurationFileIsAnError(t *testing.T) {
 		// A TYPO is an error too. A silently ignored key is a limit the
 		// operator believes they set and the dispatcher does not.
 		`{"enabled": false, "lease_second": 900}`,
+		// CONTENT AFTER THE OBJECT. A decoder consumes one value and
+		// says nothing about what follows it, so a file with a valid
+		// object and then some other content would decode — and a
+		// configuration whose meaning depends on where the reader
+		// stopped is not a configuration.
+		`{"enabled": false} and then some other content`,
 	} {
 		path := filepath.Join(t.TempDir(), "dispatch.json")
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -217,7 +223,44 @@ func TestAnUnpinnedWorkerAgentIsRefused(t *testing.T) {
 	}
 }
 
-// TheConfigurationIsAPlainJSONObject proves the file is readable.
+// TestARelativePathIsRefused proves the paths the containment needs are
+// checked BEFORE anything is claimed.
+//
+// The sandbox's root and the workspace it contains are resolved against
+// the filesystem, and the containment refuses a relative path. The
+// worker path needed that already; the reviewer path only found out at
+// the factory — after the claim.
+func TestARelativePathIsRefused(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.Concurrency = 1
+	cfg.LeaseSeconds = 900
+	cfg.RuntimeTimeoutSeconds = 600
+	cfg.LeaseMarginSeconds = 300
+	cfg.CandidateLimit = 10
+	cfg.WorkspaceRoot = "relative/workspaces"
+	cfg.ReviewRepoPath = "/srv/repo"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("a relative workspace root was accepted")
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("the refusal does not name the reason: %v", err)
+	}
+
+	cfg.WorkspaceRoot = "/srv/workspaces"
+	cfg.ReviewRepoPath = "relative/repo"
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatal("a relative repository was accepted")
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("the refusal does not name the reason: %v", err)
+	}
+}
+
+// TestTheConfigurationIsAPlainJSONObject proves the file is readable.
 //
 // A configuration that only a Go program can parse is a configuration an
 // operator cannot inspect.

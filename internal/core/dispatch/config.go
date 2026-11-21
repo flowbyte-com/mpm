@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // The dispatcher's configuration.
@@ -145,7 +146,7 @@ func DefaultConfig() Config {
 		WorkspaceRoot:            "",
 		WorkerAgent:              "mpm-worker",
 		ReviewerAgent:            "mpm-reviewer",
-		ReviewerModel:            "minimax-coding-plan/MiniMax-M3.1-Flash",
+		ReviewerModel:            DefaultReviewModel,
 		ReviewRepoPath:           "",
 		Model:                    "",
 	}
@@ -240,14 +241,33 @@ func (c Config) Validate() error {
 			"dispatch: the reviewer agent is %q, and the review path is pinned to %q",
 			c.ReviewerAgent, DefaultReviewerAgent)
 	}
-	if c.WorkerAgent == c.ReviewerAgent {
-		return fmt.Errorf(
-			"dispatch: the worker agent %q and the reviewer agent %q are the same definition; "+
-				"the reviewer runs under its own default-deny definition and never the worker's",
-			c.WorkerAgent, c.ReviewerAgent)
-	}
+	// THE REVIEWER CANNOT BE THE WORKER, and the PIN is what proves it.
+	//
+	// There is no separate check for "the same definition for both",
+	// because the pin above already makes it impossible: the worker is
+	// `mpm-worker` and the reviewer is `mpm-reviewer`, and a
+	// configuration that names the same definition for both names
+	// neither of them — so it is refused by the pin, with a message that
+	// says what the pin is.
 	if c.ReviewRepoPath == "" {
 		return fmt.Errorf("dispatch: the configuration is enabled but names no repository to review")
+	}
+	// THE PATHS MUST BE ABSOLUTE, because the CONTAINMENT requires it.
+	//
+	// The sandbox's root and the workspace it contains are resolved
+	// against the filesystem, and a relative path would make the
+	// containment's own guarantee depend on the working directory. The
+	// worker path needs it too — the adapter refuses a relative
+	// workspace — but the reviewer path only found out at the factory,
+	// after the claim. Refusing it here is the same decision, made
+	// before anything is claimed.
+	if !filepath.IsAbs(c.WorkspaceRoot) {
+		return fmt.Errorf(
+			"dispatch: the workspace root %q is not an absolute path", c.WorkspaceRoot)
+	}
+	if !filepath.IsAbs(c.ReviewRepoPath) {
+		return fmt.Errorf(
+			"dispatch: the repository to review %q is not an absolute path", c.ReviewRepoPath)
 	}
 	if c.ReviewerModel == "" {
 		return fmt.Errorf("dispatch: the configuration is enabled but names no reviewer model")
@@ -289,6 +309,17 @@ func LoadConfig(path string) (Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return DefaultConfig(), fmt.Errorf(
 			"dispatch: the configuration at %s is not usable JSON: %w", path, err)
+	}
+	// NOTHING AFTER THE OBJECT.
+	//
+	// A decoder consumes ONE value and says nothing about what follows
+	// it, so a file with a valid object and then some other content
+	// would decode and be accepted. A configuration file is either one
+	// object or it is not a configuration file: a half-read file is a
+	// file whose meaning depends on where the reader stopped.
+	if dec.More() {
+		return DefaultConfig(), fmt.Errorf(
+			"dispatch: the configuration at %s has content after the object", path)
 	}
 	if err := cfg.Validate(); err != nil {
 		return DefaultConfig(), fmt.Errorf("dispatch: the configuration at %s is not usable: %w", path, err)
