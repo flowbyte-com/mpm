@@ -86,6 +86,7 @@ There is no environment variable that turns it on by accident, and
   "workspace_root": "/var/lib/mpm/workspaces",
   "worker_agent": "mpm-worker",
   "reviewer_agent": "mpm-reviewer",
+  "reviewer_model": "minimax-coding-plan/MiniMax-M3.1-Flash",
   "review_repo_path": "/srv/repo",
   "model": "mpm-sidecar/permitted-model"
 }
@@ -116,9 +117,27 @@ same tree.
 clean tree, because the review path pins an exact revision.
 
 `worker_agent` and `reviewer_agent` are recorded so an operator can SEE
-that the reviewer is not the worker. They cannot be the same value: the
-configuration refuses it, and the review path ignores the value
-entirely and uses the pinned `mpm-reviewer` definition.
+that the reviewer is not the worker. They are also **PINNED**: the
+configuration refuses any other value, because the runtime's allow-list
+names exactly the two definitions MPM ships. A configuration naming a
+third one would be refused by the runtime — after the claim, and before
+any attempt exists — and a refusal that creates no attempt never trips
+the dispatch-attempt cap, so the assignment would be retried forever
+while its live claim starved the tree's concurrency budget. Refusing the
+configuration is the same decision, made before anything is claimed.
+
+`model` is the WORKER's model and `reviewer_model` is the REVIEWER's,
+and they are different on purpose. The worker's model is the sidecar's
+local id, which only means anything inside the worker's namespace with
+the sidecar's socket. The reviewer's sandbox has no provider and no
+sidecar, so it names a real provider/model — and naming the worker's id
+there would ask the reviewer for a model its own configuration does not
+define.
+
+**AN UNKNOWN KEY IS AN ERROR.** A silently ignored key is a typo the
+operator cannot see: they wrote `lease_second` and the dispatcher used
+the default, and the difference between the two is the difference between
+a lease that covers the runtime window and one that does not.
 
 ## 5. The budgets are the service's business
 
@@ -209,9 +228,17 @@ The relationship, stated once:
 | timeout | how long the runtime may run. It is shorter than the lease. |
 | renewal | NOT USED during execution. It advances the epoch, which would fence out the running attempt. |
 
-The dispatcher reuses its OWN live lease when it already holds one —
-that is the crash-after-the-claim case — and a lease held by anybody
-else is never reclaimed.
+**THE DISPATCHER ALWAYS CLAIMS.** It does not try to recognise "a lease
+I already hold" by the owner string: the operator's one-shot and the
+scheduler's tick share that string, and a second one would then resume
+an attempt the first one is still working on — both would prompt the same
+recorded session. So every dispatch takes a claim, and PR 2's
+compare-and-swap decides: one claim per epoch, whoever asks first.
+
+**A LIVE LEASE IS NEVER RECLAIMED**, by anybody. The assignment waits for
+it to expire, which is the safe direction in both directions: an expired
+lease is not evidence that the old process stopped, and a live lease is
+not evidence that it did.
 
 ## 7. Recovery
 
@@ -221,9 +248,16 @@ different record:
 | The crash | The record | What the next run does |
 |---|---|---|
 | after the claim | a lease, no attempt | the lease expires, the assignment is reclaimed and dispatched |
-| after the intent | a durable session id | the runtime is asked about the session; if it has never heard of it, the recorded id is reused and the launch resumes |
+| after the intent | a durable session id | the lease expires, the assignment is reclaimed, and the recorded session is INSPECTED before anything starts |
 | during the execution | a session that may be working | a BLOCKER: no second writer, an operator-visible note |
-| after the runtime ended | an outcome nobody recorded | reconciled through the existing fenced path |
+| after the runtime ended | an outcome nobody recorded | reconciled through the existing fenced path, when the attempt is at the assignment's current epoch |
+
+The inspection is what decides, not the epoch arithmetic. A session the
+runtime has never heard of was never created, so re-running the objective
+cannot duplicate work; a session that exists and has not reported an
+outcome may still be working, and that blocks; a runtime that cannot be
+asked at all blocks too, because nobody can then say whether the session
+is still running.
 
 ### What is never done
 
@@ -252,6 +286,15 @@ assignment's ledger, and `mpm assignment dispatch-status` lists it under
 **recoverable**. The assignment is NOT moved: inventing a transition to
 carry this would be a change to PR 1's contract.
 
+The drain window is REAL time, not the injected clock. The injected clock
+governs the lease — when a claim expires and when an epoch moves. A drain
+is a WAIT on an external system, and a wait bounded by a clock that
+never advances is a wait that never ends.
+
+The recovery pass reports only what it BLOCKED and what it RECONCILED. An
+assignment it merely observed is left to the dispatch path, so every
+assignment appears in the report exactly once.
+
 ## 8. The reviewer is not the worker
 
 A reviewer runs through PR 3's REVIEW path, with the pinned
@@ -260,7 +303,15 @@ provides `sandbox_exec`. The reviewer never runs in the worker's
 context, and the implementer never gets to record a review's outcome.
 
 The reviewer's boundary gained `Inspect`, because an interface that
-could not be inspected could only ever be reported, never recovered.
+could not be inspected could only ever be reported, never recovered. Its
+MODEL is its own too: the worker's model is the sidecar's local id, and
+the reviewer's sandbox has no provider and no sidecar.
+
+The reviewer's sandbox TREE exists. The runtime's read-only commands run
+with their working directory at `<root>/home`, and the review path reads
+the reviewer's session through exactly that command — so without the
+tree, every inspection fails with `chdir …: no such file or directory`
+and a review can only ever be reported, never recovered.
 
 Four facts stay apart, and the report never collapses them:
 
@@ -279,17 +330,42 @@ codes.
 
 ```
 dispatch_disabled          no_eligible_assignment   budget_exhausted
-lease_held                 stale_epoch              session_still_running
-runtime_unavailable        ambiguous_execution      reviewer_unavailable
-recovery_required          operator_gate_pending    dispatched
-completed                  refused                  deferred
-failed
+lease_held                 lease_insufficient       stale_epoch
+session_still_running      runtime_unavailable      ambiguous_execution
+reviewer_unavailable       recovery_required        operator_gate_pending
+dispatched                 completed                refused
+deferred                   failed
 ```
 
 The counts are `dispatched`, `completed`, `refused`, `deferred` and
-`ambiguous`, and every attempt counts against the run's concurrency
-whatever its outcome was: a dispatch that FAILED still spent a claim and
-a session, so it is not free to try another one.
+`ambiguous`, and they mean:
+
+| Count | Means |
+|---|---|
+| `dispatched` | the dispatcher handed the work to the adapter |
+| `completed` | the assignment reached its terminal state |
+| `refused` | a rule said no; nothing was launched |
+| `deferred` | the work was not attempted this round |
+| `ambiguous` | the runtime's outcome could not be determined |
+
+A claim that was REFUSED is not a dispatch: nothing was launched. A
+**failed** attempt is a dispatch that did not complete — the work reached
+the adapter and failed there — so it is counted as `dispatched` and not
+as `refused`: nothing refused it, and the per-assignment reason says
+`failed`. A **recovered** completion is counted as `completed` and not as
+`dispatched`, because the run that recovered it did not launch it: it
+only recorded what the runtime had already said. So `completed` can
+exceed `dispatched` in a run that only recovered.
+
+And every attempt counts against the RUN's concurrency whatever its
+outcome was: a dispatch that FAILED still spent a claim and a session, so
+it is not free to try another one.
+
+`lease_held` and `lease_insufficient` are different facts and are not
+folded together: the first says a **live lease blocks the claim**,
+whoever holds it — and the detail names the holder and the expiry — and
+the second says the lease the dispatcher holds is too short to record the
+result.
 
 `mpm assignment dispatch-status` shows what is **pending**, what is
 **blocked** and what is **recoverable**, plus the budget picture of

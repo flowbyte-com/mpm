@@ -3101,6 +3101,8 @@ The dispatcher finds work MPM already knows about, proves the operator's root au
 
 Autonomous dispatch is off unless an operator writes a configuration file — `~/.mpm/dispatch.json` by default, or wherever `--dispatch-config` points. A **missing** file means off, and the disabled dispatcher reads no row, builds no runtime and starts no session. A file that is **present and enabled** must be **complete**: a configuration that names no lease, no runtime window or no workspace is refused rather than completed with invented values. A file that is **present and broken** is refused too, and the refusal names the file: a broken configuration is not a reason to guess, and it is not a reason to dispatch.
 
+An **unknown key** is refused as well. A silently ignored key is a typo the operator cannot see: they wrote `lease_second` and the dispatcher used the default, and the difference between the two is the difference between a lease that covers the runtime window and one that does not.
+
 There is no environment variable that turns it on by accident, and "installed" is not "enabled".
 
 #### Two verbs, and they are the operator's alone
@@ -3125,19 +3127,39 @@ The count and the write are **one statement**. The `INSERT` that creates a child
 
 The dispatcher does not renew during execution, and it cannot: a renewal advances the claim epoch, and PR 3's attempt writes are fenced on the epoch, so a renewal in the middle of a run would make the running attempt unable to record its result — and the next dispatch would duplicate the work. The lease is therefore sized **once**, up front, to cover the whole runtime window plus a margin for the adapter to observe the outcome and write it down; a configuration whose lease cannot cover that window is refused, and work that does not fit is refused rather than started.
 
+**Every dispatch takes a claim, and a live lease is never reclaimed.** The dispatcher does not try to recognise "a lease I already hold" by the owner string: the operator's one-shot and the scheduler's tick share that string, and a second one would then resume an attempt the first one is still working on — both would prompt the same recorded session. PR 2's compare-and-swap decides instead: one claim per epoch, whoever asks first. An assignment under a live lease waits for it to expire, which is the safe direction in both directions: an expired lease is not evidence that the old process stopped, and a live lease is not evidence that it did.
+
 #### Recovery observes; it never invents
 
 A run can be interrupted after the claim, after the intent, during the execution, or after the runtime ended, and each leaves a different record. The dispatcher **observes** the recorded session through the runtime and reconciles through the **existing** fenced path — the adapter that owns a runtime's report is the only thing that records it.
 
 What it never does: it never reclaims a **live lease**; it never turns "the runtime could not be asked" into a success — that is **ambiguous**, and an ambiguous attempt stays ambiguous until a human or a later observation resolves it; and it never stops a session. There is no verified host operation that safely ends an OpenCode session, so a session that may still be working is a **blocker**: the dispatcher refuses to put a second writer into the same workspace, records the state where the operator will see it, and says so.
 
+**The inspection decides, not the epoch arithmetic.** A session the runtime has never heard of was never created, so re-running the objective cannot duplicate work; a session that exists and has not reported an outcome may still be working, and that blocks; a runtime that cannot be asked at all blocks too, because nobody can then say whether the session is still running. The drain window is **real** time rather than the injected clock: the injected clock governs the lease, and a wait bounded by a clock that never advances is a wait that never ends.
+
 #### The reviewer stays separate
 
-A reviewer runs only through PR 3's review path, under the pinned default-deny `mpm-reviewer` definition, in its own sandbox, with the plugin that provides `sandbox_exec`. It never inherits the worker's context, workspace, model or agent definition, and the dispatcher's configuration refuses to name the same definition for both. Four facts stay apart: the **runtime's** outcome, the review **evidence** the host captured, the review **verdict** the reviewer recorded, and the **operator's** approval. The dispatcher records the first two and never the last.
+A reviewer runs only through PR 3's review path, under the pinned default-deny `mpm-reviewer` definition, in its own sandbox, with the plugin that provides `sandbox_exec`. It never inherits the worker's context, workspace, model or agent definition, and the dispatcher's configuration refuses to name the same definition for both — and refuses to name any definition but those two, because the runtime's allow-list is pinned to them and a refusal that creates no attempt never trips the dispatch-attempt cap.
+
+The reviewer's **model** is its own, and it has to be: the worker's model is the sidecar's local id, which only means anything inside the worker's namespace with the sidecar's socket, while the reviewer's sandbox has no provider and no sidecar. Four facts stay apart: the **runtime's** outcome, the review **evidence** the host captured, the review **verdict** the reviewer recorded, and the **operator's** approval. The dispatcher records the first two and never the last.
 
 #### The report is a value with a closed vocabulary
 
-One pass returns a report — no live runtime, no open session — with counts (`dispatched`, `completed`, `refused`, `deferred`, `ambiguous`) and a per-assignment reason drawn from a **closed set**: `dispatch_disabled`, `no_eligible_assignment`, `budget_exhausted`, `lease_held`, `stale_epoch`, `session_still_running`, `runtime_unavailable`, `ambiguous_execution`, `reviewer_unavailable`, `recovery_required`, `operator_gate_pending`, `dispatched`, `completed`, `refused`, `deferred`, `failed`. Every attempt counts against the run's concurrency whatever its outcome was: a dispatch that failed still spent a claim and a session. Nothing in the report carries a credential, a prompt or a transcript.
+One pass returns a report — no live runtime, no open session — with counts (`dispatched`, `completed`, `refused`, `deferred`, `ambiguous`) and a per-assignment reason drawn from a **closed set**: `dispatch_disabled`, `no_eligible_assignment`, `budget_exhausted`, `lease_held`, `lease_insufficient`, `stale_epoch`, `session_still_running`, `runtime_unavailable`, `ambiguous_execution`, `reviewer_unavailable`, `recovery_required`, `operator_gate_pending`, `dispatched`, `completed`, `refused`, `deferred`, `failed`. Every attempt counts against the run's concurrency whatever its outcome was: a dispatch that failed still spent a claim and a session. Nothing in the report carries a credential, a prompt or a transcript.
+
+The counts mean what they say, and each one is a fact about the run:
+
+| Count | Means |
+|---|---|
+| `dispatched` | the dispatcher handed the work to the adapter |
+| `completed` | the assignment reached its terminal state |
+| `refused` | a rule said no; nothing was launched |
+| `deferred` | the work was not attempted this round |
+| `ambiguous` | the runtime's outcome could not be determined |
+
+A **failed** attempt is a dispatch that did not complete — the work reached the adapter and failed there — so it is counted as `dispatched` and not as `refused`: nothing refused it. A **recovered** completion is counted as `completed` and not as `dispatched`, because the run that recovered it did not launch it: it only recorded what the runtime had already said. So `completed` can exceed `dispatched` in a run that only recovered.
+
+`lease_held` and `lease_insufficient` are different facts and are not folded together: the first says a **live lease blocks the claim**, whoever holds it — and the detail names the holder and the expiry — and the second says the lease the dispatcher holds is too short to record the result.
 
 The selection is deterministic — `(created_at, id)` — so two dispatchers that see the same rows consider them in the same order, and a report is reproducible.
 
