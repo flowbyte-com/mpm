@@ -28,6 +28,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	oc "github.com/flowbyte-com/mpm-core/opencode"
 )
@@ -1199,5 +1200,122 @@ func TestExecuteReviewAdmitsExactlyOneConcurrentInvocation(t *testing.T) {
 	if live > 1 {
 		t.Errorf("%d live attempts coexist at epoch %d; admission is not atomic",
 			live, rev.epoch)
+	}
+}
+
+// TestExecuteReviewRefusesASecondReviewerAfterTheEvidenceIsCaptured is
+// Fix 1: the authoritative refusal has to be INSIDE the transaction that
+// persists the launch intent.
+//
+// The preliminary evidence check and the intent write live in DIFFERENT
+// transactions, so a concurrent caller can pass the check, wait for another
+// review to complete, and then persist its intent anyway. The partial unique
+// index does not help: it covers only NON-TERMINAL attempts, so once the
+// winner's attempt goes terminal the index says nothing.
+//
+// THE INTERLEAVING IS DETERMINISTIC. The package's fault seam holds caller B
+// at the moment before its intent is written — before the transaction opens,
+// so no write lock is held — while caller A runs a complete review and
+// captures the evidence.
+//
+// THE ASSERTION IS THE NUMBER OF RUNTIME CALLS, not the number of successful
+// results. Without the fix B would still fail, because the capture is
+// write-once — but only AFTER spending a full reviewer session.
+func TestExecuteReviewRefusesASecondReviewerAfterTheEvidenceIsCaptured(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	implID, _ := claimedAssignment(t, store, projectID, "alpha")
+	rev := reviewFixture(t, store, implID, "charlie")
+
+	// CALLER B IS HELD AT ITS LAUNCH INTENT.
+	var intents int32
+	bHeld := make(chan struct{})
+	bRelease := make(chan struct{})
+	store.fault = func(stage string) error {
+		if stage != "attempt-intent" {
+			return nil
+		}
+		// The first caller through is B: the test starts B and waits for
+		// bHeld before it starts A.
+		if atomic.AddInt32(&intents, 1) == 1 {
+			close(bHeld)
+			<-bRelease
+		}
+		return nil
+	}
+	t.Cleanup(func() { store.fault = nil })
+
+	bRuntime := &fakeReviewRuntime{result: &oc.ReviewResult{
+		ReviewedRevision: strings.Repeat("2", 40),
+		FindingsSHA256:   strings.Repeat("b", 64),
+		Outcome:          "succeeded",
+		Agent:            "mpm-reviewer",
+		Findings:         "B's findings",
+		EvidencePath:     "/evidence/b.json",
+	}}
+	bDone := make(chan error, 1)
+	go func() {
+		_, err := store.ExecuteReview(context.Background(), bRuntime, ExecuteReviewParams{
+			ID: rev.id, Epoch: rev.epoch, Brief: "b",
+		})
+		bDone <- err
+	}()
+
+	// B has passed its preliminary check and is about to persist an intent.
+	select {
+	case <-bHeld:
+	case <-time.After(30 * time.Second):
+		t.Fatal("caller B never reached the launch intent")
+	}
+
+	// CALLER A RUNS A COMPLETE REVIEW AND CAPTURES THE EVIDENCE.
+	aRuntime := &fakeReviewRuntime{result: &oc.ReviewResult{
+		ReviewedRevision: strings.Repeat("1", 40),
+		FindingsSHA256:   strings.Repeat("a", 64),
+		Outcome:          "succeeded",
+		Agent:            "mpm-reviewer",
+		Findings:         "A's findings",
+		EvidencePath:     "/evidence/a.json",
+	}}
+	if _, err := store.ExecuteReview(context.Background(), aRuntime, ExecuteReviewParams{
+		ID: rev.id, Epoch: rev.epoch, Brief: "a",
+	}); err != nil {
+		t.Fatalf("caller A: %v", err)
+	}
+	if aRuntime.Calls() != 1 {
+		t.Fatalf("caller A made %d runtime calls, want 1", aRuntime.Calls())
+	}
+
+	// CALLER B RESUMES AND TRIES TO PERSIST ITS INTENT.
+	close(bRelease)
+
+	var bErr error
+	select {
+	case bErr = <-bDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("caller B never finished")
+	}
+
+	if bErr == nil {
+		t.Fatal("the second reviewer completed")
+	}
+	// THE POINT OF THE TEST: B never reached the runtime.
+	if bRuntime.Calls() != 0 {
+		t.Errorf("caller B invoked the reviewer %d times; the refusal must "+
+			"happen BEFORE the session is launched", bRuntime.Calls())
+	}
+	if !strings.Contains(bErr.Error(), "captured evidence") {
+		t.Errorf("refused, but not as a completed review: %v", bErr)
+	}
+
+	// And the recorded evidence is A's, not B's.
+	got, err := store.Get(rev.id)
+	if err != nil {
+		t.Fatalf("get the reviewer: %v", err)
+	}
+	if got.ReviewedSHA != strings.Repeat("1", 40) {
+		t.Errorf("the recorded revision is %q, want A's", got.ReviewedSHA)
+	}
+	if got.FindingsSHA256 != strings.Repeat("a", 64) {
+		t.Errorf("the recorded digest is %q, want A's", got.FindingsSHA256)
 	}
 }

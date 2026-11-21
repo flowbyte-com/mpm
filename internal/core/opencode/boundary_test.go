@@ -755,3 +755,160 @@ func TestFindingsRequireAssistantAuthorship(t *testing.T) {
 		}
 	}
 }
+
+// TestCompletionGuardRequiresAssistantText is Fix 2.
+//
+// The completion guard used to be answered by the RENDERED transcript, and
+// the rendering includes tool activity: "[tool sandbox_exec]" is not
+// whitespace. A session where Charlie only RAN TOOLS therefore looked like a
+// review.
+//
+// This exercises the REAL guard — `captureReviewFindings` is the function
+// `Review` calls — against the whole acceptance table, and checks that the
+// transcript survives a refusal, because a reader still needs to see what
+// the reviewer actually did.
+func TestCompletionGuardRequiresAssistantText(t *testing.T) {
+	cases := []struct {
+		name    string
+		msgs    []reviewMessage
+		accept  bool
+		wantIn  string
+		wantOut string
+	}{
+		{
+			name:    "user prompt only",
+			msgs:    []reviewMessage{{Type: "user", Text: "please review this"}},
+			accept:  false,
+			wantIn:  "[user] please review this",
+			wantOut: "",
+		},
+		{
+			name: "empty assistant message",
+			msgs: []reviewMessage{
+				{Type: "user", Text: "please review this"},
+				{Type: "assistant", Content: json.RawMessage(`[{"type":"text","text":"   "}]`)},
+			},
+			accept:  false,
+			wantIn:  "[user] please review this",
+			wantOut: "",
+		},
+		{
+			name: "tool activity only",
+			msgs: []reviewMessage{
+				{Type: "user", Text: "please review this"},
+				{Type: "assistant", Content: json.RawMessage(
+					`[{"type":"tool","name":"sandbox_exec","input":{"command":["ls"]}}]`)},
+			},
+			accept:  false,
+			wantIn:  "[tool sandbox_exec]",
+			wantOut: "",
+		},
+		{
+			name: "diagnostics only",
+			msgs: []reviewMessage{
+				{Type: "user", Text: "please review this"},
+				{Type: "idle", Error: json.RawMessage(`{"type":"unknown","message":"boom"}`)},
+			},
+			accept:  false,
+			wantIn:  "[idle] ",
+			wantOut: "",
+		},
+		{
+			name: "tool activity plus assistant textual findings",
+			msgs: []reviewMessage{
+				{Type: "user", Text: "please review this"},
+				{Type: "assistant", Content: json.RawMessage(
+					`[{"type":"tool","name":"sandbox_exec","input":{"command":["ls"]}}]`)},
+				{Type: "assistant", Content: json.RawMessage(
+					`[{"type":"text","text":"F1: the fence is wrong"}]`)},
+			},
+			accept:  true,
+			wantIn:  "[tool sandbox_exec]",
+			wantOut: "F1: the fence is wrong",
+		},
+		{
+			name: "assistant textual findings only",
+			msgs: []reviewMessage{
+				{Type: "user", Text: "please review this"},
+				{Type: "assistant", Content: json.RawMessage(
+					`[{"type":"text","text":"F1: the fence is wrong"}]`)},
+			},
+			accept:  true,
+			wantIn:  "[user] please review this",
+			wantOut: "F1: the fence is wrong",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			transcript, err := captureReviewFindings(tc.msgs)
+
+			// THE GATE.
+			if tc.accept && err != nil {
+				t.Fatalf("the review was refused: %v", err)
+			}
+			if !tc.accept {
+				if err == nil {
+					t.Fatal("the review was accepted")
+				}
+				if !errors.Is(err, ErrReviewerUnavailable) {
+					t.Errorf("refused with %v, want ErrReviewerUnavailable", err)
+				}
+			}
+
+			// THE TRANSCRIPT SURVIVES BOTH WAYS, and it keeps the prompt,
+			// the tool activity and the diagnostics.
+			if transcript == "" {
+				t.Fatal("the transcript was not recorded")
+			}
+			if tc.wantIn != "" && !strings.Contains(transcript, tc.wantIn) {
+				t.Errorf("the transcript does not carry %q:\n%s", tc.wantIn, transcript)
+			}
+			if tc.wantOut == "" {
+				// A REFUSAL must not carry the assistant's words — there
+				// are none.
+				if strings.Contains(transcript, "F1: the fence is wrong") {
+					t.Errorf("a refused review carries findings:\n%s", transcript)
+				}
+			} else if !strings.Contains(transcript, tc.wantOut) {
+				t.Errorf("the transcript does not carry %q:\n%s", tc.wantOut, transcript)
+			}
+		})
+	}
+}
+
+// TestToolActivityCannotSatisfyTheAuthorshipGate is the sharp half of Fix 2,
+// stated on its own.
+//
+// The rendered transcript of a tool-only assistant message is NOT empty — it
+// is "[tool sandbox_exec]" — so any authorship check that reads the
+// rendering would call that a review.
+func TestToolActivityCannotSatisfyTheAuthorshipGate(t *testing.T) {
+	toolOnly := json.RawMessage(
+		`[{"type":"tool","name":"sandbox_exec","input":{"command":["ls"]}}]`)
+	mixed := json.RawMessage(
+		`[{"type":"tool","name":"sandbox_exec","input":{"command":["ls"]}},` +
+			`{"type":"text","text":"F1: the fence is wrong"}]`)
+
+	if got := assistantText(toolOnly); strings.TrimSpace(got) == "" {
+		t.Fatal("the transcript dropped the tool activity; the record would lie")
+	} else if !strings.Contains(got, "[tool sandbox_exec]") {
+		t.Errorf("the tool marker is gone: %q", got)
+	}
+
+	if got := assistantAuthoredText(toolOnly); strings.TrimSpace(got) != "" {
+		t.Errorf("tool activity counted as authored text: %q", got)
+	}
+	if got := assistantAuthoredText(mixed); !strings.Contains(got, "F1: the fence is wrong") {
+		t.Errorf("the assistant's own words were dropped: %q", got)
+	}
+	if got := assistantAuthoredText(json.RawMessage(`[]`)); strings.TrimSpace(got) != "" {
+		t.Errorf("an empty message counted as authored text: %q", got)
+	}
+	if got := assistantAuthoredText(nil); strings.TrimSpace(got) != "" {
+		t.Errorf("a missing payload counted as authored text: %q", got)
+	}
+	if got := assistantAuthoredText(json.RawMessage(`"not a part list"`)); strings.TrimSpace(got) != "" {
+		t.Errorf("an unparseable payload counted as authored text: %q", got)
+	}
+}

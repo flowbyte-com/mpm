@@ -177,20 +177,15 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 	//
 	// ONLY ASSISTANT-AUTHORED TEXT COUNTS AS FINDINGS. A session that
 	// contains nothing but the submitted prompt echo, an empty assistant
-	// turn or a diagnostic envelope has produced NO REVIEW — counting it
-	// would let a prompt be mistaken for a verdict.
-	findings, authored, state, err := r.captureMessages(ctx, req.SessionID)
+	// turn, tool activity or a diagnostic envelope has produced NO REVIEW —
+	// counting it would let a prompt be mistaken for a verdict.
+	findings, state, err := r.captureMessages(ctx, req.SessionID)
 	if err != nil {
 		return nil, err
 	}
 	if state == nil {
 		return nil, fmt.Errorf("%w: the reviewer produced no session state (%v)",
 			ErrReviewerUnavailable, runErr)
-	}
-	if !authored {
-		return nil, fmt.Errorf(
-			"%w: the reviewer session produced no assistant-authored findings "+
-				"(only the submitted prompt, empty output or diagnostics)", ErrReviewerUnavailable)
 	}
 	if len(state.Permissions) > 0 {
 		return nil, fmt.Errorf(
@@ -327,27 +322,32 @@ func (r *Runtime) writeReviewConfig() error {
 //
 // The errors and the tool results are included: a review that refused to run
 // is not a review that found nothing.
-func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string, bool, *SessionState, error) {
+func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string, *SessionState, error) {
 	out, err := r.runIsolated(ctx, r.cfg.OpenCodeBin, "--standalone", "api",
 		"session.message.list", "--param", "sessionID="+sessionID)
 	if err != nil {
-		return "", false, nil, fmt.Errorf("opencode: read the reviewer's messages: %w", err)
+		return "", nil, fmt.Errorf("opencode: read the reviewer's messages: %w", err)
 	}
 	var env struct {
 		Data []reviewMessage `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(out), &env); err != nil {
-		return "", false, nil, fmt.Errorf("opencode: parse the reviewer's messages: %w", err)
+		return "", nil, fmt.Errorf("opencode: parse the reviewer's messages: %w", err)
 	}
 
-	transcript, authored := findingsFromMessages(env.Data)
+	// THE COMPLETION GUARD, applied where the stream is read. The
+	// transcript survives a refusal — it is returned alongside the error
+	// — but a session that produced no assistant-authored TEXT is not a
+	// review.
+	transcript, err := captureReviewFindings(env.Data)
+	if err != nil {
+		return transcript, nil, err
+	}
 	state, err := r.Inspect(ctx, sessionID)
 	if err != nil {
-		return "", false, nil, err
+		return "", nil, err
 	}
-	// The returned text is the full transcript, so the capture is a faithful
-	// record — but `authored` is what gates completion.
-	return transcript, authored, state, nil
+	return transcript, state, nil
 }
 
 // reviewMessage is the shape findingsFromMessages consumes.
@@ -358,22 +358,28 @@ type reviewMessage struct {
 	Error   json.RawMessage `json:"error"`
 }
 
-// findingsFromMessages decides whether a session produced an ACTUAL REVIEW.
+// findingsFromMessages separates the TRANSCRIPT from the AUTHORSHIP.
 //
-// The transcript includes the prompt and the runtime's diagnostics so a reader
-// has the whole exchange, but `authored` is true only when the ASSISTANT wrote
-// something. A session containing nothing but the submitted prompt, an empty
-// assistant turn or a diagnostic envelope has produced no review, and counting
-// it would let a prompt be mistaken for a verdict.
+// The transcript is a faithful record: the submitted prompt, the tool
+// activity and the runtime's diagnostics all appear, because a reader
+// needs the whole exchange — a review that refused to run is not a review
+// that found nothing.
+//
+// `authored` answers a different question: did the ASSISTANT write TEXT? A
+// tool part renders as "[tool sandbox_exec]", which is not whitespace, so
+// counting the rendered transcript would let a session that only RAN TOOLS
+// pass as a review. The gate therefore looks at the assistant's own words
+// only.
 func findingsFromMessages(msgs []reviewMessage) (transcript string, authored bool) {
 	var all, assistant strings.Builder
 	for _, m := range msgs {
 		switch m.Type {
 		case "assistant":
-			text := assistantText(m.Content)
-			all.WriteString(text)
+			// The TRANSCRIPT keeps the tool markers; the AUTHORSHIP gate
+			// sees the assistant's text only.
+			all.WriteString(assistantText(m.Content))
 			all.WriteString("\n")
-			assistant.WriteString(text)
+			assistant.WriteString(assistantAuthoredText(m.Content))
 		case "user":
 			all.WriteString("[user] " + m.Text + "\n")
 		case "idle":
@@ -385,7 +391,27 @@ func findingsFromMessages(msgs []reviewMessage) (transcript string, authored boo
 	return all.String(), strings.TrimSpace(assistant.String()) != ""
 }
 
-// assistantText flattens an assistant message's content parts.
+// captureReviewFindings is the COMPLETION GUARD.
+//
+// It builds the transcript and then decides whether the session produced an
+// actual review. `Review` calls this exact function, so a test that
+// exercises it exercises the production guard: a prompt-only session, an
+// empty assistant turn, tool activity alone and a diagnostics-only session
+// are all refused, and the transcript is returned either way so the refusal
+// can be read.
+func captureReviewFindings(msgs []reviewMessage) (string, error) {
+	transcript, authored := findingsFromMessages(msgs)
+	if !authored {
+		return transcript, fmt.Errorf(
+			"%w: the reviewer session produced no assistant-authored findings "+
+				"(only the submitted prompt, empty output, tool activity or "+
+				"diagnostics)", ErrReviewerUnavailable)
+	}
+	return transcript, nil
+}
+
+// assistantText flattens an assistant message's content parts for the
+// TRANSCRIPT: its text verbatim, and its tool activity as a marker.
 func assistantText(raw json.RawMessage) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return ""
@@ -406,6 +432,33 @@ func assistantText(raw json.RawMessage) string {
 		case "tool":
 			b.WriteString("[tool " + p.Name + "]\n")
 		}
+	}
+	return b.String()
+}
+
+// assistantAuthoredText returns ONLY the assistant's own words.
+//
+// A tool part is ACTIVITY, not prose: "[tool sandbox_exec]" is not a
+// finding, and a session whose assistant turns carry nothing but tool
+// calls has not written a review. A payload that cannot be parsed into
+// content parts is not prose either, so it contributes nothing.
+func assistantAuthoredText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if p.Type != "text" {
+			continue
+		}
+		b.WriteString(p.Text)
 	}
 	return b.String()
 }

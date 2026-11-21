@@ -138,11 +138,32 @@ convention:
 | an attempt's `claim_epoch` must be the assignment's **current** claim | a reclaimed worker cannot even record an intent |
 | attempts are **consecutive** per task | a retry is visibly a retry, not a silent second execution |
 | `(runtime, native_session_id)` is **unique** | two assignments cannot claim one runtime object |
+| at most one **non-terminal** attempt per `(task_id, claim_epoch)` | two concurrent callers must not both obtain permission to launch; a service-level check cannot close that window, because its read and its write are not one critical section |
 | `launch_state` moves **forward only** | a failed attempt cannot be relabelled a success |
 | the row is **not deletable** | an executed assignment cannot be made to look unexecuted |
 
 `agent_task_events` still carries the durable history. **No new event type was
 added** — the ledger's vocabulary is PR 1's closed set.
+
+The single-flight index is scoped to the **claim epoch** on purpose. A worker
+whose lease was reclaimed leaves a stale intent behind, and an index on
+`(task_id)` alone would then block every future attempt of that assignment
+forever.
+
+### The reviewer cannot be launched twice
+
+The evidence check that refuses a completed review lives **inside the
+transaction that persists the launch intent**, not in a preliminary read
+before it. A preliminary read is in a different transaction, so a concurrent
+caller can pass it, wait for another review to complete, and then persist its
+intent anyway — the partial index does not help, because it covers only
+non-terminal attempts and the winner's attempt goes terminal within
+milliseconds.
+
+So the authoritative row is read in the same transaction as the write: the
+refusal and the intent are one critical section, and the refusal happens
+**before** a second OpenCode session can be launched. A review that *failed*
+recorded no evidence and stays retryable.
 
 ### The launch-state graph
 
@@ -338,6 +359,24 @@ write**:
 It records evidence, not a verdict. A verdict remains the reviewer's own fenced
 transition, so **an implementer that can record evidence still cannot record a
 review**, and a completed review is still not operator approval.
+
+### What counts as findings
+
+The captured stream is a **faithful record**: the submitted prompt, the tool
+activity and the runtime's diagnostics all appear, because a review that
+refused to run is not a review that found nothing.
+
+The *authorship* gate is a separate question, and it is stricter than "the
+transcript is not empty". A tool part renders as `[tool sandbox_exec]`, which
+is not whitespace — so a session where the reviewer only **ran tools** would
+otherwise pass as a review. A review counts only when the **assistant wrote
+text**: a prompt-only session, an empty assistant turn, tool activity alone
+and a diagnostics-only session are all refused, and a message carrying both
+tool activity and substantive prose satisfies the gate.
+
+The refusal happens where the stream is read, so it is part of the completion
+contract rather than a later inspection: a session that produced no
+assistant-authored text is not a completed review, however it exited.
 
 ---
 

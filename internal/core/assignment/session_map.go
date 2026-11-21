@@ -102,11 +102,14 @@ type BeginAttemptParams struct {
 //   - the assignment to exist and to have a role that executes;
 //   - the presented epoch to BE the assignment's current claim;
 //   - the assignment to be in a state that may be executed;
-//   - a non-empty, allow-listed runtime and session id.
+//   - a non-empty, allow-listed runtime and session id;
+//   - for a REVIEWER, that no evidence has already been captured.
 //
 // The intent is written in the SAME transaction that re-reads the
 // assignment, so an epoch that moved between the check and the write
-// cannot produce an intent for a claim the caller does not hold.
+// cannot produce an intent for a claim the caller does not hold — and,
+// for a reviewer, neither can a completion that landed between the
+// caller's own preliminary check and this write.
 func (s *Store) BeginAttempt(p BeginAttemptParams) (*SessionAttempt, error) {
 	if p.Runtime != RuntimeOpenCode {
 		return nil, fmt.Errorf("%w: the runtime must be %q", ErrConstraint, RuntimeOpenCode)
@@ -118,6 +121,15 @@ func (s *Store) BeginAttempt(p BeginAttemptParams) (*SessionAttempt, error) {
 	if strings.TrimSpace(p.IntendedAgent) == "" {
 		return nil, fmt.Errorf("%w: a launch intent must name the agent definition",
 			ErrConstraint)
+	}
+
+	// THE TEST SEAM FIRES BEFORE THE TRANSACTION OPENS, so a test can hold
+	// a caller at the moment its intent is about to be persisted without
+	// holding a write lock. It is the package's established seam for
+	// reproducing a SCHEDULE that is otherwise only reachable by winning
+	// a race.
+	if err := s.injectFault("attempt-intent"); err != nil {
+		return nil, err
 	}
 
 	var out *SessionAttempt
@@ -145,6 +157,31 @@ func (s *Store) BeginAttempt(p BeginAttemptParams) (*SessionAttempt, error) {
 		default:
 			return fmt.Errorf("%w: %s is %s and cannot be executed",
 				ErrIllegalTransition, task.ID, task.State)
+		}
+
+		// A REVIEWER WHOSE EVIDENCE IS ALREADY CAPTURED CANNOT LAUNCH.
+		//
+		// The preliminary check in ExecuteReview runs in a DIFFERENT
+		// transaction from this one, so a concurrent caller can pass it,
+		// wait for another review to complete, and arrive here with a
+		// stale intent. The partial unique index does not help: it covers
+		// only NON-TERMINAL attempts, so once the winner's attempt goes
+		// terminal the index no longer says anything.
+		//
+		// The authoritative row is read HERE, inside the transaction that
+		// persists the intent, so the refusal and the write are one
+		// critical section. The capture is write-once, so a second
+		// reviewer would produce a second findings capture for one verdict
+		// — and pay for a full model session to discover it.
+		//
+		// A review that FAILED recorded no evidence, so it stays
+		// retryable. Only a completed review is refused here.
+		if task.Role == RoleReviewer &&
+			(task.ReviewedSHA != "" || task.FindingsSHA256 != "") {
+			return fmt.Errorf("%w: %s already carries captured evidence (%s); "+
+				"a completed review is not re-run — the rework is a NEW "+
+				"assignment delegated from the subject",
+				ErrConstraint, task.ID, task.ReviewedSHA)
 		}
 
 		id, err := newID("ats")
