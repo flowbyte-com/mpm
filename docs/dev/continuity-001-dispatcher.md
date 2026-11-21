@@ -428,8 +428,11 @@ status command agrees — it lists the same states under **blocked**.
 and the recovery path alike, so the same reason cannot count one way in
 one pass and another way in the next — the same live lease would
 otherwise be a refusal in one pass and a deferral in the next. It is also
-**TOTAL**: every reason reaches at least one counter, because an outcome
-that no counter reflects is a fact the operator cannot see.
+**TOTAL over the assignment-level reasons**: every one of them reaches at
+least one counter, because an outcome that no counter reflects is a fact
+the operator cannot see. The two run-level reasons — the dispatcher being
+off, and nothing being eligible — are not assignments and are not
+counted.
 
 A claim that was REFUSED is not a dispatch: nothing was launched. A
 **failed** attempt is a dispatch that did not complete — the work reached
