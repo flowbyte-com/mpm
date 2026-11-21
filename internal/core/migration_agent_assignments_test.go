@@ -10,26 +10,26 @@
 //
 // The tests fall into three groups:
 //
-//	  - THE MIGRATION'S DISCIPLINE — the same AT1–AT8 shape PR #224's
-//	    Stage 1 established: an existing database gains the objects and
-//	    changes nothing else; a fresh database ends up with the same
-//	    schema; the migration is idempotent; a failure inside it leaves NO
-//	    partial schema and the next open recovers; the tables never appear
-//	    in the cross-workspace `shared` schema; the restore allow-list
-//	    gains exactly two names and is still load-bearing.
+//   - THE MIGRATION'S DISCIPLINE — the same AT1–AT8 shape PR #224's
+//     Stage 1 established: an existing database gains the objects and
+//     changes nothing else; a fresh database ends up with the same
+//     schema; the migration is idempotent; a failure inside it leaves NO
+//     partial schema and the next open recovers; the tables never appear
+//     in the cross-workspace `shared` schema; the restore allow-list
+//     gains exactly two names and is still load-bearing.
 //
-//	  - THE PERSISTENCE INVARIANTS — each one observed as a REFUSED
-//	    write, not as a comment. The state machine is role-aware; the
-//	    claim epoch advances by exactly one; only a claim changes the
-//	    owner; a task is born unclaimed; the role is immutable; the root
-//	    carries the budgets and a child carries none; the delegation tree
-//	    is a tree contained in ONE project; the idempotency key is unique;
-//	    the ledger is append-only and monotonic; the operator's gate names
-//	    its action.
+//   - THE PERSISTENCE INVARIANTS — each one observed as a REFUSED
+//     write, not as a comment. The state machine is role-aware; the
+//     claim epoch advances by exactly one; only a claim changes the
+//     owner; a task is born unclaimed; the role is immutable; the root
+//     carries the budgets and a child carries none; the delegation tree
+//     is a tree contained in ONE project; the idempotency key is unique;
+//     the ledger is append-only and monotonic; the operator's gate names
+//     its action.
 //
-//	  - THE NEGATIVE CONTROLS — the tests themselves, proved to be
-//	    load-bearing by disabling each invariant and watching the test
-//	    that depends on it fail.
+//   - THE NEGATIVE CONTROLS — the tests themselves, proved to be
+//     load-bearing by disabling each invariant and watching the test
+//     that depends on it fail.
 //
 // EVERY DATABASE IS DISPOSABLE
 //
@@ -911,9 +911,14 @@ func TestAgentAssignmentAT8RestoreAllowList(t *testing.T) {
 	db := dm.SQLDB()
 
 	// 1. the exact delta.
+	//
+	// PR 3 adds a THIRD name to the same allow-list (the session mapping),
+	// so the pre-change reproduction removes all three. The assertion's
+	// purpose is unchanged: the list must have gained the Continuity 001
+	// tables and nothing else.
 	var without []string
 	for _, name := range CanonicalMPMSchema {
-		if name == "agent_tasks" || name == "agent_task_events" {
+		if name == "agent_tasks" || name == "agent_task_events" || name == "agent_task_sessions" {
 			continue
 		}
 		without = append(without, name)
@@ -2383,11 +2388,11 @@ func TestAssignmentPermittedOperationsMustBeStrings(t *testing.T) {
 	projectID := seedProject(t, dm, "")
 
 	for _, ops := range []string{
-		`["a",{"b":1}]`,  // an object
-		`[["read"]]`,     // an array
-		`[true]`,         // a boolean
-		`[7]`,            // a number
-		`[null]`,         // a null
+		`["a",{"b":1}]`, // an object
+		`[["read"]]`,    // an array
+		`[true]`,        // a boolean
+		`[7]`,           // a number
+		`[null]`,        // a null
 	} {
 		assignmentMustRefuseWith(t, db, "a permitted operation that is not a string ("+ops+")",
 			"a permitted operation must be a non-null string", `
@@ -3435,12 +3440,12 @@ func TestAssignmentEligibleRecipientsMustBeStrings(t *testing.T) {
 	projectID := seedProject(t, dm, "")
 
 	for _, list := range []string{
-		`[{"a":1},"alpha"]`,  // an object
-		`[["alpha"]]`,        // an array
-		`[true,"alpha"]`,     // a boolean
-		`[42,"alpha"]`,       // a number
-		`[null,"alpha"]`,     // a null
-		`["","alpha"]`,       // an empty address
+		`[{"a":1},"alpha"]`, // an object
+		`[["alpha"]]`,       // an array
+		`[true,"alpha"]`,    // a boolean
+		`[42,"alpha"]`,      // a number
+		`[null,"alpha"]`,    // a null
+		`["","alpha"]`,      // an empty address
 	} {
 		assignmentMustRefuseWith(t, db, "an eligible recipient that is not an address ("+list+")",
 			"an eligible recipient must be a non-null string", `
@@ -3468,7 +3473,7 @@ func TestAssignmentEligibleRecipientsMustBeStrings(t *testing.T) {
 // TestAssignmentEmptyPermittedOperationIsRefused pins the empty operation.
 //
 // A root that may do nothing is a silent misconfiguration rather than a
-// safe default, and an operation named '' is that same misconfiguration
+// safe default, and an operation named ” is that same misconfiguration
 // one level down.
 func TestAssignmentEmptyPermittedOperationIsRefused(t *testing.T) {
 	dm := NewTestLocalOnlyDM(t)

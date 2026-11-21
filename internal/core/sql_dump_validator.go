@@ -157,6 +157,7 @@ var CanonicalMPMSchema = []string{
 	// guard can actually check. They are local-only: attachShared never
 	// propagates them into the cross-workspace `shared` schema.
 	"agent_task_events",
+	"agent_task_sessions",
 	"agent_tasks",
 	"admission_log",
 	"artifact_provenance",

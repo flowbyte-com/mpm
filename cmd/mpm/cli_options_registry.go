@@ -147,28 +147,33 @@ func init() {
 		// The AST-derived coverage test
 		// (TestCLIOptionRegistryCoversEverySourceVocabulary) is what
 		// found it, and it is what keeps it fixed.
-		"backup":          {},
-		"blob":            {"dry-run", "n"},
-		"cascade":         {"max-iterations", "poll-interval", "once"},
-		"challenge":       {"json", "j", "limit"},
-		"continue":        {"session-id"},
-		"decisions":       cognitiveVerbOptions,
-		"gc":              {"json", "j", "dry-run", "aggressive", "review", "purge", "shred-negative", "max-age"},
-		"handoff":         {"json", "j", "session-id", "summary", "tag", "unread"},
+		"backup":    {},
+		"blob":      {"dry-run", "n"},
+		"cascade":   {"max-iterations", "poll-interval", "once"},
+		"challenge": {"json", "j", "limit"},
+		"continue":  {"session-id"},
+		"decisions": cognitiveVerbOptions,
+		"gc":        {"json", "j", "dry-run", "aggressive", "review", "purge", "shred-negative", "max-age"},
+		"handoff":   {"json", "j", "session-id", "summary", "tag", "unread"},
 		// Continuity 001 PR 2. The vocabulary is the flag registrations
 		// in cmd/mpm/assignment_cmds.go; the drift test derives it
 		// from that source, so the two cannot disagree.
 		"assignment": {
-			"action", "actor", "actor-kind", "awaiting-action", "base-sha",
+			// PR 3 adds the explicit-execution surface: the agent
+			// definition, the authorised worktree, its label, the
+			// runtime model and the bounded references. They are
+			// registered here because an unregistered option is
+			// refused before the verb runs.
+			"action", "actor", "actor-kind", "agent", "awaiting-action", "base-sha",
 			"eligible-recipient", "epoch", "evidence", "evidence-ref",
 			"findings-sha256", "head-sha", "id", "idempotency-key",
-			"issue-ref", "json", "lease-seconds", "limit", "max-concurrency",
-			"max-depth", "max-resource-units", "max-tasks", "note",
+			"brief", "issue-ref", "json", "lease-seconds", "limit", "max-concurrency",
+			"max-depth", "max-resource-units", "max-tasks", "model", "note",
 			"objective", "owner", "parent-id", "payload",
 			"permitted-operation",
-			"pr-ref", "project-id", "recipient", "resource-units",
+			"pr-ref", "project-id", "recipient", "reference", "resource-units",
 			"reviewed-sha", "revision", "role", "root-id", "source", "state",
-			"title", "verdict",
+			"title", "verdict", "workspace", "workspace-id",
 		},
 		"hint":            {"json", "max"},
 		"ingest":          ingestOptionNames,
@@ -387,7 +392,7 @@ var cliOptionSubcommandFamilies = map[string]bool{
 	// The families of the router's own dispatch table.
 	"work": true, "session": true, "handoff": true, "lesson": true,
 	"assignment": true,
-	"skill": true, "ops": true, "call": true, "kb": true, "topic": true,
+	"skill":      true, "ops": true, "call": true, "kb": true, "topic": true,
 	"reference": true, "memory": true, "mode": true, "persona": true,
 	"integration": true, "self-heal": true, "why": true, "config": true,
 	"onboard": true, "compact": true, "capability": true, "debug": true,
