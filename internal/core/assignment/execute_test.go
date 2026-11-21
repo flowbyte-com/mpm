@@ -1319,3 +1319,114 @@ func TestExecuteReviewRefusesASecondReviewerAfterTheEvidenceIsCaptured(t *testin
 		t.Errorf("the recorded digest is %q, want A's", got.FindingsSHA256)
 	}
 }
+
+// TestExecuteReviewRefusesWhenTheEvidenceCheckIsInsideTheTransaction pins
+// WHERE the evidence check lives, not merely that it exists.
+//
+// The first test proves the refusal happens between the capture and the
+// launch. It does not prove the refusal is derived from a read INSIDE the
+// transaction that persists the intent: a check moved out in front of it —
+// a preliminary read — would pass that test, because the preliminary read
+// would still see the evidence by the time it runs.
+//
+// THIS ONE closes that hole. Caller B is held INSIDE its transaction, right
+// after the authoritative row is read, so the transaction's read snapshot
+// PREDATES the capture. The evidence is therefore not visible to B's
+// snapshot at all:
+//
+//   - with the check inside the transaction, B's write attempt fails with
+//     SQLITE_BUSY_SNAPSHOT, the transaction is RESTARTED against a fresh
+//     snapshot, the re-read sees the evidence, and B is refused BEFORE the
+//     runtime is invoked;
+//   - with the check moved out in front of the transaction, the restart
+//     re-reads nothing, the intent is written, and a second reviewer
+//     launches.
+//
+// The assertion is again the number of runtime calls.
+func TestExecuteReviewRefusesWhenTheEvidenceCheckIsInsideTheTransaction(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	implID, _ := claimedAssignment(t, store, projectID, "alpha")
+	rev := reviewFixture(t, store, implID, "charlie")
+
+	// CALLER B IS HELD INSIDE ITS TRANSACTION.
+	var txIntents int32
+	bHeld := make(chan struct{})
+	bRelease := make(chan struct{})
+	store.fault = func(stage string) error {
+		if stage != "attempt-intent-tx" {
+			return nil
+		}
+		// The first caller through is B: the test starts B and waits for
+		// bHeld before it starts A.
+		if atomic.AddInt32(&txIntents, 1) == 1 {
+			close(bHeld)
+			<-bRelease
+		}
+		return nil
+	}
+	t.Cleanup(func() { store.fault = nil })
+
+	bRuntime := &fakeReviewRuntime{result: &oc.ReviewResult{
+		ReviewedRevision: strings.Repeat("2", 40),
+		FindingsSHA256:   strings.Repeat("b", 64),
+		Outcome:          "succeeded",
+		Agent:            "mpm-reviewer",
+		Findings:         "B's findings",
+		EvidencePath:     "/evidence/b.json",
+	}}
+	bDone := make(chan error, 1)
+	go func() {
+		_, err := store.ExecuteReview(context.Background(), bRuntime, ExecuteReviewParams{
+			ID: rev.id, Epoch: rev.epoch, Brief: "b",
+		})
+		bDone <- err
+	}()
+
+	select {
+	case <-bHeld:
+	case <-time.After(30 * time.Second):
+		t.Fatal("caller B never reached the transactional read")
+	}
+
+	// CALLER A RUNS A COMPLETE REVIEW AND CAPTURES THE EVIDENCE, while B
+	// holds a read snapshot that predates it.
+	aRuntime := &fakeReviewRuntime{result: &oc.ReviewResult{
+		ReviewedRevision: strings.Repeat("1", 40),
+		FindingsSHA256:   strings.Repeat("a", 64),
+		Outcome:          "succeeded",
+		Agent:            "mpm-reviewer",
+		Findings:         "A's findings",
+		EvidencePath:     "/evidence/a.json",
+	}}
+	if _, err := store.ExecuteReview(context.Background(), aRuntime, ExecuteReviewParams{
+		ID: rev.id, Epoch: rev.epoch, Brief: "a",
+	}); err != nil {
+		t.Fatalf("caller A: %v", err)
+	}
+	if aRuntime.Calls() != 1 {
+		t.Fatalf("caller A made %d runtime calls, want 1", aRuntime.Calls())
+	}
+
+	// CALLER B RESUMES. Its snapshot is stale, so its write is refused and
+	// the transaction is restarted against a fresh one.
+	close(bRelease)
+
+	var bErr error
+	select {
+	case bErr = <-bDone:
+	case <-time.After(60 * time.Second):
+		t.Fatal("caller B never finished")
+	}
+
+	if bErr == nil {
+		t.Fatal("the second reviewer completed")
+	}
+	if bRuntime.Calls() != 0 {
+		t.Errorf("caller B invoked the reviewer %d times; the check must be "+
+			"inside the transaction, so the restart re-reads and refuses",
+			bRuntime.Calls())
+	}
+	if !strings.Contains(bErr.Error(), "captured evidence") {
+		t.Errorf("refused, but not as a completed review: %v", bErr)
+	}
+}

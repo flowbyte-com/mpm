@@ -138,6 +138,15 @@ func (s *Store) BeginAttempt(p BeginAttemptParams) (*SessionAttempt, error) {
 		if err != nil {
 			return err
 		}
+		// THE SAME SEAM, INSIDE THE TRANSACTION. It fires after the
+		// authoritative row has been read and before the evidence check,
+		// so a test can hold a caller at the exact point where the
+		// PLACEMENT of that check matters — and prove the check is inside
+		// the transaction that persists the intent, not a preliminary read
+		// in front of it.
+		if err := s.injectFault("attempt-intent-tx"); err != nil {
+			return err
+		}
 		// BOTH ROLES HAVE EXECUTION PATHS: an implementer runs in the
 		// worker containment, a reviewer in its own sandbox. The WORKER
 		// path refuses a reviewer in Execute; the mapping itself does not
