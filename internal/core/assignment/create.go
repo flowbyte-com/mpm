@@ -2,6 +2,7 @@ package assignment
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -311,7 +312,10 @@ func (s *Store) Delegate(p DelegateParams) (*Assignment, bool, error) {
 				resource_units, permitted_operations, eligible_recipients,
 				issue_ref, pr_ref, base_sha, head_sha, reviewed_sha,
 				findings_sha256, evidence_ref, payload, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'enqueued', ?, ?, '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'enqueued', ?, ?, '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			WHERE `+taskBudgetCondition+`
+			  AND `+resourceBudgetCondition,
 			5,
 			id, parent.ProjectID, root.ID, parent.ID, childDepth,
 			p.Title, p.Objective, p.Recipient, role, p.IdempotencyKey,
@@ -320,6 +324,10 @@ func (s *Store) Delegate(p DelegateParams) (*Assignment, bool, error) {
 			nullIfEmpty(p.HeadSHA), nullIfEmpty(p.ReviewedSHA),
 			nullIfEmpty(p.FindingsSHA256), nullIfEmpty(p.EvidenceRef),
 			payloadJSON, now, now,
+			// taskBudgetCondition
+			root.ID, root.ID,
+			// resourceBudgetCondition
+			root.ID, p.ResourceUnits, root.ID,
 		); err != nil {
 			if strings.Contains(err.Error(), "never reused") {
 				winner, ferr := findByIdempotencyKey(node, p.IdempotencyKey)
@@ -332,6 +340,29 @@ func (s *Store) Delegate(p DelegateParams) (*Assignment, bool, error) {
 				}
 			}
 			return storageRefusal(err)
+		}
+
+		// THE BUDGET REFUSAL IS ZERO ROWS, NOT AN ERROR.
+		//
+		// The INSERT's WHERE clause carries the budget condition, so a
+		// tree that is full produces NO row and NO SQLite error. That is
+		// what makes the check atomic with the write — and it means the
+		// refusal has to be read back, because "nothing was inserted" is
+		// the only symptom.
+		inserted, err := getAssignmentTx(node, id)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if inserted == nil {
+			budget, berr := readBudgetSnapshot(node, root.ID, now)
+			if berr != nil {
+				return berr
+			}
+			if budget.Tasks >= budget.MaxTasks {
+				return budgetRefusal("max_tasks", budget.MaxTasks, budget.Tasks)
+			}
+			return budgetRefusal("max_resource_units", budget.MaxUnits,
+				budget.Units+p.ResourceUnits)
 		}
 
 		if err := s.injectFault("delegate-event"); err != nil {

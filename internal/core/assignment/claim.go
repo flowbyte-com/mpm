@@ -78,11 +78,22 @@ func (s *Store) Claim(p ClaimParams) (*Assignment, error) {
 		if err := s.injectFault("claim"); err != nil {
 			return err
 		}
+		// THE CONCURRENCY BUDGET IS PART OF THE WRITE, NOT A READ BEFORE
+		// IT.
+		//
+		// The tree's max_concurrency bounds how many assignments may hold
+		// a LIVE lease at once. A read-then-write check could be crossed
+		// between the two operations, so the count lives in the UPDATE's
+		// own WHERE clause: the statement that takes the lease also
+		// proves the tree had room for it.
 		res, err := node.ExecTracked(`
 			UPDATE agent_tasks
 			SET claim_epoch = ?, owner = ?, lease_expires_at = ?, updated_at = ?
-			WHERE id = ? AND claim_epoch = ?`,
-			5, newEpoch, p.Owner, newLease, now, p.ID, p.ExpectedEpoch)
+			WHERE id = ? AND claim_epoch = ?
+			  AND `+concurrencyBudgetCondition,
+			5, newEpoch, p.Owner, newLease, now, p.ID, p.ExpectedEpoch,
+			// concurrencyBudgetCondition
+			p.ID, now, p.ID, current.RootID)
 		if err != nil {
 			return storageRefusal(err)
 		}
@@ -91,6 +102,26 @@ func (s *Store) Claim(p ClaimParams) (*Assignment, error) {
 			return fmt.Errorf("assignment: read the affected rows: %w", err)
 		}
 		if affected != 1 {
+			// ZERO ROWS MEANS THE WHERE CLAUSE FAILED, and it can fail
+			// for more than one reason: the epoch moved, the tree is
+			// full, or the row's state refuses the write. The budget is
+			// only claimed when the budget is what actually refuses it.
+			after, aerr := getAssignmentTx(node, p.ID)
+			if aerr != nil {
+				return aerr
+			}
+			if after != nil && after.ClaimEpoch == p.ExpectedEpoch {
+				budget, berr := readBudgetSnapshot(node, current.RootID, now)
+				if berr != nil {
+					return berr
+				}
+				if budget.LiveClaims >= budget.MaxConcurrent {
+					return budgetRefusal("max_concurrency", budget.MaxConcurrent,
+						budget.LiveClaims)
+				}
+				return fmt.Errorf("%w: %s is %s and holds no claim",
+					ErrConstraint, p.ID, after.State)
+			}
 			return fmt.Errorf("%w: %s was claimed by somebody else", ErrStaleClaim, p.ID)
 		}
 
