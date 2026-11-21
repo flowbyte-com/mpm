@@ -126,6 +126,13 @@ func TestEveryReasonCountsWhereItSaysItCounts(t *testing.T) {
 		countOutcome(recovered, Outcome{Reason: tc.reason}, false)
 		want := tc.want
 		want.Dispatched = 0
+		if tc.reason == ReasonDispatched {
+			// A RECOVERED DISPATCH is not a dispatch BY THIS PASS, and
+			// the assignment did not reach a terminal state, so it is a
+			// deferral. It is counted SOMEWHERE: an outcome that no
+			// counter reflects is a fact the operator cannot see.
+			want = Report{Deferred: 1}
+		}
 		if countsOf(recovered) != countsOf(&want) {
 			t.Errorf("the reason %q counted %s in the recovery path, want %s",
 				tc.reason, countsOf(recovered), countsOf(&want))

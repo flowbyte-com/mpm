@@ -347,7 +347,9 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 		// refusal that costs a claim is worse than a clear report.
 		//
 		// It is NOT COUNTED AGAIN here: the recovery pass already
-		// counted it as deferred.
+		// counted it — as a deferral for a session that may still be
+		// working, and as a refusal for a runtime that could not be
+		// asked.
 		if _, ok := blocked[candidate.ID]; ok {
 			continue
 		}
@@ -364,11 +366,6 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 		}
 		reason, detail := e.preflight(candidate)
 		if reason != "" {
-			if reason == ReasonDeferred {
-				report.Deferred++
-			} else {
-				report.Refused++
-			}
 			report.Outcomes = append(report.Outcomes, Outcome{
 				AssignmentID: candidate.ID,
 				RootID:       candidate.RootID,
@@ -376,6 +373,12 @@ func (e *Engine) RunOnce(ctx context.Context) (*Report, error) {
 				Reason:       reason,
 				Detail:       detail,
 			})
+			// THROUGH THE SAME FUNCTION. The preflight can refuse a
+			// candidate before it is claimed, and a reason counted here
+			// by hand would be a third place for the mapping to live —
+			// and the third place is where the two paths would drift
+			// apart again.
+			countOutcome(report, Outcome{Reason: reason}, false)
 			continue
 		}
 
@@ -609,6 +612,13 @@ func countOutcome(report *Report, outcome Outcome, launched bool) {
 	case ReasonDispatched:
 		if launched {
 			report.Dispatched++
+		} else {
+			// A RECOVERED DISPATCH. The runtime's work is done but the
+			// assignment did not reach a terminal state, and this pass did
+			// not launch anything, so it will be considered again. It is
+			// counted here rather than nowhere: an outcome that no
+			// counter reflects is a fact the operator cannot see.
+			report.Deferred++
 		}
 	case ReasonDeferred, ReasonLeaseHeld, ReasonStaleEpoch,
 		ReasonSessionStillRunning, ReasonRecoveryRequired:

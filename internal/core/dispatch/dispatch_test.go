@@ -60,6 +60,10 @@ type fakeRuntime struct {
 	workspace string
 	// agent is the agent the last launch was given.
 	agent string
+	// inspectHook, when set, decides what an inspection returns. It
+	// lets a test script a session that reports an outcome only after
+	// the first inspection — the shape a drain waits for.
+	inspectHook func(sessionID string) *oc.SessionState
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -128,6 +132,13 @@ func (f *fakeRuntime) Inspect(ctx context.Context, sessionID string) (*oc.Sessio
 	f.inspections++
 	if f.inspectErr != nil {
 		return nil, f.inspectErr
+	}
+	if f.inspectHook != nil {
+		state := f.inspectHook(sessionID)
+		if state == nil {
+			return nil, oc.ErrSessionNotFound
+		}
+		return state, nil
 	}
 	state, ok := f.states[sessionID]
 	if !ok {
