@@ -137,7 +137,16 @@ define.
 **AN UNKNOWN KEY IS AN ERROR.** A silently ignored key is a typo the
 operator cannot see: they wrote `lease_second` and the dispatcher used
 the default, and the difference between the two is the difference between
-a lease that covers the runtime window and one that does not.
+a lease that covers the runtime window and one that does not. So is
+**CONTENT AFTER THE OBJECT**: a decoder consumes one value and says
+nothing about what follows it, and a configuration whose meaning depends
+on where the reader stopped is not a configuration.
+
+**THE PATHS MUST BE ABSOLUTE.** The sandbox roots are built from
+`workspace_root` and `review_repo_path`, and the containment resolves them
+against the filesystem — a relative path would make the containment's own
+guarantee depend on the working directory. The check is here, before
+anything is claimed, and not at the factory afterwards.
 
 ## 5. The budgets are the service's business
 
@@ -295,7 +304,38 @@ The recovery pass reports only what it BLOCKED and what it RECONCILED. An
 assignment it merely observed is left to the dispatch path, so every
 assignment appears in the report exactly once.
 
-## 8. The reviewer is not the worker
+**ONE ASSIGNMENT, ONE OUTCOME.** An assignment can carry more than one
+outstanding attempt — PR 3's reconcile creates a new attempt when the
+epoch advances, and the older one stays outstanding. EVERY attempt is
+inspected, because an older session may still be working and that is a
+blocker, but the assignment is reported once.
+
+The drain's two endings are kept apart: the WINDOW CLOSING is the drain's
+own end, and the CALLER CANCELLING is somebody stopping the run on
+purpose.
+
+## 8. One runtime per assignment, per pass
+
+The sidecar takes an **exclusive lifetime lock** on its socket path, and
+the socket path is per assignment: `<mpmDir>/opencode/runs/<id>/sidecar.sock`.
+A second sidecar for the same assignment in the same process is therefore
+refused by the sidecar's own lock — "another sidecar holds …; refusing to
+take it over" — even though the first one is THIS process's own.
+
+And the dispatcher asks for the same assignment more than once per pass:
+the recovery pass inspects it, and the dispatch path may then launch it.
+Without a cache the second request is refused, the recovery pass can never
+reconcile an implementer, and an implementer with an outstanding attempt
+is refused FOREVER — a refusal that creates no attempt, so the
+dispatch-attempt cap never trips.
+
+So the factory builds **one runtime per assignment for the life of the
+pass**, and asking again returns the same one. One sidecar per assignment
+per pass is also what the sidecar was designed for: the socket path is
+stable per assignment, and the tree is stable per assignment, so a retry
+finds the same data store and the same relay.
+
+## 9. The reviewer is not the worker
 
 A reviewer runs through PR 3's REVIEW path, with the pinned
 `mpm-reviewer` definition, in its own sandbox, with the plugin that
@@ -322,7 +362,7 @@ Four facts stay apart, and the report never collapses them:
 | the review's verdict | the reviewer's own fenced transition |
 | the approval | the OPERATOR's |
 
-## 9. The report
+## 10. The report
 
 The report is a VALUE — no live runtime, no open session, no handle
 that could be mistaken for a live system — with a CLOSED set of reason
@@ -342,20 +382,29 @@ The counts are `dispatched`, `completed`, `refused`, `deferred` and
 
 | Count | Means |
 |---|---|
-| `dispatched` | the dispatcher handed the work to the adapter |
+| `dispatched` | the work was handed to the adapter by this pass |
 | `completed` | the assignment reached its terminal state |
-| `refused` | a rule said no; nothing was launched |
-| `deferred` | the work was not attempted this round |
+| `failed` | the attempt failed |
+| `refused` | a rule said no, and it will not be tried again without the operator changing something |
+| `deferred` | nothing was launched, and the work will be considered again |
 | `ambiguous` | the runtime's outcome could not be determined |
+
+**`deferred` AND `refused` ARE DIFFERENT FACTS.** A live lease, a moved
+epoch and a session that may still be working are WAITS: nothing was
+launched, and the work will be considered again. A spent budget, an
+unavailable runtime and a lease too short to record the result are NOT:
+they will not be tried again without the operator changing something. The
+status command agrees — it lists the same states under **blocked**.
 
 A claim that was REFUSED is not a dispatch: nothing was launched. A
 **failed** attempt is a dispatch that did not complete — the work reached
-the adapter and failed there — so it is counted as `dispatched` and not
-as `refused`: nothing refused it, and the per-assignment reason says
-`failed`. A **recovered** completion is counted as `completed` and not as
-`dispatched`, because the run that recovered it did not launch it: it
-only recorded what the runtime had already said. So `completed` can
-exceed `dispatched` in a run that only recovered.
+the adapter and failed there — so it is counted as `dispatched` and
+`failed`, and not as `refused`: nothing refused it. A **recovered**
+completion is counted as `completed` and not as `dispatched`, because the
+run that recovered it did not launch it: it only recorded what the runtime
+had already said. So `completed` can exceed `dispatched` in a run that
+only recovered. A recovered **failure** is counted as `failed` too — an
+outcome that no counter reflects is a fact the operator cannot see.
 
 And every attempt counts against the RUN's concurrency whatever its
 outcome was: a dispatch that FAILED still spent a claim and a session, so
@@ -375,7 +424,7 @@ exactly when an operator wants to see what enabling it would do.
 
 Nothing in the report carries a credential, a prompt or a transcript.
 
-## 10. The selection
+## 11. The selection
 
 The candidate list is ordered by `(created_at, id)`, so two dispatchers
 that see the same rows consider them in the same order, and a report is
@@ -390,7 +439,7 @@ dispatch attempts, or that failed too recently, is DEFERRED. That is
 what stops a repeatedly failing assignment from monopolising the
 dispatcher.
 
-## 11. What PR 4 does not do
+## 12. What PR 4 does not do
 
 - It does not publish evidence to GitHub (PR 5).
 - It does not merge, deploy or approve anything.
@@ -401,7 +450,7 @@ dispatcher.
 - It does not replace OpenCode.
 - It does not run a HAL loop.
 
-## 12. Known limitations, stated plainly
+## 13. Known limitations, stated plainly
 
 - **The dispatcher's view of "the runtime cannot be asked" is a
   refusal, not a decision.** The attempt stays ambiguous until a human
@@ -409,6 +458,11 @@ dispatcher.
   unfinished one — but it means an unreachable runtime can strand work.
 - **The recovery pass inspects one session per outstanding attempt per
   run.** A large backlog takes several runs to drain, by design.
+- **The enabled path has never run against the real OpenCode
+  boundary.** Every test uses a fake runtime, and the real factory is
+  driven only as far as building a runtime — the credential that was
+  exposed still has to be rotated, so no real inference was attempted.
+  The wiring is tested; the inference is not.
 - **The reviewer's reconciliation is refused, not performed.** A review
   session that ended without a record is reported as needing an
   operator: the review path refuses to run a second reviewer while an

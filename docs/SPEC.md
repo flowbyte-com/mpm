@@ -3101,7 +3101,9 @@ The dispatcher finds work MPM already knows about, proves the operator's root au
 
 Autonomous dispatch is off unless an operator writes a configuration file — `~/.mpm/dispatch.json` by default, or wherever `--dispatch-config` points. A **missing** file means off, and the disabled dispatcher reads no row, builds no runtime and starts no session. A file that is **present and enabled** must be **complete**: a configuration that names no lease, no runtime window or no workspace is refused rather than completed with invented values. A file that is **present and broken** is refused too, and the refusal names the file: a broken configuration is not a reason to guess, and it is not a reason to dispatch.
 
-An **unknown key** is refused as well. A silently ignored key is a typo the operator cannot see: they wrote `lease_second` and the dispatcher used the default, and the difference between the two is the difference between a lease that covers the runtime window and one that does not.
+An **unknown key** is refused as well. A silently ignored key is a typo the operator cannot see: they wrote `lease_second` and the dispatcher used the default, and the difference between the two is the difference between a lease that covers the runtime window and one that does not. So is **content after the object**, because a configuration whose meaning depends on where the reader stopped is not a configuration.
+
+The paths the configuration names must be **absolute**: the sandbox roots are built from them and the containment resolves them against the filesystem, so a relative path would make the containment's own guarantee depend on the working directory. That is checked before anything is claimed, not discovered at the factory afterwards.
 
 There is no environment variable that turns it on by accident, and "installed" is not "enabled".
 
@@ -3137,27 +3139,36 @@ What it never does: it never reclaims a **live lease**; it never turns "the runt
 
 **The inspection decides, not the epoch arithmetic.** A session the runtime has never heard of was never created, so re-running the objective cannot duplicate work; a session that exists and has not reported an outcome may still be working, and that blocks; a runtime that cannot be asked at all blocks too, because nobody can then say whether the session is still running. The drain window is **real** time rather than the injected clock: the injected clock governs the lease, and a wait bounded by a clock that never advances is a wait that never ends.
 
+**One assignment, one outcome.** An assignment can carry more than one outstanding attempt — PR 3's reconcile creates a new attempt when the epoch advances, and the older one stays outstanding. Every attempt is inspected, because an older session may still be working, but the assignment is reported once: a report that says the same thing twice is a report an operator has to reconcile by hand. The drain's two endings are kept apart too: the window closing is the drain's own end, and the caller cancelling is somebody stopping the run on purpose.
+
 #### The reviewer stays separate
 
-A reviewer runs only through PR 3's review path, under the pinned default-deny `mpm-reviewer` definition, in its own sandbox, with the plugin that provides `sandbox_exec`. It never inherits the worker's context, workspace, model or agent definition, and the dispatcher's configuration refuses to name the same definition for both — and refuses to name any definition but those two, because the runtime's allow-list is pinned to them and a refusal that creates no attempt never trips the dispatch-attempt cap.
+A reviewer runs only through PR 3's review path, under the pinned default-deny `mpm-reviewer` definition, in its own sandbox, with the plugin that provides `sandbox_exec`. It never inherits the worker's context, workspace, model or agent definition, and the dispatcher's configuration refuses to name any definition but the pinned two, because the runtime's allow-list is pinned to them and a refusal that creates no attempt never trips the dispatch-attempt cap. That pin is also what proves the reviewer cannot be the worker: a configuration that named the same definition for both would name neither of them, so it is refused by the pin.
 
 The reviewer's **model** is its own, and it has to be: the worker's model is the sidecar's local id, which only means anything inside the worker's namespace with the sidecar's socket, while the reviewer's sandbox has no provider and no sidecar. Four facts stay apart: the **runtime's** outcome, the review **evidence** the host captured, the review **verdict** the reviewer recorded, and the **operator's** approval. The dispatcher records the first two and never the last.
 
+#### One runtime per assignment, per pass
+
+The sidecar takes an **exclusive lifetime lock** on its socket path, and the socket path is per assignment. So the factory builds **one runtime per assignment for the life of the pass**, and asking again returns the same one. Without that, the recovery pass — which inspects an assignment and may then launch it — would be refused by the sidecar's own lock, and a refusal that creates no attempt never trips the dispatch-attempt cap: the assignment would be refused forever.
+
 #### The report is a value with a closed vocabulary
 
-One pass returns a report — no live runtime, no open session — with counts (`dispatched`, `completed`, `refused`, `deferred`, `ambiguous`) and a per-assignment reason drawn from a **closed set**: `dispatch_disabled`, `no_eligible_assignment`, `budget_exhausted`, `lease_held`, `lease_insufficient`, `stale_epoch`, `session_still_running`, `runtime_unavailable`, `ambiguous_execution`, `reviewer_unavailable`, `recovery_required`, `operator_gate_pending`, `dispatched`, `completed`, `refused`, `deferred`, `failed`. Every attempt counts against the run's concurrency whatever its outcome was: a dispatch that failed still spent a claim and a session. Nothing in the report carries a credential, a prompt or a transcript.
+One pass returns a report — no live runtime, no open session — with counts (`dispatched`, `completed`, `failed`, `refused`, `deferred`, `ambiguous`) and a per-assignment reason drawn from a **closed set**: `dispatch_disabled`, `no_eligible_assignment`, `budget_exhausted`, `lease_held`, `lease_insufficient`, `stale_epoch`, `session_still_running`, `runtime_unavailable`, `ambiguous_execution`, `reviewer_unavailable`, `recovery_required`, `operator_gate_pending`, `dispatched`, `completed`, `refused`, `deferred`, `failed`. Every attempt counts against the run's concurrency whatever its outcome was: a dispatch that failed still spent a claim and a session. Nothing in the report carries a credential, a prompt or a transcript.
 
 The counts mean what they say, and each one is a fact about the run:
 
 | Count | Means |
 |---|---|
-| `dispatched` | the dispatcher handed the work to the adapter |
+| `dispatched` | the work was handed to the adapter by this pass |
 | `completed` | the assignment reached its terminal state |
-| `refused` | a rule said no; nothing was launched |
-| `deferred` | the work was not attempted this round |
+| `failed` | the attempt failed |
+| `refused` | a rule said no, and it will not be tried again without the operator changing something |
+| `deferred` | nothing was launched, and the work will be considered again |
 | `ambiguous` | the runtime's outcome could not be determined |
 
-A **failed** attempt is a dispatch that did not complete — the work reached the adapter and failed there — so it is counted as `dispatched` and not as `refused`: nothing refused it. A **recovered** completion is counted as `completed` and not as `dispatched`, because the run that recovered it did not launch it: it only recorded what the runtime had already said. So `completed` can exceed `dispatched` in a run that only recovered.
+`deferred` and `refused` are the two the operator acts on differently, so they are kept apart: a **live lease**, a **moved epoch** and a **session that may still be working** are WAITS, and a **spent budget** or an **unavailable runtime** are not. The status command says the same thing about the same state by listing it as blocked rather than pending.
+
+A **failed** attempt is a dispatch that did not complete — the work reached the adapter and failed there — so it is counted as `dispatched` and `failed`, and not as `refused`: nothing refused it. A **recovered** completion is counted as `completed` and not as `dispatched`, because the run that recovered it did not launch it: it only recorded what the runtime had already said. So `completed` can exceed `dispatched` in a run that only recovered. A recovered **failure** is counted as `failed` too — an outcome that no counter reflects is a fact the operator cannot see.
 
 `lease_held` and `lease_insufficient` are different facts and are not folded together: the first says a **live lease blocks the claim**, whoever holds it — and the detail names the holder and the expiry — and the second says the lease the dispatcher holds is too short to record the result.
 
