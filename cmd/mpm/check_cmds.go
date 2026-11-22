@@ -73,6 +73,8 @@ func printCheckHelp() int {
 	b.WriteString("  --project       only this project's records\n")
 	b.WriteString("  --role          only this role's records\n")
 	b.WriteString("  --disposition   only this disposition's records\n")
+	b.WriteString("\nExit status: 0 when the whole published corpus verified, 1 when it did\n")
+	b.WriteString("not or could not be read. The report is printed either way.\n")
 	return respond(b.String(), "", 0)
 }
 
@@ -128,14 +130,34 @@ func handleCheck(args []string) int {
 		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
 	}
 
+	// THE EXIT STATUS AGREES WITH THE REPORT.
+	//
+	// A caller that reads the exit status must not be told "success" by a
+	// report whose own verdict is "not verified": a CI gate would pass
+	// while the evidence it was gating says it does not hold. The report
+	// is printed either way, because the reader needs to see WHY.
+	code := checkExitCode(report)
 	if jsonOutput {
 		raw, merr := json.MarshalIndent(report, "", "  ")
 		if merr != nil {
 			return respond("", fmt.Sprintf("Error: encode the report: %v\n", merr), 1)
 		}
-		return respond(string(raw)+"\n", "", 0)
+		return respond(string(raw)+"\n", "", code)
 	}
-	return respond(renderCheckReport(report), "", 0)
+	return respond(renderCheckReport(report), "", code)
+}
+
+// checkExitCode is the command's exit status for a report.
+//
+// It is 0 exactly when the report verified the whole corpus, and 1
+// otherwise. A report that is not verified says so in its own mark and
+// in the states it prints; the exit status is the same fact for a
+// script.
+func checkExitCode(report *evidence.CheckReport) int {
+	if report != nil && report.Verified {
+		return 0
+	}
+	return 1
 }
 
 // renderCheckReport renders the check for a human reader.
@@ -167,6 +189,19 @@ func renderCheckReport(report *evidence.CheckReport) string {
 	}
 	fmt.Fprintf(&b, "   records    %d published%s · %s\n",
 		report.RecordCount, shown, verifiedSummary(report.Records))
+	if report.Truncated {
+		// THE PUBLICATION IS PARTIAL, AND THE READER IS TOLD.
+		//
+		// The publication was cut at the bound, so the queue below is
+		// part of the work and not all of it. A reader who takes a
+		// partial queue for the whole one is reading fiction.
+		bounded := "read under a bound"
+		if report.ScanLimit > 0 {
+			bounded = fmt.Sprintf("read under a bound of %d assignments", report.ScanLimit)
+		}
+		fmt.Fprintf(&b, "   partial    %s; more work exists and the rows past the bound were dropped\n",
+			bounded)
+	}
 	if len(report.Renderings) > 0 {
 		// The index names the human artefacts with digests, and the
 		// check checks them: a digest nobody checks is a claim.

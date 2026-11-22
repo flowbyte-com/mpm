@@ -160,8 +160,11 @@ func TestCheckReadsThePublishedQueueWithoutADatabase(t *testing.T) {
 	t.Setenv(checkAPIEnv, fixture.server.URL)
 
 	code, out := runCheckCLI(t, "--repo", "owner/name", "--json")
-	if code != 0 {
-		t.Fatalf("the check exited with %d: %s", code, out)
+	// The record carries no review evidence, so the corpus is NOT
+	// verified, and the exit status says so. The report is printed
+	// either way: the reader needs to see why.
+	if code != 1 {
+		t.Fatalf("the check exited with %d, want 1 (the corpus is not verified): %s", code, out)
 	}
 	var report struct {
 		Source struct {
@@ -216,7 +219,10 @@ func TestCheckWritesNothing(t *testing.T) {
 	t.Setenv(checkAPIEnv, fixture.server.URL)
 
 	code, out := runCheckCLI(t, "--repo", "owner/name", "--json")
-	if code != 0 {
+	// The exit status follows the report's verdict (this corpus is not
+	// verified), and that is not what this test is about: what matters
+	// is that the path wrote nothing.
+	if code != 0 && code != 1 {
 		t.Fatalf("the check exited with %d: %s", code, out)
 	}
 	if writes := atomic.LoadInt32(&fixture.writes); writes != 0 {
@@ -317,6 +323,64 @@ func TestTheCheckCountsNameTheSetTheyDescribe(t *testing.T) {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("the report counts records the filters hid (%q):\n%s", unwanted, out)
 		}
+	}
+}
+
+// TestTheCheckExitStatusAgreesWithTheReport proves a script that reads
+// the exit status is told what the report says.
+//
+// Before this, `check` exited 0 while its own mark said the corpus was
+// not verified: a CI gate passed while the evidence it was gating said it
+// did not hold.
+func TestTheCheckExitStatusAgreesWithTheReport(t *testing.T) {
+	if code := checkExitCode(&evidence.CheckReport{Verified: true}); code != 0 {
+		t.Errorf("a verified report's exit status is %d, want 0", code)
+	}
+	if code := checkExitCode(&evidence.CheckReport{Verified: false}); code != 1 {
+		t.Errorf("an unverified report's exit status is %d, want 1", code)
+	}
+	if code := checkExitCode(nil); code != 1 {
+		t.Errorf("a missing report's exit status is %d, want 1", code)
+	}
+	// And the CLI itself: the fixture's corpus has no review evidence,
+	// so the report is not verified, and the command says so.
+	fixture := newCheckFixture(t)
+	t.Setenv("MPM_WORKSPACE", t.TempDir())
+	t.Setenv(checkAPIEnv, fixture.server.URL)
+	code, out := runCheckCLI(t, "--repo", "owner/name")
+	if code != 1 {
+		t.Fatalf("the check exited with %d, want 1:\n%s", code, out)
+	}
+}
+
+// TestTheCheckReportSaysWhenThePublicationIsPartial proves the truncation
+// reaches the human report.
+//
+// The index says the publication holds part of the work; a report that
+// dropped the flag would show a partial queue as the whole one.
+func TestTheCheckReportSaysWhenThePublicationIsPartial(t *testing.T) {
+	report := &evidence.CheckReport{
+		Source:      evidence.Source{Repository: "owner/name", Branch: "evidence"},
+		RecordCount: 500,
+		ShownCount:  500,
+		Truncated:   true,
+		Scanned:     500,
+		ScanLimit:   499,
+	}
+	out := renderCheckReport(report)
+	for _, want := range []string{"partial", "499", "more work"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not say %q:\n%s", want, out)
+		}
+	}
+	// A whole publication says nothing about a partial one.
+	whole := renderCheckReport(&evidence.CheckReport{
+		Source:      evidence.Source{Repository: "owner/name", Branch: "evidence"},
+		RecordCount: 1,
+		ShownCount:  1,
+	})
+	if strings.Contains(whole, "partial") {
+		t.Errorf("a whole publication reports itself as partial:\n%s", whole)
 	}
 }
 

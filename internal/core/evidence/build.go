@@ -332,7 +332,7 @@ func reviewGroupKey(a ReviewInfo) string {
 //
 // It is a pure union: every field is taken from the account that
 // carries it, and where two accounts carry different values for the
-// same field, the one that sorts LAST by the accounts' own fields wins.
+// same field, the one whose fields compare GREATEST wins.
 //
 // So the union does not depend on the order the accounts arrived in —
 // and nothing that only ONE account knows is lost.
@@ -381,7 +381,8 @@ func newerReview(a, b ReviewInfo) bool {
 //
 // The rule is arbitrary but FIXED, and that is what matters: the
 // contract says the published review is a function of the accounts, not
-// of the order the caller found them in.
+// of the order the caller found them in. The account whose fields
+// compare GREATEST is the one that wins a disagreement.
 func reviewKey(a ReviewInfo) string {
 	return strings.Join([]string{
 		a.ReviewerID,
@@ -450,6 +451,19 @@ func fillsTheGaps(other, current ReviewInfo) bool {
 // through a gap the current account happened to have, and the tie rule
 // could not take it back because the gap was no longer empty.
 //
+// # THE CORRELATED FIELDS TRAVEL TOGETHER
+//
+// A verdict says something ABOUT A REVISION, and a status says
+// something about BYTES: it is the publisher's answer ABOUT that digest.
+// Those are two facts, and each is carried by one account.
+//
+// So the verdict brings its revision with it, and the capture's digest
+// brings its status and its pointer with it. Taking the revision from
+// one account and the verdict from another would publish a decision
+// about a revision that no account ever paired with it — and taking
+// the digest from one account and the status from another would
+// publish an answer about bytes that account never saw.
+//
 // # THE VERDICT AND ITS PROVENANCE TRAVEL TOGETHER
 //
 // A verdict reported from outside the substrate is published as one, and
@@ -463,21 +477,38 @@ func mergeReview(base, other ReviewInfo) ReviewInfo {
 	if out.ReviewerID == "" {
 		out.ReviewerID = other.ReviewerID
 	}
-	if out.ReviewedSHA == "" {
-		out.ReviewedSHA = other.ReviewedSHA
-	}
-	if out.FindingsSHA256 == "" {
-		out.FindingsSHA256 = other.FindingsSHA256
-	}
-	if out.CaptureStatus == "" {
-		out.CaptureStatus = other.CaptureStatus
-	}
-	if out.EvidenceRef == "" {
-		out.EvidenceRef = other.EvidenceRef
-	}
+	// THE DECISION AND THE REVISION IT IS ABOUT.
 	if out.Verdict == "" && other.Verdict != "" {
 		out.Verdict = other.Verdict
 		out.LocallyReported = other.LocallyReported
+		// The revision comes with the verdict — even when that means
+		// the published revision is EMPTY, because a revision from
+		// another account would be a revision that account never
+		// paired with this verdict.
+		out.ReviewedSHA = other.ReviewedSHA
+	} else if out.Verdict == "" && out.ReviewedSHA == "" {
+		// No account has said anything about a revision, so the
+		// revision may be taken on its own.
+		out.ReviewedSHA = other.ReviewedSHA
+	}
+	// THE CAPTURE AND THE PUBLISHER'S ANSWER ABOUT IT.
+	//
+	// The DIGEST-bearing account owns the triple: a pointer with no
+	// digest is an unchecked pointer, and the account that names bytes
+	// is the one whose status and pointer are about those bytes.
+	if out.FindingsSHA256 == "" {
+		out.FindingsSHA256 = other.FindingsSHA256
+		out.CaptureStatus = other.CaptureStatus
+		out.EvidenceRef = other.EvidenceRef
+	} else if SameDigest(out.FindingsSHA256, other.FindingsSHA256) {
+		// The SAME digest: the answer and the pointer may be filled
+		// in, because they are about these bytes.
+		if out.CaptureStatus == "" {
+			out.CaptureStatus = other.CaptureStatus
+		}
+		if out.EvidenceRef == "" {
+			out.EvidenceRef = other.EvidenceRef
+		}
 	}
 	if other.UpdatedAt > out.UpdatedAt {
 		out.UpdatedAt = other.UpdatedAt
@@ -568,6 +599,15 @@ func buildOne(c Claims, review ReviewInfo, facts Facts) (*Record, error) {
 			SHA256: unknownDigest(review.FindingsSHA256),
 			Status: review.CaptureStatus,
 		}
+		// THE POINTER IS SCREENED LIKE EVERY OTHER STRING.
+		//
+		// The store records the capture where the HOST wrote it, which
+		// is an absolute path on the publisher's machine. Publishing it
+		// would put the operator's disk layout inside the
+		// content-addressed bytes, and it would make the checker fetch
+		// a path the record chose. So a pointer to a local path is
+		// withheld — and the record names the field it withheld.
+		rec.ReviewEvidence.Ref, _ = r.Redact(FieldReviewEvidence+".ref", rec.ReviewEvidence.Ref)
 		if rec.ReviewEvidence.Ref == "" {
 			rec.ReviewEvidence.Ref = Unknown
 		}

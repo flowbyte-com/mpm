@@ -3228,7 +3228,7 @@ A record is named by the **digest of its own bytes**, so the same evidence alway
 
 The index also names the **human-readable artefacts** — every `records/<id>.md` and the queue summary — with their digests, so a reader can check the Markdown a person reads as exactly as they can check the record a machine reads. **`check` checks them too**: a digest nobody checks is a claim, and a tampered queue summary would otherwise be invisible to a reader who trusted it.
 
-A publication that holds only **part** of the work **says so**: the index carries `truncated`, `scanned` and `scan_limit`. A reader that took a partial queue for the whole one would be misled, and a silent truncation is worse than a visible one. The flag means what it says: the publication reads one row past its bound, so it knows whether anything was actually dropped — a scan that merely *reached* the bound has truncated nothing. The bound sits **below** the store's own listing limit, because a store clamps every listing and a bound at the clamp could never see the row past it; the flag is decided while that row is still in hand.
+A publication that holds only **part** of the work **says so**: the index carries `truncated`, `scanned` and `scan_limit`. A reader that took a partial queue for the whole one would be misled, and a silent truncation is worse than a visible one. The flag means what it says: the publication reads one row past its bound, so it knows whether anything was actually dropped — a scan that merely *reached* the bound has truncated nothing. The bound sits **below** the store's own listing limit, because a store clamps every listing and a bound at the clamp could never see the row past it; the flag is decided while that row is still in hand. The flag reaches the **reader**, not only a machine file: `mpm check` prints a `partial` line, its JSON carries the three fields, and the queue summary says the publication holds part of the work.
 
 Publication is **deterministic** for identical input evidence, apart from the publication timestamp, which is recorded as metadata in the index and never inside a record.
 
@@ -3248,7 +3248,9 @@ Every captured digest is checked, whether or not a reviewer has recorded a verdi
 
 The **observed side is screened like the claims**. A pull request's title, a review's body and a workflow's or job's name are written by other people, and the substrate never saw them — so they go through the same redactor as the store's own text, and a withheld one becomes `unknown` with the **field named** and never its content. A record that somehow carries a credential in an observed field is **refused**, not published.
 
-No **raw prompt, chat transcript, API key, environment dump, private filesystem path or unredacted runtime log** is published. The record has no field that carries model output at all — a review's findings are published as a digest and a pointer — and every string it does carry is screened for credentials, private paths and transcript-shaped text before the record is hashed.
+No **raw prompt, chat transcript, API key, environment dump, private filesystem path or unredacted runtime log** is published. The record has no field that carries model output at all — a review's findings are published as a digest and a pointer — and every string it does carry is screened for credentials, private paths, **absolute paths on the publishing machine** and transcript-shaped text before the record is hashed.
+
+The **evidence pointer is screened like every other string**. The store records the capture where the host wrote it, which is an absolute path on the publishing machine: publishing it would put the operator's disk layout inside the content-addressed bytes, and it would make the checker fetch a path the record chose. So the pointer is withheld (`unknown`) while the digest and the capture status still say what the publisher established. A reader is not told the record **failed**: the publisher checked the digest against bytes it could read, so the check reports that the capture cannot be checked by anybody, and says what the publisher established.
 
 #### The queue's own vocabulary
 
@@ -3300,7 +3302,7 @@ Three properties matter more than the shape:
 
 - **It works without the operator's local MPM database.** The queue comes from the published evidence and from GitHub, so a fresh reviewer on a machine that has never had MPM installed can run it. It needs no publication credential either: a public repository is readable without one.
 - **It is strictly read-only.** It writes nothing to the substrate, nothing to GitHub, and it starts nothing.
-- **It does not report stale information as current.** If the published index cannot be retrieved or verified, the command reports that condition and exits non-zero. It never falls back to a local copy and calls it current.
+- **It does not report stale information as current.** If the published index cannot be retrieved or verified, the command reports that condition and exits **non-zero**. It never falls back to a local copy and calls it current. The exit status agrees with the report's own verdict: `0` exactly when the whole corpus verified, `1` otherwise — and the report is printed either way. A record whose bytes do not hash to the identifier the index gave it is reported as a record, and an index whose record identifiers are not digests is refused before any path is built from them.
 
 The filters are the project's own dimensions — `--repo`, `--branch`, `--project`, `--role`, `--disposition` — and there is no dashboard.
 

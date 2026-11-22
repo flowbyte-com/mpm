@@ -207,6 +207,30 @@ var controls = []control{
 		to:        "\t\tif false {\n\t\t\tout = append(out, r)\n\t\t\tcontinue\n\t\t}",
 		test:      "TestAFilterCannotHideATamperedRecord",
 	},
+	{
+		name:      "the pointer is published raw",
+		invariant: "a pointer on the publisher's machine is not published",
+		file:      "build.go",
+		from:      "\t\trec.ReviewEvidence.Ref, _ = r.Redact(FieldReviewEvidence+\".ref\", rec.ReviewEvidence.Ref)\n",
+		to:        "\t\t// the pointer is published verbatim\n",
+		test:      "TestAPointerOnThePublishersMachineIsNotPublished",
+	},
+	{
+		name:      "the partial publication is not announced",
+		invariant: "a publication that holds part of the work says so in the queue summary",
+		file:      "index.go",
+		from:      "\tif corpus != nil && corpus.Truncated {",
+		to:        "\tif false {",
+		test:      "TestTheQueueSummarySaysWhenThePublicationIsPartial",
+	},
+	{
+		name:      "the report drops the truncation",
+		invariant: "the reader is told when the publication holds only part of the work",
+		file:      "check.go",
+		from:      "\treport.Truncated = index.Truncated",
+		to:        "\treport.Truncated = false",
+		test:      "TestTheCheckCarriesTheTruncationToTheReader",
+	},
 }
 
 // TestTheNegativeControlsAreLoadBearing runs every control.

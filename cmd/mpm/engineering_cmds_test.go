@@ -416,6 +416,20 @@ func TestTheStorePublicationChecksTheCapturedDigest(t *testing.T) {
 		t.Errorf("the record's digest is %q, want %q",
 			rec.ReviewEvidence.SHA256, storeTestDigest(body))
 	}
+	// THE POINTER IS NOT PUBLISHED.
+	//
+	// The store recorded the capture where the HOST wrote it, which is
+	// an absolute path on this machine. Publishing it would put the
+	// operator's disk layout inside the content-addressed bytes, and on
+	// a default install the publishable check would then refuse the
+	// WHOLE publication. So the pointer is withheld while the digest
+	// and the status still say what the publisher established.
+	if rec.ReviewEvidence.Ref != evidence.Unknown {
+		t.Errorf("the record publishes the host path %q", rec.ReviewEvidence.Ref)
+	}
+	if err := evidence.AssertPublishable(rec); err != nil {
+		t.Errorf("the record is not publishable: %v", err)
+	}
 	// THE REVIEWER'S OWN RECORD CARRIES THE SAME ANSWER.
 	//
 	// The publisher checked this digest and published its answer on the
@@ -431,6 +445,9 @@ func TestTheStorePublicationChecksTheCapturedDigest(t *testing.T) {
 	if reviewerRec.ReviewEvidence.Status != rec.ReviewEvidence.Status {
 		t.Errorf("the reviewer's record says the capture is %q and the subject's says %q",
 			reviewerRec.ReviewEvidence.Status, rec.ReviewEvidence.Status)
+	}
+	if reviewerRec.ReviewEvidence.Ref != evidence.Unknown {
+		t.Errorf("the reviewer's record publishes the host path %q", reviewerRec.ReviewEvidence.Ref)
 	}
 }
 

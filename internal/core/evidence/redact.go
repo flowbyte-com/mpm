@@ -76,6 +76,21 @@ var privatePathPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(^|\s)~/(\.mpm|\.config|\.ssh|\.aws)`),
 }
 
+// The local path shapes.
+//
+// A path on the PUBLISHER'S MACHINE is not a pointer a reader can follow:
+// the bytes behind it are not published, and the path itself says where
+// the operator's disk is laid out. So an absolute path is withheld
+// wherever it appears — the private-path patterns above catch the
+// operator's home, and this catches everything else, including a data
+// root nobody thought of as private.
+var localPathPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^/`),
+	regexp.MustCompile(`^[A-Za-z]:[\\/]`),
+	regexp.MustCompile(`^\\\\`),
+	regexp.MustCompile(`(?i)^file:/`),
+}
+
 // Redactor applies the redaction rules to the values a record carries.
 //
 // It is a FUNCTION and not a set of helpers at the call sites, because the
@@ -98,6 +113,8 @@ type Redactor struct {
 //     secret);
 //   - a value that looks like a credential is withheld;
 //   - a value that names a private path is withheld;
+//   - a value that names a path ON THIS MACHINE is withheld — a reader
+//     cannot follow it, and it says where the operator's disk is;
 //   - a value that is not a single line, or is longer than the cap, is
 //     withheld — that is the shape of a transcript.
 func (r *Redactor) Redact(field, value string) (string, bool) {
@@ -109,6 +126,10 @@ func (r *Redactor) Redact(field, value string) (string, bool) {
 		return Unknown, true
 	}
 	if privatePathLike(value) {
+		r.note(field)
+		return Unknown, true
+	}
+	if localPathLike(value) {
 		r.note(field)
 		return Unknown, true
 	}
@@ -178,6 +199,27 @@ func secretLike(value string) bool {
 // privatePathLike reports whether a value names a private path.
 func privatePathLike(value string) bool {
 	for _, p := range privatePathPatterns {
+		if p.MatchString(value) {
+			return true
+		}
+	}
+	return false
+}
+
+// localPathLike reports whether a value names a path on this machine.
+//
+// It is a WEAKER rule than privatePathLike and a different one: the
+// private-path patterns name the places that are private, and this names
+// every absolute path — a data root nobody thought of as private, a
+// container mount, a path on a machine that is not the operator's.
+//
+// The review's evidence pointer is where it matters: the store records
+// the capture where the HOST wrote it, which is an absolute path on the
+// publisher's machine. Publishing it would put the operator's disk
+// layout inside the content-addressed bytes, and it would make the
+// checker fetch a path the record chose.
+func localPathLike(value string) bool {
+	for _, p := range localPathPatterns {
 		if p.MatchString(value) {
 			return true
 		}
@@ -268,6 +310,9 @@ func AssertPublishable(r *Record) error {
 		}
 		if privatePathLike(value) {
 			return fmt.Errorf("evidence: %s carries a private filesystem path", field)
+		}
+		if localPathLike(value) {
+			return fmt.Errorf("evidence: %s names a path on the publishing machine", field)
 		}
 		if transcriptLike(value) {
 			return fmt.Errorf("evidence: %s carries what looks like a transcript", field)

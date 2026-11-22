@@ -131,6 +131,17 @@ type CheckReport struct {
 	// nobody checks is a claim, and a tampered queue summary would be
 	// invisible to a reader who trusted it.
 	Renderings []RenderingVerification `json:"renderings,omitempty"`
+	// Truncated says the PUBLICATION holds only part of the work.
+	//
+	// It is the reader's answer to the question the index answered for
+	// the publisher: a queue that was cut short is not the queue, and a
+	// reader who cannot see that would take a partial publication for
+	// the whole one.
+	Truncated bool `json:"truncated,omitempty"`
+	// Scanned is how many assignments the publication was read from.
+	Scanned int `json:"scanned,omitempty"`
+	// ScanLimit is the bound the read was under.
+	ScanLimit int `json:"scan_limit,omitempty"`
 }
 
 // RunCheck reads the published evidence and verifies it against GitHub.
@@ -163,6 +174,16 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	report.Source.SnapshotID = index.SnapshotID
 	report.Source.PublishedAt = index.PublishedAt
 	report.Source.Retrieved = true
+
+	// THE READ IS CARRIED THROUGH TO THE READER.
+	//
+	// The index says whether the publication holds all of the work, and
+	// the reader is the one who has to know: a queue that was cut
+	// short is not the queue, and the flag in a machine file that the
+	// reader has to go and fetch is not the same as the reader knowing.
+	report.Truncated = index.Truncated
+	report.Scanned = index.Scanned
+	report.ScanLimit = index.ScanLimit
 
 	verifier := &Verifier{GitHub: gh, Branch: branch, Repository: repository}
 	for _, entry := range index.Records {

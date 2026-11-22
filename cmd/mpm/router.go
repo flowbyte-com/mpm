@@ -85,13 +85,13 @@ func NewRouter() *CommandRouter {
 		"review": {Name: "review", Description: "Start spaced-repetition review", MinArgs: 0, Help: printReviewHelp},
 
 		// Feature namespaces
-		"switch":    {Name: "switch", Description: "Switch persona/mode interactively", MinArgs: 0},
-		"reference": {Name: "reference", Description: "Manage reference documents", MinArgs: 1},
-		"topic":     {Name: "topic", Description: "Manage topics", MinArgs: 1},
-		"session":   {Name: "session", Description: "Manage sessions", MinArgs: 1},
-		"handoff":   {Name: "handoff", Description: "Manage handoffs (write|read|list|shred)"},
-		"lesson":    {Name: "lesson", Description: "Manage lessons", MinArgs: 1},
-		"memory":    {Name: "memory", Description: "Manage memories", MinArgs: 1},
+		"switch":     {Name: "switch", Description: "Switch persona/mode interactively", MinArgs: 0},
+		"reference":  {Name: "reference", Description: "Manage reference documents", MinArgs: 1},
+		"topic":      {Name: "topic", Description: "Manage topics", MinArgs: 1},
+		"session":    {Name: "session", Description: "Manage sessions", MinArgs: 1},
+		"handoff":    {Name: "handoff", Description: "Manage handoffs (write|read|list|shred)"},
+		"lesson":     {Name: "lesson", Description: "Manage lessons", MinArgs: 1},
+		"memory":     {Name: "memory", Description: "Manage memories", MinArgs: 1},
 		"assignment": {Name: "assignment", Description: "Manage assignments (inbox|show|history|deliver|claim|delegate|record-review|handoff|create-root|record-approval)", MinArgs: 1, Help: printAssignmentHelp},
 
 		// Ingest / cascade / migrate
@@ -134,28 +134,28 @@ func NewRouter() *CommandRouter {
 		"read-skill":  {Name: "read-skill", Description: "Read skill by name (or id) and optional version", MinArgs: 1, MaxArgs: 2},
 
 		// Operations — state, scheduling, diagnostics, engine-room
-		"mode":       {Name: "mode", Description: "Manage modes"},
-		"wake":       {Name: "wake", Description: "Show wake context (--json, --strict)", MinArgs: 0},
+		"mode": {Name: "mode", Description: "Manage modes"},
+		"wake": {Name: "wake", Description: "Show wake context (--json, --strict)", MinArgs: 0},
 		// The engineering queue. `check` is the READ-ONLY door: it
 		// reads the published evidence and GitHub, and it writes
 		// nothing. `engineering publish` is the operator's WRITE door,
 		// and it is deliberately a separate command.
-		"check":      {Name: "check", Description: "Show the engineering queue and verify its evidence against GitHub (--json)", MinArgs: 0, MaxArgs: 0, Help: printCheckHelp},
+		"check":       {Name: "check", Description: "Show the engineering queue and verify its evidence against GitHub (--json)", MinArgs: 0, MaxArgs: 0, Help: printCheckHelp},
 		"engineering": {Name: "engineering", Description: "Publish the engineering evidence (publish)", MinArgs: 0, Help: printEngineeringHelp},
-		"gc":         {Name: "gc", Description: "Run decay sweep (--dry-run, --review, --purge)"},
-		"blob":       {Name: "blob", Description: "Blob storage management (gc)"},
-		"tasks":      {Name: "tasks", Description: "Manage scheduled tasks (upsert|list|delete)", MinArgs: 0},
-		"lint":       {Name: "lint", Description: "Validate router frontmatter (YAML + regex compile)", MinArgs: 0},
-		"backup":     {Name: "backup", Description: "Export database to SQL dump (optional path arg)"},
-		"restore":    {Name: "restore", Description: "Restore soft-deleted memory", MinArgs: 1},
-		"restore-db": {Name: "restore-db", Description: "Restore database from SQL dump", MinArgs: 1},
-		"directives": {Name: "directives", Description: "Show behavioral directives"},
-		"lifecycle":  {Name: "lifecycle", Description: "Lifecycle asymmetry notes for artifact families", MinArgs: 0, MaxArgs: 1},
-		"status":     {Name: "status", Description: "Show system status (incl. lesson proposals awaiting operator review)", MinArgs: 0},
-		"update":     {Name: "update", Description: "Update the runtime to a newer release (check, apply, rollback)", MinArgs: 0},
-		"persona":    {Name: "persona", Description: "Manage personas"},
-		"ops":        {Name: "ops", Description: "Engine-room operations (maintenance, diagnostics)"},
-		"onboard":    {Name: "onboard", Description: "Guided setup and verification of an MPM installation", MinArgs: 0, MaxArgs: -1},
+		"gc":          {Name: "gc", Description: "Run decay sweep (--dry-run, --review, --purge)"},
+		"blob":        {Name: "blob", Description: "Blob storage management (gc)"},
+		"tasks":       {Name: "tasks", Description: "Manage scheduled tasks (upsert|list|delete)", MinArgs: 0},
+		"lint":        {Name: "lint", Description: "Validate router frontmatter (YAML + regex compile)", MinArgs: 0},
+		"backup":      {Name: "backup", Description: "Export database to SQL dump (optional path arg)"},
+		"restore":     {Name: "restore", Description: "Restore soft-deleted memory", MinArgs: 1},
+		"restore-db":  {Name: "restore-db", Description: "Restore database from SQL dump", MinArgs: 1},
+		"directives":  {Name: "directives", Description: "Show behavioral directives"},
+		"lifecycle":   {Name: "lifecycle", Description: "Lifecycle asymmetry notes for artifact families", MinArgs: 0, MaxArgs: 1},
+		"status":      {Name: "status", Description: "Show system status (incl. lesson proposals awaiting operator review)", MinArgs: 0},
+		"update":      {Name: "update", Description: "Update the runtime to a newer release (check, apply, rollback)", MinArgs: 0},
+		"persona":     {Name: "persona", Description: "Manage personas"},
+		"ops":         {Name: "ops", Description: "Engine-room operations (maintenance, diagnostics)"},
+		"onboard":     {Name: "onboard", Description: "Guided setup and verification of an MPM installation", MinArgs: 0, MaxArgs: -1},
 
 		// Routing — context-aware helpers
 		"hint":  {Name: "hint", Description: "Surface context-relevant artifacts", MinArgs: 1},

@@ -120,6 +120,13 @@ a change to the store's limit cannot make the extra row unreachable again.
 And the flag is decided while that extra row is still in hand — a flag
 computed after the rows were cut could never be true.
 
+The flag is published **to the reader**, not only to a machine file the reader
+would have to go and fetch: `mpm check` prints a `partial` line naming the
+bound and saying more work exists, its JSON carries `truncated`, `scanned` and
+`scan_limit`, and the queue summary — the artefact a person opens first — says
+the publication holds part of the work. A flag that reached only `index.json`
+reached no reader: the report dropped it, and the summary said nothing.
+
 **Publication is deterministic** for identical input evidence: the records are
 a pure function of the evidence, and the only field that differs between two
 publications is `published_at` in the index, which is recorded metadata.
@@ -183,6 +190,17 @@ record is hashed:
 - credential shapes (provider keys, GitHub tokens, cloud keys, chat tokens,
   bearer headers, private keys);
 - private paths (the operator's home, the data root, the platform homes);
+- **absolute paths on the publishing machine**, wherever they appear. The
+  review's evidence pointer is the case that matters: the store records the
+  capture where the HOST wrote it, which is an absolute path under the MPM
+  root. Publishing it would put the operator's disk layout inside the
+  content-addressed bytes, and it would make the checker fetch a path the
+  record chose. So the pointer is **withheld** — `unknown` — while the digest
+  and the capture status still say what the publisher established. Before
+  this, the pointer was copied verbatim: on a default install the publishable
+  check then refused the WHOLE publication, and elsewhere the pointer was
+  published and `check` reported the capture as `failed`, contradicting the
+  publisher about the same bytes;
 - transcript shapes (more than one line, more than the length cap, more than
   the word cap).
 
@@ -290,7 +308,18 @@ asks for nothing.
 
 **A published pointer is data, not a command.** The verifier fetches only safe
 relative paths inside the evidence repository, so a record that was fetched
-from anywhere cannot make the verifier read anything else.
+from anywhere cannot make the verifier read anything else. The index's own
+record identifiers are checked against the identifier's shape — the lowercase
+hex SHA-256 of the record's bytes — before any path is built from them: an
+index that named `../../etc/passwd` would otherwise be an index the reader
+followed.
+
+**A pointer the publisher withheld is MISSING, not a contradiction.** When the
+publisher checked the digest against bytes it could read and then withheld the
+pointer (because it named a path on the publishing machine), the capture is
+not published, so no reader can check it. The check says that, and says what
+the publisher established, rather than calling the record `failed` — which
+would contradict the publisher about the same bytes.
 
 **A network failure is never a successful verification.** `unverified` is a
 distinct state precisely because "GitHub could not be asked" and "the thing is
@@ -321,6 +350,12 @@ mutating method at all — the capability is not merely unused, it is absent.
 cannot be retrieved or read, the command reports that condition and exits
 non-zero. There is no local fallback, because a fallback that looks current is
 worse than no answer.
+
+**The exit status agrees with the report.** It is `0` exactly when the report
+verified the whole corpus, and `1` otherwise; the report is printed either way,
+because the reader needs to see WHY. Before this, `check` exited `0` while its
+own mark said `⚠`: a CI gate or a script read "success" from a report whose
+verdict was "the evidence does not hold".
 
 The sections are the queue's own: active, awaiting review, awaiting CI,
 awaiting the operator, blocked, ambiguous, completed — and **stale or
@@ -431,9 +466,18 @@ the candidates come from a ledger that was read in one order, and the tree's
 own correlation comes from a different walk. So the accounts are **grouped by
 the review they describe** (the reviewer's id and the moment), and each group
 is merged on its own: every field is taken from the account that carries it,
-and where two accounts of the same moment disagree, the one whose fields sort
-last wins. Nothing that only ONE account knows is lost, and nothing about the
-published review depends on the order the accounts arrived in.
+and where two accounts of the same moment disagree, the one whose fields
+compare **greatest** wins. Nothing that only ONE account knows is lost, and
+nothing about the published review depends on the order the accounts arrived
+in.
+
+**Correlated fields travel together.** A verdict says something about a
+revision, and a capture status says something about bytes. So the verdict
+brings its revision with it, and the digest brings its status and its pointer
+with it. Taking the revision from one account and the verdict from another
+would publish a decision about a revision no account ever paired with it —
+and taking the digest from one account and the status from another would
+publish an answer about bytes that account never saw.
 
 **The groups compete, and a SUPERSEDED group is dropped whole.** Where two
 groups disagree, the LATER one wins. And a group whose moment is earlier than
@@ -482,7 +526,7 @@ contract is the one failure mode the whole design exists to prevent.
 
 ## 10. The negative controls
 
-Nineteen controls remove an invariant from the implementation and require the
+Twenty-two controls remove an invariant from the implementation and require the
 acceptance suite to **fail**. A control that removes nothing measures nothing;
 a suite that does not notice is a suite that does not test the invariant.
 
@@ -507,6 +551,9 @@ a suite that does not notice is a suite that does not test the invariant.
 | the verifier falls back to the record's repository | a verifier that was not told where the evidence lives must not read from the record's repository |
 | the artefacts are not checked | the index names the human artefacts with digests, and the check checks them |
 | a tampered record is filtered away | a filter must not hide a record whose bytes do not match its name |
+| the pointer is published raw | a pointer on the publisher's machine is not published |
+| the partial publication is not announced | a publication that holds part of the work says so in the queue summary |
+| the report drops the truncation | the reader is told when the publication holds only part of the work |
 
 They run **in Go**, inside the package's own test, because the package is
 observable by itself and depends on nothing but the standard library. A control

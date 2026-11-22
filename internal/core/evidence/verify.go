@@ -407,8 +407,21 @@ func (v *Verifier) checkReviewEvidence(ctx context.Context, out *Verification, r
 	}
 	ref := rec.ReviewEvidence.Ref
 	if ref == "" || ref == Unknown {
-		out.add(CheckReviewEvidence, CheckMissing,
-			"the review's evidence pointer is not readable from the evidence repository")
+		// THE PUBLISHER'S ANSWER AND THE READER'S ARE ABOUT
+		// DIFFERENT THINGS.
+		//
+		// The publisher may have checked the digest against bytes it
+		// could read, and the bytes may still not be published — the
+		// findings are a model's output and the contract never
+		// publishes them. So the detail says which of the two it is,
+		// rather than leaving the reader to reconcile a "verified"
+		// status with a missing capture.
+		detail := "the review's evidence pointer is not readable from the evidence repository"
+		if rec.ReviewEvidence.Status == CaptureVerified {
+			detail = "the publisher checked the digest, but the bytes are not published, " +
+				"so no reader can check it"
+		}
+		out.add(CheckReviewEvidence, CheckMissing, detail)
 		return
 	}
 	if strings.Contains(ref, "://") {

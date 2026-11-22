@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -212,7 +213,7 @@ func NewPlanFromCorpus(repository, branch string, corpus *Corpus, records []*Rec
 	}
 	plan.Files = append(plan.Files, File{
 		Path:    QueueSummaryPath,
-		Content: []byte(RenderQueueMarkdown(records, snapshot)),
+		Content: []byte(RenderQueueMarkdown(records, snapshot, corpus)),
 	})
 	index := Index{
 		FormatVersion: FormatVersion,
@@ -296,12 +297,37 @@ func ParseIndex(raw []byte) (*Index, error) {
 		return nil, fmt.Errorf("evidence: the index claims %d records and lists %d",
 			idx.RecordCount, len(idx.Records))
 	}
+	for _, r := range idx.Records {
+		// THE IDENTIFIER IS THE RECORD'S FILE NAME.
+		//
+		// It comes out of the index, and the index is data: an entry
+		// that is not a digest is an index that names a file the
+		// format does not have. Refusing it here means the reader never
+		// builds a path out of it.
+		if !isRecordID(r.ID) {
+			return nil, fmt.Errorf("evidence: the index names a record by %q, which is not a record identifier", r.ID)
+		}
+	}
 	for _, r := range idx.Renderings {
 		if r.Path == "" || r.SHA256 == "" {
 			return nil, fmt.Errorf("evidence: the index names a rendering with no path or no digest")
 		}
 	}
 	return &idx, nil
+}
+
+// isRecordID reports whether a value is a record identifier: the
+// lowercase hex SHA-256 of the record's canonical bytes.
+func isRecordID(id string) bool {
+	if len(id) != sha256.Size*2 {
+		return false
+	}
+	for _, c := range id {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // RenderRecordMarkdown renders one record for a human reader.
@@ -374,10 +400,26 @@ func RenderRecordMarkdown(r *Record) string {
 //
 // It is the summary a person reads first, and it says the SAME things
 // the machine report says — both render the same records.
-func RenderQueueMarkdown(records []*Record, snapshot string) string {
+//
+// # A PARTIAL PUBLICATION SAYS SO HERE
+//
+// The queue summary is the artefact a person opens first. A publication
+// that holds only part of the work must say so in the place the reader
+// is already looking, and not only in a machine file they would have to
+// go and fetch.
+func RenderQueueMarkdown(records []*Record, snapshot string, corpus *Corpus) string {
 	var b strings.Builder
 	b.WriteString("# The engineering queue\n\n")
 	fmt.Fprintf(&b, "Snapshot `%s` · format `%s`\n\n", snapshot, FormatVersion)
+	if corpus != nil && corpus.Truncated {
+		bound := ""
+		if corpus.ScanLimit > 0 {
+			bound = fmt.Sprintf(" It was read under a bound of %d assignments.", corpus.ScanLimit)
+		}
+		fmt.Fprintf(&b,
+			"**This publication holds PART of the work.**%s There is more work "+
+				"than it holds, and the rows past the bound were dropped.\n\n", bound)
+	}
 	if len(records) == 0 {
 		b.WriteString("The queue is empty.\n")
 		return b.String()
