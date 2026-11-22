@@ -503,7 +503,11 @@ func renderingExpectations(records []*Record, ids []string, index *Index,
 	summary := renderingExpectation{path: QueueSummaryPath, summary: true}
 	switch {
 	case !clean:
-		summary.why = "the queue summary cannot be checked against the records while a record is not the one the index names"
+		// NOT "not the one the index names": the other reason clean
+		// is false is a record whose bytes hash to its identifier but
+		// are not a record at all. "Could not be established" covers
+		// both, and is what the reader was told.
+		summary.why = "the queue summary cannot be checked against the records while a record could not be established"
 	case !snapshotVerified:
 		// THE SUMMARY NAMES THE SNAPSHOT. If the index's snapshot is
 		// not the records' digest, the index's metadata cannot be
@@ -597,19 +601,35 @@ func verifyRenderings(ctx context.Context, gh GitHub, repository, branch string,
 	//
 	// ParseIndex refuses a path the layout does not define, so what is
 	// left is the rendering of a record the check could not establish —
-	// its bytes were not the record the index named, or it could not be
-	// read. There is no verified record to re-render it from, and a
-	// digest alone is not a verification: the artefact is NOT verified,
-	// and the detail says why.
+	// its bytes were not the record the index named, or they were not a
+	// record at all. There is no established record to re-render it
+	// from, so the artefact is NOT verified; its PUBLISHED digest is
+	// still checked, because a digest the index publishes is a claim
+	// this reader can compare with the bytes.
 	for _, r := range index.Renderings {
 		if seen[r.Path] {
 			continue
 		}
-		out = append(out, RenderingVerification{
-			Path:   r.Path,
-			SHA256: r.SHA256,
-			Detail: "the record this artefact renders is not one the check could establish, so the artefact is not verified",
-		})
+		verification := RenderingVerification{Path: r.Path, SHA256: r.SHA256}
+		if !safeEvidencePath(r.Path) {
+			verification.Detail = "the index names a path outside the evidence repository"
+			out = append(out, verification)
+			continue
+		}
+		raw, err := gh.Content(ctx, repository, branch, r.Path)
+		if err != nil {
+			verification.Detail = fmt.Sprintf("the artefact could not be read: %v", err)
+			out = append(out, verification)
+			continue
+		}
+		if !SameDigest(DigestBytes(raw), r.SHA256) {
+			verification.Detail = fmt.Sprintf("the artefact hashes to %s and the index says %s",
+				DigestBytes(raw), r.SHA256)
+			out = append(out, verification)
+			continue
+		}
+		verification.Detail = "the record this artefact renders is not one the check could establish, so the artefact is not verified; its digest is the one the index published"
+		out = append(out, verification)
 	}
 	return out
 }

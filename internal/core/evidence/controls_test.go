@@ -299,8 +299,16 @@ var controls = []control{
 		name:      "a page for an unestablished record is verified",
 		invariant: "an artefact whose record the check could not establish is not verified",
 		file:      "check.go",
-		from:      "\t\t\tSHA256: r.SHA256,\n",
-		to:        "\t\t\tSHA256: r.SHA256,\n\t\t\tOK:     true,\n",
+		from:      "\t\tverification.Detail = \"the record this artefact renders is not one the check could establish",
+		to:        "\t\tverification.OK = true\n\t\tverification.Detail = \"the record this artefact renders is not one the check could establish",
+		test:      "TestATamperedRecordIsFiledAsAmbiguous",
+	},
+	{
+		name:      "the page of an unestablished record is not digest-checked",
+		invariant: "a page whose record was not established still has its published digest checked",
+		file:      "check.go",
+		from:      "\t\tif !SameDigest(DigestBytes(raw), r.SHA256) {",
+		to:        "\t\tif false && !SameDigest(DigestBytes(raw), r.SHA256) {",
 		test:      "TestATamperedRecordIsFiledAsAmbiguous",
 	},
 	{

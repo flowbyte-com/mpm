@@ -18,7 +18,7 @@ import (
 // the answer. A reader never has to trust the publisher about the state
 // of the world.
 //
-// # THE FOUR RESULTS
+// # THE FIVE RESULTS
 //
 //   - verified: GitHub says the same thing the record says
 //   - stale: the record was true, and the world has moved on

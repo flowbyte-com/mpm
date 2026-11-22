@@ -606,7 +606,7 @@ contract is the one failure mode the whole design exists to prevent.
 
 ## 10. The negative controls
 
-Thirty-three controls remove an invariant from the implementation and require the
+Thirty-four controls remove an invariant from the implementation and require the
 acceptance suite to **fail**. A control that removes nothing measures nothing;
 a suite that does not notice is a suite that does not test the invariant.
 
@@ -643,6 +643,7 @@ a suite that does not notice is a suite that does not test the invariant.
 | an artefact outside the layout is accepted | every artefact the index names is one the published layout defines |
 | two records for one assignment are accepted | one assignment has one record |
 | a page for an unestablished record is verified | an artefact whose record the check could not establish is not verified |
+| the page of an unestablished record is not digest-checked | a page whose record was not established still has its published digest checked |
 | a broken artefact does not unverify the corpus | a corpus with an artefact that is not its rendering is not verified |
 | the snapshot is not checked | the index's snapshot id is the digest of the records it names |
 

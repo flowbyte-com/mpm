@@ -211,6 +211,47 @@ func TestATamperedRecordIsFiledAsAmbiguous(t *testing.T) {
 	if !foundPage {
 		t.Errorf("the report does not name the record's page %s", page)
 	}
+
+	// AND ITS PUBLISHED DIGEST IS CHECKED: a page whose bytes are not
+	// the ones the index names says so, rather than being reported as
+	// "could not be established".
+	gh.content[page] = []byte("# a different page\n")
+	report, err = RunCheck(context.Background(), gh, testRepo, EvidenceBranch, Filters{})
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	assertRenderingDigestProblem(t, report, page)
+
+	// THE SUMMARY IS FETCHED AND ITS PUBLISHED DIGEST IS CHECKED TOO,
+	// even though it cannot be re-rendered while a record could not be
+	// established.
+	gh.content[QueueSummaryPath] = []byte("# a different summary\n")
+	report, err = RunCheck(context.Background(), gh, testRepo, EvidenceBranch, Filters{})
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	assertRenderingDigestProblem(t, report, QueueSummaryPath)
+}
+
+// assertRenderingDigestProblem requires the named artefact to be not
+// verified because its bytes do not hash to the digest the index
+// published.
+func assertRenderingDigestProblem(t *testing.T, report *CheckReport, path string) {
+	t.Helper()
+	for _, r := range report.Renderings {
+		if r.Path != path {
+			continue
+		}
+		if r.OK {
+			t.Errorf("%s is verified although its bytes are not the ones the index names", path)
+		}
+		if !strings.Contains(r.Detail, "hashes to") {
+			t.Errorf("%s's detail is %q, want it to say the bytes do not hash to the index's digest",
+				path, r.Detail)
+		}
+		return
+	}
+	t.Errorf("the report does not name the artefact %s", path)
 }
 
 // ── 6: an index must name its source, and it must be the source read ─────
