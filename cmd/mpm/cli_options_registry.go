@@ -164,7 +164,12 @@ func init() {
 			// runtime model and the bounded references. They are
 			// registered here because an unregistered option is
 			// refused before the verb runs.
+			//
+			// PR 4 adds the dispatcher's configuration path: the
+			// operator's explicit switch. A MISSING file means the
+			// dispatcher is off.
 			"action", "actor", "actor-kind", "agent", "awaiting-action", "base-sha",
+			"dispatch-config",
 			"eligible-recipient", "epoch", "evidence", "evidence-ref",
 			"findings-sha256", "head-sha", "id", "idempotency-key",
 			"brief", "issue-ref", "json", "lease-seconds", "limit", "max-concurrency",

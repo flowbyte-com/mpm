@@ -572,6 +572,107 @@ func TestExecuteDoesNotRepromptATerminalSession(t *testing.T) {
 	}
 }
 
+// TestExecuteRecordOnlyRefusesToLaunch proves a record-only caller can
+// never start work.
+//
+// The adapter decides for itself whether to record, resume a recorded
+// session, or mint a NEW attempt and launch it. A caller that has
+// OBSERVED an outcome and wants it recorded wants the first and must
+// never have the third: a launch from a recovery pass is a second writer
+// into a workspace whose earlier session may still be working.
+//
+// So the adapter refuses to resume and refuses to mint an attempt when
+// the caller asked for a recording, and it says why.
+func TestExecuteRecordOnlyRefusesToLaunch(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	ws := t.TempDir()
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+
+	intent, err := store.BeginAttempt(BeginAttemptParams{
+		TaskID: id, Epoch: epoch, Runtime: RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses_mpm_record_only1",
+		CorrelationRef: "corr-record-only", WorkspaceID: "ws", WorkspacePath: ws,
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	// The attempt is TERMINAL. An ordinary execute would mint a new
+	// attempt and launch it — which is exactly what must not happen.
+	if _, err := store.MarkAttemptFailed(SessionStateParams{
+		AttemptID: intent.ID, Epoch: epoch, Outcome: "failed", Error: "the runtime said so",
+	}); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	rt := &fakeRuntime{
+		allowed:  map[string]bool{"mpm-worker": true},
+		sessions: map[string]*oc.SessionState{},
+	}
+	params := executeParams(id, epoch, ws)
+	params.RecordOnly = true
+
+	if _, err := store.Execute(context.Background(), rt, params); err == nil {
+		t.Fatal("a record-only execute minted a new attempt and launched it")
+	}
+	if rt.launches != 0 {
+		t.Fatalf("the adapter launched %d times; a record-only caller must never launch",
+			rt.launches)
+	}
+	attempts, err := store.AttemptsFor(id)
+	if err != nil {
+		t.Fatalf("attempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Errorf("the assignment has %d attempts, want 1; a record-only caller minted one",
+			len(attempts))
+	}
+}
+
+// TestExecuteRecordOnlyRecordsAnObservedOutcome proves the record-only
+// path still RECORDS.
+//
+// The refusal above is for the case where there is nothing to record. An
+// observed outcome is recorded through the same fenced path as ever, and
+// nothing is launched.
+func TestExecuteRecordOnlyRecordsAnObservedOutcome(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	ws := t.TempDir()
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+
+	intent, err := store.BeginAttempt(BeginAttemptParams{
+		TaskID: id, Epoch: epoch, Runtime: RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses_mpm_record_only2",
+		CorrelationRef: "corr-record-only-2", WorkspaceID: "ws", WorkspacePath: ws,
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	// The session already succeeded, and the adapter never saw it.
+	rt := &fakeRuntime{
+		allowed: map[string]bool{"mpm-worker": true},
+		sessions: map[string]*oc.SessionState{
+			intent.NativeSessionID: okState(ws, "permitted-model", "mpm-worker"),
+		},
+	}
+	params := executeParams(id, epoch, ws)
+	params.RecordOnly = true
+
+	res, err := store.Execute(context.Background(), rt, params)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if rt.launches != 0 {
+		t.Fatalf("the adapter launched %d times for a recording", rt.launches)
+	}
+	if res.LaunchState != SessionCompleted {
+		t.Errorf("the launch state is %q, want %q", res.LaunchState, SessionCompleted)
+	}
+	if res.Assignment.State != StateCompleted {
+		t.Errorf("the assignment is %q; the observed success was not recorded",
+			res.Assignment.State)
+	}
+}
+
 // TestExecuteStartsANewAttemptAfterTheEpochAdvances is the reviewer's F2.
 //
 // An attempt stamped with the OLD epoch can never record its result: the
@@ -933,6 +1034,17 @@ func (f *fakeReviewRuntime) Review(_ context.Context, req oc.ReviewRequest) (*oc
 	r := *f.result
 	r.SessionID = req.SessionID
 	return &r, nil
+}
+
+// Inspect reports that the runtime has never heard of the session.
+//
+// PR 4's recovery asks a reviewer what became of a recorded session, so
+// the reviewer boundary has to be INSPECTABLE — an interface that could
+// not be inspected could only ever be reported, never recovered. The
+// fake reports "not found" because that is what a reviewer runtime says
+// about a session it never created.
+func (f *fakeReviewRuntime) Inspect(_ context.Context, _ string) (*oc.SessionState, error) {
+	return nil, oc.ErrSessionNotFound
 }
 
 // TestExecuteReviewRefusesWhileAnEarlierReviewIsLive is finding 3.

@@ -27,6 +27,7 @@ import (
 
 	"github.com/flowbyte-com/mpm-core/assignment"
 	"github.com/flowbyte-com/mpm-core/config"
+	"github.com/flowbyte-com/mpm-core/dispatch"
 	oc "github.com/flowbyte-com/mpm-core/opencode"
 	"github.com/flowbyte-com/mpm-core/usererror"
 )
@@ -35,19 +36,22 @@ import (
 // environment — the sidecar runs on the host, outside the worker's
 // namespace, and the credential never enters the sandbox.
 const (
-	envSidecarKey      = "MPM_OPENCODE_SIDECAR_KEY"
-	envSidecarUpstream = "MPM_OPENCODE_SIDECAR_UPSTREAM"
-	envOpenCodeBin     = "MPM_OPENCODE_BIN"
+	// The names are the dispatch package's: one vocabulary, so the
+	// CLI's explicit execution and the dispatcher's automatic one read
+	// the same environment and cannot drift apart.
+	envSidecarKey      = dispatch.EnvSidecarKey
+	envSidecarUpstream = dispatch.EnvSidecarUpstream
+	envOpenCodeBin     = dispatch.EnvOpenCodeBin
 	// The UPSTREAM model id. The worker asks for the stable local id
 	// ("permitted-model"); the sidecar translates it. That way the
 	// worker's configuration never names a real provider model.
-	envUpstreamModel = "MPM_OPENCODE_SIDECAR_MODEL"
+	envUpstreamModel = dispatch.EnvUpstreamModel
 	// Where the MPM OpenCode plugin lives. The REVIEWER's `sandbox_exec`
 	// comes from it, so a review cannot start without it.
-	envOpenCodePlugin = "MPM_OPENCODE_PLUGIN"
+	envOpenCodePlugin = dispatch.EnvOpenCodePlugin
 	// The fallback credential source. It is the operator's own provider
 	// key, and it stays in this process.
-	envDeepSeekKey = "DEEPSEEK_API_KEY"
+	envDeepSeekKey = dispatch.EnvFallbackProviderKey
 )
 
 const defaultSidecarUpstream = "https://api.deepseek.com"
@@ -239,8 +243,17 @@ func assignmentVerbExecuteReview(store *assignment.Store, f *assignmentFlags) (i
 
 	mpmDir := config.GetMPMDir()
 	root := filepath.Join(mpmDir, "opencode", "reviews", f.id)
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return nil, fmt.Errorf("create the review root: %w", err)
+	// THE SANDBOX TREE, and not just the root.
+	//
+	// The runtime's read-only commands run with their working directory
+	// at <root>/home, and the review path reads the reviewer's session
+	// through exactly that command. Without the tree, the capture fails
+	// with "chdir …: no such file or directory" — so the review would
+	// never produce a finding, and a review that cannot be read can only
+	// ever be reported, never recovered.
+	spec := oc.Spec{Root: root, Workspace: f.workspace}
+	if err := oc.BuildTree(spec); err != nil {
+		return nil, err
 	}
 
 	opencodeBin := os.Getenv(envOpenCodeBin)

@@ -220,6 +220,14 @@ func main() {
 	// configurable (confidence.decay.*) and the pass is safe to re-run.
 	s.RegisterTickHandler("confidence_decay",
 		scheduler.NewConfidenceDecayHandler(dm, logger).TickHandler())
+	// dispatch → ONE bounded autonomous dispatch pass, IF the operator
+	//              enabled it. The handler reads the dispatcher's
+	//              configuration file on every tick, so a MISSING file
+	//              means it does nothing at all — an installed scheduler
+	//              never dispatches on its own. See
+	//              internal/scheduler/dispatch_tick.go.
+	s.RegisterTickHandler("dispatch",
+		scheduler.NewDispatchTickHandler(dm, logger).TickHandler())
 
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)

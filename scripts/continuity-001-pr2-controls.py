@@ -525,18 +525,32 @@ def control_claim_is_not_a_cas():
 		switch current.State {""",
         "the claim's Go half",
     )
+    # PR 4 PUT THE CONCURRENCY BUDGET IN THE SAME STATEMENT, so the
+    # clause this control removes now carries a second predicate. The
+    # control removes THE EPOCH PREDICATE and leaves the budget
+    # predicate alone: the budget is a DIFFERENT invariant, and
+    # removing it too would measure two things at once. The mutation
+    # is the same one the control has always made — the claim's WHERE
+    # clause stops presenting the epoch — and the suite must still
+    # fail the same test.
     replace_text(
         "internal/core/assignment/claim.go",
         """			SET claim_epoch = ?, owner = ?, lease_expires_at = ?, updated_at = ?
-			WHERE id = ? AND claim_epoch = ?`,""",
+			WHERE id = ? AND claim_epoch = ?
+			  AND `+concurrencyBudgetCondition,""",
         """			SET claim_epoch = ?, owner = ?, lease_expires_at = ?, updated_at = ?
-			WHERE id = ?`,""",
+			WHERE id = ?
+			  AND `+concurrencyBudgetCondition,""",
         "the claim's WHERE clause",
     )
+    # The value the predicate binds goes with the predicate. Leaving it
+    # in place would make the statement a bind error, and every
+    # successful claim in the suite would fail for a reason that has
+    # nothing to do with the invariant under test.
     replace_text(
         "internal/core/assignment/claim.go",
-        """			5, newEpoch, p.Owner, newLease, now, p.ID, p.ExpectedEpoch)""",
-        """			5, newEpoch, p.Owner, newLease, now, p.ID)""",
+        """			5, newEpoch, p.Owner, newLease, now, p.ID, p.ExpectedEpoch,""",
+        """			5, newEpoch, p.Owner, newLease, now, p.ID,""",
         "the claim's bound epoch",
     )
 

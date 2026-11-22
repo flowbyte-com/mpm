@@ -120,6 +120,17 @@ var (
 	// depth beyond the root's budget, a missing field.
 	ErrConstraint = errors.New("assignment: refused by the assignment rules")
 
+	// ErrRecordOnlyRefused is returned when a RECORD-ONLY caller asked
+	// the adapter to record an observed outcome and the adapter could
+	// not: the attempt is terminal, or its session was never created.
+	//
+	// It is NOT a refusal of the WORK. The attempt stays outstanding, the
+	// work is not lost, and a later pass may dispatch the assignment
+	// normally — so a caller that buckets refusals by this error must
+	// treat it as "considered again", not as "will not be tried again".
+	ErrRecordOnlyRefused = errors.New(
+		"assignment: the outcome could not be recorded, and the caller asked for no launch")
+
 	// ErrIdempotencyConflict is returned when the same idempotency key
 	// is presented with a DIFFERENT logical assignment. Returning the
 	// existing row would hand back something that does not match the

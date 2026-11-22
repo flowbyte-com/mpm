@@ -70,6 +70,13 @@ type ReviewRuntime interface {
 	// MintSessionID returns the id the review will use. The adapter
 	// persists it before the launch, exactly as it does for the worker.
 	Review(ctx context.Context, req oc.ReviewRequest) (*oc.ReviewResult, error)
+	// Inspect reads a session's own report WITHOUT running anything.
+	//
+	// It is here so a dispatcher can recover an interrupted review: it
+	// has to be able to ask what became of a recorded session before it
+	// decides whether another reviewer may run. An interface that could
+	// not be inspected could only ever be reported, never recovered.
+	Inspect(ctx context.Context, sessionID string) (*oc.SessionState, error)
 }
 
 // ExecuteReview runs one independent review and records its evidence.
