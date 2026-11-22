@@ -223,14 +223,14 @@ func TestTheIndexSourceMustMatchTheReader(t *testing.T) {
 		name   string
 		repo   string
 		branch string
-		want   bool // a contradiction is expected
+		want   string // a substring the contradiction's detail must carry; "" for a match
 	}{
-		{"the source matches", testRepo, EvidenceBranch, false},
-		{"the repository's case differs", strings.ToUpper(testRepo), EvidenceBranch, false},
-		{"no repository", "", EvidenceBranch, true},
-		{"another repository", "other/name", EvidenceBranch, true},
-		{"no branch", testRepo, "", true},
-		{"another branch", testRepo, "evidence/v2", true},
+		{"the source matches", testRepo, EvidenceBranch, ""},
+		{"the repository's case differs", strings.ToUpper(testRepo), EvidenceBranch, ""},
+		{"no repository", "", EvidenceBranch, "names no repository"},
+		{"another repository", "other/name", EvidenceBranch, "lives in other/name"},
+		{"no branch", testRepo, "", "names no branch"},
+		{"another branch", testRepo, "evidence/v2", "lives on the branch"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -252,9 +252,12 @@ func TestTheIndexSourceMustMatchTheReader(t *testing.T) {
 			if err != nil {
 				t.Fatalf("check: %v", err)
 			}
-			if tc.want {
-				if report.IndexDetail == "" {
-					t.Error("the check accepted an index that contradicts the source it was read from")
+			if tc.want != "" {
+				// THE DETAIL NAMES THE CLAUSE THAT FIRED, so a table
+				// cannot pass because some other contradiction produced
+				// a detail.
+				if !strings.Contains(report.IndexDetail, tc.want) {
+					t.Errorf("the detail is %q, want it to name %q", report.IndexDetail, tc.want)
 				}
 				if report.Verified {
 					t.Error("the corpus is verified although the index contradicts its source")

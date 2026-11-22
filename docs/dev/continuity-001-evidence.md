@@ -113,9 +113,12 @@ a forger who rewrites the artefact and its index digest would otherwise be
 verified; re-rendering without the digest check would let the index publish a
 digest nobody ever checked. The required set is the RECORDS', not the index's
 list: an index that names nothing would otherwise verify with nothing checked.
-An artefact whose record the check could not establish is neither fetched nor
-verified — there is nothing to re-render it from, and its digest alone is not
-a rendering.
+
+Where the rendering **cannot** be computed, the artefact is still fetched and
+its published digest is checked, but it is **not verified**: a record page for
+a record the check could not establish says so, and so does the summary when
+the snapshot is not the records' digest. There is nothing to re-render the page
+from, and the digest alone is not a rendering.
 
 **The index's other fields are checked too.** An entry's root, task, pull
 request, disposition and title must agree with the record it names — a reader
