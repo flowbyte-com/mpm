@@ -145,7 +145,9 @@ func TestABrokenArtefactMakesTheCorpusUnverified(t *testing.T) {
 // ── 5: bytes that are not the record are not filed by their claim ───────
 
 // TestATamperedRecordIsFiledAsAmbiguous proves the queue does not file a
-// record by the claim of bytes the check did not establish.
+// record by the claim of bytes the check did not establish, and that the
+// page and the summary in such a corpus still have their published
+// digests checked.
 func TestATamperedRecordIsFiledAsAmbiguous(t *testing.T) {
 	record := builtRecord(t, "task-a")
 	record.CI = []CIRun{greenRun(1, testHead)}

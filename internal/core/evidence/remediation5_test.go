@@ -315,6 +315,18 @@ func TestARenamedSnapshotIsNotVerified(t *testing.T) {
 	if report.Verified {
 		t.Error("the corpus is verified although its snapshot id is not the records' digest")
 	}
+
+	// THE SUMMARY IS STILL FETCHED AND DIGEST-CHECKED, even though it
+	// cannot be re-rendered while the snapshot is not the records'
+	// digest. A summary whose bytes are not the index's digest says so,
+	// rather than being reported as "its digest is the one the index
+	// published" about a digest nobody read.
+	gh.content[QueueSummaryPath] = []byte("# a different summary\n")
+	report, err = RunCheck(context.Background(), gh, testRepo, EvidenceBranch, Filters{})
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	assertRenderingDigestProblem(t, report, QueueSummaryPath)
 }
 
 // ── R12: an index may not list one record twice ──────────────────────────

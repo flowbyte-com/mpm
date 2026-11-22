@@ -107,7 +107,8 @@ type RenderingVerification struct {
 	// OK says the artefact is VERIFIED: its bytes hash to the digest
 	// the index published AND they are the rendering of the record (or
 	// the queue summary of the records) the check ESTABLISHED — the
-	// record whose bytes hash to its identifier. The record's own
+	// record that DECODES and whose bytes hash to its identifier. The
+	// record's own
 	// verdict is reported separately and is one of the five check
 	// states (verified, stale, failed, missing, unverified), so a
 	// correct page of a record that is not verified can still be OK.
@@ -466,10 +467,11 @@ func indexEntryDisagreement(entry IndexEntry, record *Record) string {
 // the bytes it must be the rendering of.
 //
 // content is nil when the expectation cannot be computed — a record it
-// would be rendered from is not the record the index names, or the
+// would be rendered from could not be established (its bytes are not
+// the ones the index names, or they are not a record at all), or the
 // index's snapshot is not the records' digest — and why says so. In
-// that case the artefact is NOT verified: the index's digest is checked,
-// and the report says the rendering could not be established.
+// that case the artefact is NOT verified: its published digest is still
+// checked, and the report says the rendering could not be established.
 type renderingExpectation struct {
 	path    string
 	content []byte

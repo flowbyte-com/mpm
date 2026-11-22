@@ -118,7 +118,9 @@ Where the rendering **cannot** be computed, the artefact is still fetched and
 its published digest is checked, but it is **not verified**: a record page for
 a record the check could not establish says so, and so does the summary when
 the snapshot is not the records' digest. There is nothing to re-render the page
-from, and the digest alone is not a rendering.
+from, and the digest alone is not a rendering. A record the check could not
+establish is one whose bytes are not the ones the index names, or one whose
+bytes are not a record at all.
 
 **The index's other fields are checked too.** An entry's root, task, pull
 request, disposition and title must agree with the record it names — a reader
