@@ -334,9 +334,31 @@ func TestARenamedSnapshotIsNotVerified(t *testing.T) {
 	if !strings.Contains(summaryReason, "its digest is the one the index published") {
 		t.Errorf("the summary's reason does not say its published digest was checked: %q", summaryReason)
 	}
+	// THE RECORD'S PAGE IS OK, which is what "established" means: the
+	// page was re-rendered from the record. (DigestVerified alone is the
+	// hash-only fact; a byte sequence that is not a record can have it
+	// and still not be established.)
+	id, err := RecordID(record)
+	if err != nil {
+		t.Fatalf("the record's id: %v", err)
+	}
+	page := RecordsDirectory + "/" + id + ".md"
+	pageOK := false
+	for _, r := range report.Renderings {
+		if r.Path != page {
+			continue
+		}
+		if !r.OK {
+			t.Errorf("the record's page is not verified: %s", r.Detail)
+		}
+		pageOK = r.OK
+	}
+	if !pageOK {
+		t.Fatalf("the report does not verify the record's page %s, so the test cannot distinguish the snapshot branch",
+			page)
+	}
 	if len(report.Records) != 1 || !report.Records[0].DigestVerified {
-		t.Fatalf("the record was not established, so the test cannot distinguish the snapshot branch: %+v",
-			report.Records)
+		t.Fatalf("the record's bytes do not hash to their identifier: %+v", report.Records)
 	}
 
 	// THE SUMMARY IS STILL FETCHED AND DIGEST-CHECKED, even though it

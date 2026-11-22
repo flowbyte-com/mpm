@@ -117,7 +117,8 @@ list: an index that names nothing would otherwise verify with nothing checked.
 Where the rendering **cannot** be computed, the artefact is still REQUIRED and
 its published digest is checked, but it is **not verified**: a record page for
 a record the check could not establish says so, and so does the summary when
-the snapshot is not the records' digest. There is nothing to re-render the page
+the snapshot is not the records' digest. The required set is the index's
+RECORD list, not its RENDERING list. There is nothing to re-render the page
 from, and the digest alone is not a rendering. A record the check could not
 establish is one whose bytes are not the ones the index names, or one whose
 bytes are not a record at all. A page the index does not name at all is

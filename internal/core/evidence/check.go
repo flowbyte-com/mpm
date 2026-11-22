@@ -347,7 +347,13 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	// records verify is an index that lies about what the reader is
 	// looking at.
 	snapshot := ""
-	if recomputed, err := SnapshotID(loaded); err != nil {
+	if !clean {
+		// THE SNAPSHOT CANNOT BE BOUND TO A RECORD THE CHECK COULD NOT
+		// ESTABLISH. Recomputing it from the established subset would
+		// verify a subset's digest against the whole corpus's
+		// identifier, which is not the same claim.
+		report.SnapshotDetail = "the index's snapshot id cannot be checked while a record could not be established"
+	} else if recomputed, err := SnapshotID(loaded); err != nil {
 		report.SnapshotDetail = err.Error()
 	} else {
 		snapshot = recomputed
@@ -470,8 +476,10 @@ func indexEntryDisagreement(entry IndexEntry, record *Record) string {
 // a page would be rendered from could not be established (its bytes are
 // not the ones the index names, or they are not a record at all), or
 // the index's snapshot is not the records' digest — and why says so. In
-// that case the artefact is NOT verified: its published digest is still
-// checked, and the report says the rendering could not be established.
+// that case the artefact is NOT verified: when the index names it, its
+// published digest is still checked and the report says the rendering
+// could not be established; when the index does not name it, the report
+// says so.
 type renderingExpectation struct {
 	path    string
 	content []byte
@@ -479,12 +487,14 @@ type renderingExpectation struct {
 	summary bool
 }
 
-// renderingExpectations is what the publication must hold, from the
-// records the reader verified.
+// renderingExpectations is what the publication must hold.
 //
-// The set is not the index's list: the index is data, so an index that
-// names nothing would otherwise verify with nothing checked. It is the
-// records themselves, plus the queue summary they render.
+// The set is the index's RECORD list — not its RENDERING list — plus
+// the queue summary. The index is data, so an index that names no
+// artefacts would otherwise verify with nothing checked; and every
+// record it lists has a page, established or not. The established
+// records supply the bytes to re-render their pages; an unestablished
+// record's page is required WITHOUT a rendering.
 func renderingExpectations(records []*Record, ids []string, index *Index,
 	clean bool, snapshot string, snapshotVerified bool) []renderingExpectation {
 	// THE ESTABLISHED RECORDS, BY THE IDENTIFIER THE INDEX GAVE THEM.
