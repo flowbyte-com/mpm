@@ -112,6 +112,14 @@ bound, so it knows whether anything was actually dropped. A scan that merely
 *reached* the bound has truncated nothing, and publishing it as truncated
 would be a false alarm in every report that carries the flag.
 
+That extra row is only reachable while the store's **own** listing limit is
+above the publication's bound — the store clamps every listing, so a bound AT
+the store's limit could never see the row past it. The bound is therefore
+derived from the store's limit (`MaxInboxLimit - 1`), not written beside it:
+a change to the store's limit cannot make the extra row unreachable again.
+And the flag is decided while that extra row is still in hand — a flag
+computed after the rows were cut could never be true.
+
 **Publication is deterministic** for identical input evidence: the records are
 a pure function of the evidence, and the only field that differs between two
 publications is `published_at` in the index, which is recorded metadata.
@@ -273,6 +281,13 @@ is a separate choice — so a verifier that fetched the review's bytes from the
 record's own repository would read from wherever a published record says to
 read, and would report a missing capture for a capture that is right there.
 
+There is **no fallback** to the record's repository. A record is data: it may
+have been fetched from anywhere, and its repository is a field in it. A
+verifier that fell back to that field would read from whatever repository a
+forged record named — with the reader's own credential. So a verifier that was
+not told where the evidence lives says that the check could not be made, and
+asks for nothing.
+
 **A published pointer is data, not a command.** The verifier fetches only safe
 relative paths inside the evidence repository, so a record that was fetched
 from anywhere cannot make the verifier read anything else.
@@ -398,7 +413,7 @@ The rows arrive newest first, so a publisher that kept the last one it saw
 would publish the OLDEST review — the opposite of what the contract needs. So
 the rule lives in the package, not in a caller: every candidate review for a
 task is compared, and only the newest is used, with the tie broken by the
-reviewer's id so the answer does not depend on the order the candidates
+accounts' own fields so the answer does not depend on the order the candidates
 arrived in.
 
 **Two accounts of ONE review are merged, not chosen between.** A review can be
@@ -410,13 +425,30 @@ competed, the claim won the tie, and the subject's record was published with
 NO verdict at all: which reads as "no review happened" and files finished work
 under "awaiting review" forever.
 
-**The merge respects the order too.** Where the two accounts DISAGREE, the
-LATER one wins — so a superseded verdict cannot come back through the merge.
-And every candidate is compared with the account the PREVIOUS candidates
-produced, not with the one the tree started with: comparing with the original
-would let a later candidate overwrite what an earlier one established, and the
-answer would depend on the order the candidates arrived in — which is the
-caller's accident, not a fact about the work.
+**The accounts are a SET, and the merge is a function of the set.** The order
+the accounts arrived in is the caller's accident, not a fact about the work —
+the candidates come from a ledger that was read in one order, and the tree's
+own correlation comes from a different walk. So the accounts are **grouped by
+the review they describe** (the reviewer's id and the moment), and each group
+is merged on its own: every field is taken from the account that carries it,
+and where two accounts of the same moment disagree, the one whose fields sort
+last wins. Nothing that only ONE account knows is lost, and nothing about the
+published review depends on the order the accounts arrived in.
+
+**The groups compete, and a SUPERSEDED group is dropped whole.** Where two
+groups disagree, the LATER one wins. And a group whose moment is earlier than
+the current one's describes the review as it WAS: its verdict is a decision
+the current account does not carry, and publishing it would file the work as
+blocked on the strength of a decision that has been superseded. So a
+superseded group contributes **nothing** — not even a field the current one
+happens to be missing. Before this the merge filled the gap from whichever
+account it held, so an older account's verdict came back through the gap, and
+the tie rule could not take it back because the gap was no longer empty.
+
+**An account with NO moment is not superseded.** "I do not know when this
+happened" is not "this happened before the newer account". So such an account
+still fills the gaps the current one leaves — and it is how a **reported**
+review, which names no reviewer and carries no moment, reaches the reader.
 
 **A candidate that names no reviewer is MERGED, not dropped.** A reported
 review — one that happened outside the substrate — names no reviewer, so it
@@ -469,8 +501,10 @@ a suite that does not notice is a suite that does not test the invariant.
 | the ledger's account of a review is lost | two accounts of ONE review are merged, not chosen between |
 | a finished review is filed as waiting for a review | a reviewer's own record is filed by the review, not by the subject's rules |
 | the merge publishes the OLDER verdict | a merge must not let a superseded verdict come back |
+| the accounts are folded in arrival order | the published review must not depend on the order the accounts arrived in |
 | an unestablished digest is published | a digest the publisher could NOT establish must not be published as true |
 | the verifier fetches from the record's repository | the review's bytes are fetched from the READER's repository, not the record's |
+| the verifier falls back to the record's repository | a verifier that was not told where the evidence lives must not read from the record's repository |
 | the artefacts are not checked | the index names the human artefacts with digests, and the check checks them |
 | a tampered record is filtered away | a filter must not hide a record whose bytes do not match its name |
 

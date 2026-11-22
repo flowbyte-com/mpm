@@ -108,6 +108,10 @@ type Index struct {
 	// misled, so the truncation is published rather than assumed away.
 	Truncated bool `json:"truncated,omitempty"`
 	// Scanned is how many assignments the publication was read from.
+	//
+	// It is the number of rows the scan contributed: when the
+	// publication was truncated, this is the bound, and the rows past
+	// it were dropped.
 	Scanned int `json:"scanned,omitempty"`
 	// ScanLimit is the bound the read was under.
 	ScanLimit int `json:"scan_limit,omitempty"`

@@ -29,8 +29,8 @@ func (s *Store) Inbox(q InboxQuery) ([]*Assignment, error) {
 	if limit <= 0 {
 		limit = defaultInboxLimit
 	}
-	if limit > maxInboxLimit {
-		limit = maxInboxLimit
+	if limit > MaxInboxLimit {
+		limit = MaxInboxLimit
 	}
 
 	var (

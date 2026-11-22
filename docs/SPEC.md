@@ -3228,7 +3228,7 @@ A record is named by the **digest of its own bytes**, so the same evidence alway
 
 The index also names the **human-readable artefacts** — every `records/<id>.md` and the queue summary — with their digests, so a reader can check the Markdown a person reads as exactly as they can check the record a machine reads. **`check` checks them too**: a digest nobody checks is a claim, and a tampered queue summary would otherwise be invisible to a reader who trusted it.
 
-A publication that holds only **part** of the work **says so**: the index carries `truncated`, `scanned` and `scan_limit`. A reader that took a partial queue for the whole one would be misled, and a silent truncation is worse than a visible one. The flag means what it says: the publication reads one row past its bound, so it knows whether anything was actually dropped — a scan that merely *reached* the bound has truncated nothing.
+A publication that holds only **part** of the work **says so**: the index carries `truncated`, `scanned` and `scan_limit`. A reader that took a partial queue for the whole one would be misled, and a silent truncation is worse than a visible one. The flag means what it says: the publication reads one row past its bound, so it knows whether anything was actually dropped — a scan that merely *reached* the bound has truncated nothing. The bound sits **below** the store's own listing limit, because a store clamps every listing and a bound at the clamp could never see the row past it; the flag is decided while that row is still in hand.
 
 Publication is **deterministic** for identical input evidence, apart from the publication timestamp, which is recorded as metadata in the index and never inside a record.
 
@@ -3278,7 +3278,7 @@ MPM · Check
 ⚠  evidence   flowbyte-com/mpm @ evidence
    snapshot   sha256:…
    published  2026-11-22T09:00:00Z
-   records    4 · 4 missing
+   records    4 published · 4 missing
 
 completed · 4
    ○  pr-262  implementer  completed
@@ -3290,7 +3290,7 @@ The mark beside `evidence` is the report's `verified` flag: **⚠ when the corpu
 
 It reports the **active** assignments, the work **awaiting independent review**, the work **awaiting CI**, the work **awaiting the operator**, the **blocked or ambiguous** assignments, the **recently completed** work, and the **stale or contradictory** evidence — and `--json` emits the same records in machine form.
 
-The report's `verified` flag covers the **whole published corpus**, not the filtered view: a reader who filtered to one project must not be told "verified" while another project's records are stale. The report says how many records the publication holds (`record_count`) and how many the filters left (`shown_count`), so a filtered view can never be mistaken for the whole thing.
+The report's `verified` flag covers the **whole published corpus**, not the filtered view: a reader who filtered to one project must not be told "verified" while another project's records are stale. The report says how many records the publication holds (`record_count`) and how many the filters left (`shown_count`), so a filtered view can never be mistaken for the whole thing. The states the report prints are the **shown** records' states, so the numbers on the line add up: the publication's count, the shown count, and the states of what is shown.
 
 **A filter narrows what a reader looks at; it may not hide what the reader needs to know.** A record whose bytes do not hash to the identifier the index gave it is always reported, whatever the filters say — a reader who filtered it away would never learn that the evidence was tampered with.
 
@@ -3310,7 +3310,7 @@ A published manifest is an **index of evidence**, not proof that its claims are 
 
 The decision checks are **falsifiable**: a verdict for a revision the pull request has moved past is **stale**, not verified; an approval to merge a pull request that is not merged is **failed**, not verified; and each check's detail says explicitly what was not established.
 
-The verifier looks for the review's bytes **in the repository the reader was told, on the branch the reader was told** — the evidence lives where the publication put it, and neither is the record's to name: a record names the repository the *work* is visible in, which is not necessarily where the evidence was published. And it fetches only **safe relative paths inside the evidence repository**. A published pointer is data, not a command.
+The verifier looks for the review's bytes **in the repository the reader was told, on the branch the reader was told** — the evidence lives where the publication put it, and neither is the record's to name: a record names the repository the *work* is visible in, which is not necessarily where the evidence was published. And it fetches only **safe relative paths inside the evidence repository**. A published pointer is data, not a command. There is **no fallback** to the record's own repository: a record is data too, so a verifier that was not told where the evidence lives reports that the check could not be made rather than reading from wherever the record points.
 
 Each check ends in one of five states: `verified`, `stale` (the record was true and the world has moved on), `failed` (GitHub says something else), `missing` (the thing could not be found) and `unverified` (GitHub could not be asked). **A network failure is never a successful verification**, and an unverified record is never presented as a verified one.
 

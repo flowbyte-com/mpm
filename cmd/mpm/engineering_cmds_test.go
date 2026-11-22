@@ -30,6 +30,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -520,6 +521,10 @@ func TestTheStorePublicationRefusesARefutedDigest(t *testing.T) {
 
 // TestTheStorePublicationSaysWhenItIsTruncated proves the truncation is
 // published rather than assumed away.
+//
+// A scan that merely REACHED the bound has dropped nothing, and saying
+// that it had would be a false alarm in every report that carries the
+// flag.
 func TestTheStorePublicationSaysWhenItIsTruncated(t *testing.T) {
 	clock := &storeTestClock{at: time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)}
 	store, _ := storeFixture(t, clock.Now)
@@ -537,6 +542,90 @@ func TestTheStorePublicationSaysWhenItIsTruncated(t *testing.T) {
 	if corpus.Truncated {
 		t.Errorf("the corpus says it was truncated after %d rows", corpus.Scanned)
 	}
+}
+
+// TestTheStorePublicationSaysWhenItDroppedSomething proves the
+// truncation flag can be TRUE — and that it is true exactly when
+// something was dropped.
+//
+// The corpus knows whether anything was actually dropped only if it can
+// see ONE ROW PAST its bound, and the store clamps every listing to its
+// own limit. So the bound has to sit BELOW that limit, and the extra
+// row has to be read.
+//
+// Before this the bound WAS the store's limit: the extra row was
+// silently unreachable, the flag could never be true, and a publication
+// that held half the queue said it held all of it.
+func TestTheStorePublicationSaysWhenItDroppedSomething(t *testing.T) {
+	clock := &storeTestClock{at: time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)}
+	store := storeWithAssignments(t, clock.Now, storeScanLimit+2)
+	gh := newStoreGitHub(t, "closed")
+	corpus, err := corpusFromStore(context.Background(), store, storeClient(gh))
+	if err != nil {
+		t.Fatalf("build the corpus: %v", err)
+	}
+	if !corpus.Truncated {
+		t.Errorf("the corpus says it dropped nothing, and the store holds more rows than the bound (%d)",
+			storeScanLimit)
+	}
+	if corpus.Scanned != storeScanLimit {
+		t.Errorf("the corpus says it read %d assignments, want %d", corpus.Scanned, storeScanLimit)
+	}
+	if corpus.ScanLimit != storeScanLimit {
+		t.Errorf("the corpus's scan limit is %d, want %d", corpus.ScanLimit, storeScanLimit)
+	}
+	// And the publication holds the bound's worth, and no more.
+	records, err := corpus.Records()
+	if err != nil {
+		t.Fatalf("the corpus's records: %v", err)
+	}
+	if len(records) != storeScanLimit {
+		t.Errorf("the corpus holds %d records, want %d", len(records), storeScanLimit)
+	}
+}
+
+// storeWithAssignments builds a store holding a number of assignments.
+//
+// The tree's ceiling is raised so that the store really holds the rows:
+// a test that asked for more than the store could hold would prove
+// nothing about the scan.
+func storeWithAssignments(t *testing.T, clock assignment.Clock, count int) *assignment.Store {
+	t.Helper()
+	dm := assignmentCLIFixture(t)
+	store := assignment.NewStoreWithClock(dm, clock)
+	root, created, err := store.CreateRoot(
+		assignment.NewLocalOperatorAuthority("operator"),
+		assignment.CreateRootParams{
+			ProjectID:           "cpj-cli",
+			Title:               "the root",
+			Objective:           "the objective",
+			Recipient:           "alpha",
+			IdempotencyKey:      "idem:pub:many:root",
+			PermittedOperations: []string{"read", "write"},
+			EligibleRecipients:  []string{"alpha"},
+			MaxDepth:            3,
+			MaxTasks:            int64(count) + 10,
+			MaxConcurrency:      2,
+			MaxResourceUnits:    int64(count) + 10,
+		})
+	if err != nil || !created {
+		t.Fatalf("create the root: %v (created=%v)", err, created)
+	}
+	for i := 0; i < count; i++ {
+		_, created, err := store.Delegate(assignment.DelegateParams{
+			ParentID:       root.ID,
+			Title:          "the work",
+			Objective:      "do the thing",
+			Recipient:      "alpha",
+			Role:           assignment.RoleImplementer,
+			IdempotencyKey: fmt.Sprintf("idem:pub:many:%d", i),
+			PRRef:          "https://github.com/owner/name/pull/262",
+		})
+		if err != nil || !created {
+			t.Fatalf("delegate %d: %v (created=%v)", i, err, created)
+		}
+	}
+	return store
 }
 
 // TestTheFixtureCorpusIsPublishedWithItsObservedFacts proves the FIRST

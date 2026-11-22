@@ -423,9 +423,19 @@ type InboxQuery struct {
 }
 
 // The default and maximum size of an inbox listing.
+//
+// MaxInboxLimit is EXPORTED, because a reader that has to know whether
+// it saw EVERYTHING has to know the bound it was read under: a listing
+// that stopped at the limit says nothing at all about what was past it.
+// The publisher of the engineering evidence needs exactly that — it
+// reads one row past its own bound so it can tell a full store from a
+// truncated one, and that extra row is only reachable while the store's
+// own limit is above it.
 const (
 	defaultInboxLimit = 50
-	maxInboxLimit     = 500
+	// MaxInboxLimit is the largest number of assignments one inbox
+	// listing returns. A larger Limit is clamped to it.
+	MaxInboxLimit = 500
 )
 
 // ── The operator authority ────────────────────────────────────────────────

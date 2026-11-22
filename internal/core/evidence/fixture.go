@@ -216,6 +216,9 @@ type Corpus struct {
 	// than a visible one.
 	Truncated bool
 	// Scanned is how many assignments the corpus was read from.
+	//
+	// It is the number of rows the scan contributed: when the scan was
+	// truncated, this is the bound, and the rows past it were dropped.
 	Scanned int
 	// ScanLimit is the bound the corpus was read under.
 	ScanLimit int

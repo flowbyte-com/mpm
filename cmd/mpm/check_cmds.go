@@ -154,14 +154,18 @@ func renderCheckReport(report *evidence.CheckReport) string {
 	fmt.Fprintf(&b, "%s  evidence   %s @ %s\n", status, report.Source.Repository, report.Source.Branch)
 	fmt.Fprintf(&b, "   snapshot   %s\n", report.Source.SnapshotID)
 	fmt.Fprintf(&b, "   published  %s\n", report.Source.PublishedAt)
-	// The corpus count, and the filtered count when the filters hid
-	// something: a reader must never mistake a filtered view for the
-	// whole publication.
+	// THE PUBLICATION AND THE VIEW.
+	//
+	// The publication holds RecordCount records, and the filters left
+	// ShownCount of them. The states below are the SHOWN ones, so the
+	// numbers on the line add up: a reader who filtered to one project
+	// sees the states of the records they are looking at, and the count
+	// of the whole publication beside it.
 	shown := ""
 	if report.ShownCount != report.RecordCount {
 		shown = fmt.Sprintf(" · showing %d", report.ShownCount)
 	}
-	fmt.Fprintf(&b, "   records    %d%s · %s\n",
+	fmt.Fprintf(&b, "   records    %d published%s · %s\n",
 		report.RecordCount, shown, verifiedSummary(report.Records))
 	if len(report.Renderings) > 0 {
 		// The index names the human artefacts with digests, and the

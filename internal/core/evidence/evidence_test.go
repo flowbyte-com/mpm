@@ -322,7 +322,7 @@ func TestADigestMismatchIsVisiblyRefused(t *testing.T) {
 	gh := newFakeGitHub()
 	gh.prs[262] = mergedPR(262, testHead)
 	gh.content["evidence/findings.txt"] = []byte("different bytes entirely")
-	v := &Verifier{GitHub: gh}
+	v := &Verifier{GitHub: gh, Repository: testRepo}
 	verification, err := v.Verify(context.Background(), record)
 	if err != nil {
 		t.Fatalf("verify: %v", err)

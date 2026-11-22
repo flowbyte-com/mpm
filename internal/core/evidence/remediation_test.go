@@ -618,7 +618,7 @@ func TestTheEvidenceIsLookedForOnTheBranchTheReaderWasTold(t *testing.T) {
 	gh := newFakeGitHub()
 	gh.prs[262] = mergedPR(262, testHead)
 	gh.content["reviews/findings.json"] = body
-	v := &Verifier{GitHub: gh, Branch: "evidence/v2"}
+	v := &Verifier{GitHub: gh, Branch: "evidence/v2", Repository: testRepo}
 	verification, err := v.Verify(context.Background(), record)
 	if err != nil {
 		t.Fatalf("verify: %v", err)

@@ -277,6 +277,49 @@ func TestEngineeringPublishRefusesWithoutAConfiguredTarget(t *testing.T) {
 	}
 }
 
+// TestTheCheckCountsNameTheSetTheyDescribe proves the numbers on the
+// report's line add up.
+//
+// The publication holds RecordCount records, the filters left
+// ShownCount of them, and the states are the SHOWN ones — so a reader
+// who filtered to one project sees the states of the records they are
+// looking at, and the count of the whole publication beside it.
+//
+// Before this the two populations shared one line and one separator, so
+// a reader could add the states up against the wrong count.
+func TestTheCheckCountsNameTheSetTheyDescribe(t *testing.T) {
+	record := &evidence.VerifiedRecord{
+		Record: &evidence.Record{
+			TaskID: "task-a", Role: "implementer",
+			Disposition: evidence.DispositionCompleted,
+		},
+		Verdict: evidence.CheckFailed,
+	}
+	report := &evidence.CheckReport{
+		Source:      evidence.Source{Repository: "owner/name", Branch: "evidence"},
+		RecordCount: 3,
+		ShownCount:  1,
+		Records:     []*evidence.VerifiedRecord{record},
+		Sections: []evidence.Section{{
+			Disposition: evidence.DispositionCompleted,
+			Records:     []*evidence.VerifiedRecord{record},
+		}},
+	}
+	out := renderCheckReport(report)
+	for _, want := range []string{"3 published", "showing 1", "1 failed"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not say %q:\n%s", want, out)
+		}
+	}
+	// The states are the SHOWN ones, so they add up to the shown count
+	// and not to the published one.
+	for _, unwanted := range []string{"2 failed", "3 failed"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("the report counts records the filters hid (%q):\n%s", unwanted, out)
+		}
+	}
+}
+
 // runCheckCLI runs `mpm check` and captures its output.
 //
 // The CLI's runner pipes stdout and stderr into ONE buffer, so the error

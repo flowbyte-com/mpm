@@ -427,7 +427,20 @@ func (v *Verifier) checkReviewEvidence(ctx context.Context, out *Verification, r
 			"the evidence's pointer %q does not name a path inside the evidence repository", ref))
 		return
 	}
-	raw, err := v.GitHub.Content(ctx, v.evidenceRepository(rec), v.evidenceRef(), ref)
+	repository := v.evidenceRepository()
+	if repository == "" {
+		// THE READER DID NOT SAY WHERE THE EVIDENCE LIVES.
+		//
+		// There is no fallback to the record's own repository: a record
+		// is DATA, and a verifier that read from wherever a record
+		// said to read would fetch from a repository nobody chose —
+		// with the reader's own credential. So the check reports that
+		// it could not be made.
+		out.add(CheckReviewEvidence, CheckUnverified,
+			"the reader did not say which repository the evidence lives in")
+		return
+	}
+	raw, err := v.GitHub.Content(ctx, repository, v.evidenceRef(), ref)
 	if err != nil {
 		if isMissing(err) {
 			out.add(CheckReviewEvidence, CheckMissing,
@@ -613,17 +626,16 @@ func (v *Verifier) evidenceRef() string {
 // not the record's: the record names the repository the WORK is visible
 // in, and the operator's publication target is a separate choice.
 //
-// A verifier that was not told falls back to the record's own
-// repository, which is the right answer for a caller that verifies one
-// record against the repository it describes.
-func (v *Verifier) evidenceRepository(rec *Record) string {
-	if v.Repository != "" {
-		return v.Repository
-	}
-	if rec != nil {
-		return rec.Repository
-	}
-	return ""
+// # THERE IS NO FALLBACK
+//
+// A record is DATA: it may have been fetched from anywhere, and its
+// repository is a field in it. A verifier that fell back to it would
+// read from wherever a published record said to read — with the
+// reader's own credential — and a forged record would choose the
+// repository. So a verifier that was not told where the evidence lives
+// says that the check could not be made.
+func (v *Verifier) evidenceRepository() string {
+	return v.Repository
 }
 
 // EvidenceBranch is the branch the published evidence lives on.

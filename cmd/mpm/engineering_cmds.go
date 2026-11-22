@@ -240,7 +240,19 @@ func openAssignmentStore() (*assignment.Store, error) {
 //
 // It is a BOUND, not a silent truncation: a publication that holds part
 // of the queue says so, in the index and in the report.
-const storeScanLimit = 500
+//
+// # IT IS ONE BELOW THE STORE'S OWN LIMIT
+//
+// The corpus knows whether anything was actually dropped only if it can
+// see ONE ROW PAST the bound — and the store clamps every listing to
+// its own limit, so a bound AT the store's limit can never see the row
+// past it. The bound is therefore derived from the store's limit, and a
+// change to that limit cannot make the extra row unreachable again.
+//
+// Before this the bound WAS the store's limit, and the extra row was
+// silently unreachable: the publication read 500 rows, dropped nothing,
+// and said it had dropped nothing — which it could not know.
+const storeScanLimit = assignment.MaxInboxLimit - 1
 
 // corpusFromStore builds a corpus from the assignment store.
 //
@@ -277,13 +289,18 @@ func corpusFromStore(ctx context.Context, store *assignment.Store,
 	if len(rows) == 0 {
 		return nil, fmt.Errorf("the assignment store holds no assignments")
 	}
-	// ONE ROW PAST THE BOUND.
+	// THE TRUNCATION IS DECIDED BEFORE THE ROWS ARE CUT.
 	//
-	// The corpus knows whether anything was actually dropped only if
-	// it can see one row more than the bound. A scan that merely
-	// REACHED the limit has not truncated anything, and publishing it
-	// as truncated would be a false alarm.
-	if len(rows) > storeScanLimit {
+	// The corpus knows whether anything was actually dropped only if it
+	// can see one row more than the bound. A scan that merely REACHED
+	// the limit has not truncated anything, and publishing it as
+	// truncated would be a false alarm.
+	//
+	// So the flag is decided while the extra row is still there. Before
+	// this the rows were cut first and the flag was computed afterwards,
+	// so it could never be true.
+	truncated := len(rows) > storeScanLimit
+	if truncated {
 		rows = rows[:storeScanLimit]
 	}
 	trees := map[string]evidence.Tree{}
@@ -339,11 +356,8 @@ func corpusFromStore(ctx context.Context, store *assignment.Store,
 	// anything was actually dropped: a scan that merely REACHED the
 	// limit has not truncated anything, and saying that it had would
 	// be a false alarm.
-	corpus.Truncated = len(rows) > storeScanLimit
+	corpus.Truncated = truncated
 	corpus.Scanned = len(rows)
-	if corpus.Truncated {
-		corpus.Scanned = storeScanLimit
-	}
 	corpus.ScanLimit = storeScanLimit
 	return corpus, nil
 }

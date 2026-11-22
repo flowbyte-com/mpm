@@ -184,12 +184,49 @@ func Build(tree Tree, facts map[string]Facts) ([]*Record, error) {
 // as "no review happened" and files finished work under
 // "awaiting review" forever.
 //
-// # THE MERGE RESPECTS THE ORDER TOO
+// # THE ACCOUNTS ARE A SET, AND THE ORDER DECIDES NOTHING
 //
-// A merge is not a licence to publish an older verdict. Where the two
-// accounts DISAGREE, the LATER one wins — so a superseded verdict
-// cannot come back through the merge, and the order the candidates
-// arrived in decides nothing.
+// The published review is a function of the ACCOUNTS, not of the order
+// they arrived in: the order is the caller's accident, not a fact about
+// the work.
+//
+// So the accounts are GROUPED by the review they describe — the
+// reviewer's id and the moment — and each group is merged on its own.
+// Two accounts of one review are two halves of it, and the merge keeps
+// what EITHER of them knows.
+//
+// A merge that folded the accounts in ARRIVAL order could not deliver
+// that: the first account to fill a gap took the gap, and the account
+// that should have filled it later could not — so the same two
+// accounts, in the other order, published a different verdict.
+//
+// # THE GROUPS COMPETE, AND THE LATER ONE WINS
+//
+// Two DIFFERENT reviews of one subject compete: the head advanced and
+// the work was re-reviewed. The LATER review says what the subject's
+// state is now, and publishing the earlier one would publish a
+// SUPERSEDED verdict as the current one.
+//
+// # A SUPERSEDED GROUP IS DROPPED WHOLE
+//
+// A group whose moment is EARLIER than the current group's describes the
+// review as it WAS. Its verdict is a decision the current account does
+// not carry, and publishing it would file the work as blocked on the
+// strength of a decision that has been superseded.
+//
+// So a superseded group contributes NOTHING — not even a field the
+// current one happens to be missing. That is the hole the first merge
+// had: it filled the gap from whichever account it held, so an older
+// account's verdict came back through the gap, and the tie rule could
+// not take it back because the gap was no longer empty.
+//
+// # AN ACCOUNT WITH NO MOMENT IS NOT SUPERSEDED
+//
+// "I do not know when this happened" is not "this happened before the
+// newer account". So a group with no moment is never superseded, and —
+// when it is about the SAME review — it still fills the gaps the
+// current one leaves. It is how a REPORTED review, which names no
+// reviewer and carries no moment, reaches the reader.
 //
 // The rule lives HERE, and not in one caller, because it is part of the
 // contract: a caller that built its own map could get it wrong, and the
@@ -201,28 +238,18 @@ func BuildWithReviews(tree Tree, facts map[string]Facts,
 	}
 	reviews := correlateReviews(tree)
 	for taskID, candidates := range extra {
-		current, ok := reviews[taskID]
-		for _, candidate := range candidates {
-			switch {
-			case !ok:
-				current = candidate
-				ok = true
-			case sameReview(current, candidate):
-				current = mergeReview(current, candidate)
-			case newerReview(candidate, current):
-				current = candidate
-			}
-			// THE ACCOUNT IS ACCUMULATED.
-			//
-			// Every candidate is compared with the account the PREVIOUS
-			// candidates produced, not with the one the tree started
-			// with. Comparing with the original would let a later
-			// candidate overwrite what an earlier one established — and
-			// the answer would depend on the order the candidates
-			// arrived in, which is the caller's accident and not a fact
-			// about the work.
-			reviews[taskID] = current
+		// THE TREE'S OWN ACCOUNT IS ONE OF THE ACCOUNTS.
+		//
+		// The correlation reads the reviewer's CLAIM and the candidates
+		// read the LEDGER. They are accounts of the same review, and
+		// they are resolved together — so the resolution cannot depend
+		// on which of them the caller happened to hold first.
+		accounts := make([]ReviewInfo, 0, len(candidates)+1)
+		accounts = append(accounts, candidates...)
+		if own, ok := reviews[taskID]; ok {
+			accounts = append(accounts, own)
 		}
+		reviews[taskID] = resolveReview(accounts)
 	}
 	claims := append([]Claims(nil), tree.Tasks...)
 	sortClaims(claims)
@@ -238,19 +265,103 @@ func BuildWithReviews(tree Tree, facts map[string]Facts,
 	return out, nil
 }
 
+// resolveReview resolves the accounts of one review into the account
+// that is published.
+//
+// It is a function of the SET of accounts: the same accounts in any
+// order resolve to the same published review.
+func resolveReview(accounts []ReviewInfo) ReviewInfo {
+	if len(accounts) == 0 {
+		return ReviewInfo{}
+	}
+	// THE ACCOUNTS, GROUPED BY THE REVIEW THEY DESCRIBE.
+	groups := map[string][]ReviewInfo{}
+	keys := make([]string, 0, len(accounts))
+	for _, a := range accounts {
+		key := reviewGroupKey(a)
+		if _, seen := groups[key]; !seen {
+			keys = append(keys, key)
+		}
+		groups[key] = append(groups[key], a)
+	}
+	// The groups are visited in a FIXED order, so the resolution does
+	// not depend on the order the accounts arrived in.
+	sort.Strings(keys)
+
+	// THE GROUPS, EACH MERGED ON ITS OWN.
+	resolved := make([]ReviewInfo, 0, len(keys))
+	for _, key := range keys {
+		resolved = append(resolved, unionReview(groups[key]))
+	}
+
+	// THE CURRENT REVIEW. The latest moment wins, and a tie is broken by
+	// the accounts' own fields.
+	sort.SliceStable(resolved, func(i, j int) bool {
+		return newerReview(resolved[i], resolved[j])
+	})
+	current := resolved[0]
+	out := current
+	for _, other := range resolved[1:] {
+		if supersededReview(other, current) {
+			// A SUPERSEDED GROUP IS DROPPED WHOLE.
+			//
+			// It describes the review as it was, and folding it in
+			// would publish a decision the current account does not
+			// carry.
+			continue
+		}
+		if !fillsTheGaps(other, current) {
+			// A DIFFERENT REVIEW. It competed, and it lost.
+			continue
+		}
+		out = mergeReview(out, other)
+	}
+	return out
+}
+
+// reviewGroupKey is the identity of the review an account describes.
+//
+// It is the reviewer's id and the moment: two accounts with the same
+// key are two halves of ONE review, and two accounts with different
+// keys are two DIFFERENT reviews that compete.
+func reviewGroupKey(a ReviewInfo) string {
+	return a.ReviewerID + "\x00" + strconv.FormatInt(a.UpdatedAt, 10)
+}
+
+// unionReview merges the accounts of ONE review into one account.
+//
+// It is a pure union: every field is taken from the account that
+// carries it, and where two accounts carry different values for the
+// same field, the one that sorts LAST by the accounts' own fields wins.
+//
+// So the union does not depend on the order the accounts arrived in —
+// and nothing that only ONE account knows is lost.
+func unionReview(accounts []ReviewInfo) ReviewInfo {
+	ordered := make([]ReviewInfo, len(accounts))
+	copy(ordered, accounts)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return reviewKey(ordered[i]) > reviewKey(ordered[j])
+	})
+	out := ReviewInfo{}
+	for _, a := range ordered {
+		out = mergeReview(out, a)
+	}
+	return out
+}
+
 // newerReview says whether a review is more recent than another.
 //
-// The comparison is on the update time, and the tie is broken by the
-// reviewer's id — so the answer does not depend on the order the
-// candidates were found in.
+// The comparison is on the update time, and an account whose time is
+// UNKNOWN never wins a comparison it cannot make: "I do not know when
+// this happened" is not "this happened later".
 //
-// An account whose time is UNKNOWN never wins a comparison it cannot
-// make: "I do not know when this happened" is not "this happened
-// later". So an unknown time loses to a known one.
+// A tie is broken by the accounts' OWN fields, in a fixed order, so two
+// accounts of the same moment are resolved the same way whatever order
+// they arrived in.
 func newerReview(a, b ReviewInfo) bool {
 	switch {
 	case a.UpdatedAt == 0 && b.UpdatedAt == 0:
-		return a.ReviewerID > b.ReviewerID
+		return reviewKey(a) > reviewKey(b)
 	case a.UpdatedAt == 0:
 		return false
 	case b.UpdatedAt == 0:
@@ -258,68 +369,113 @@ func newerReview(a, b ReviewInfo) bool {
 	case a.UpdatedAt != b.UpdatedAt:
 		return a.UpdatedAt > b.UpdatedAt
 	}
-	return a.ReviewerID > b.ReviewerID
+	return reviewKey(a) > reviewKey(b)
 }
 
-// sameReview says whether two accounts describe the SAME review.
+// reviewKey is an account's own fields, in a fixed order.
 //
-// Two accounts of one review name the same reviewer. Two DIFFERENT
-// reviews of one subject name two reviewers, and they compete.
+// It is the tie-break: two accounts of the same moment that disagree
+// are resolved by it. It is NOT the order the accounts arrived in — it
+// is a property of the accounts — so the published review never depends
+// on the caller's accident.
 //
-// An account that names NO reviewer is a REPORTED review — one that
+// The rule is arbitrary but FIXED, and that is what matters: the
+// contract says the published review is a function of the accounts, not
+// of the order the caller found them in.
+func reviewKey(a ReviewInfo) string {
+	return strings.Join([]string{
+		a.ReviewerID,
+		a.ReviewedSHA,
+		a.FindingsSHA256,
+		a.CaptureStatus,
+		a.EvidenceRef,
+		strconv.FormatBool(a.LocallyReported),
+		strconv.FormatBool(a.Exists),
+		a.Verdict,
+	}, "\x00")
+}
+
+// supersededReview says whether an account describes the review as it
+// WAS.
+//
+// An account is superseded when the current account knows a LATER
+// moment and this one knows an EARLIER moment. An account with no
+// moment is never superseded: nobody can say it happened before.
+func supersededReview(account, current ReviewInfo) bool {
+	if account.UpdatedAt == 0 || current.UpdatedAt == 0 {
+		return false
+	}
+	return account.UpdatedAt < current.UpdatedAt
+}
+
+// fillsTheGaps says whether an account may fill the gaps of the
+// published one.
+//
+// An account that names the SAME reviewer is an account of the same
+// review — the claim and the ledger's account of it — so it fills what
+// the published one does not carry.
+//
+// An account that names NO reviewer is a REPORTED review: one that
 // happened outside the substrate, and that the publisher was told
-// about. It cannot be told apart from the account of the same
-// review, so it is MERGED rather than chosen between: the merge keeps
-// what either of them knows, and a dropped candidate is a verdict that
-// never reaches the reader.
-func sameReview(a, b ReviewInfo) bool {
-	if a.ReviewerID == "" || b.ReviewerID == "" {
+// about. It cannot be told apart from the account of the same review,
+// so it is merged rather than chosen between — because a dropped
+// candidate is a verdict that never reaches the reader.
+//
+// An account that names a DIFFERENT reviewer is a different review: it
+// competed for the subject, and it lost.
+func fillsTheGaps(other, current ReviewInfo) bool {
+	if other.ReviewerID == "" {
 		return true
 	}
-	return a.ReviewerID == b.ReviewerID
+	return other.ReviewerID == current.ReviewerID
 }
 
-// mergeReview folds two accounts of the SAME review into one.
+// mergeReview folds an account into the one that is published.
 //
-// They are two halves of one review: the tree's correlation reads the
-// reviewer's CLAIM and the corpus's candidate reads the LEDGER. The
-// merge keeps what EITHER of them knows, and where they DISAGREE the
-// LATER account wins — so a superseded verdict cannot come back
-// through the merge, and the order the accounts arrived in decides
-// nothing.
+// It only FILLS GAPS: where the published account already says
+// something, the account folded in does not overrule it.
 //
-// The verdict and its provenance travel TOGETHER: a verdict reported
-// from outside the substrate is published as one, and a verdict the
-// substrate recorded is published as one. Merging them apart would let
-// a record claim a reported verdict as a recorded one.
+// # WHY THE FOLDED ACCOUNT DOES NOT OVERRULE
+//
+// The published account is the CURRENT one — the latest moment — and a
+// disagreement between the current account and another is a
+// disagreement between the review as it is and the review as it was.
+// The current one wins.
+//
+// # WHY A SUPERSEDED ACCOUNT MAY NOT EVEN FILL A GAP
+//
+// A superseded account is dropped whole, before it reaches this
+// function. Before that rule existed, the merge filled the gaps from
+// whichever account it held — so an older account's verdict came back
+// through a gap the current account happened to have, and the tie rule
+// could not take it back because the gap was no longer empty.
+//
+// # THE VERDICT AND ITS PROVENANCE TRAVEL TOGETHER
+//
+// A verdict reported from outside the substrate is published as one, and
+// a verdict the substrate recorded is published as one. Merging them
+// apart would let a record claim a reported verdict as a recorded one.
 func mergeReview(base, other ReviewInfo) ReviewInfo {
 	out := base
-	// The later account wins a disagreement. Where neither is later,
-	// they are the same moment, and the one that CARRIES the verdict is
-	// the one the record exists for.
-	otherWins := other.UpdatedAt > base.UpdatedAt
-	if other.UpdatedAt == base.UpdatedAt && base.Verdict == "" && other.Verdict != "" {
-		otherWins = true
-	}
 	if other.Exists {
 		out.Exists = true
 	}
-	if other.ReviewerID != "" && (base.ReviewerID == "" || otherWins) {
+	if out.ReviewerID == "" {
 		out.ReviewerID = other.ReviewerID
 	}
-	if other.ReviewedSHA != "" && (base.ReviewedSHA == "" || otherWins) {
+	if out.ReviewedSHA == "" {
 		out.ReviewedSHA = other.ReviewedSHA
 	}
-	if other.FindingsSHA256 != "" && (base.FindingsSHA256 == "" || otherWins) {
+	if out.FindingsSHA256 == "" {
 		out.FindingsSHA256 = other.FindingsSHA256
 	}
-	if other.CaptureStatus != "" && (base.CaptureStatus == "" || otherWins) {
+	if out.CaptureStatus == "" {
 		out.CaptureStatus = other.CaptureStatus
 	}
-	if other.EvidenceRef != "" && (base.EvidenceRef == "" || otherWins) {
+	if out.EvidenceRef == "" {
 		out.EvidenceRef = other.EvidenceRef
 	}
-	if other.Verdict != "" && (base.Verdict == "" || otherWins) {
+	if out.Verdict == "" && other.Verdict != "" {
 		out.Verdict = other.Verdict
 		out.LocallyReported = other.LocallyReported
 	}
