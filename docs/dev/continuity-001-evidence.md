@@ -118,9 +118,12 @@ list: an index that names nothing would otherwise verify with nothing checked.
 request, disposition and title must agree with the record it names — a reader
 who does not run the check reads the index, so an entry that says another task
 is a pointer that lies about the bytes it points at. The `snapshot_id` is
-recomputed from the records, the repository and branch must be the ones the
-reader read, and an index that lists one record or one artefact twice is
-refused.
+recomputed from the records, the index must NAME its repository and branch and
+they must be the ones the reader read, and an index that lists one record or
+one artefact twice, or two records for one assignment, is refused. The layout
+is exhaustive: a rendering is the queue summary or a listed record's page, and
+an index that names an extra page is refused — a digest is not a rendering, and
+a page no record renders is a page no check can establish.
 
 **A summary that disagrees with the index's metadata is named as a
 disagreement, not as a forgery.** The summary prints the snapshot and the
@@ -597,7 +600,7 @@ contract is the one failure mode the whole design exists to prevent.
 
 ## 10. The negative controls
 
-Twenty-nine controls remove an invariant from the implementation and require the
+Thirty-two controls remove an invariant from the implementation and require the
 acceptance suite to **fail**. A control that removes nothing measures nothing;
 a suite that does not notice is a suite that does not test the invariant.
 
@@ -631,6 +634,9 @@ a suite that does not notice is a suite that does not test the invariant.
 | the artefact digest is not checked | the digest the index published for an artefact is its bytes' digest |
 | the index entry is not checked | the index entry says what the record it names says |
 | the queue is filed by the record's claim | a record is filed where its own fields put it |
+| an artefact outside the layout is accepted | every artefact the index names is one the published layout defines |
+| two records for one assignment are accepted | one assignment has one record |
+| a broken artefact does not unverify the corpus | a corpus with an artefact that is not its rendering is not verified |
 | the snapshot is not checked | the index's snapshot id is the digest of the records it names |
 
 They run **in Go**, inside the package's own test, because the package is

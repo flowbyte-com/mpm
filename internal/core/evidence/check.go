@@ -104,9 +104,15 @@ type RenderingVerification struct {
 	Path string `json:"path"`
 	// SHA256 is the digest the index gave it.
 	SHA256 string `json:"sha256"`
-	// OK says whether the artefact's bytes hash to that digest.
+	// OK says the artefact is VERIFIED: its bytes hash to the digest
+	// the index published AND they are the rendering of the record (or
+	// the queue summary of the records) the check verified.
+	//
+	// It is false when either part does not hold, and false when the
+	// expectation could not be computed — a digest alone is not a
+	// verification.
 	OK bool `json:"ok"`
-	// Detail says what could not be checked.
+	// Detail says what did not hold, or what could not be established.
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -153,7 +159,9 @@ type CheckReport struct {
 	ShownCount int `json:"shown_count"`
 	// Sections are the queue's sections, in report order.
 	Sections []Section `json:"sections"`
-	// Records are every record, in report order.
+	// Records are the records the report SHOWS, in report order — the
+	// filtered view plus the records a filter may not hide. The
+	// corpus's count is RecordCount.
 	Records []*VerifiedRecord `json:"records"`
 	// Renderings are the human-readable artefacts the publication must
 	// hold, and whether each is the one the index and the records name.
@@ -258,9 +266,10 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 					Title: entry.Title, PRRef: entry.PRRef,
 					Disposition: entry.Disposition,
 				},
-				Verification:   verification,
-				Verdict:        verification.Verdict(),
-				DigestVerified: digestOK,
+				Verification:     verification,
+				Verdict:          verification.Verdict(),
+				DigestVerified:   digestOK,
+				FiledDisposition: DispositionAmbiguous,
 			})
 			clean = false
 			continue
@@ -274,6 +283,11 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 				Verification:   verification,
 				Verdict:        verification.Verdict(),
 				DigestVerified: false,
+				// THE BYTES ARE NOT THE RECORD THE INDEX NAMED, so
+				// where the task sits cannot be established from
+				// them. The queue files it as ambiguous, not where
+				// the tampered bytes claim.
+				FiledDisposition: DispositionAmbiguous,
 			})
 			clean = false
 			continue
@@ -346,11 +360,16 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	// A reader reaches the index by a repository and a branch. An index
 	// that names another source is an index that was moved, and the
 	// publication a reader is looking at is not the one it describes.
-	if index.Repository != "" && !strings.EqualFold(index.Repository, repository) {
+	switch {
+	case index.Repository == "":
+		report.IndexDetail = "the index names no repository"
+	case !strings.EqualFold(index.Repository, repository):
 		report.IndexDetail = fmt.Sprintf(
 			"the index says the evidence lives in %s, and the reader read it from %s",
 			index.Repository, repository)
-	} else if index.Branch != "" && index.Branch != branch {
+	case index.Branch == "":
+		report.IndexDetail = "the index names no branch"
+	case index.Branch != branch:
 		report.IndexDetail = fmt.Sprintf(
 			"the index says the evidence lives on the branch %s, and the reader read it from %s",
 			index.Branch, branch)
@@ -570,39 +589,23 @@ func verifyRenderings(ctx context.Context, gh GitHub, repository, branch string,
 		verification.OK = true
 		out = append(out, verification)
 	}
-	// AN EXTRA ARTEFACT the expected set does not know about. The index
-	// still gives it a digest, so the digest is checked; there is no
-	// record to re-render it from.
+	// AN ARTEFACT THE EXPECTED SET DOES NOT KNOW ABOUT.
+	//
+	// ParseIndex refuses a path the layout does not define, so what is
+	// left is the rendering of a record the check could not establish —
+	// its bytes were not the record the index named, or it could not be
+	// read. There is no verified record to re-render it from, and a
+	// digest alone is not a verification: the artefact is NOT verified,
+	// and the detail says why.
 	for _, r := range index.Renderings {
 		if seen[r.Path] {
 			continue
 		}
-		verification := RenderingVerification{Path: r.Path, SHA256: r.SHA256}
-		if r.Path == "" || r.SHA256 == "" {
-			verification.Detail = "the index named an artefact with no path or no digest"
-			out = append(out, verification)
-			continue
-		}
-		if !safeEvidencePath(r.Path) {
-			verification.Detail = "the index names a path outside the evidence repository"
-			out = append(out, verification)
-			continue
-		}
-		raw, err := gh.Content(ctx, repository, branch, r.Path)
-		if err != nil {
-			verification.Detail = fmt.Sprintf("the artefact could not be read: %v", err)
-			out = append(out, verification)
-			continue
-		}
-		got := DigestBytes(raw)
-		if !SameDigest(got, r.SHA256) {
-			verification.Detail = fmt.Sprintf("the artefact hashes to %s and the index says %s",
-				got, r.SHA256)
-			out = append(out, verification)
-			continue
-		}
-		verification.OK = true
-		out = append(out, verification)
+		out = append(out, RenderingVerification{
+			Path:   r.Path,
+			SHA256: r.SHA256,
+			Detail: "the record this artefact renders is not one the check could establish, so the artefact is not verified",
+		})
 	}
 	return out
 }
@@ -638,7 +641,12 @@ func filterRecords(records []*VerifiedRecord, filters Filters) []*VerifiedRecord
 		if filters.Role != "" && r.Role != filters.Role {
 			continue
 		}
-		if filters.Disposition != "" && filedDisposition(r) != filters.Disposition {
+		// THE FILTER SELECTS BY THE CLAIM. A record whose claim is
+		// NOT the derivation is failed, and a failed record is one the
+		// filter may not hide, so it is above this line already — the
+		// section it is filed in (the derived one) is the report's
+		// answer to "where does it sit".
+		if filters.Disposition != "" && r.Disposition != filters.Disposition {
 			continue
 		}
 		out = append(out, r)

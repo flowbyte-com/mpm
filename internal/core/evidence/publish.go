@@ -75,6 +75,13 @@ func LoadTarget(path string) (*Target, error) {
 	if err := dec.Decode(&t); err != nil {
 		return nil, fmt.Errorf("evidence: the publication configuration is not valid: %w", err)
 	}
+	// THE CONFIGURATION'S WHITESPACE IS NOT PART OF THE TARGET.
+	//
+	// A repository stored untrimmed would make the publisher write an
+	// index naming " owner/name", and a reader at "owner/name" would be
+	// told the index contradicts its source.
+	t.Repository = strings.TrimSpace(t.Repository)
+	t.Branch = strings.TrimSpace(t.Branch)
 	if _, _, err := ParseRepository(t.Repository); err != nil {
 		return nil, fmt.Errorf("evidence: the publication configuration: %w", err)
 	}

@@ -297,7 +297,8 @@ func ParseIndex(raw []byte) (*Index, error) {
 		return nil, fmt.Errorf("evidence: the index claims %d records and lists %d",
 			idx.RecordCount, len(idx.Records))
 	}
-	seen := make(map[string]bool, len(idx.Records))
+	ids := make(map[string]bool, len(idx.Records))
+	assignments := make(map[string]bool, len(idx.Records))
 	for _, r := range idx.Records {
 		// THE IDENTIFIER IS THE RECORD'S FILE NAME.
 		//
@@ -310,21 +311,62 @@ func ParseIndex(raw []byte) (*Index, error) {
 		}
 		// AND IT IS LISTED ONCE. Two entries with one identifier are
 		// one record counted twice, and the count is published.
-		if seen[r.ID] {
+		if ids[r.ID] {
 			return nil, fmt.Errorf("evidence: the index lists the record %s twice", r.ID)
 		}
-		seen[r.ID] = true
+		ids[r.ID] = true
+		// ONE ASSIGNMENT HAS ONE RECORD. Two records for the same
+		// root and task are not two facts about it, and a reader that
+		// believed them would see one task twice — the publisher
+		// refuses exactly this corpus.
+		key := r.RootID + "\x00" + r.TaskID
+		if assignments[key] {
+			return nil, fmt.Errorf(
+				"evidence: the index lists two records for the assignment %s/%s; a task has one record",
+				r.RootID, r.TaskID)
+		}
+		assignments[key] = true
 	}
+	paths := make(map[string]bool, len(idx.Renderings))
 	for _, r := range idx.Renderings {
 		if r.Path == "" || r.SHA256 == "" {
 			return nil, fmt.Errorf("evidence: the index names a rendering with no path or no digest")
 		}
-		if seen[r.Path] {
+		if paths[r.Path] {
 			return nil, fmt.Errorf("evidence: the index names the artefact %s twice", r.Path)
 		}
-		seen[r.Path] = true
+		paths[r.Path] = true
+		// EVERY ARTEFACT IS ONE THE LAYOUT DEFINES.
+		//
+		// A digest is not a rendering: an index could otherwise
+		// publish an "approved by the operator" page beside a record
+		// that carries no approval, and a check that verified it on its
+		// digest alone would call the corpus verified.
+		if !validRenderingPath(r.Path, ids) {
+			return nil, fmt.Errorf(
+				"evidence: the index names the artefact %q, which this format does not define", r.Path)
+		}
 	}
 	return &idx, nil
+}
+
+// validRenderingPath says whether a path is one the published layout
+// defines: the queue summary, or the human rendering of a record the
+// index names.
+//
+// The set is exhaustive on purpose. An artefact outside it is not the
+// rendering of any record, so no re-render can establish it, and a
+// digest alone is not a verification.
+func validRenderingPath(path string, ids map[string]bool) bool {
+	if path == QueueSummaryPath {
+		return true
+	}
+	prefix := RecordsDirectory + "/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, ".md") {
+		return false
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), ".md")
+	return isRecordID(id) && ids[id]
 }
 
 // isRecordID reports whether a value is a record identifier: the
@@ -375,7 +417,8 @@ func RenderRecordMarkdown(r *Record) string {
 			fmt.Fprintf(&b, " · status `%s`", r.ReviewEvidence.Status)
 		}
 		b.WriteString("\n")
-		if r.ReviewEvidence.Ref == Unknown && r.ReviewEvidence.Status == CaptureVerified {
+		if r.ReviewEvidence.Ref == Unknown && r.ReviewEvidence.Status == CaptureVerified &&
+			r.ReviewEvidence.Known() {
 			// THE HUMAN READER IS TOLD WHAT THE PUBLISHER
 			// ESTABLISHED, because the pointer alone cannot tell them —
 			// and only when the status says the digest was CHECKED. A
