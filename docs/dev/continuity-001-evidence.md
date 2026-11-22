@@ -111,15 +111,16 @@ published, and then renders the expected document and compares the bytes.
 Hashing an artefact only against the index binds it to the mutable pointer, and
 a forger who rewrites the artefact and its index digest would otherwise be
 verified; re-rendering without the digest check would let the index publish a
-digest nobody ever checked. The required set is the RECORDS', not the index's
-list: an index that names nothing would otherwise verify with nothing checked.
+digest nobody ever checked. The required set is the index's RECORD list, not
+its RENDERING list, plus the queue summary: an index that names no artefacts
+would otherwise verify with nothing checked, and an index that names a record
+must name its page.
 
 Where the rendering **cannot** be computed, the artefact is still REQUIRED and
 its published digest is checked, but it is **not verified**: a record page for
 a record the check could not establish says so, and so does the summary when
-the snapshot is not the records' digest. The required set is the index's
-RECORD list, not its RENDERING list. There is nothing to re-render the page
-from, and the digest alone is not a rendering. A record the check could not
+the snapshot is not the records' digest. There is nothing to re-render the
+page from, and the digest alone is not a rendering. A record the check could not
 establish is one whose bytes are not the ones the index names, or one whose
 bytes are not a record at all. A page the index does not name at all is
 reported as missing.
@@ -128,9 +129,12 @@ reported as missing.
 request, disposition and title must agree with the record it names — a reader
 who does not run the check reads the index, so an entry that says another task
 is a pointer that lies about the bytes it points at. The `snapshot_id` is
-recomputed from the records, the index must NAME its repository and branch and
-they must be the ones the reader read, and an index that lists one record or
-one artefact twice, or two records for one assignment, is refused. The layout
+recomputed from the records — and **not** recomputed at all when a record could
+not be established, because a subset's digest is not the whole corpus's
+identifier; the report says the snapshot could not be checked. The index must
+NAME its repository and branch and they must be the ones the reader read, and
+an index that lists one record or one artefact twice, or two records for one
+assignment, is refused. The layout
 is exhaustive: a rendering is the queue summary or a listed record's page, and
 an index that names an extra page is refused — a digest is not a rendering, and
 a page no record renders is a page no check can establish.
@@ -610,7 +614,7 @@ contract is the one failure mode the whole design exists to prevent.
 
 ## 10. The negative controls
 
-Thirty-three controls remove an invariant from the implementation and require the
+Thirty-four controls remove an invariant from the implementation and require the
 acceptance suite to **fail**. A control that removes nothing measures nothing;
 a suite that does not notice is a suite that does not test the invariant.
 
@@ -648,6 +652,7 @@ a suite that does not notice is a suite that does not test the invariant.
 | two records for one assignment are accepted | one assignment has one record |
 | a page for an unestablished record is verified | an artefact whose record the check could not establish is not verified |
 | a broken artefact does not unverify the corpus | a corpus with an artefact that is not its rendering is not verified |
+| the snapshot is checked against the established subset | the snapshot id is not verified over a subset of the records it names |
 | the snapshot is not checked | the index's snapshot id is the digest of the records it names |
 
 They run **in Go**, inside the package's own test, because the package is

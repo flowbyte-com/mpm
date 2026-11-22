@@ -333,6 +333,79 @@ func TestAPageTheIndexOmitsIsReported(t *testing.T) {
 	}
 }
 
+// ── 5d: the snapshot is not the established subset's digest ─────────────
+
+// TestASnapshotOfTheEstablishedSubsetIsNotVerified proves the snapshot is
+// not recomputed over a subset.
+//
+// An index can name a snapshot that is the digest of the records the
+// check COULD establish while another listed record is not the one the
+// index names. Recomputing over the subset would call that verified; the
+// subset's digest is not the whole corpus's identifier.
+func TestASnapshotOfTheEstablishedSubsetIsNotVerified(t *testing.T) {
+	tree := Tree{RootID: "root-1"}
+	a := claimsFor("task-a")
+	b := claimsFor("task-b")
+	b.PRRef = "https://github.com/owner/name/pull/263"
+	tree.Tasks = append(tree.Tasks, a, b)
+	records, err := Build(tree, map[string]Facts{
+		"task-a": {GitHub: mergedPR(262, testHead), CI: []CIRun{greenRun(1, testHead)}},
+		"task-b": {GitHub: mergedPR(263, testHead), CI: []CIRun{greenRun(2, testHead)}},
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	var recA, recB *Record
+	for _, r := range records {
+		switch r.TaskID {
+		case "task-a":
+			recA = r
+		case "task-b":
+			recB = r
+		}
+	}
+	if recA == nil || recB == nil {
+		t.Fatalf("the two records are not both present")
+	}
+	plan, err := NewPlan(testRepo, EvidenceBranch, records, timeFixture())
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	gh := servedPlan(t, plan)
+	gh.prs[262] = mergedPR(262, testHead)
+	gh.prs[263] = mergedPR(263, testHead)
+
+	// ONE RECORD IS NOT THE ONE THE INDEX NAMES, and the index's
+	// snapshot is the digest of the ESTABLISHED SUBSET.
+	idB, err := RecordID(recB)
+	if err != nil {
+		t.Fatalf("the record's id: %v", err)
+	}
+	gh.content[RecordsDirectory+"/"+idB+".json"] = []byte(`{"task_id":"not-a-record"}`)
+	subset, err := SnapshotID([]*Record{recA})
+	if err != nil {
+		t.Fatalf("the subset's snapshot: %v", err)
+	}
+	index := parsePlanIndex(t, plan)
+	index.SnapshotID = subset
+	writePlanIndex(t, gh, index)
+
+	report, err := RunCheck(context.Background(), gh, testRepo, EvidenceBranch, Filters{})
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if report.SnapshotVerified {
+		t.Error("the check verified the snapshot against the established subset")
+	}
+	if !strings.Contains(report.SnapshotDetail, "could not be established") {
+		t.Errorf("the report's snapshot detail is %q, want it to say the snapshot could not be checked",
+			report.SnapshotDetail)
+	}
+	if report.Verified {
+		t.Error("the corpus is verified although one record is not the one the index names")
+	}
+}
+
 // ── 6: an index must name its source, and it must be the source read ─────
 
 // TestTheIndexSourceMustMatchTheReader proves every clause of the source

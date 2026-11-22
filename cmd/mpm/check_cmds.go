@@ -177,11 +177,14 @@ func renderCheckReport(report *evidence.CheckReport) string {
 	fmt.Fprintf(&b, "%s  evidence   %s @ %s\n", status, report.Source.Repository, report.Source.Branch)
 	fmt.Fprintf(&b, "   snapshot   %s\n", report.Source.SnapshotID)
 	if report.SnapshotDetail != "" {
-		// THE SNAPSHOT ID IS PRINTED, SO IT IS CHECKED.
+		// THE SNAPSHOT ID IS PRINTED, SO IT IS CHECKED — or the report
+		// says it could not be.
 		//
 		// A reader may record it as the corpus's identity; an index
 		// that renamed the snapshot while the records verify is an
-		// index that lies about what is being looked at.
+		// index that lies about what is being looked at, and a record
+		// that could not be established leaves nothing to check it
+		// against.
 		fmt.Fprintf(&b, "   ✗ snapshot %s\n", report.SnapshotDetail)
 	}
 	fmt.Fprintf(&b, "   published  %s\n", report.Source.PublishedAt)

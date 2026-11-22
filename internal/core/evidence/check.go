@@ -141,7 +141,9 @@ type CheckReport struct {
 	// corpus's identity; an index that renamed the snapshot would
 	// otherwise be verified.
 	SnapshotVerified bool `json:"snapshot_verified"`
-	// SnapshotDetail explains a snapshot id that does not match.
+	// SnapshotDetail explains a snapshot id that does not match, or one
+	// that could not be checked because a record could not be
+	// established.
 	SnapshotDetail string `json:"snapshot_detail,omitempty"`
 	// IndexDetail explains an index that contradicts the publication it
 	// points at — a repository or branch other than the one read.
@@ -342,10 +344,10 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	// THE INDEX'S SNAPSHOT ID IS A DIGEST OF THE RECORDS IT NAMES.
 	//
 	// It is printed at the top of the report, so a reader may record it
-	// as the corpus's identity. The check has every record and can
-	// recompute it; an index that renames the snapshot while the
-	// records verify is an index that lies about what the reader is
-	// looking at.
+	// as the corpus's identity. The check can recompute it whenever
+	// every record it lists is established; an index that renames the
+	// snapshot while the records verify is an index that lies about
+	// what the reader is looking at.
 	snapshot := ""
 	if !clean {
 		// THE SNAPSHOT CANNOT BE BOUND TO A RECORD THE CHECK COULD NOT

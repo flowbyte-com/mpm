@@ -312,6 +312,14 @@ var controls = []control{
 		test:      "TestABrokenArtefactMakesTheCorpusUnverified",
 	},
 	{
+		name:      "the snapshot is checked against the established subset",
+		invariant: "the snapshot id is not verified over a subset of the records it names",
+		file:      "check.go",
+		from:      "\tif !clean {",
+		to:        "\tif false {",
+		test:      "TestASnapshotOfTheEstablishedSubsetIsNotVerified",
+	},
+	{
 		name:      "the snapshot is not checked",
 		invariant: "the index's snapshot id is the digest of the records it names",
 		file:      "check.go",
