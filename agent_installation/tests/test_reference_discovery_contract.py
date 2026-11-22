@@ -438,12 +438,19 @@ class DocumentedCommandsActuallyExist(unittest.TestCase):
         router = (REPO_ROOT / "cmd" / "mpm" / "router.go").read_text(
             encoding="utf-8",
         )
-        self.assertIn(
-            '"reference": {Name: "reference"', router,
+        # WHITESPACE IS NOT PART OF THE CONTRACT. The router is a Go map
+        # and gofmt aligns its entries; an assertion on the exact run of
+        # spaces breaks the moment the longest key in the block changes
+        # (and adding `engineering` did exactly that). The names and the
+        # dispatch flag are the contract, not the padding.
+        self.assertRegex(
+            router,
+            r'"reference":\s+\{Name: "reference"',
             "the reference command must be registered in the CLI router",
         )
-        self.assertIn(
-            '"reference":   true,', router,
+        self.assertRegex(
+            router,
+            r'"reference":\s+true,',
             "reference must dispatch subcommands, which is what "
             "`mpm reference search` and `mpm reference show` rely on",
         )
