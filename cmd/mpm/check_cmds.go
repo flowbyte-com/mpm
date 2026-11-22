@@ -154,7 +154,7 @@ func renderCheckReport(report *evidence.CheckReport) string {
 	fmt.Fprintf(&b, "%s  evidence   %s @ %s\n", status, report.Source.Repository, report.Source.Branch)
 	fmt.Fprintf(&b, "   snapshot   %s\n", report.Source.SnapshotID)
 	fmt.Fprintf(&b, "   published  %s\n", report.Source.PublishedAt)
-	fmt.Fprintf(&b, "   records    %d · verified %s\n",
+	fmt.Fprintf(&b, "   records    %d · %s\n",
 		len(report.Records), verifiedSummary(report.Records))
 	render.BlankLine(&b)
 
@@ -171,6 +171,17 @@ func renderCheckReport(report *evidence.CheckReport) string {
 			if detail := firstProblem(rec); detail != "" {
 				fmt.Fprintf(&b, "      %s %s\n", recordSymbol(rec), detail)
 			}
+		}
+		render.BlankLine(&b)
+	}
+	if len(report.StaleRecords()) > 0 {
+		// The stale section repeats the records, so it carries ONLY
+		// the problem. A reader who has just read the queue does not
+		// need the pointers again.
+		fmt.Fprintf(&b, "stale or contradictory · %d\n", len(report.StaleRecords()))
+		for _, rec := range report.StaleRecords() {
+			fmt.Fprintf(&b, "   %s  %s  %s\n", recordSymbol(rec), rec.TaskID,
+				firstProblem(rec))
 		}
 		render.BlankLine(&b)
 	}

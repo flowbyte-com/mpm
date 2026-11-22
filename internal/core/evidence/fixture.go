@@ -2,9 +2,9 @@ package evidence
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -94,15 +94,28 @@ type FixtureTask struct {
 	PendingOperatorAction string `json:"pending_operator_action,omitempty"`
 }
 
-// LoadFixture reads a fixture file.
+// The fixtures are EMBEDDED.
+//
+// A fixture is a corpus that ships with the binary, so the corpus an
+// installed MPM publishes is the corpus its source says it is — and a
+// path that could point somewhere else is a path that eventually will.
+//
+//go:embed fixtures/*.json
+var fixtureFS embed.FS
+
+// LoadFixture reads a named fixture from the embedded corpus.
 //
 // It refuses an unknown field and a trailing document: a fixture that
 // carries something the loader does not understand is a fixture whose
 // meaning nobody can vouch for.
-func LoadFixture(path string) (*Fixture, error) {
-	raw, err := os.ReadFile(path)
+func LoadFixture(name string) (*Fixture, error) {
+	path, err := FixturePath(name)
 	if err != nil {
-		return nil, fmt.Errorf("evidence: read the fixture: %w", err)
+		return nil, err
+	}
+	raw, err := fixtureFS.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("evidence: read the fixture %q: %w", name, err)
 	}
 	var f Fixture
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
@@ -317,10 +330,12 @@ func mergeIndex(records []*Record, target *Record) int {
 	return -1
 }
 
-// FixturePath returns the path of a named fixture.
+// FixturePath returns the path of a named fixture inside the embedded
+// corpus.
 //
-// The fixtures live in the package's own directory, so a fixture is
-// versioned with the code that reads it and cannot drift away from it.
+// The name is checked: a fixture name that names a PATH would let a
+// caller reach a file outside the corpus, and the corpus is the only
+// thing the publisher may publish from.
 func FixturePath(name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("evidence: the fixture names itself nothing")
@@ -329,4 +344,20 @@ func FixturePath(name string) (string, error) {
 		return "", fmt.Errorf("evidence: the fixture name %q names a path", name)
 	}
 	return filepath.Join("fixtures", name+".json"), nil
+}
+
+// FixtureNames lists the embedded fixtures.
+//
+// It exists so that a reader can see what the corpus holds without
+// reading the source.
+func FixtureNames() ([]string, error) {
+	entries, err := fixtureFS.ReadDir("fixtures")
+	if err != nil {
+		return nil, fmt.Errorf("evidence: read the fixture corpus: %w", err)
+	}
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, strings.TrimSuffix(entry.Name(), ".json"))
+	}
+	return out, nil
 }

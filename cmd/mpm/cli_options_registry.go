@@ -101,7 +101,7 @@ func init() {
 		// publication door. `engineering` dispatches its leaves below
 		// the router, so its entry names the LEAF's vocabulary.
 		"check":      {"json", "j", "repo", "branch", "project", "role", "disposition"},
-		"engineering": {"dry-run", "fixture", "json", "j"},
+		"engineering": {"dry-run", "fixture", "json", "j", "repo", "branch"},
 		"why":         {"kind"},
 		"lint":        {"dir", "show-clean", "strict"},
 		"integration": {},

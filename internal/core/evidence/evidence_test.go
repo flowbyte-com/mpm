@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -824,7 +823,7 @@ func TestAnIndexThatDoesNotAddUpIsRefused(t *testing.T) {
 // ── the fixture corpus loads and builds ──────────────────────────────────
 
 func TestTheContinuityFixtureLoadsAndBuilds(t *testing.T) {
-	fixture, err := LoadFixture(filepath.Join("fixtures", "continuity-001.json"))
+	fixture, err := LoadFixture("continuity-001")
 	if err != nil {
 		t.Fatalf("load the fixture: %v", err)
 	}

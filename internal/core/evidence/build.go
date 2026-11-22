@@ -160,6 +160,7 @@ func buildOne(c Claims, review ReviewInfo, facts Facts) (*Record, error) {
 		RootID:            c.RootID,
 		TaskID:            c.ID,
 		Title:             c.Title,
+		Objective:         c.Objective,
 		Recipient:         c.Recipient,
 		Role:              c.Role,
 		State:             c.State,

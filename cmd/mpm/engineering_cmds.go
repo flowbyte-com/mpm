@@ -90,6 +90,8 @@ func handleEngineeringPublish(args []string) int {
 	jsonOutput, rest := ExtractJSONFlag(args)
 	dryRun := false
 	fixtureName := ""
+	repoFlag := ""
+	branchFlag := ""
 	for i := 0; i < len(rest); i++ {
 		switch rest[i] {
 		case "--dry-run":
@@ -100,18 +102,53 @@ func handleEngineeringPublish(args []string) int {
 			}
 			i++
 			fixtureName = rest[i]
+		case "--repo":
+			if i+1 >= len(rest) {
+				return respond("", "Error: --repo needs a value\n", 1)
+			}
+			i++
+			repoFlag = rest[i]
+		case "--branch":
+			if i+1 >= len(rest) {
+				return respond("", "Error: --branch needs a value\n", 1)
+			}
+			i++
+			branchFlag = rest[i]
 		default:
 			return respond("", fmt.Sprintf(
 				"Error: unknown option %q for `mpm engineering publish`\n", rest[i]), 1)
 		}
 	}
 
+	// THE TARGET.
+	//
+	// The CONFIGURED target is the authority, and a WRITE requires it:
+	// a publisher that invented a target would publish the evidence
+	// somewhere nobody chose.
+	//
+	// A DRY RUN may be pointed at a target explicitly, because a
+	// rehearsal that needs a configuration file to exist cannot be run
+	// anywhere else — and a rehearsal writes nothing.
 	target, err := evidence.LoadTarget(filepath.Join(config.GetMPMDir(), evidenceConfigFileName))
 	if err != nil {
-		// A MISSING CONFIGURATION IS NOT A DEFAULT. The publication
-		// target is the operator's choice, and a publisher that invented
-		// one would publish the evidence somewhere nobody chose.
-		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+		if !dryRun {
+			return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+		}
+		if repoFlag == "" {
+			return respond("", fmt.Sprintf(
+				"Error: %v\nA dry run needs a target: pass --repo and --branch\n", err), 1)
+		}
+		target = &evidence.Target{Repository: repoFlag, Branch: branchFlag}
+		if target.Branch == "" {
+			target.Branch = evidence.EvidenceBranch
+		}
+		if _, _, perr := evidence.ParseRepository(target.Repository); perr != nil {
+			return respond("", fmt.Sprintf("Error: %v\n", perr), 1)
+		}
+	} else if repoFlag != "" && repoFlag != target.Repository {
+		return respond("", fmt.Sprintf(
+			"Error: --repo names %s and the configured target is %s; the configuration wins\n",
+			repoFlag, target.Repository), 1)
 	}
 
 	ctx := context.Background()
@@ -163,11 +200,7 @@ func handleEngineeringPublish(args []string) int {
 func buildPublicationCorpus(ctx context.Context, client *evidence.Client,
 	fixtureName string) (*evidence.Corpus, error) {
 	if fixtureName != "" {
-		path, err := evidence.FixturePath(fixtureName)
-		if err != nil {
-			return nil, err
-		}
-		fixture, err := evidence.LoadFixture(resolveFixturePath(path))
+		fixture, err := evidence.LoadFixture(fixtureName)
 		if err != nil {
 			return nil, err
 		}
@@ -190,17 +223,6 @@ func openAssignmentStore() (*assignment.Store, error) {
 		return nil, fmt.Errorf("the database is unavailable")
 	}
 	return assignment.NewStore(dm), nil
-}
-
-// resolveFixturePath finds a fixture's file.
-//
-// The fixtures are versioned with the package that reads them, and the
-// binary is built beside them.
-func resolveFixturePath(relative string) string {
-	if _, err := os.Stat(relative); err == nil {
-		return relative
-	}
-	return filepath.Join("internal", "core", "evidence", relative)
 }
 
 // corpusFromStore builds a corpus from the assignment store.

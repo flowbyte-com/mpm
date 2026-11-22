@@ -36,6 +36,13 @@ import (
 // title, an action name and a pointer.
 const maxPublishedString = 240
 
+// maxPublishedWords is the longest run of words a published string may
+// carry.
+//
+// It is set where an operator's one-line objective still fits and a
+// pasted paragraph does not.
+const maxPublishedWords = 48
+
 // The secret shapes.
 //
 // They are the shapes of the credentials this codebase actually handles:
@@ -150,11 +157,15 @@ func transcriptLike(value string) bool {
 	if strings.ContainsAny(value, "\n\r") {
 		return true
 	}
-	// A long run of prose without punctuation is a pasted paragraph, not
-	// a label. The threshold is high enough that a URL or a path is not
-	// caught by it.
+	// A long run of prose is a pasted paragraph, not a label.
+	//
+	// The threshold is a JUDGEMENT, and it is set where an operator's
+	// one-line objective still fits and a pasted transcript does not.
+	// The structural guarantee is the one that matters — the record has
+	// no field that carries model output — and this is the second line
+	// of defence for the fields that do carry free text.
 	words := strings.Fields(value)
-	if len(words) > 24 {
+	if len(words) > maxPublishedWords {
 		return true
 	}
 	return false
