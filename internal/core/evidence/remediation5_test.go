@@ -315,6 +315,29 @@ func TestARenamedSnapshotIsNotVerified(t *testing.T) {
 	if report.Verified {
 		t.Error("the corpus is verified although its snapshot id is not the records' digest")
 	}
+	// THE SUMMARY IS NOT VERIFIED FOR THE SNAPSHOT REASON — not for the
+	// other nil-expectation reason — and the record itself was
+	// established, so the !clean branch cannot be the one that produced
+	// it.
+	summaryReason := ""
+	for _, r := range report.Renderings {
+		if r.Path == QueueSummaryPath {
+			if r.OK {
+				t.Error("the queue summary is verified while the index's snapshot is not the records' digest")
+			}
+			summaryReason = r.Detail
+		}
+	}
+	if !strings.Contains(summaryReason, "snapshot id is not the records' digest") {
+		t.Errorf("the summary's reason is %q, want the snapshot reason", summaryReason)
+	}
+	if !strings.Contains(summaryReason, "its digest is the one the index published") {
+		t.Errorf("the summary's reason does not say its published digest was checked: %q", summaryReason)
+	}
+	if len(report.Records) != 1 || !report.Records[0].DigestVerified {
+		t.Fatalf("the record was not established, so the test cannot distinguish the snapshot branch: %+v",
+			report.Records)
+	}
 
 	// THE SUMMARY IS STILL FETCHED AND DIGEST-CHECKED, even though it
 	// cannot be re-rendered while the snapshot is not the records'

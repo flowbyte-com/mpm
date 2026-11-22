@@ -108,10 +108,10 @@ type RenderingVerification struct {
 	// the index published AND they are the rendering of the record (or
 	// the queue summary of the records) the check ESTABLISHED — the
 	// record that DECODES and whose bytes hash to its identifier. The
-	// record's own
-	// verdict is reported separately and is one of the five check
-	// states (verified, stale, failed, missing, unverified), so a
-	// correct page of a record that is not verified can still be OK.
+	// record's own verdict is reported separately and is one of the
+	// five check states (verified, stale, failed, missing, unverified),
+	// so a correct page of a record that is not verified can still be
+	// OK.
 	//
 	// It is false when either part does not hold, and false when the
 	// expectation could not be computed — a digest alone is not a

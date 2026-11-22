@@ -214,6 +214,21 @@ func TestATamperedRecordIsFiledAsAmbiguous(t *testing.T) {
 		t.Errorf("the report does not name the record's page %s", page)
 	}
 
+	// THE SUMMARY IS NOT VERIFIED FOR THE !clean REASON — the record
+	// could not be established — and its published digest was checked.
+	summaryReason := ""
+	for _, r := range report.Renderings {
+		if r.Path == QueueSummaryPath {
+			if r.OK {
+				t.Error("the queue summary is verified while a record could not be established")
+			}
+			summaryReason = r.Detail
+		}
+	}
+	if !strings.Contains(summaryReason, "while a record could not be established") {
+		t.Errorf("the summary's reason is %q, want the unestablished-record reason", summaryReason)
+	}
+
 	// AND ITS PUBLISHED DIGEST IS CHECKED: a page whose bytes are not
 	// the ones the index names says so, rather than being reported as
 	// "could not be established".
