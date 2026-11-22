@@ -114,13 +114,14 @@ verified; re-rendering without the digest check would let the index publish a
 digest nobody ever checked. The required set is the RECORDS', not the index's
 list: an index that names nothing would otherwise verify with nothing checked.
 
-Where the rendering **cannot** be computed, the artefact is still fetched and
+Where the rendering **cannot** be computed, the artefact is still REQUIRED and
 its published digest is checked, but it is **not verified**: a record page for
 a record the check could not establish says so, and so does the summary when
 the snapshot is not the records' digest. There is nothing to re-render the page
 from, and the digest alone is not a rendering. A record the check could not
 establish is one whose bytes are not the ones the index names, or one whose
-bytes are not a record at all.
+bytes are not a record at all. A page the index does not name at all is
+reported as missing.
 
 **The index's other fields are checked too.** An entry's root, task, pull
 request, disposition and title must agree with the record it names — a reader
@@ -608,7 +609,7 @@ contract is the one failure mode the whole design exists to prevent.
 
 ## 10. The negative controls
 
-Thirty-four controls remove an invariant from the implementation and require the
+Thirty-three controls remove an invariant from the implementation and require the
 acceptance suite to **fail**. A control that removes nothing measures nothing;
 a suite that does not notice is a suite that does not test the invariant.
 
@@ -645,7 +646,6 @@ a suite that does not notice is a suite that does not test the invariant.
 | an artefact outside the layout is accepted | every artefact the index names is one the published layout defines |
 | two records for one assignment are accepted | one assignment has one record |
 | a page for an unestablished record is verified | an artefact whose record the check could not establish is not verified |
-| the page of an unestablished record is not digest-checked | a page whose record was not established still has its published digest checked |
 | a broken artefact does not unverify the corpus | a corpus with an artefact that is not its rendering is not verified |
 | the snapshot is not checked | the index's snapshot id is the digest of the records it names |
 

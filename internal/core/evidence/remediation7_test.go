@@ -271,6 +271,68 @@ func assertRenderingDigestProblem(t *testing.T, report *CheckReport, path string
 	t.Errorf("the report does not name the artefact %s", path)
 }
 
+// ── 5c: a page the index omits is reported ──────────────────────────────
+
+// TestAPageTheIndexOmitsIsReported proves the required set is the
+// RECORDS', not the index's list, even for a record the check could not
+// establish.
+//
+// The page of an established record is required; so is the page of an
+// unestablished one, because the reader would otherwise believe a digest
+// was checked that was never read.
+func TestAPageTheIndexOmitsIsReported(t *testing.T) {
+	record := builtRecord(t, "task-a")
+	record.CI = []CIRun{greenRun(1, testHead)}
+	record.Disposition = DeriveDisposition(record)
+	plan, err := NewPlan(testRepo, EvidenceBranch, []*Record{record}, timeFixture())
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	id, err := RecordID(record)
+	if err != nil {
+		t.Fatalf("the record's id: %v", err)
+	}
+	gh := servedPlan(t, plan)
+	gh.prs[262] = mergedPR(262, testHead)
+	// THE RECORD IS NOT THE ONE THE INDEX NAMES, so its page cannot be
+	// re-rendered.
+	gh.content[RecordsDirectory+"/"+id+".json"] = []byte(`{"task_id":"not-a-record"}`)
+	index := parsePlanIndex(t, plan)
+	page := RecordsDirectory + "/" + id + ".md"
+	kept := index.Renderings[:0]
+	for _, r := range index.Renderings {
+		if r.Path != page {
+			kept = append(kept, r)
+		}
+	}
+	index.Renderings = kept
+	writePlanIndex(t, gh, index)
+
+	report, err := RunCheck(context.Background(), gh, testRepo, EvidenceBranch, Filters{})
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	found := false
+	for _, r := range report.Renderings {
+		if r.Path != page {
+			continue
+		}
+		found = true
+		if r.OK {
+			t.Error("the omitted page is reported as verified")
+		}
+		if !strings.Contains(r.Detail, "does not name") {
+			t.Errorf("the page's detail is %q, want it to say the index does not name it", r.Detail)
+		}
+	}
+	if !found {
+		t.Errorf("the report does not name the omitted page %s", page)
+	}
+	if report.Verified {
+		t.Error("the corpus is verified although a required page is not named")
+	}
+}
+
 // ── 6: an index must name its source, and it must be the source read ─────
 
 // TestTheIndexSourceMustMatchTheReader proves every clause of the source

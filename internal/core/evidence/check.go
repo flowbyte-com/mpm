@@ -466,10 +466,10 @@ func indexEntryDisagreement(entry IndexEntry, record *Record) string {
 // renderingExpectation is one artefact the publication must hold, and
 // the bytes it must be the rendering of.
 //
-// content is nil when the expectation cannot be computed — a record it
-// would be rendered from could not be established (its bytes are not
-// the ones the index names, or they are not a record at all), or the
-// index's snapshot is not the records' digest — and why says so. In
+// content is nil when the expectation cannot be computed — the record
+// a page would be rendered from could not be established (its bytes are
+// not the ones the index names, or they are not a record at all), or
+// the index's snapshot is not the records' digest — and why says so. In
 // that case the artefact is NOT verified: its published digest is still
 // checked, and the report says the rendering could not be established.
 type renderingExpectation struct {
@@ -487,15 +487,30 @@ type renderingExpectation struct {
 // records themselves, plus the queue summary they render.
 func renderingExpectations(records []*Record, ids []string, index *Index,
 	clean bool, snapshot string, snapshotVerified bool) []renderingExpectation {
-	out := make([]renderingExpectation, 0, len(records)+1)
+	// THE ESTABLISHED RECORDS, BY THE IDENTIFIER THE INDEX GAVE THEM.
+	established := make(map[string]*Record, len(records))
 	for i, r := range records {
-		if i >= len(ids) {
-			break
+		if i < len(ids) {
+			established[ids[i]] = r
 		}
-		out = append(out, renderingExpectation{
-			path:    RecordsDirectory + "/" + ids[i] + ".md",
-			content: []byte(RenderRecordMarkdown(r)),
-		})
+	}
+	// EVERY RECORD THE INDEX LISTS HAS A PAGE, ESTABLISHED OR NOT.
+	//
+	// An established record's page is re-rendered from it. An
+	// unestablished record has no record to render from, so its page
+	// is expected WITHOUT a rendering: it must still be named and its
+	// published digest checked, and it is not verified.
+	out := make([]renderingExpectation, 0, len(index.Records)+1)
+	for _, entry := range index.Records {
+		expectation := renderingExpectation{
+			path: RecordsDirectory + "/" + entry.ID + ".md",
+		}
+		if record, ok := established[entry.ID]; ok {
+			expectation.content = []byte(RenderRecordMarkdown(record))
+		} else {
+			expectation.why = "the record this artefact renders is not one the check could establish"
+		}
+		out = append(out, expectation)
 	}
 	corpus := &Corpus{
 		Truncated: index.Truncated,
@@ -535,10 +550,8 @@ func verifyRenderings(ctx context.Context, gh GitHub, repository, branch string,
 	for _, r := range index.Renderings {
 		named[r.Path] = r
 	}
-	out := make([]RenderingVerification, 0, len(expectations)+len(index.Renderings))
-	seen := make(map[string]bool, len(expectations))
+	out := make([]RenderingVerification, 0, len(expectations))
 	for _, exp := range expectations {
-		seen[exp.path] = true
 		verification := RenderingVerification{Path: exp.path}
 		entry, ok := named[exp.path]
 		if !ok {
@@ -597,40 +610,6 @@ func verifyRenderings(ctx context.Context, gh GitHub, repository, branch string,
 			continue
 		}
 		verification.OK = true
-		out = append(out, verification)
-	}
-	// AN ARTEFACT THE EXPECTED SET DOES NOT KNOW ABOUT.
-	//
-	// ParseIndex refuses a path the layout does not define, so what is
-	// left is the rendering of a record the check could not establish —
-	// its bytes were not the record the index named, or they were not a
-	// record at all. There is no established record to re-render it
-	// from, so the artefact is NOT verified; its PUBLISHED digest is
-	// still checked, because a digest the index publishes is a claim
-	// this reader can compare with the bytes.
-	for _, r := range index.Renderings {
-		if seen[r.Path] {
-			continue
-		}
-		verification := RenderingVerification{Path: r.Path, SHA256: r.SHA256}
-		if !safeEvidencePath(r.Path) {
-			verification.Detail = "the index names a path outside the evidence repository"
-			out = append(out, verification)
-			continue
-		}
-		raw, err := gh.Content(ctx, repository, branch, r.Path)
-		if err != nil {
-			verification.Detail = fmt.Sprintf("the artefact could not be read: %v", err)
-			out = append(out, verification)
-			continue
-		}
-		if !SameDigest(DigestBytes(raw), r.SHA256) {
-			verification.Detail = fmt.Sprintf("the artefact hashes to %s and the index says %s",
-				DigestBytes(raw), r.SHA256)
-			out = append(out, verification)
-			continue
-		}
-		verification.Detail = "the record this artefact renders is not one the check could establish, so the artefact is not verified; its digest is the one the index published"
 		out = append(out, verification)
 	}
 	return out
