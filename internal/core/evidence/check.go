@@ -106,7 +106,11 @@ type RenderingVerification struct {
 	SHA256 string `json:"sha256"`
 	// OK says the artefact is VERIFIED: its bytes hash to the digest
 	// the index published AND they are the rendering of the record (or
-	// the queue summary of the records) the check verified.
+	// the queue summary of the records) the check ESTABLISHED — the
+	// record whose bytes hash to its identifier. The record's own
+	// verdict (verified, stale, failed) is reported separately, so a
+	// correct page of a stale record is OK while the record is not
+	// verified.
 	//
 	// It is false when either part does not hold, and false when the
 	// expectation could not be computed — a digest alone is not a

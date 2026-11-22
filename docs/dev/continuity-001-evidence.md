@@ -113,6 +113,9 @@ a forger who rewrites the artefact and its index digest would otherwise be
 verified; re-rendering without the digest check would let the index publish a
 digest nobody ever checked. The required set is the RECORDS', not the index's
 list: an index that names nothing would otherwise verify with nothing checked.
+An artefact whose record the check could not establish is neither fetched nor
+verified — there is nothing to re-render it from, and its digest alone is not
+a rendering.
 
 **The index's other fields are checked too.** An entry's root, task, pull
 request, disposition and title must agree with the record it names — a reader
@@ -600,7 +603,7 @@ contract is the one failure mode the whole design exists to prevent.
 
 ## 10. The negative controls
 
-Thirty-two controls remove an invariant from the implementation and require the
+Thirty-three controls remove an invariant from the implementation and require the
 acceptance suite to **fail**. A control that removes nothing measures nothing;
 a suite that does not notice is a suite that does not test the invariant.
 
@@ -636,6 +639,7 @@ a suite that does not notice is a suite that does not test the invariant.
 | the queue is filed by the record's claim | a record is filed where its own fields put it |
 | an artefact outside the layout is accepted | every artefact the index names is one the published layout defines |
 | two records for one assignment are accepted | one assignment has one record |
+| a page for an unestablished record is verified | an artefact whose record the check could not establish is not verified |
 | a broken artefact does not unverify the corpus | a corpus with an artefact that is not its rendering is not verified |
 | the snapshot is not checked | the index's snapshot id is the digest of the records it names |
 

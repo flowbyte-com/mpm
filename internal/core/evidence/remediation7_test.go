@@ -2,6 +2,8 @@ package evidence
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -188,36 +190,85 @@ func TestATamperedRecordIsFiledAsAmbiguous(t *testing.T) {
 	if !ambiguous {
 		t.Errorf("the tampered record is not filed as %q: %+v", DispositionAmbiguous, report.Sections)
 	}
+	// AND THE PAGE FOR THAT RECORD IS NOT VERIFIED. The check could not
+	// establish the record, so there is nothing to re-render the page
+	// from — a digest alone is not a rendering, and the page is the
+	// place a reader would look for the claim the bytes make.
+	page := RecordsDirectory + "/" + id + ".md"
+	foundPage := false
+	for _, r := range report.Renderings {
+		if r.Path != page {
+			continue
+		}
+		foundPage = true
+		if r.OK {
+			t.Error("the page for a tampered record is reported as verified")
+		}
+		if r.Detail == "" {
+			t.Error("the page for a tampered record is not verified and says nothing about it")
+		}
+	}
+	if !foundPage {
+		t.Errorf("the report does not name the record's page %s", page)
+	}
 }
 
-// ── 6: an index must name its source ────────────────────────────────────
+// ── 6: an index must name its source, and it must be the source read ─────
 
-// TestAnIndexWithoutItsSourceIsNotVerified proves the source check is
-// not skipped when the index omits the fields.
-func TestAnIndexWithoutItsSourceIsNotVerified(t *testing.T) {
-	record := builtRecord(t, "task-a")
-	record.CI = []CIRun{greenRun(1, testHead)}
-	record.Disposition = DeriveDisposition(record)
-	plan, err := NewPlan(testRepo, EvidenceBranch, []*Record{record}, timeFixture())
-	if err != nil {
-		t.Fatalf("plan: %v", err)
+// TestTheIndexSourceMustMatchTheReader proves every clause of the source
+// check — a missing repository, a wrong one, a missing branch, a wrong
+// one — and that a match is accepted.
+func TestTheIndexSourceMustMatchTheReader(t *testing.T) {
+	cases := []struct {
+		name   string
+		repo   string
+		branch string
+		want   bool // a contradiction is expected
+	}{
+		{"the source matches", testRepo, EvidenceBranch, false},
+		{"the repository's case differs", strings.ToUpper(testRepo), EvidenceBranch, false},
+		{"no repository", "", EvidenceBranch, true},
+		{"another repository", "other/name", EvidenceBranch, true},
+		{"no branch", testRepo, "", true},
+		{"another branch", testRepo, "evidence/v2", true},
 	}
-	gh := servedPlan(t, plan)
-	gh.prs[262] = mergedPR(262, testHead)
-	index := parsePlanIndex(t, plan)
-	index.Repository = ""
-	index.Branch = ""
-	writePlanIndex(t, gh, index)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			record, body := verifiedRecord(t, "task-a")
+			plan, err := NewPlan(testRepo, EvidenceBranch, []*Record{record}, timeFixture())
+			if err != nil {
+				t.Fatalf("plan: %v", err)
+			}
+			gh := servedPlan(t, plan)
+			gh.prs[262] = mergedPR(262, testHead)
+			gh.runs[testHead] = []CIRun{greenRun(1, testHead)}
+			gh.content["reviews/findings.json"] = body
+			index := parsePlanIndex(t, plan)
+			index.Repository = tc.repo
+			index.Branch = tc.branch
+			writePlanIndex(t, gh, index)
 
-	report, err := RunCheck(context.Background(), gh, testRepo, EvidenceBranch, Filters{})
-	if err != nil {
-		t.Fatalf("check: %v", err)
-	}
-	if report.IndexDetail == "" {
-		t.Error("the check accepted an index that names no source")
-	}
-	if report.Verified {
-		t.Error("the corpus is verified although the index names no source")
+			report, err := RunCheck(context.Background(), gh, testRepo, EvidenceBranch, Filters{})
+			if err != nil {
+				t.Fatalf("check: %v", err)
+			}
+			if tc.want {
+				if report.IndexDetail == "" {
+					t.Error("the check accepted an index that contradicts the source it was read from")
+				}
+				if report.Verified {
+					t.Error("the corpus is verified although the index contradicts its source")
+				}
+				return
+			}
+			if report.IndexDetail != "" {
+				t.Errorf("the check reports a contradiction for a matching source: %s", report.IndexDetail)
+			}
+			if !report.Verified {
+				t.Errorf("the matching publication is not verified: %+v",
+					report.Records[0].Verification.Checks)
+			}
+		})
 	}
 }
 
@@ -238,6 +289,32 @@ func TestTheMarkdownDoesNotClaimADigestThatIsUnknown(t *testing.T) {
 	out := RenderRecordMarkdown(record)
 	if strings.Contains(out, "what the publisher established") {
 		t.Errorf("the Markdown claims a checked digest, and the digest is unknown:\n%s", out)
+	}
+}
+
+// ── 5b: the configured target is trimmed before it is validated ─────────
+
+// TestThePublicationTargetIsTrimmed proves the publisher does not write
+// an index naming a padded repository.
+//
+// A configuration with surrounding whitespace would otherwise publish
+// " owner/name", and every reader at "owner/name" would be told the index
+// contradicts its source.
+func TestThePublicationTargetIsTrimmed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "evidence.json")
+	raw := []byte(`{"repository":"  owner/name  ","branch":"  evidence  "}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write the configuration: %v", err)
+	}
+	target, err := LoadTarget(path)
+	if err != nil {
+		t.Fatalf("load the target: %v", err)
+	}
+	if target.Repository != testRepo {
+		t.Errorf("the target's repository is %q, want %q", target.Repository, testRepo)
+	}
+	if target.Branch != EvidenceBranch {
+		t.Errorf("the target's branch is %q, want %q", target.Branch, EvidenceBranch)
 	}
 }
 

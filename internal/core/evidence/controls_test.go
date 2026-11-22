@@ -296,6 +296,14 @@ var controls = []control{
 		test:      "TestAnIndexThatListsTwoRecordsForOneAssignmentIsRefused",
 	},
 	{
+		name:      "a page for an unestablished record is verified",
+		invariant: "an artefact whose record the check could not establish is not verified",
+		file:      "check.go",
+		from:      "\t\t\tSHA256: r.SHA256,\n",
+		to:        "\t\t\tSHA256: r.SHA256,\n\t\t\tOK:     true,\n",
+		test:      "TestATamperedRecordIsFiledAsAmbiguous",
+	},
+	{
 		name:      "a broken artefact does not unverify the corpus",
 		invariant: "a corpus with an artefact that is not its rendering is not verified",
 		file:      "check.go",

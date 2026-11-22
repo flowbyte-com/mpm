@@ -134,11 +134,12 @@ func TestAMisfiledRecordIsFiledByItsDerivation(t *testing.T) {
 	if !blocked {
 		t.Errorf("the derived disposition %q is not a section: %+v", DispositionBlocked, report.Sections)
 	}
-	// And a filter on ANOTHER disposition still shows it: a failed
-	// record is one no filter may hide, and the section it is filed in
-	// is the derived one, which the assertions above pin.
+	// And a filter on a disposition that does NOT match shows it too: a
+	// failed record is one no filter may hide. (`completed` would be the
+	// record's own claim, so a filter for it proves nothing about
+	// must-show.)
 	filtered, err := RunCheck(context.Background(), gh, testRepo, EvidenceBranch,
-		Filters{Disposition: DispositionCompleted})
+		Filters{Disposition: DispositionAwaitingCI})
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}
