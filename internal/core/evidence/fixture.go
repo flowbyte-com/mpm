@@ -1,0 +1,332 @@
+package evidence
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// The FIXTURE: a named corpus of engineering work.
+//
+// # WHY A FIXTURE EXISTS
+//
+// The assignment store is the natural source of a publication, and it is
+// the right one. But a corpus that only ever comes from the store cannot
+// be published until the store has been populated, and the Continuity 001
+// work itself PREDATES the store being used for it — the four pull
+// requests were reviewed and merged before the substrate was running the
+// work.
+//
+// So a fixture is a corpus of claims, written down, that the publisher
+// publishes exactly the way it publishes the store's claims: the claims
+// come from the fixture, and the OBSERVED facts are read from GitHub at
+// publication time.
+//
+// # WHAT A FIXTURE MAY NOT DO
+//
+// It may not carry the observed facts. A fixture that recorded "the pull
+// request is merged" would be a claim about GitHub written by hand, and
+// the publisher would publish it as a fact. The fixture names the pull
+// request; the publisher asks GitHub what became of it.
+//
+// It may not carry a review verdict that the service recorded. A verdict
+// in a fixture is a REPORTED verdict, and it is published as one.
+
+// Fixture is a named corpus of claims.
+type Fixture struct {
+	// Name is the fixture's name.
+	Name string `json:"name"`
+	// Description says what the corpus is, in one bounded line.
+	Description string `json:"description"`
+	// Repository is "owner/name" — where the work is visible.
+	Repository string `json:"repository"`
+	// Project is the project the work belongs to.
+	Project string `json:"project"`
+	// RootID is the root assignment the corpus hangs from.
+	RootID string `json:"root_id"`
+	// Tasks are the corpus's tasks.
+	Tasks []FixtureTask `json:"tasks"`
+}
+
+// FixtureTask is one task of a fixture.
+type FixtureTask struct {
+	// TaskID identifies the task within the corpus.
+	TaskID string `json:"task_id"`
+	// Title is the task's title.
+	Title string `json:"title"`
+	// Objective is the task's one-line objective.
+	Objective string `json:"objective"`
+	// Recipient is who the work was addressed to.
+	//
+	// It is Unknown when the corpus was reconstructed from a record that
+	// does not name one. Guessing would be worse than saying so.
+	Recipient string `json:"recipient"`
+	// Role is the task's role.
+	Role string `json:"role"`
+	// State is the task's state.
+	State string `json:"state"`
+	// IssueRef is the issue the work answers.
+	IssueRef string `json:"issue_ref,omitempty"`
+	// PRRef is the pull request the work produced.
+	PRRef string `json:"pr_ref,omitempty"`
+	// BaseSHA is the implementation's base.
+	BaseSHA string `json:"base_sha"`
+	// HeadSHA is the implementation's head.
+	HeadSHA string `json:"head_sha"`
+	// ReviewedSHA is the revision that was reviewed.
+	ReviewedSHA string `json:"reviewed_sha"`
+	// ReviewDisposition is what is known about the review.
+	ReviewDisposition string `json:"review_disposition"`
+	// ReviewVerdict is the REPORTED verdict, when the review happened
+	// outside the substrate.
+	ReviewVerdict string `json:"review_verdict,omitempty"`
+	// ReviewEvidenceRef points at the review's bytes.
+	ReviewEvidenceRef string `json:"review_evidence_ref,omitempty"`
+	// ReviewEvidenceSHA256 is the digest of those bytes.
+	//
+	// It is Unknown when the bytes were never captured durably. It is
+	// NEVER the digest of something else.
+	ReviewEvidenceSHA256 string `json:"review_evidence_sha256,omitempty"`
+	// PendingOperatorAction is what the operator is being asked for.
+	PendingOperatorAction string `json:"pending_operator_action,omitempty"`
+}
+
+// LoadFixture reads a fixture file.
+//
+// It refuses an unknown field and a trailing document: a fixture that
+// carries something the loader does not understand is a fixture whose
+// meaning nobody can vouch for.
+func LoadFixture(path string) (*Fixture, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("evidence: read the fixture: %w", err)
+	}
+	var f Fixture
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&f); err != nil {
+		return nil, fmt.Errorf("evidence: the fixture is not valid: %w", err)
+	}
+	if dec.More() {
+		return nil, fmt.Errorf("evidence: the fixture carries content after the object")
+	}
+	if f.Name == "" {
+		return nil, fmt.Errorf("evidence: the fixture names itself nothing")
+	}
+	if _, _, err := ParseRepository(f.Repository); err != nil {
+		return nil, fmt.Errorf("evidence: the fixture: %w", err)
+	}
+	if f.RootID == "" {
+		return nil, fmt.Errorf("evidence: the fixture names no root assignment")
+	}
+	if len(f.Tasks) == 0 {
+		return nil, fmt.Errorf("evidence: the fixture holds no tasks")
+	}
+	return &f, nil
+}
+
+// Tree turns the fixture into a tree of claims.
+//
+// A fixture task becomes an assignment in one tree, and the review of a
+// task is the review of that task — a fixture holds the review's facts,
+// not a separate reviewer assignment.
+func (f *Fixture) Tree() Tree {
+	tree := Tree{RootID: f.RootID}
+	for _, t := range f.Tasks {
+		tree.Tasks = append(tree.Tasks, Claims{
+			ID:             t.TaskID,
+			RootID:         f.RootID,
+			ProjectID:      f.Project,
+			Title:          t.Title,
+			Objective:      t.Objective,
+			Recipient:      t.Recipient,
+			Role:           t.Role,
+			State:          t.State,
+			IssueRef:       t.IssueRef,
+			PRRef:          t.PRRef,
+			BaseSHA:        t.BaseSHA,
+			HeadSHA:        t.HeadSHA,
+			ReviewedSHA:    t.ReviewedSHA,
+			FindingsSHA256: t.ReviewEvidenceSHA256,
+			EvidenceRef:    t.ReviewEvidenceRef,
+			AwaitingAction: t.PendingOperatorAction,
+		})
+	}
+	return tree
+}
+
+// Reviews returns the fixture's review facts, keyed by task id.
+//
+// A fixture's review is a REPORTED review: it happened in a session, not
+// in the substrate's ledger. It is published as a claim, and the record
+// says so.
+func (f *Fixture) Reviews() map[string]ReviewInfo {
+	out := map[string]ReviewInfo{}
+	for _, t := range f.Tasks {
+		if t.ReviewDisposition == "" {
+			continue
+		}
+		out[t.TaskID] = ReviewInfo{
+			Exists:          true,
+			ReviewedSHA:     t.ReviewedSHA,
+			FindingsSHA256:  t.ReviewEvidenceSHA256,
+			EvidenceRef:     t.ReviewEvidenceRef,
+			Verdict:         t.ReviewVerdict,
+			LocallyReported: t.ReviewDisposition == ReviewDispositionLocallyReported,
+		}
+	}
+	return out
+}
+
+// Corpus is a publication's input: the claims and the observed facts.
+type Corpus struct {
+	// Trees are the trees being published.
+	Trees []Tree
+	// Reviews are the review facts, keyed by task id.
+	Reviews map[string]ReviewInfo
+	// Facts are the observed facts, keyed by task id.
+	Facts map[string]Facts
+}
+
+// BuildCorpusFromFixture reads a fixture and asks GitHub what became of
+// it.
+//
+// The FIXTURE supplies the claims. GITHUB supplies the facts: the pull
+// request's state, its head, and the workflow runs for that head. A
+// fixture cannot state a fact about GitHub, and this function never
+// believes one if it tries.
+func BuildCorpusFromFixture(ctx context.Context, gh GitHub, f *Fixture) (*Corpus, error) {
+	if gh == nil {
+		return nil, fmt.Errorf("evidence: there is no GitHub reader to read the fixture's facts")
+	}
+	corpus := &Corpus{
+		Trees:   []Tree{f.Tree()},
+		Reviews: f.Reviews(),
+		Facts:   map[string]Facts{},
+	}
+	for _, t := range f.Tasks {
+		if t.PRRef == "" || t.PRRef == Unknown {
+			continue
+		}
+		number, err := PRNumber(t.PRRef)
+		if err != nil {
+			return nil, fmt.Errorf("evidence: the fixture's task %s: %w", t.TaskID, err)
+		}
+		pr, err := gh.PullRequest(ctx, f.Repository, number)
+		if err != nil {
+			return nil, fmt.Errorf("evidence: read the pull request for %s: %w", t.TaskID, err)
+		}
+		facts := Facts{GitHub: pr}
+		if t.HeadSHA != "" && t.HeadSHA != Unknown {
+			runs, err := gh.WorkflowRuns(ctx, f.Repository, t.HeadSHA)
+			if err != nil {
+				// A missing CI is not a fatal problem: the record
+				// publishes what IS known, and the verification says
+				// what could not be read.
+				runs = nil
+			}
+			facts.CI = runs
+		}
+		corpus.Facts[t.TaskID] = facts
+	}
+	return corpus, nil
+}
+
+// BuildCorpusFromTrees builds a corpus from the assignment store's trees
+// and the facts read from GitHub.
+func BuildCorpusFromTrees(trees []Tree, reviews map[string]ReviewInfo,
+	facts map[string]Facts) *Corpus {
+	return &Corpus{Trees: trees, Reviews: reviews, Facts: facts}
+}
+
+// Records builds the corpus's records.
+func (c *Corpus) Records() ([]*Record, error) {
+	var out []*Record
+	for _, tree := range c.Trees {
+		records, err := Build(tree, c.Facts)
+		if err != nil {
+			return nil, err
+		}
+		// A corpus may carry the review facts of a tree the claims did
+		// not: a fixture records the review of a task beside the task,
+		// rather than as a reviewer assignment.
+		for _, r := range records {
+			if review, ok := c.Reviews[r.TaskID]; ok {
+				merged, err := applyReview(r, review)
+				if err != nil {
+					return nil, err
+				}
+				records[mergeIndex(records, r)] = merged
+			}
+		}
+		out = append(out, records...)
+	}
+	return out, nil
+}
+
+// applyReview folds a corpus-level review into a record.
+func applyReview(r *Record, review ReviewInfo) (*Record, error) {
+	updated := *r
+	switch {
+	case review.LocallyReported:
+		updated.ReviewDisposition = ReviewDispositionLocallyReported
+		// The REPORTED verdict is carried as what it is: a verdict
+		// that was reported outside the substrate, published with its
+		// own vocabulary and never as the service's verdict.
+		updated.ReviewVerdict = review.Verdict
+	case review.Verdict != "":
+		updated.ReviewDisposition = ReviewDispositionVerdict
+		updated.ReviewVerdict = review.Verdict
+	case review.FindingsSHA256 != "" || review.EvidenceRef != "":
+		updated.ReviewDisposition = ReviewDispositionFindingsCaptured
+	default:
+		updated.ReviewDisposition = ReviewDispositionNone
+	}
+	if review.ReviewedSHA != "" {
+		updated.ReviewedSHA = unknownSHA(review.ReviewedSHA)
+	}
+	if updated.ReviewDisposition != ReviewDispositionNone {
+		updated.ReviewEvidence = &EvidenceRef{
+			Ref:    review.EvidenceRef,
+			SHA256: unknownDigest(review.FindingsSHA256),
+		}
+		if updated.ReviewEvidence.Ref == "" {
+			updated.ReviewEvidence.Ref = Unknown
+		}
+	}
+	updated.Disposition = DeriveDisposition(&updated)
+	if err := Validate(&updated); err != nil {
+		return nil, err
+	}
+	if err := AssertPublishable(&updated); err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+// mergeIndex finds a record's position by identity.
+func mergeIndex(records []*Record, target *Record) int {
+	for i, r := range records {
+		if r == target {
+			return i
+		}
+	}
+	return -1
+}
+
+// FixturePath returns the path of a named fixture.
+//
+// The fixtures live in the package's own directory, so a fixture is
+// versioned with the code that reads it and cannot drift away from it.
+func FixturePath(name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("evidence: the fixture names itself nothing")
+	}
+	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+		return "", fmt.Errorf("evidence: the fixture name %q names a path", name)
+	}
+	return filepath.Join("fixtures", name+".json"), nil
+}

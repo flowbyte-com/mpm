@@ -136,6 +136,12 @@ func NewRouter() *CommandRouter {
 		// Operations — state, scheduling, diagnostics, engine-room
 		"mode":       {Name: "mode", Description: "Manage modes"},
 		"wake":       {Name: "wake", Description: "Show wake context (--json, --strict)", MinArgs: 0},
+		// The engineering queue. `check` is the READ-ONLY door: it
+		// reads the published evidence and GitHub, and it writes
+		// nothing. `engineering publish` is the operator's WRITE door,
+		// and it is deliberately a separate command.
+		"check":      {Name: "check", Description: "Show the engineering queue and verify its evidence against GitHub (--json)", MinArgs: 0, MaxArgs: 0, Help: printCheckHelp},
+		"engineering": {Name: "engineering", Description: "Publish the engineering evidence (publish)", MinArgs: 0, Help: printEngineeringHelp},
 		"gc":         {Name: "gc", Description: "Run decay sweep (--dry-run, --review, --purge)"},
 		"blob":       {Name: "blob", Description: "Blob storage management (gc)"},
 		"tasks":      {Name: "tasks", Description: "Manage scheduled tasks (upsert|list|delete)", MinArgs: 0},
@@ -345,6 +351,10 @@ func (r *CommandRouter) Execute(args []string) int {
 		return handleVersion(args[1:])
 	case "wake":
 		return handleWake(args)
+	case "check":
+		return handleCheck(args[1:])
+	case "engineering":
+		return handleEngineering(args[1:])
 	case "gc":
 		return handleGC(args)
 	case "blob":
@@ -945,6 +955,7 @@ var commandsWithSubcommandDispatch = map[string]bool{
 	"work":        true, // status|show|clear|promote|item
 	"session":     true, // add|search|show|shred|list
 	"assignment":  true, // inbox|show|history|deliver|claim|delegate|handoff
+	"engineering": true, // publish
 	"handoff":     true, // write|read|list|shred
 	"lesson":      true, // add|show|list|search|shred
 	"skill":       true, // add|list|show|search|workshop
@@ -1437,6 +1448,8 @@ var opsSubcommandDescs = []struct {
 	{"memory", "Memory operations"},
 	{"reference", "Reference library"},
 	{"wake", "Show last session context"},
+	{"check", "Show the engineering queue and verify its evidence against GitHub"},
+	{"engineering publish", "Publish the engineering evidence to the configured repository"},
 	{"gateway", "Gateway control"},
 	{"status", "System status dashboard"},
 	{"stance assume <mode> <persona> <rationale>", "XITL: hot-swap existing persona when auto active"},

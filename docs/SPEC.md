@@ -3188,6 +3188,107 @@ The selection is deterministic — `(created_at, id)` — so two dispatchers tha
 
 It does not publish evidence anywhere (that is PR 5), merge, deploy or approve anything, create a root or a project, run a pilot, add a credential manager or a model router, replace OpenCode, or run a loop of its own. The design of record is `docs/dev/continuity-001-dispatcher.md`.
 
+### 6.17 The engineering evidence and the read-only `check` (Continuity 001, PR 5)
+
+PR 4 shipped the decision of *which* assignment runs next. What it did not ship is a way for **another session, a reviewer or an operator** to find that work and to check it — and the only way to find it, until now, was a pasted handover.
+
+PR 5 ships that gap: a **versioned, machine-readable evidence record** of engineering work, **published to a location an independent reader can reach**, and a **read-only `check`** that reads the published evidence and verifies it against GitHub before anybody believes it.
+
+MPM coordinates. GitHub is the externally inspectable engineering record. **Neither system may invent approval, review completion or successful execution**, and the whole design of this section is that neither can.
+
+#### The four things that are not interchangeable
+
+The evidence contract keeps four facts apart, because conflating them is how a queue becomes a fiction:
+
+| fact | what it is | what it is not |
+|---|---|---|
+| a runtime reported success | the adapter's own report of an attempt | task completion |
+| captured findings | bytes the HOST captured over what a reviewer produced | a review verdict |
+| a review verdict | the reviewer's own fenced transition | operator approval |
+| an operator approval | a recorded decision with an action, a revision and an evidence pointer | a merge |
+
+Each lives in its own field, and each carries a **provenance category**: `observed` (a fact about the outside world, checked against GitHub), `recorded` (a claim the assignment store makes about itself), or `decision` (somebody's verdict or somebody's approval). The categories are published **with** the record, so a reader never has to know this section's rules to know what it is reading.
+
+**Unknown values are explicit.** An unknown SHA is the string `unknown` — never the current branch head, never an empty field a reader might mistake for a fact. A record that says `unknown` is telling the truth about a gap; a record that says the head instead is telling a lie about a review.
+
+#### The published layout
+
+The evidence lives on a branch of the repository it describes (`evidence` by default), so a reader needs nothing but a URL and a network:
+
+```
+index.json                 the MUTABLE pointer at the current snapshot
+records/<id>.json          one IMMUTABLE evidence record
+records/<id>.md            the same record, human-readable
+summaries/queue.md         the engineering queue, human-readable
+```
+
+A record is named by the **digest of its own bytes**, so the same evidence always lands on the same file and a republication is invisible rather than noisy; a reader can download a record, hash it, and compare the hash with the name the index gave it. The **index** is the one mutable file: it names the current snapshot and says when it was published.
+
+**Nothing in the published content contains the SHA of the content that contains it.** The index names the records by their digests and the records do not name the index, so every digest a reader is given is one the reader can check.
+
+Publication is **deterministic** for identical input evidence, apart from the publication timestamp, which is recorded as metadata in the index and never inside a record.
+
+#### What is published, and what is not
+
+The publisher publishes the assignment store's **claims** and GitHub's **observed facts**, and it never publishes a review nobody recorded or an approval nobody gave. Where the evidence is missing, the record says so.
+
+A **reviewer finding captured from a real host session** may be published as host-captured evidence. It is **not** a GitHub review unless such a review actually exists, and the record keeps the two apart: the captured findings are a digest and a pointer, and a verdict is a separate field.
+
+A **manifest supplied by an agent** cannot become authoritative because the agent wrote it: the publisher reads the assignment store and GitHub, and it verifies the digest of any host-captured evidence before publishing it.
+
+No **raw prompt, chat transcript, API key, environment dump, private filesystem path or unredacted runtime log** is published. The record has no field that carries model output at all — a review's findings are published as a digest and a pointer — and every string it does carry is screened for credentials, private paths and transcript-shaped text before the record is hashed.
+
+#### The read-only `check`
+
+`mpm check` reports the latest engineering queue and verifies it:
+
+```
+MPM · Check
+
+✓  evidence   flowbyte-com/mpm @ evidence
+   snapshot   sha256:…
+   published  2026-11-22T09:00:00Z
+   records    4 · verified 0 · missing 4
+
+completed · 4
+   ○  pr-262  implementer  completed  https://github.com/…/pull/262  head bb1bf630…
+      review_evidence: the review's bytes are not published, so the digest cannot be checked
+```
+
+It reports the **active** assignments, the work **awaiting independent review**, the work **awaiting CI**, the work **awaiting the operator**, the **blocked or ambiguous** assignments, the **recently completed** work, and the **stale or contradictory** evidence — and `--json` emits the same records in machine form.
+
+Three properties matter more than the shape:
+
+- **It works without the operator's local MPM database.** The queue comes from the published evidence and from GitHub, so a fresh reviewer on a machine that has never had MPM installed can run it. It needs no publication credential either: a public repository is readable without one.
+- **It is strictly read-only.** It writes nothing to the substrate, nothing to GitHub, and it starts nothing.
+- **It does not report stale information as current.** If the published index cannot be retrieved or verified, the command reports that condition and exits non-zero. It never falls back to a local copy and calls it current.
+
+The filters are the project's own dimensions — `--repo`, `--branch`, `--project`, `--role`, `--disposition` — and there is no dashboard.
+
+#### The verification, against GitHub and not against the manifest
+
+A published manifest is an **index of evidence**, not proof that its claims are still true. `check` therefore checks every material external assertion against GitHub itself: that the pull request exists and belongs to the expected repository, that its actual head equals the recorded head, that the reviewed SHA matches the intended revision, that each cited workflow run exists and belongs to the recorded commit, that a run is not described as passed while a required job is failed, pending or missing, that a merged pull request is distinguished from an open draft, and that a review or an operator decision is not invented by a missing source record.
+
+Each check ends in one of five states: `verified`, `stale` (the record was true and the world has moved on), `failed` (GitHub says something else), `missing` (the thing could not be found) and `unverified` (GitHub could not be asked). **A network failure is never a successful verification**, and an unverified record is never presented as a verified one.
+
+So if the head advances after a review, `check` shows the review as **stale for the new head**.
+
+#### The publication authority
+
+Publication is a **controlled evidence operation**, not another way for an agent to gain a privilege.
+
+- The repository and the branch come from the **operator's configuration file** (`~/.mpm/evidence.json`). A missing configuration is an error, never a default: a publisher that invented a target would publish the evidence somewhere nobody chose.
+- The **write** goes through the operator's own `gh`, so the credential never enters MPM, never enters a record, and never reaches a contained worker or Charlie's isolated reviewer.
+- The publication path is **explicit and has a dry run**: `mpm engineering publish --dry-run` builds the publication and writes nothing. It is the same plan, not a second rendering that might differ.
+- No model-facing payload may select the repository, supply an operator approval, or replace independently captured reviewer evidence. There is no agent-facing action for publication at all: the operator's shell is the door.
+- The read-only `check` path needs **no publication credentials** and works with read-only GitHub access.
+
+#### The first corpus
+
+The first published corpus is **Continuity 001's own work**: pull requests #259, #260, #261 and #262, reconstructed from the GitHub record, because that work predates the assignment store's use of it. The corpus is a **fixture** — a versioned set of claims — and the publisher reads the **observed facts** from GitHub at publication time, exactly as it does for the store's claims.
+
+The reviews of those four pull requests happened in contained sessions whose findings were never published durably, so the corpus records them as **reported** reviews with **no digest**, and `check` says the evidence cannot be checked. That is the honest state, and the corpus is not a place where a missing digest becomes an approval.
+
 ---
 
 ## 7. Core Stability
@@ -4156,6 +4257,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`capability`** — Manage capabilities (seed, lifecycle, governance)
 - **`cascade`** — Materialize cascade intents
 - **`challenge`** — Flag memory as obsolete; 'list' enumerates challenged rows, 'restore <id>' undoes one (issue #20)
+- **`check`** — Show the engineering queue and verify its evidence against GitHub (--json)
 - **`compact`** — Operator commands for the compaction deferral lifecycle (deferred|requeue-deferred)
 - **`config`** — Configure LLM and embedding profiles manually (wizard | show | get | set | profile | component | capability)
 - **`continue`** — Resume previous session — composes working context, wake context, decisions, skills, theories
@@ -4167,6 +4269,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`directives`** — Show behavioral directives
 - **`doctor`** _(aliases: doc)_ — Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)
 - **`drills`** — Behavioural drill execution + compatibility matrix (list|show|run|report)
+- **`engineering`** — Publish the engineering evidence (publish)
 - **`evidence`** — Manage evidence (add|list) — confidence foundation
 - **`export`** — Export memories to JSON (structured object with the package loss marker)
 - **`gc`** — Run decay sweep (--dry-run, --review, --purge)
