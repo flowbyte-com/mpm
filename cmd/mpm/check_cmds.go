@@ -170,6 +170,12 @@ func renderCheckReport(report *evidence.CheckReport) string {
 		return b.String()
 	}
 	for _, section := range report.Sections {
+		// The stale section is rendered BELOW, on its own, carrying
+		// only the problem. Rendering it here as well would print
+		// the same records twice.
+		if section.Disposition == evidence.StaleSection {
+			continue
+		}
 		fmt.Fprintf(&b, "%s · %d\n", section.Disposition, len(section.Records))
 		for _, rec := range section.Records {
 			fmt.Fprintf(&b, "   %s  %s  %s  %s\n",

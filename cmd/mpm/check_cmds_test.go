@@ -17,11 +17,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -293,17 +292,34 @@ func runEngineeringCLI(t *testing.T, argv ...string) (int, string) {
 	return runCLI(t, append([]string{"engineering"}, argv...)...)
 }
 
-// TestTheFixtureIsReachableFromTheCommandLine proves the fixture file is
-// where the command expects it.
-func TestTheFixtureIsReachableFromTheCommandLine(t *testing.T) {
-	path, err := evidence.FixturePath("continuity-001")
+// TestTheFixtureLoadsFromTheCommandLine proves the command can LOAD the
+// fixture, not merely that the file is where the package says it is.
+//
+// The fixture is EMBEDDED, so an installed binary publishes the corpus
+// its source names — a path that could point somewhere else is a path
+// that eventually will. The old assertion — that the file exists in the
+// SOURCE tree — was true of a binary that could not read it.
+func TestTheFixtureLoadsFromTheCommandLine(t *testing.T) {
+	fixture, err := evidence.LoadFixture("continuity-001")
 	if err != nil {
-		t.Fatalf("the fixture path: %v", err)
+		t.Fatalf("the fixture does not load: %v", err)
 	}
-	if filepath.Base(path) != "continuity-001.json" {
-		t.Errorf("the fixture path is %q", path)
+	if len(fixture.Tasks) != 4 {
+		t.Errorf("the fixture holds %d tasks, want 4", len(fixture.Tasks))
 	}
-	if _, err := os.Stat(filepath.Join("..", "..", "internal", "core", "evidence", path)); err != nil {
-		t.Errorf("the fixture is not where the package says it is: %v", err)
+	for _, task := range fixture.Tasks {
+		if task.PRRef == "" {
+			t.Errorf("the task %s names no pull request", task.TaskID)
+		}
+	}
+	// And the corpus it yields builds records — the publication path
+	// reads the OBSERVED facts from GitHub, and a fixture that cannot
+	// be published is not a corpus.
+	corpus, err := evidence.BuildCorpusFromFixture(context.Background(), nil, fixture)
+	if err == nil {
+		t.Error("the corpus was built without a GitHub reader")
+	}
+	if corpus != nil {
+		t.Error("the corpus was built without a GitHub reader")
 	}
 }

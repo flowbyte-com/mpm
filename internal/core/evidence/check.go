@@ -256,10 +256,18 @@ func sectionize(records []*VerifiedRecord) []Section {
 	}
 	stale := StaleRecords(records)
 	if len(stale) > 0 {
-		sections = append(sections, Section{Disposition: "stale_or_contradictory", Records: stale})
+		sections = append(sections, Section{Disposition: StaleSection, Records: stale})
 	}
 	return sections
 }
+
+// StaleSection is the name of the section that holds the records whose
+// evidence no longer holds.
+//
+// It is a CONSTANT and not a literal at the call sites, because the
+// section is named in the report and a name that changed in one place
+// and not another would make the report lie about itself.
+const StaleSection = "stale_or_contradictory"
 
 // StaleRecords returns the records whose evidence no longer holds.
 //

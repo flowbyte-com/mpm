@@ -518,3 +518,42 @@ func TestTheStorePublicationSaysWhenItIsTruncated(t *testing.T) {
 		t.Errorf("the corpus says it was truncated after %d rows", corpus.Scanned)
 	}
 }
+
+// TestTheFixtureCorpusIsPublishedWithItsObservedFacts proves the FIRST
+// corpus — the one the Continuity 001 work itself produced — is
+// publishable from an installed binary.
+//
+// The fixture is EMBEDDED, so the binary carries it; and the publisher
+// reads the OBSERVED facts from GitHub at publication time, so a
+// fixture cannot state a fact about GitHub even if it wanted to.
+func TestTheFixtureCorpusIsPublishedWithItsObservedFacts(t *testing.T) {
+	fixture, err := evidence.LoadFixture("continuity-001")
+	if err != nil {
+		t.Fatalf("the fixture does not load: %v", err)
+	}
+	if len(fixture.Tasks) != 4 {
+		t.Fatalf("the fixture holds %d tasks, want 4", len(fixture.Tasks))
+	}
+	gh := newStoreGitHub(t, "closed")
+	corpus, err := evidence.BuildCorpusFromFixture(context.Background(),
+		storeClient(gh), fixture)
+	if err != nil {
+		t.Fatalf("build the corpus: %v", err)
+	}
+	records, err := corpus.Records()
+	if err != nil {
+		t.Fatalf("the corpus's records: %v", err)
+	}
+	if len(records) != len(fixture.Tasks) {
+		t.Fatalf("the corpus holds %d records, want %d", len(records), len(fixture.Tasks))
+	}
+	for _, rec := range records {
+		if rec.GitHub == nil {
+			t.Errorf("the record %s carries no observed pull request", rec.TaskID)
+			continue
+		}
+		if rec.Repository == "" || rec.Repository == evidence.Unknown {
+			t.Errorf("the record %s names the repository %q", rec.TaskID, rec.Repository)
+		}
+	}
+}
