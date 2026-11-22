@@ -45,7 +45,17 @@ import (
 //
 // It is in every record and in every index. A reader that does not
 // recognise the version says so rather than guessing at the fields.
-const FormatVersion = "mpm.evidence/v1"
+//
+// # THE VERSION COVERS THE DERIVATIONS TOO
+//
+// A record is not only its fields: the queue's filing is DERIVED from
+// them, and the human artefacts are RENDERED from them. Those rules
+// are part of the contract, so a change to a derivation or a rendering
+// changes what a reader must accept — and it changes THIS. Otherwise a
+// reader would check an old publication's bytes against rules that
+// publication never used and call legitimate evidence forged, while
+// the only compatibility signal said nothing had changed.
+const FormatVersion = "mpm.evidence/v2"
 
 // Unknown is the explicit value of a field nobody knows.
 //

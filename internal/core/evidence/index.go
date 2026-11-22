@@ -319,6 +319,10 @@ func ParseIndex(raw []byte) (*Index, error) {
 		if r.Path == "" || r.SHA256 == "" {
 			return nil, fmt.Errorf("evidence: the index names a rendering with no path or no digest")
 		}
+		if seen[r.Path] {
+			return nil, fmt.Errorf("evidence: the index names the artefact %s twice", r.Path)
+		}
+		seen[r.Path] = true
 	}
 	return &idx, nil
 }
@@ -371,9 +375,12 @@ func RenderRecordMarkdown(r *Record) string {
 			fmt.Fprintf(&b, " · status `%s`", r.ReviewEvidence.Status)
 		}
 		b.WriteString("\n")
-		if r.ReviewEvidence.Ref == Unknown && r.ReviewEvidence.Known() {
+		if r.ReviewEvidence.Ref == Unknown && r.ReviewEvidence.Status == CaptureVerified {
 			// THE HUMAN READER IS TOLD WHAT THE PUBLISHER
-			// ESTABLISHED, because the pointer alone cannot tell them.
+			// ESTABLISHED, because the pointer alone cannot tell them —
+			// and only when the status says the digest was CHECKED. A
+			// digest with status "none" was never checked, and saying
+			// it was is the fiction this contract exists to prevent.
 			b.WriteString("- **what the publisher established**: the digest was checked " +
 				"against the captured bytes; the bytes are not published, so no reader " +
 				"can check it\n")
@@ -443,8 +450,9 @@ func RenderQueueMarkdown(records []*Record, snapshot string, corpus *Corpus) str
 	// The order the caller handed the records in is not part of the
 	// queue, so it is not part of the bytes: the summary is sorted by
 	// root and task, exactly as the index lists them. That is what
-	// makes the published summary re-renderable by a reader who has the
-	// records and nothing else.
+	// makes the summary a function of the record SET — and of the
+	// publication's own metadata, the snapshot id and the truncation
+	// fields, which the summary prints.
 	ordered := make([]*Record, len(records))
 	copy(ordered, records)
 	sort.SliceStable(ordered, func(i, j int) bool {

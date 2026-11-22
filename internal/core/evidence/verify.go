@@ -68,6 +68,13 @@ const (
 	// record that files itself somewhere its own fields do not put it
 	// is a record that makes the queue lie.
 	CheckDisposition = "disposition"
+	// CheckIndex is the INDEX entry's agreement with the record it
+	// names.
+	//
+	// The index is what a reader who does not run the check reads:
+	// its task, title and disposition must be the record's, or the
+	// pointer says something the record does not.
+	CheckIndex = "index"
 )
 
 // Check is one verification result.

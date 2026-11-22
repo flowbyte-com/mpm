@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // The CHECK: read the published index, verify it against GitHub.
@@ -73,6 +74,14 @@ type VerifiedRecord struct {
 	// It is a separate fact from the checks, because it is about the
 	// RECORD and not about the world.
 	DigestVerified bool `json:"digest_verified"`
+	// FiledDisposition is where the QUEUE files the record: the
+	// disposition the record's own fields derive.
+	//
+	// It is the record's own Disposition for a well-formed record. A
+	// record that files itself elsewhere is filed HERE — where its
+	// fields put it — and failed, so the queue cannot show a task in a
+	// section its own state contradicts.
+	FiledDisposition string `json:"filed_disposition,omitempty"`
 }
 
 // Section is one section of the queue.
@@ -123,23 +132,36 @@ type CheckReport struct {
 	SnapshotVerified bool `json:"snapshot_verified"`
 	// SnapshotDetail explains a snapshot id that does not match.
 	SnapshotDetail string `json:"snapshot_detail,omitempty"`
+	// IndexDetail explains an index that contradicts the publication it
+	// points at — a repository or branch other than the one read.
+	IndexDetail string `json:"index_detail,omitempty"`
+	// UnverifiedOutside is how many records in the WHOLE corpus did
+	// not verify and are not shown, because a filter excluded them.
+	//
+	// The report's verdict covers the whole corpus, so a filtered view
+	// whose own records all verified still says ⚠; this is the number
+	// that explains why.
+	UnverifiedOutside int `json:"unverified_outside,omitempty"`
 	// RecordCount is how many records the publication holds.
 	//
 	// It is the count of the CORPUS, so a reader can tell a filtered
 	// view from the whole thing.
 	RecordCount int `json:"record_count"`
-	// ShownCount is how many records the filters left.
+	// ShownCount is how many records the report SHOWS: the records the
+	// filters selected, plus any record a filter may not hide (a
+	// tampered one, and one whose evidence is stale or contradicted).
 	ShownCount int `json:"shown_count"`
 	// Sections are the queue's sections, in report order.
 	Sections []Section `json:"sections"`
 	// Records are every record, in report order.
 	Records []*VerifiedRecord `json:"records"`
-	// Renderings are the human-readable artefacts the index named, and
-	// whether their bytes are the ones it named.
+	// Renderings are the human-readable artefacts the publication must
+	// hold, and whether each is the one the index and the records name.
 	//
-	// They are checked because the index gives them digests: a digest
-	// nobody checks is a claim, and a tampered queue summary would be
-	// invisible to a reader who trusted it.
+	// They are checked because the index gives them digests — a digest
+	// nobody checks is a claim — and because each one is RE-RENDERED
+	// from the record it belongs to, so a tampered summary or record
+	// page is invisible to nobody.
 	Renderings []RenderingVerification `json:"renderings,omitempty"`
 	// Truncated says the PUBLICATION holds only part of the work.
 	//
@@ -271,7 +293,13 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 		if err := AssertPublishable(&record); err != nil {
 			verification.add(CheckRecord, CheckFailed, err.Error())
 		}
-		if derived := DeriveDisposition(&record); derived != record.Disposition {
+		// THE INDEX ENTRY IS WHAT A READER WHO DOES NOT RUN THE CHECK
+		// READS. It must say what the record says.
+		if disagreement := indexEntryDisagreement(entry, &record); disagreement != "" {
+			verification.add(CheckIndex, CheckFailed, disagreement)
+		}
+		derived := DeriveDisposition(&record)
+		if derived != record.Disposition {
 			verification.add(CheckDisposition, CheckFailed, fmt.Sprintf(
 				"the record files itself as %q, and its own fields derive %q",
 				record.Disposition, derived))
@@ -282,10 +310,11 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 		}
 		verification.Checks = append(verification.Checks, live.Checks...)
 		report.Records = append(report.Records, &VerifiedRecord{
-			Record:         &record,
-			Verification:   verification,
-			Verdict:        verification.Verdict(),
-			DigestVerified: true,
+			Record:           &record,
+			Verification:     verification,
+			Verdict:          verification.Verdict(),
+			DigestVerified:   true,
+			FiledDisposition: derived,
 		})
 		loaded = append(loaded, &record)
 		loadedIDs = append(loadedIDs, entry.ID)
@@ -298,14 +327,33 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	// recompute it; an index that renames the snapshot while the
 	// records verify is an index that lies about what the reader is
 	// looking at.
-	if snapshot, err := SnapshotID(loaded); err != nil {
+	snapshot := ""
+	if recomputed, err := SnapshotID(loaded); err != nil {
 		report.SnapshotDetail = err.Error()
-	} else if SameDigest(snapshot, index.SnapshotID) {
-		report.SnapshotVerified = true
 	} else {
-		report.SnapshotDetail = fmt.Sprintf(
-			"the index names the snapshot %s, and the records it lists hash to %s",
-			index.SnapshotID, snapshot)
+		snapshot = recomputed
+		if SameDigest(recomputed, index.SnapshotID) {
+			report.SnapshotVerified = true
+		} else {
+			report.SnapshotDetail = fmt.Sprintf(
+				"the index names the snapshot %s, and the records the check could read hash to %s",
+				index.SnapshotID, recomputed)
+		}
+	}
+
+	// THE INDEX NAMES ITS OWN SOURCE.
+	//
+	// A reader reaches the index by a repository and a branch. An index
+	// that names another source is an index that was moved, and the
+	// publication a reader is looking at is not the one it describes.
+	if index.Repository != "" && !strings.EqualFold(index.Repository, repository) {
+		report.IndexDetail = fmt.Sprintf(
+			"the index says the evidence lives in %s, and the reader read it from %s",
+			index.Repository, repository)
+	} else if index.Branch != "" && index.Branch != branch {
+		report.IndexDetail = fmt.Sprintf(
+			"the index says the evidence lives on the branch %s, and the reader read it from %s",
+			index.Branch, branch)
 	}
 
 	// THE VERDICT IS OVER THE WHOLE CORPUS.
@@ -314,7 +362,8 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	// to one project must not be told "verified" while another
 	// project's records are stale.
 	report.RecordCount = len(report.Records)
-	report.Verified = report.RecordCount > 0 && report.SnapshotVerified
+	report.Verified = report.RecordCount > 0 && report.SnapshotVerified &&
+		report.IndexDetail == ""
 	for _, r := range report.Records {
 		if r.Verdict != CheckVerified {
 			report.Verified = false
@@ -331,7 +380,7 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	// verified. Hashing it against the index alone would only bind it
 	// to the mutable pointer.
 	report.Renderings = verifyRenderings(ctx, gh, repository, branch, index,
-		renderingExpectations(loaded, loadedIDs, index, clean))
+		renderingExpectations(loaded, loadedIDs, index, clean, snapshot, report.SnapshotVerified))
 	for _, r := range report.Renderings {
 		if !r.OK {
 			report.Verified = false
@@ -339,22 +388,70 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 		}
 	}
 
+	// WHAT THE FILTERED VIEW DOES NOT SHOW.
+	//
+	// The verdict covers the whole corpus, so a filtered view whose own
+	// records all verified still says ⚠. The number of records outside
+	// the view that did not verify is how the report explains that ⚠.
+	unverified := 0
+	for _, r := range report.Records {
+		if r.Verdict != CheckVerified {
+			unverified++
+		}
+	}
 	report.Records = filterRecords(report.Records, filters)
+	shownUnverified := 0
+	for _, r := range report.Records {
+		if r.Verdict != CheckVerified {
+			shownUnverified++
+		}
+	}
+	report.UnverifiedOutside = unverified - shownUnverified
 	report.ShownCount = len(report.Records)
 	report.Sections = sectionize(report.Records)
 	return report, nil
 }
 
-// renderingExpectation is one artefact the index must name, and the
-// bytes it must be the rendering of.
+// indexEntryDisagreement returns what the index entry says that the
+// record does not, or "".
 //
-// content is nil when the expectation cannot be computed — the record it
-// would be rendered from is not the record the index names — and why
-// says so. In that case only the index's digest can be checked.
+// The index is what a reader who does not run the check reads, so an
+// entry that contradicts its record is a pointer that lies about the
+// bytes it points at.
+func indexEntryDisagreement(entry IndexEntry, record *Record) string {
+	fields := []struct {
+		name  string
+		index string
+		rec   string
+	}{
+		{FieldRootID, entry.RootID, record.RootID},
+		{FieldTaskID, entry.TaskID, record.TaskID},
+		{FieldPRRef, entry.PRRef, record.PRRef},
+		{FieldDisposition, entry.Disposition, record.Disposition},
+		{FieldTitle, entry.Title, record.Title},
+	}
+	for _, f := range fields {
+		if f.index != f.rec {
+			return fmt.Sprintf("the index says %s is %q, and the record says %q",
+				f.name, f.index, f.rec)
+		}
+	}
+	return ""
+}
+
+// renderingExpectation is one artefact the publication must hold, and
+// the bytes it must be the rendering of.
+//
+// content is nil when the expectation cannot be computed — a record it
+// would be rendered from is not the record the index names, or the
+// index's snapshot is not the records' digest — and why says so. In
+// that case the artefact is NOT verified: the index's digest is checked,
+// and the report says the rendering could not be established.
 type renderingExpectation struct {
 	path    string
 	content []byte
 	why     string
+	summary bool
 }
 
 // renderingExpectations is what the publication must hold, from the
@@ -364,7 +461,7 @@ type renderingExpectation struct {
 // names nothing would otherwise verify with nothing checked. It is the
 // records themselves, plus the queue summary they render.
 func renderingExpectations(records []*Record, ids []string, index *Index,
-	clean bool) []renderingExpectation {
+	clean bool, snapshot string, snapshotVerified bool) []renderingExpectation {
 	out := make([]renderingExpectation, 0, len(records)+1)
 	for i, r := range records {
 		if i >= len(ids) {
@@ -380,11 +477,18 @@ func renderingExpectations(records []*Record, ids []string, index *Index,
 		Scanned:   index.Scanned,
 		ScanLimit: index.ScanLimit,
 	}
-	summary := renderingExpectation{path: QueueSummaryPath}
-	if clean {
-		summary.content = []byte(RenderQueueMarkdown(records, index.SnapshotID, corpus))
-	} else {
+	summary := renderingExpectation{path: QueueSummaryPath, summary: true}
+	switch {
+	case !clean:
 		summary.why = "the queue summary cannot be checked against the records while a record is not the one the index names"
+	case !snapshotVerified:
+		// THE SUMMARY NAMES THE SNAPSHOT. If the index's snapshot is
+		// not the records' digest, the index's metadata cannot be
+		// used as the expectation: a comparison would accuse the
+		// summary of a disagreement the metadata caused.
+		summary.why = "the queue summary cannot be checked while the index's snapshot id is not the records' digest"
+	default:
+		summary.content = []byte(RenderQueueMarkdown(records, snapshot, corpus))
 	}
 	out = append(out, summary)
 	return out
@@ -430,26 +534,40 @@ func verifyRenderings(ctx context.Context, gh GitHub, repository, branch string,
 			out = append(out, verification)
 			continue
 		}
-		if exp.content != nil {
-			if !bytes.Equal(raw, exp.content) {
-				verification.Detail = "the artefact's bytes are not the rendering of the record it names"
-				out = append(out, verification)
-				continue
-			}
-			verification.OK = true
-			out = append(out, verification)
-			continue
-		}
-		// THE EXPECTATION COULD NOT BE COMPUTED. The index's digest is
-		// all that can be checked, and the detail says so.
+		// THE DIGEST THE INDEX PUBLISHED IS CHECKED, EVERY TIME.
+		//
+		// A reader may record it; an artefact whose bytes do not hash
+		// to the digest the index gave it is not the artefact the
+		// index names, whatever else is true of it.
 		if !SameDigest(DigestBytes(raw), entry.SHA256) {
 			verification.Detail = fmt.Sprintf("the artefact hashes to %s and the index says %s",
 				DigestBytes(raw), entry.SHA256)
 			out = append(out, verification)
 			continue
 		}
+		if exp.content == nil {
+			// THE EXPECTATION COULD NOT BE COMPUTED. The digest is the
+			// one the index published, and the artefact is still not
+			// verified: saying so is not the same as saying it is
+			// forged, and the detail says which question was open.
+			verification.Detail = exp.why + "; its digest is the one the index published"
+			out = append(out, verification)
+			continue
+		}
+		if !bytes.Equal(raw, exp.content) {
+			if exp.summary {
+				// THE SUMMARY'S BYTES DEPEND ON THE INDEX'S SNAPSHOT AND
+				// TRUNCATION FIELDS. A disagreement is between the
+				// artefact and the index's metadata, not proof that
+				// the artefact is the forgery.
+				verification.Detail = "the queue summary is not the rendering of the records under the index's snapshot and truncation fields"
+			} else {
+				verification.Detail = "the artefact's bytes are not the rendering of the record it names"
+			}
+			out = append(out, verification)
+			continue
+		}
 		verification.OK = true
-		verification.Detail = exp.why
 		out = append(out, verification)
 	}
 	// AN EXTRA ARTEFACT the expected set does not know about. The index
@@ -520,7 +638,7 @@ func filterRecords(records []*VerifiedRecord, filters Filters) []*VerifiedRecord
 		if filters.Role != "" && r.Role != filters.Role {
 			continue
 		}
-		if filters.Disposition != "" && r.Disposition != filters.Disposition {
+		if filters.Disposition != "" && filedDisposition(r) != filters.Disposition {
 			continue
 		}
 		out = append(out, r)
@@ -552,7 +670,13 @@ func sectionize(records []*VerifiedRecord) []Section {
 	for _, disposition := range Dispositions() {
 		group := make([]*VerifiedRecord, 0)
 		for _, r := range records {
-			if r.Disposition == disposition {
+			// THE FILING IS DERIVED, NOT THE RECORD'S CLAIM.
+			//
+			// A record that files itself where its fields do not put
+			// it is failed, and it is filed where its fields put it —
+			// a queue section headed "completed" must not contain a
+			// cancelled task.
+			if filedDisposition(r) == disposition {
 				group = append(group, r)
 			}
 		}
@@ -566,6 +690,20 @@ func sectionize(records []*VerifiedRecord) []Section {
 		sections = append(sections, Section{Disposition: StaleSection, Records: stale})
 	}
 	return sections
+}
+
+// filedDisposition is where the queue files a record.
+//
+// It is the DERIVED disposition for a record the check evaluated, and
+// the record's own for a hand-built report that did not derive one.
+func filedDisposition(r *VerifiedRecord) string {
+	if r == nil {
+		return ""
+	}
+	if r.FiledDisposition != "" {
+		return r.FiledDisposition
+	}
+	return r.Disposition
 }
 
 // StaleSection is the name of the section that holds the records whose

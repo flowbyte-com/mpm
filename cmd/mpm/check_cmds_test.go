@@ -430,6 +430,49 @@ func TestTheReportSaysWhenTheSnapshotIDDoesNotMatch(t *testing.T) {
 	}
 }
 
+// TestAFilteredViewSaysWhatItDoesNotShow proves the human report
+// explains a ⚠ whose cause the filter excluded.
+func TestAFilteredViewSaysWhatItDoesNotShow(t *testing.T) {
+	report := &evidence.CheckReport{
+		Source:            evidence.Source{Repository: "owner/name", Branch: "evidence"},
+		RecordCount:       2,
+		ShownCount:        1,
+		UnverifiedOutside: 1,
+	}
+	out := renderCheckReport(report)
+	if !strings.Contains(out, "outside this view are not verified") {
+		t.Errorf("the report shows ⚠ with no reason:\n%s", out)
+	}
+}
+
+// TestTheArtefactProblemIsShownEvenWhenNoRecordMatches proves a broken
+// artefact is printed on the zero-match path.
+//
+// A reader whose filter matched nothing must still learn that the
+// summary does not match the index: it is as much the reason for the ⚠
+// as a broken record.
+func TestTheArtefactProblemIsShownEvenWhenNoRecordMatches(t *testing.T) {
+	report := &evidence.CheckReport{
+		Source:      evidence.Source{Repository: "owner/name", Branch: "evidence"},
+		RecordCount: 2,
+		ShownCount:  0,
+		Renderings: []evidence.RenderingVerification{{
+			Path:   evidence.QueueSummaryPath,
+			Detail: "the queue summary is not the rendering of the records under the index's snapshot and truncation fields",
+		}},
+	}
+	out := renderCheckReport(report)
+	if !strings.Contains(out, "No records match the filters") {
+		t.Errorf("the report does not say the filter matched nothing:\n%s", out)
+	}
+	if !strings.Contains(out, "artefacts not verified") {
+		t.Errorf("the report hides the broken artefact behind the empty view:\n%s", out)
+	}
+	if !strings.Contains(out, evidence.QueueSummaryPath) {
+		t.Errorf("the report does not name the broken artefact:\n%s", out)
+	}
+}
+
 // runCheckCLI runs `mpm check` and captures its output.
 //
 // The CLI's runner pipes stdout and stderr into ONE buffer, so the error

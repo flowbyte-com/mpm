@@ -185,28 +185,50 @@ func renderCheckReport(report *evidence.CheckReport) string {
 		fmt.Fprintf(&b, "   ✗ snapshot %s\n", report.SnapshotDetail)
 	}
 	fmt.Fprintf(&b, "   published  %s\n", report.Source.PublishedAt)
+	if report.IndexDetail != "" {
+		// THE INDEX AND THE PUBLICATION IT POINTS AT.
+		//
+		// A reader reaches the index by a repository and a branch; an
+		// index that names another source was moved, and what the
+		// reader is looking at is not what it describes.
+		fmt.Fprintf(&b, "   ✗ index %s\n", report.IndexDetail)
+	}
 	// THE PUBLICATION AND THE VIEW.
 	//
-	// The publication holds RecordCount records, and the filters left
-	// ShownCount of them. The states below are the SHOWN ones, so the
-	// numbers on the line add up: a reader who filtered to one project
-	// sees the states of the records they are looking at, and the count
-	// of the whole publication beside it.
+	// The publication holds RecordCount records, and the report SHOWS
+	// ShownCount of them — the filtered view plus the records a filter
+	// may not hide. The states below are the SHOWN ones, so the numbers
+	// on the line add up: a reader who filtered to one project sees the
+	// states of the records they are looking at, and the count of the
+	// whole publication beside it.
 	shown := ""
 	if report.ShownCount != report.RecordCount {
 		shown = fmt.Sprintf(" · showing %d", report.ShownCount)
 	}
 	fmt.Fprintf(&b, "   records    %d published%s · %s\n",
 		report.RecordCount, shown, verifiedSummary(report.Records))
+	if report.UnverifiedOutside > 0 {
+		// THE ⚠ HAS A CAUSE THE VIEW DOES NOT SHOW.
+		//
+		// The verdict covers the whole corpus, so a filtered view whose
+		// own records all verified still says ⚠. A reader who was not
+		// told how many records outside the view did not verify would
+		// see a warning with no reason for it.
+		fmt.Fprintf(&b, "   ✗ %d record(s) outside this view are not verified\n",
+			report.UnverifiedOutside)
+	}
 	if report.Truncated {
 		// THE PUBLICATION IS PARTIAL, AND THE READER IS TOLD.
 		//
 		// The publication was cut at the bound, so the queue below is
 		// part of the work and not all of it. A reader who takes a
-		// partial queue for the whole one is reading fiction.
-		bounded := "read under a bound"
+		// partial queue for the whole one is reading fiction. The
+		// bound is the PUBLICATION's claim: the check has no
+		// independent source for it, and the summary's own bytes are
+		// checked separately.
+		bounded := "the publication records a bound"
 		if report.ScanLimit > 0 {
-			bounded = fmt.Sprintf("read under a bound of %d assignments", report.ScanLimit)
+			bounded = fmt.Sprintf("the publication records a bound of %d assignments", report.ScanLimit)
 		}
 		fmt.Fprintf(&b, "   partial    %s; more work exists and the rows past the bound were dropped\n",
 			bounded)
@@ -237,45 +259,47 @@ func renderCheckReport(report *evidence.CheckReport) string {
 			fmt.Fprintf(&b, "No records match the filters; the publication holds %d.\n",
 				report.RecordCount)
 		}
-		return b.String()
-	}
-	if len(report.Sections) == 0 {
+		render.BlankLine(&b)
+	} else if len(report.Sections) == 0 {
 		b.WriteString("No records could be filed into the queue.\n")
-		return b.String()
-	}
-	for _, section := range report.Sections {
-		// The stale section is rendered BELOW, on its own, carrying
-		// only the problem. Rendering it here as well would print
-		// the same records twice.
-		if section.Disposition == evidence.StaleSection {
-			continue
-		}
-		fmt.Fprintf(&b, "%s · %d\n", section.Disposition, len(section.Records))
-		for _, rec := range section.Records {
-			fmt.Fprintf(&b, "   %s  %s  %s  %s\n",
-				recordSymbol(rec), rec.TaskID, rec.Role, rec.Disposition)
-			fmt.Fprintf(&b, "      %s · head %s\n", rec.PRRef, rec.HeadSHA)
-			if detail := firstProblem(rec); detail != "" {
-				fmt.Fprintf(&b, "      %s %s\n", recordSymbol(rec), detail)
+		render.BlankLine(&b)
+	} else {
+		for _, section := range report.Sections {
+			// The stale section is rendered BELOW, on its own, carrying
+			// only the problem. Rendering it here as well would print
+			// the same records twice.
+			if section.Disposition == evidence.StaleSection {
+				continue
 			}
+			fmt.Fprintf(&b, "%s · %d\n", section.Disposition, len(section.Records))
+			for _, rec := range section.Records {
+				fmt.Fprintf(&b, "   %s  %s  %s  %s\n",
+					recordSymbol(rec), rec.TaskID, rec.Role, rec.Disposition)
+				fmt.Fprintf(&b, "      %s · head %s\n", rec.PRRef, rec.HeadSHA)
+				if detail := firstProblem(rec); detail != "" {
+					fmt.Fprintf(&b, "      %s %s\n", recordSymbol(rec), detail)
+				}
+			}
+			render.BlankLine(&b)
 		}
-		render.BlankLine(&b)
-	}
-	if len(report.StaleRecords()) > 0 {
-		// The stale section repeats the records, so it carries ONLY
-		// the problem. A reader who has just read the queue does not
-		// need the pointers again.
-		fmt.Fprintf(&b, "stale or contradictory · %d\n", len(report.StaleRecords()))
-		for _, rec := range report.StaleRecords() {
-			fmt.Fprintf(&b, "   %s  %s  %s\n", recordSymbol(rec), rec.TaskID,
-				firstProblem(rec))
+		if len(report.StaleRecords()) > 0 {
+			// The stale section repeats the records, so it carries ONLY
+			// the problem. A reader who has just read the queue does not
+			// need the pointers again.
+			fmt.Fprintf(&b, "stale or contradictory · %d\n", len(report.StaleRecords()))
+			for _, rec := range report.StaleRecords() {
+				fmt.Fprintf(&b, "   %s  %s  %s\n", recordSymbol(rec), rec.TaskID,
+					firstProblem(rec))
+			}
+			render.BlankLine(&b)
 		}
-		render.BlankLine(&b)
 	}
-	// THE ARTEFACTS THAT DID NOT MATCH.
+	// THE ARTEFACTS THAT ARE NOT VERIFIED.
 	//
 	// A reader who trusts a queue summary that was changed after
-	// publication is trusting bytes nobody checked.
+	// publication is trusting bytes nobody checked — and this section is
+	// printed even when no record matches the filter, because a broken
+	// artefact is as much the reason for the ⚠ as a broken record.
 	broken := make([]evidence.RenderingVerification, 0)
 	for _, r := range report.Renderings {
 		if !r.OK {
@@ -283,7 +307,7 @@ func renderCheckReport(report *evidence.CheckReport) string {
 		}
 	}
 	if len(broken) > 0 {
-		fmt.Fprintf(&b, "artefacts that do not match the index · %d\n", len(broken))
+		fmt.Fprintf(&b, "artefacts not verified · %d\n", len(broken))
 		for _, r := range broken {
 			fmt.Fprintf(&b, "   ✗  %s  %s\n", r.Path, r.Detail)
 		}

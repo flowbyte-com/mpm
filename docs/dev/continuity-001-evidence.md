@@ -103,15 +103,39 @@ person reads as exactly as they can check the record a machine reads. Before
 this, the human artefacts were covered by nothing: a reader who verified a
 record had verified nothing about the documents anybody actually opens.
 
-**And the check RE-RENDERS them.** The rendering is a pure function of the
-record — and, for the queue summary, of the record set and the truncation
-fields — so `check` renders the expected document from the record it verified
-and compares the bytes. Hashing an artefact only against the index binds it to
-the mutable pointer, and a forger who rewrites the artefact and its index
-digest would otherwise be verified. The required set is the RECORDS', not the
-index's list: an index that names nothing would otherwise verify with nothing
-checked. The index's `snapshot_id` is recomputed from the records it lists, for
-the same reason — it is printed as the corpus's identity, so it is checked.
+**And the check RE-RENDERS them, AFTER checking the published digest.** The
+rendering is a function of the record — and, for the queue summary, of the
+record set and the publication's own snapshot and truncation fields — so
+`check` first checks that the artefact hashes to the digest the index
+published, and then renders the expected document and compares the bytes.
+Hashing an artefact only against the index binds it to the mutable pointer, and
+a forger who rewrites the artefact and its index digest would otherwise be
+verified; re-rendering without the digest check would let the index publish a
+digest nobody ever checked. The required set is the RECORDS', not the index's
+list: an index that names nothing would otherwise verify with nothing checked.
+
+**The index's other fields are checked too.** An entry's root, task, pull
+request, disposition and title must agree with the record it names — a reader
+who does not run the check reads the index, so an entry that says another task
+is a pointer that lies about the bytes it points at. The `snapshot_id` is
+recomputed from the records, the repository and branch must be the ones the
+reader read, and an index that lists one record or one artefact twice is
+refused.
+
+**A summary that disagrees with the index's metadata is named as a
+disagreement, not as a forgery.** The summary prints the snapshot and the
+truncation fields, so its bytes depend on the index. When they differ, the
+check cannot know which side is wrong, and it says so: the artefact is not
+verified, and the detail names the index's fields. When the snapshot is not
+the records' digest, the summary's expectation is not computed at all — a
+comparison would accuse the summary of a disagreement the metadata caused.
+
+**The format version covers these derivations.** The filing and the renderings
+are rules of the contract, so a change to either changes the version; a reader
+refuses a version it does not understand rather than checking an older
+publication's bytes against rules it never used. Before this, the renderers
+changed and the version did not — and a legitimate publication from the
+previous delta was reported as forged.
 
 **A partial publication says it is partial.** The index carries `truncated`,
 `scanned` and `scan_limit`. A reader that took a partial queue for the whole
@@ -347,10 +371,12 @@ reader that believes it. So the check applies the same validity and redaction
 gates the publisher applies before it publishes (`Validate`,
 `AssertPublishable`), and it re-derives the queue's filing from the record's
 own fields: a record that files itself where its fields do not put it is
-**failed**, not filed. Before this, a record with a foreign format, an unknown
-disposition or a forged provenance was accepted, counted and called verified —
-and a record with an unknown disposition vanished from every section while the
-human report said "The queue is empty" and exited 0.
+**failed**, and the queue files it where its fields put it — a section headed
+"completed" must not contain a cancelled task. Before this, a record with a
+foreign format, an unknown disposition or a forged provenance was accepted,
+counted and called verified — and a record with an unknown disposition vanished
+from every section while the human report said "The queue is empty" and exited
+0.
 
 A record whose bytes are **not JSON at all** is reported as a record too: the
 check no longer aborts on it. Aborting would hide the queue behind an error,
@@ -394,7 +420,9 @@ filtered view: a reader who filtered to one project must not be told
 "verified" while another project's records are stale. The report says how many
 records the publication holds (`record_count`) and how many it SHOWS
 (`shown_count` — the filtered view plus the records a filter may not hide), so
-a filtered view can never be mistaken for the whole thing. An empty
+a filtered view can never be mistaken for the whole thing. When the filter
+excludes records that did not verify, the report says how many
+(`unverified_outside`): a ⚠ must not arrive without a reason. An empty
 publication is not a verified one.
 
 **A filter narrows what a reader LOOKS at; it may not hide what the reader
@@ -407,13 +435,15 @@ hide the record that made it so.
 A filter that matches **nothing** says that, and does not say the queue is
 empty: "the queue is empty" is a claim about the publication, and a filter
 that matched nothing — including a typo — says nothing about the queue's
-contents. The report carries both counts, so a filtered view can never be
-mistaken for the whole thing.
+contents. A broken artefact is still printed on that path: it is a cause of
+the ⚠ too.
 
-**The human artefacts are re-rendered, not merely hashed.** `check` renders
-each `records/<id>.md` from the record it verified, and the queue summary from
-the record set and the truncation fields, and compares the bytes with what the
-index names. A digest check alone binds the artefact to the mutable pointer.
+**The human artefacts are re-rendered, not merely hashed.** `check` checks the
+digest the index published, then renders each `records/<id>.md` from the
+record it verified, and the queue summary from the record set and the
+publication's metadata, and compares the bytes. A digest check alone binds the
+artefact to the mutable pointer; a re-render alone leaves the published digest
+unchecked.
 
 The flag is **strict**, and a corpus that cannot be fully verified says so.
 Two honest reasons: the review's bytes are not published, so no digest can be
@@ -567,7 +597,7 @@ contract is the one failure mode the whole design exists to prevent.
 
 ## 10. The negative controls
 
-Twenty-six controls remove an invariant from the implementation and require the
+Twenty-nine controls remove an invariant from the implementation and require the
 acceptance suite to **fail**. A control that removes nothing measures nothing;
 a suite that does not notice is a suite that does not test the invariant.
 
@@ -598,6 +628,9 @@ a suite that does not notice is a suite that does not test the invariant.
 | the record is not validated | a record the publisher would refuse is not one the reader should believe |
 | the disposition is not derived | a record may not file itself where its own fields do not put it |
 | the artefact is not re-rendered | the Markdown a person reads is the rendering of the record a machine verified |
+| the artefact digest is not checked | the digest the index published for an artefact is its bytes' digest |
+| the index entry is not checked | the index entry says what the record it names says |
+| the queue is filed by the record's claim | a record is filed where its own fields put it |
 | the snapshot is not checked | the index's snapshot id is the digest of the records it names |
 
 They run **in Go**, inside the package's own test, because the package is
