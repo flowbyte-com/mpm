@@ -54,6 +54,20 @@ const (
 	CheckReviewEvidence = "review_evidence"
 	CheckReviewVerdict  = "review_verdict"
 	CheckApproval       = "operator_approval"
+	// CheckRecord is the record's OWN validity: the format, the
+	// vocabulary, the provenance categories, and the redaction rules
+	// the publisher applies before it publishes.
+	//
+	// The reader runs the same gates: a record the package would not
+	// publish is not one the reader should believe.
+	CheckRecord = "record"
+	// CheckDisposition is the record's OWN filing: the disposition it
+	// carries must be the one its fields derive.
+	//
+	// The queue's sections are the report's primary human output, so a
+	// record that files itself somewhere its own fields do not put it
+	// is a record that makes the queue lie.
+	CheckDisposition = "disposition"
 )
 
 // Check is one verification result.

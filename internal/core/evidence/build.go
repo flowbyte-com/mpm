@@ -133,6 +133,19 @@ type ReviewInfo struct {
 	CaptureStatus string
 	// EvidenceRef is where the captured evidence live.
 	EvidenceRef string
+	// findingsSHA is the revision the captured findings are ABOUT.
+	//
+	// A digest says something about BYTES, and those bytes are the
+	// reviewer's findings FOR A REVISION. Publishing the digest beside
+	// a different revision would say the findings are for a revision
+	// nobody examined.
+	//
+	// It is not a caller-supplied field: an account that carries a
+	// digest and a revision is claiming the two belong together, so
+	// resolveReview fills it from ReviewedSHA when the caller did not
+	// say otherwise. It is unexported because it is an internal
+	// correlation, not a published fact.
+	findingsSHA string
 	// Verdict is the recorded verdict, if any.
 	Verdict string
 	// LocallyReported says the review is asserted from OUTSIDE the
@@ -274,6 +287,21 @@ func resolveReview(accounts []ReviewInfo) ReviewInfo {
 	if len(accounts) == 0 {
 		return ReviewInfo{}
 	}
+	// THE CAPTURE NAMES THE REVISION IT IS ABOUT.
+	//
+	// An account that carries a digest and a revision is claiming the
+	// two belong together — the findings were captured for that
+	// revision. A caller that did not set findingsSHA did not mean
+	// "they are for nothing"; it meant "I did not know there was a
+	// separate pair to set". So the account's own revision is used.
+	tied := make([]ReviewInfo, len(accounts))
+	for i, a := range accounts {
+		if a.FindingsSHA256 != "" && a.FindingsSHA256 != Unknown && a.findingsSHA == "" {
+			a.findingsSHA = a.ReviewedSHA
+		}
+		tied[i] = a
+	}
+	accounts = tied
 	// THE ACCOUNTS, GROUPED BY THE REVIEW THEY DESCRIBE.
 	groups := map[string][]ReviewInfo{}
 	keys := make([]string, 0, len(accounts))
@@ -315,6 +343,21 @@ func resolveReview(accounts []ReviewInfo) ReviewInfo {
 			continue
 		}
 		out = mergeReview(out, other)
+	}
+	// THE DECISION'S REVISION AND THE CAPTURE'S REVISION MUST AGREE.
+	//
+	// The decision says which revision it is about, and the captured
+	// findings say which revision THEY are about. When two accounts of
+	// one review disagree about that, publishing the digest beside the
+	// decision would say the findings are for a revision nobody
+	// examined. There is no honest pairing to publish, so the record
+	// publishes NO capture rather than a false one.
+	if out.FindingsSHA256 != "" && out.findingsSHA != "" &&
+		out.ReviewedSHA != "" && out.findingsSHA != out.ReviewedSHA {
+		out.FindingsSHA256 = ""
+		out.CaptureStatus = ""
+		out.EvidenceRef = ""
+		out.findingsSHA = ""
 	}
 	return out
 }
@@ -390,10 +433,23 @@ func reviewKey(a ReviewInfo) string {
 		a.FindingsSHA256,
 		a.CaptureStatus,
 		a.EvidenceRef,
+		a.findingsSHA,
 		strconv.FormatBool(a.LocallyReported),
 		strconv.FormatBool(a.Exists),
 		a.Verdict,
 	}, "\x00")
+}
+
+// captureCompatible says whether two accounts' captures are about the
+// same revision.
+//
+// An account that names no revision has not contradicted anything: "the
+// bytes are here" is a claim that can be made without naming the
+// revision they were taken from. Two accounts that name DIFFERENT
+// revisions are a contradiction, and their digests must not be merged
+// with each other's revisions.
+func captureCompatible(a, b ReviewInfo) bool {
+	return a.findingsSHA == "" || b.findingsSHA == "" || a.findingsSHA == b.findingsSHA
 }
 
 // supersededReview says whether an account describes the review as it
@@ -433,15 +489,23 @@ func fillsTheGaps(other, current ReviewInfo) bool {
 
 // mergeReview folds an account into the one that is published.
 //
-// It only FILLS GAPS: where the published account already says
-// something, the account folded in does not overrule it.
+// # A MISSING FIELD IS FILLED; A CORRELATED PAIR IS NOT SPLIT
 //
-// # WHY THE FOLDED ACCOUNT DOES NOT OVERRULE
+// For the INDEPENDENT fields — the reviewer, whether a review exists —
+// the account folded in only fills a gap: where the published account
+// already says something, it does not overrule it. That is not true of
+// the CORRELATED fields, and it must not be: the decision's revision
+// wins over an older account's, so a base's revision can be replaced by
+// the verdict's, and a capture whose revision disagrees with the
+// published one is dropped (see resolveReview). "Only fills gaps"
+// applies to what is independent, not to what must travel together.
+//
+// # WHY THE FOLDED ACCOUNT DOES NOT OVERRULE AN INDEPENDENT FIELD
 //
 // The published account is the CURRENT one — the latest moment — and a
-// disagreement between the current account and another is a
-// disagreement between the review as it is and the review as it was.
-// The current one wins.
+// disagreement between the current account and another about an
+// independent field is a disagreement between the review as it is and
+// the review as it was. The current one wins.
 //
 // # WHY A SUPERSEDED ACCOUNT MAY NOT EVEN FILL A GAP
 //
@@ -493,14 +557,22 @@ func mergeReview(base, other ReviewInfo) ReviewInfo {
 	}
 	// THE CAPTURE AND THE PUBLISHER'S ANSWER ABOUT IT.
 	//
-	// The DIGEST-bearing account owns the triple: a pointer with no
-	// digest is an unchecked pointer, and the account that names bytes
-	// is the one whose status and pointer are about those bytes.
-	if out.FindingsSHA256 == "" {
-		out.FindingsSHA256 = other.FindingsSHA256
-		out.CaptureStatus = other.CaptureStatus
-		out.EvidenceRef = other.EvidenceRef
-	} else if SameDigest(out.FindingsSHA256, other.FindingsSHA256) {
+	// The DIGEST-bearing account owns the triple — the digest, the
+	// publisher's answer about it, and the pointer — AND the revision
+	// the bytes are for. A pointer with no digest is an unchecked
+	// pointer; a digest beside another account's revision is a claim
+	// nobody made.
+	//
+	// An explicit unknown is the ABSENCE of a digest, so a real digest
+	// from another account may replace it.
+	if out.FindingsSHA256 == "" || out.FindingsSHA256 == Unknown {
+		if captureCompatible(out, other) {
+			out.FindingsSHA256 = other.FindingsSHA256
+			out.CaptureStatus = other.CaptureStatus
+			out.EvidenceRef = other.EvidenceRef
+			out.findingsSHA = other.findingsSHA
+		}
+	} else if SameDigest(out.FindingsSHA256, other.FindingsSHA256) && captureCompatible(out, other) {
 		// The SAME digest: the answer and the pointer may be filled
 		// in, because they are about these bytes.
 		if out.CaptureStatus == "" {

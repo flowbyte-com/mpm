@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -113,6 +114,15 @@ type CheckReport struct {
 	// it is false for an empty corpus — an empty publication is not a
 	// verified one.
 	Verified bool `json:"verified"`
+	// SnapshotVerified says the index's snapshot id is the digest of
+	// the records it lists.
+	//
+	// The report prints the id, so a reader may record it as the
+	// corpus's identity; an index that renamed the snapshot would
+	// otherwise be verified.
+	SnapshotVerified bool `json:"snapshot_verified"`
+	// SnapshotDetail explains a snapshot id that does not match.
+	SnapshotDetail string `json:"snapshot_detail,omitempty"`
 	// RecordCount is how many records the publication holds.
 	//
 	// It is the count of the CORPUS, so a reader can tell a filtered
@@ -186,6 +196,15 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	report.ScanLimit = index.ScanLimit
 
 	verifier := &Verifier{GitHub: gh, Branch: branch, Repository: repository}
+	// THE RECORDS, AND WHAT THE READER CAN CHECK ABOUT THEM.
+	//
+	// Every decoded record is kept, with its index identifier and
+	// whether its bytes are the ones the index named. The artefacts are
+	// re-rendered FROM the records that verified, so this list is what
+	// the rendering checks stand on.
+	loaded := make([]*Record, 0, len(index.Records))
+	loadedIDs := make([]string, 0, len(index.Records))
+	clean := true
 	for _, entry := range index.Records {
 		recordRaw, err := gh.Content(ctx, repository, branch, RecordsDirectory+"/"+entry.ID+".json")
 		if err != nil {
@@ -199,8 +218,30 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 		digestOK := SameDigest(DigestBytes(recordRaw), entry.ID)
 		var record Record
 		if err := json.Unmarshal(recordRaw, &record); err != nil {
-			return nil, fmt.Errorf("evidence: the published record %s could not be read: %w",
-				entry.ID, err)
+			// REPORT IT, DO NOT ABORT.
+			//
+			// A record that cannot be read is a record the reader must
+			// be told about. Aborting would hide the queue behind an
+			// error, and the index entry still says WHICH record it is.
+			verification := &Verification{}
+			if !digestOK {
+				verification.add(CheckRepository, CheckFailed,
+					"the record's bytes do not hash to the identifier the index gave them")
+			}
+			verification.add(CheckRecord, CheckFailed,
+				"the record's bytes are not a record: "+err.Error())
+			report.Records = append(report.Records, &VerifiedRecord{
+				Record: &Record{
+					TaskID: entry.TaskID, RootID: entry.RootID,
+					Title: entry.Title, PRRef: entry.PRRef,
+					Disposition: entry.Disposition,
+				},
+				Verification:   verification,
+				Verdict:        verification.Verdict(),
+				DigestVerified: digestOK,
+			})
+			clean = false
+			continue
 		}
 		if !digestOK {
 			verification := &Verification{}
@@ -212,18 +253,59 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 				Verdict:        verification.Verdict(),
 				DigestVerified: false,
 			})
+			clean = false
 			continue
 		}
-		verification, err := verifier.Verify(ctx, &record)
+		// THE PACKAGE'S OWN GATES RUN HERE TOO.
+		//
+		// A record that is published but wrong is worse than a missing
+		// one, because it is believed. The reader applies the same
+		// validity and redaction gates the publisher applies before it
+		// publishes — and the same derivation for the queue's filing,
+		// so a record cannot file itself where its fields do not put
+		// it.
+		verification := &Verification{}
+		if err := Validate(&record); err != nil {
+			verification.add(CheckRecord, CheckFailed, err.Error())
+		}
+		if err := AssertPublishable(&record); err != nil {
+			verification.add(CheckRecord, CheckFailed, err.Error())
+		}
+		if derived := DeriveDisposition(&record); derived != record.Disposition {
+			verification.add(CheckDisposition, CheckFailed, fmt.Sprintf(
+				"the record files itself as %q, and its own fields derive %q",
+				record.Disposition, derived))
+		}
+		live, err := verifier.Verify(ctx, &record)
 		if err != nil {
 			return nil, err
 		}
+		verification.Checks = append(verification.Checks, live.Checks...)
 		report.Records = append(report.Records, &VerifiedRecord{
 			Record:         &record,
 			Verification:   verification,
 			Verdict:        verification.Verdict(),
 			DigestVerified: true,
 		})
+		loaded = append(loaded, &record)
+		loadedIDs = append(loadedIDs, entry.ID)
+	}
+
+	// THE INDEX'S SNAPSHOT ID IS A DIGEST OF THE RECORDS IT NAMES.
+	//
+	// It is printed at the top of the report, so a reader may record it
+	// as the corpus's identity. The check has every record and can
+	// recompute it; an index that renames the snapshot while the
+	// records verify is an index that lies about what the reader is
+	// looking at.
+	if snapshot, err := SnapshotID(loaded); err != nil {
+		report.SnapshotDetail = err.Error()
+	} else if SameDigest(snapshot, index.SnapshotID) {
+		report.SnapshotVerified = true
+	} else {
+		report.SnapshotDetail = fmt.Sprintf(
+			"the index names the snapshot %s, and the records it lists hash to %s",
+			index.SnapshotID, snapshot)
 	}
 
 	// THE VERDICT IS OVER THE WHOLE CORPUS.
@@ -232,7 +314,7 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	// to one project must not be told "verified" while another
 	// project's records are stale.
 	report.RecordCount = len(report.Records)
-	report.Verified = report.RecordCount > 0
+	report.Verified = report.RecordCount > 0 && report.SnapshotVerified
 	for _, r := range report.Records {
 		if r.Verdict != CheckVerified {
 			report.Verified = false
@@ -240,13 +322,16 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 		}
 	}
 
-	// THE HUMAN ARTEFACTS ARE CHECKED TOO.
+	// THE HUMAN ARTEFACTS ARE CHECKED AGAINST THE RECORDS.
 	//
-	// The index names every Markdown artefact with a digest, so the
-	// check reads them and hashes them. A digest that nobody checks is
-	// a claim, and a tampered queue summary would be invisible to a
-	// reader who trusted it.
-	report.Renderings = verifyRenderings(ctx, gh, repository, branch, index.Renderings)
+	// The index names every Markdown artefact with a digest, and the
+	// check re-renders each one FROM the record it belongs to: the
+	// rendering is a pure function of the record, so comparing the
+	// bytes binds the document a person reads to the record a machine
+	// verified. Hashing it against the index alone would only bind it
+	// to the mutable pointer.
+	report.Renderings = verifyRenderings(ctx, gh, repository, branch, index,
+		renderingExpectations(loaded, loadedIDs, index, clean))
 	for _, r := range report.Renderings {
 		if !r.OK {
 			report.Verified = false
@@ -260,16 +345,120 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	return report, nil
 }
 
-// verifyRenderings checks the human artefacts the index named.
+// renderingExpectation is one artefact the index must name, and the
+// bytes it must be the rendering of.
+//
+// content is nil when the expectation cannot be computed — the record it
+// would be rendered from is not the record the index names — and why
+// says so. In that case only the index's digest can be checked.
+type renderingExpectation struct {
+	path    string
+	content []byte
+	why     string
+}
+
+// renderingExpectations is what the publication must hold, from the
+// records the reader verified.
+//
+// The set is not the index's list: the index is data, so an index that
+// names nothing would otherwise verify with nothing checked. It is the
+// records themselves, plus the queue summary they render.
+func renderingExpectations(records []*Record, ids []string, index *Index,
+	clean bool) []renderingExpectation {
+	out := make([]renderingExpectation, 0, len(records)+1)
+	for i, r := range records {
+		if i >= len(ids) {
+			break
+		}
+		out = append(out, renderingExpectation{
+			path:    RecordsDirectory + "/" + ids[i] + ".md",
+			content: []byte(RenderRecordMarkdown(r)),
+		})
+	}
+	corpus := &Corpus{
+		Truncated: index.Truncated,
+		Scanned:   index.Scanned,
+		ScanLimit: index.ScanLimit,
+	}
+	summary := renderingExpectation{path: QueueSummaryPath}
+	if clean {
+		summary.content = []byte(RenderQueueMarkdown(records, index.SnapshotID, corpus))
+	} else {
+		summary.why = "the queue summary cannot be checked against the records while a record is not the one the index names"
+	}
+	out = append(out, summary)
+	return out
+}
+
+// verifyRenderings checks the human artefacts the publication must hold.
 //
 // A rendering that cannot be read is NOT verified: "the artefact could
 // not be found" and "the artefact is the one the index named" are
 // different facts, and a reader who confuses them will believe a
 // tampered summary.
 func verifyRenderings(ctx context.Context, gh GitHub, repository, branch string,
-	renderings []Rendering) []RenderingVerification {
-	out := make([]RenderingVerification, 0, len(renderings))
-	for _, r := range renderings {
+	index *Index, expectations []renderingExpectation) []RenderingVerification {
+	named := make(map[string]Rendering, len(index.Renderings))
+	for _, r := range index.Renderings {
+		named[r.Path] = r
+	}
+	out := make([]RenderingVerification, 0, len(expectations)+len(index.Renderings))
+	seen := make(map[string]bool, len(expectations))
+	for _, exp := range expectations {
+		seen[exp.path] = true
+		verification := RenderingVerification{Path: exp.path}
+		entry, ok := named[exp.path]
+		if !ok {
+			verification.Detail = "the index does not name this artefact"
+			out = append(out, verification)
+			continue
+		}
+		verification.SHA256 = entry.SHA256
+		if entry.SHA256 == "" {
+			verification.Detail = "the index named this artefact with no digest"
+			out = append(out, verification)
+			continue
+		}
+		if !safeEvidencePath(exp.path) {
+			verification.Detail = "the index names a path outside the evidence repository"
+			out = append(out, verification)
+			continue
+		}
+		raw, err := gh.Content(ctx, repository, branch, exp.path)
+		if err != nil {
+			verification.Detail = fmt.Sprintf("the artefact could not be read: %v", err)
+			out = append(out, verification)
+			continue
+		}
+		if exp.content != nil {
+			if !bytes.Equal(raw, exp.content) {
+				verification.Detail = "the artefact's bytes are not the rendering of the record it names"
+				out = append(out, verification)
+				continue
+			}
+			verification.OK = true
+			out = append(out, verification)
+			continue
+		}
+		// THE EXPECTATION COULD NOT BE COMPUTED. The index's digest is
+		// all that can be checked, and the detail says so.
+		if !SameDigest(DigestBytes(raw), entry.SHA256) {
+			verification.Detail = fmt.Sprintf("the artefact hashes to %s and the index says %s",
+				DigestBytes(raw), entry.SHA256)
+			out = append(out, verification)
+			continue
+		}
+		verification.OK = true
+		verification.Detail = exp.why
+		out = append(out, verification)
+	}
+	// AN EXTRA ARTEFACT the expected set does not know about. The index
+	// still gives it a digest, so the digest is checked; there is no
+	// record to re-render it from.
+	for _, r := range index.Renderings {
+		if seen[r.Path] {
+			continue
+		}
 		verification := RenderingVerification{Path: r.Path, SHA256: r.SHA256}
 		if r.Path == "" || r.SHA256 == "" {
 			verification.Detail = "the index named an artefact with no path or no digest"
@@ -306,12 +495,22 @@ func verifyRenderings(ctx context.Context, gh GitHub, repository, branch string,
 // their identifier is always reported, because a reader who filtered it
 // away would never learn that the evidence was tampered with.
 //
+// And neither is the VERIFICATION: a record whose evidence is stale or
+// contradicted is always reported, because it is the cause of the
+// report's own ⚠ — a filter that removed it would leave the reader with
+// a warning and no reason for it.
+//
 // A filter narrows what a reader LOOKS at; it may not hide what the
 // reader needs to KNOW.
 func filterRecords(records []*VerifiedRecord, filters Filters) []*VerifiedRecord {
 	out := make([]*VerifiedRecord, 0, len(records))
 	for _, r := range records {
-		if !r.DigestVerified {
+		// A record the reader NEEDS TO KNOW ABOUT is never filtered
+		// away: one whose bytes are not the ones the index names, and
+		// one whose evidence is stale or contradicted. A reader who
+		// filtered those away would see a ⚠ with no visible cause.
+		if !r.DigestVerified || (r.Verification != nil && r.Verification.Stale()) ||
+			r.Verdict == CheckStale || r.Verdict == CheckFailed {
 			out = append(out, r)
 			continue
 		}

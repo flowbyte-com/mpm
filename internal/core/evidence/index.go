@@ -297,6 +297,7 @@ func ParseIndex(raw []byte) (*Index, error) {
 		return nil, fmt.Errorf("evidence: the index claims %d records and lists %d",
 			idx.RecordCount, len(idx.Records))
 	}
+	seen := make(map[string]bool, len(idx.Records))
 	for _, r := range idx.Records {
 		// THE IDENTIFIER IS THE RECORD'S FILE NAME.
 		//
@@ -307,6 +308,12 @@ func ParseIndex(raw []byte) (*Index, error) {
 		if !isRecordID(r.ID) {
 			return nil, fmt.Errorf("evidence: the index names a record by %q, which is not a record identifier", r.ID)
 		}
+		// AND IT IS LISTED ONCE. Two entries with one identifier are
+		// one record counted twice, and the count is published.
+		if seen[r.ID] {
+			return nil, fmt.Errorf("evidence: the index lists the record %s twice", r.ID)
+		}
+		seen[r.ID] = true
 	}
 	for _, r := range idx.Renderings {
 		if r.Path == "" || r.SHA256 == "" {
@@ -358,8 +365,19 @@ func RenderRecordMarkdown(r *Record) string {
 	}
 	b.WriteString("\n")
 	if r.ReviewEvidence != nil {
-		fmt.Fprintf(&b, "- **review evidence**: %s · digest `%s`\n",
+		fmt.Fprintf(&b, "- **review evidence**: pointer %s · digest `%s`",
 			r.ReviewEvidence.Ref, r.ReviewEvidence.SHA256)
+		if r.ReviewEvidence.Status != "" {
+			fmt.Fprintf(&b, " · status `%s`", r.ReviewEvidence.Status)
+		}
+		b.WriteString("\n")
+		if r.ReviewEvidence.Ref == Unknown && r.ReviewEvidence.Known() {
+			// THE HUMAN READER IS TOLD WHAT THE PUBLISHER
+			// ESTABLISHED, because the pointer alone cannot tell them.
+			b.WriteString("- **what the publisher established**: the digest was checked " +
+				"against the captured bytes; the bytes are not published, so no reader " +
+				"can check it\n")
+		}
 	}
 	if r.PendingOperatorAction != "" && r.PendingOperatorAction != Unknown {
 		fmt.Fprintf(&b, "- **awaiting the operator**: %s\n", r.PendingOperatorAction)
@@ -420,6 +438,22 @@ func RenderQueueMarkdown(records []*Record, snapshot string, corpus *Corpus) str
 			"**This publication holds PART of the work.**%s There is more work "+
 				"than it holds, and the rows past the bound were dropped.\n\n", bound)
 	}
+	// THE RENDERING IS A FUNCTION OF THE RECORD SET.
+	//
+	// The order the caller handed the records in is not part of the
+	// queue, so it is not part of the bytes: the summary is sorted by
+	// root and task, exactly as the index lists them. That is what
+	// makes the published summary re-renderable by a reader who has the
+	// records and nothing else.
+	ordered := make([]*Record, len(records))
+	copy(ordered, records)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].RootID != ordered[j].RootID {
+			return ordered[i].RootID < ordered[j].RootID
+		}
+		return ordered[i].TaskID < ordered[j].TaskID
+	})
+	records = ordered
 	if len(records) == 0 {
 		b.WriteString("The queue is empty.\n")
 		return b.String()

@@ -74,7 +74,8 @@ func printCheckHelp() int {
 	b.WriteString("  --role          only this role's records\n")
 	b.WriteString("  --disposition   only this disposition's records\n")
 	b.WriteString("\nExit status: 0 when the whole published corpus verified, 1 when it did\n")
-	b.WriteString("not or could not be read. The report is printed either way.\n")
+	b.WriteString("not or could not be read. The report is printed when the corpus was\n")
+	b.WriteString("read; when it could not be read, the error is printed.\n")
 	return respond(b.String(), "", 0)
 }
 
@@ -175,6 +176,14 @@ func renderCheckReport(report *evidence.CheckReport) string {
 	}
 	fmt.Fprintf(&b, "%s  evidence   %s @ %s\n", status, report.Source.Repository, report.Source.Branch)
 	fmt.Fprintf(&b, "   snapshot   %s\n", report.Source.SnapshotID)
+	if report.SnapshotDetail != "" {
+		// THE SNAPSHOT ID IS PRINTED, SO IT IS CHECKED.
+		//
+		// A reader may record it as the corpus's identity; an index
+		// that renamed the snapshot while the records verify is an
+		// index that lies about what is being looked at.
+		fmt.Fprintf(&b, "   ✗ snapshot %s\n", report.SnapshotDetail)
+	}
 	fmt.Fprintf(&b, "   published  %s\n", report.Source.PublishedAt)
 	// THE PUBLICATION AND THE VIEW.
 	//
@@ -215,8 +224,23 @@ func renderCheckReport(report *evidence.CheckReport) string {
 	}
 	render.BlankLine(&b)
 
+	if report.ShownCount == 0 {
+		// THE PUBLICATION AND THE VIEW ARE DIFFERENT THINGS.
+		//
+		// "The queue is empty" is a claim about the PUBLICATION. A
+		// filter that matched nothing says nothing about the queue's
+		// contents, and printing the publication's emptiness would tell
+		// a reader there is no work when there is.
+		if report.RecordCount == 0 {
+			b.WriteString("The publication holds no records.\n")
+		} else {
+			fmt.Fprintf(&b, "No records match the filters; the publication holds %d.\n",
+				report.RecordCount)
+		}
+		return b.String()
+	}
 	if len(report.Sections) == 0 {
-		b.WriteString("The queue is empty.\n")
+		b.WriteString("No records could be filed into the queue.\n")
 		return b.String()
 	}
 	for _, section := range report.Sections {

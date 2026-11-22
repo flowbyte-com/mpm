@@ -727,6 +727,7 @@ func TestTheVerifiedFlagCoversTheWholeCorpusNotTheFilteredView(t *testing.T) {
 		PRRef:       "https://github.com/owner/name/pull/262",
 		BaseSHA:     testBase, HeadSHA: testHead, ReviewedSHA: testHead,
 		ReviewDisposition: ReviewDispositionVerdict, ReviewVerdict: VerdictPassed,
+		CI:         []CIRun{greenRun(1, testHead)},
 		Provenance: ProvenanceFor(),
 	}
 	bad := &Record{
@@ -737,6 +738,7 @@ func TestTheVerifiedFlagCoversTheWholeCorpusNotTheFilteredView(t *testing.T) {
 		PRRef:       "https://github.com/owner/name/pull/263",
 		BaseSHA:     testBase, HeadSHA: testHead, ReviewedSHA: testHead,
 		ReviewDisposition: ReviewDispositionVerdict, ReviewVerdict: VerdictPassed,
+		CI:         []CIRun{greenRun(2, testHead)},
 		Provenance: ProvenanceFor(),
 	}
 	gh := newFakeGitHub()
@@ -764,8 +766,17 @@ func TestTheVerifiedFlagCoversTheWholeCorpusNotTheFilteredView(t *testing.T) {
 	if report.RecordCount != 2 {
 		t.Errorf("the report says the corpus holds %d records, want 2", report.RecordCount)
 	}
-	if report.ShownCount != 1 {
-		t.Errorf("the report says %d records were shown, want 1", report.ShownCount)
+	// BOTH RECORDS ARE SHOWN, and that is the point: the stale record is
+	// in another project, and a filter may narrow what a reader looks
+	// at but may not hide the record that makes the report ⚠. A shown
+	// count of 1 here would be a report that says "there is a problem"
+	// and then hides it.
+	if report.ShownCount != 2 {
+		t.Errorf("the report says %d records were shown, want 2 (the stale record may not be hidden)",
+			report.ShownCount)
+	}
+	if len(report.StaleRecords()) != 1 {
+		t.Errorf("the report shows %d stale records, want 1", len(report.StaleRecords()))
 	}
 }
 

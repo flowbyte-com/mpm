@@ -384,6 +384,52 @@ func TestTheCheckReportSaysWhenThePublicationIsPartial(t *testing.T) {
 	}
 }
 
+// TestAFilterThatMatchesNothingIsNotAnEmptyQueue proves the report does
+// not say the queue is empty when a filter simply matched nothing.
+//
+// "The queue is empty" is a claim about the PUBLICATION. A filter that
+// matched nothing — including a typo — says nothing about the queue's
+// contents.
+func TestAFilterThatMatchesNothingIsNotAnEmptyQueue(t *testing.T) {
+	report := &evidence.CheckReport{
+		Source:      evidence.Source{Repository: "owner/name", Branch: "evidence"},
+		Verified:    true,
+		RecordCount: 3,
+		ShownCount:  0,
+	}
+	out := renderCheckReport(report)
+	if strings.Contains(out, "The queue is empty") {
+		t.Errorf("a filtered view with no matches says the queue is empty:\n%s", out)
+	}
+	for _, want := range []string{"No records match the filters", "holds 3"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not say %q:\n%s", want, out)
+		}
+	}
+	// An EMPTY publication is a different fact, and it is said.
+	empty := renderCheckReport(&evidence.CheckReport{
+		Source: evidence.Source{Repository: "owner/name", Branch: "evidence"},
+	})
+	if !strings.Contains(empty, "holds no records") {
+		t.Errorf("an empty publication is not said to be empty:\n%s", empty)
+	}
+}
+
+// TestTheReportSaysWhenTheSnapshotIDDoesNotMatch proves the snapshot id
+// the report prints is the one it checked.
+func TestTheReportSaysWhenTheSnapshotIDDoesNotMatch(t *testing.T) {
+	report := &evidence.CheckReport{
+		Source:         evidence.Source{Repository: "owner/name", Branch: "evidence", SnapshotID: "sha256:aaaa"},
+		RecordCount:    1,
+		ShownCount:     1,
+		SnapshotDetail: "the index names the snapshot sha256:aaaa, and the records it lists hash to sha256:bbbb",
+	}
+	out := renderCheckReport(report)
+	if !strings.Contains(out, "records it lists hash to sha256:bbbb") {
+		t.Errorf("the report prints the snapshot id without saying it does not match:\n%s", out)
+	}
+}
+
 // runCheckCLI runs `mpm check` and captures its output.
 //
 // The CLI's runner pipes stdout and stderr into ONE buffer, so the error

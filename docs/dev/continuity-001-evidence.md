@@ -103,6 +103,16 @@ person reads as exactly as they can check the record a machine reads. Before
 this, the human artefacts were covered by nothing: a reader who verified a
 record had verified nothing about the documents anybody actually opens.
 
+**And the check RE-RENDERS them.** The rendering is a pure function of the
+record — and, for the queue summary, of the record set and the truncation
+fields — so `check` renders the expected document from the record it verified
+and compares the bytes. Hashing an artefact only against the index binds it to
+the mutable pointer, and a forger who rewrites the artefact and its index
+digest would otherwise be verified. The required set is the RECORDS', not the
+index's list: an index that names nothing would otherwise verify with nothing
+checked. The index's `snapshot_id` is recomputed from the records it lists, for
+the same reason — it is printed as the corpus's identity, so it is checked.
+
 **A partial publication says it is partial.** The index carries `truncated`,
 `scanned` and `scan_limit`. A reader that took a partial queue for the whole
 one would be misled, and a silent truncation is worse than a visible one.
@@ -331,6 +341,21 @@ record whose bytes do not hash to the identifier the index gave it is not the
 record the index names, and everything said about it afterwards would be about
 something else.
 
+**The reader runs the publisher's own gates.** A record that is published but
+wrong is worse than a missing one, because it is believed — and `check` is the
+reader that believes it. So the check applies the same validity and redaction
+gates the publisher applies before it publishes (`Validate`,
+`AssertPublishable`), and it re-derives the queue's filing from the record's
+own fields: a record that files itself where its fields do not put it is
+**failed**, not filed. Before this, a record with a foreign format, an unknown
+disposition or a forged provenance was accepted, counted and called verified —
+and a record with an unknown disposition vanished from every section while the
+human report said "The queue is empty" and exited 0.
+
+A record whose bytes are **not JSON at all** is reported as a record too: the
+check no longer aborts on it. Aborting would hide the queue behind an error,
+and the index entry still says which record the reader is looking at.
+
 ---
 
 ## 7. The read-only `check`
@@ -352,10 +377,11 @@ non-zero. There is no local fallback, because a fallback that looks current is
 worse than no answer.
 
 **The exit status agrees with the report.** It is `0` exactly when the report
-verified the whole corpus, and `1` otherwise; the report is printed either way,
-because the reader needs to see WHY. Before this, `check` exited `0` while its
-own mark said `⚠`: a CI gate or a script read "success" from a report whose
-verdict was "the evidence does not hold".
+verified the whole corpus, and `1` otherwise; the report is printed when the
+corpus was read, and when it could not be read the error is printed instead.
+Before this, `check` exited `0` while its own mark said `⚠`: a CI gate or a
+script read "success" from a report whose verdict was "the evidence does not
+hold".
 
 The sections are the queue's own: active, awaiting review, awaiting CI,
 awaiting the operator, blocked, ambiguous, completed — and **stale or
@@ -366,18 +392,28 @@ its evidence still holds.
 The report's `verified` flag covers the **whole published corpus**, not the
 filtered view: a reader who filtered to one project must not be told
 "verified" while another project's records are stale. The report says how many
-records the publication holds (`record_count`) and how many the filters left
-(`shown_count`), so a filtered view can never be mistaken for the whole thing.
-An empty publication is not a verified one.
+records the publication holds (`record_count`) and how many it SHOWS
+(`shown_count` — the filtered view plus the records a filter may not hide), so
+a filtered view can never be mistaken for the whole thing. An empty
+publication is not a verified one.
 
 **A filter narrows what a reader LOOKS at; it may not hide what the reader
 needs to KNOW.** A record whose bytes do not hash to the identifier the index
-gave it is always reported, whatever the filters say.
+gave it is always reported, whatever the filters say — and so is a record
+whose evidence is **stale or contradicted**, because it is the cause of the
+report's own ⚠. Before this, a filtered report could say "not verified" and
+hide the record that made it so.
 
-**The human artefacts are checked too.** The index names every Markdown
-artefact with a digest, and `check` reads them and hashes them: a digest
-nobody checks is a claim, and a tampered queue summary would be invisible to a
-reader who trusted it.
+A filter that matches **nothing** says that, and does not say the queue is
+empty: "the queue is empty" is a claim about the publication, and a filter
+that matched nothing — including a typo — says nothing about the queue's
+contents. The report carries both counts, so a filtered view can never be
+mistaken for the whole thing.
+
+**The human artefacts are re-rendered, not merely hashed.** `check` renders
+each `records/<id>.md` from the record it verified, and the queue summary from
+the record set and the truncation fields, and compares the bytes with what the
+index names. A digest check alone binds the artefact to the mutable pointer.
 
 The flag is **strict**, and a corpus that cannot be fully verified says so.
 Two honest reasons: the review's bytes are not published, so no digest can be
@@ -473,11 +509,16 @@ in.
 
 **Correlated fields travel together.** A verdict says something about a
 revision, and a capture status says something about bytes. So the verdict
-brings its revision with it, and the digest brings its status and its pointer
-with it. Taking the revision from one account and the verdict from another
-would publish a decision about a revision no account ever paired with it —
-and taking the digest from one account and the status from another would
-publish an answer about bytes that account never saw.
+brings its revision with it; the digest brings its status and its pointer; and
+the capture names **the revision its bytes are for**. Two accounts that name
+different revisions for one review are a contradiction, and the record then
+publishes **no capture** rather than a digest beside a revision nobody paired
+it with. Taking the revision from one account and the verdict from another
+would publish a decision about a revision no account ever paired with it.
+
+**An explicit `unknown` is the ABSENCE of a digest.** An account that says
+"nothing was captured" does not shadow another account of the same review that
+did capture the bytes; the real digest and its status are taken.
 
 **The groups compete, and a SUPERSEDED group is dropped whole.** Where two
 groups disagree, the LATER one wins. And a group whose moment is earlier than
@@ -526,7 +567,7 @@ contract is the one failure mode the whole design exists to prevent.
 
 ## 10. The negative controls
 
-Twenty-two controls remove an invariant from the implementation and require the
+Twenty-six controls remove an invariant from the implementation and require the
 acceptance suite to **fail**. A control that removes nothing measures nothing;
 a suite that does not notice is a suite that does not test the invariant.
 
@@ -554,6 +595,10 @@ a suite that does not notice is a suite that does not test the invariant.
 | the pointer is published raw | a pointer on the publisher's machine is not published |
 | the partial publication is not announced | a publication that holds part of the work says so in the queue summary |
 | the report drops the truncation | the reader is told when the publication holds only part of the work |
+| the record is not validated | a record the publisher would refuse is not one the reader should believe |
+| the disposition is not derived | a record may not file itself where its own fields do not put it |
+| the artefact is not re-rendered | the Markdown a person reads is the rendering of the record a machine verified |
+| the snapshot is not checked | the index's snapshot id is the digest of the records it names |
 
 They run **in Go**, inside the package's own test, because the package is
 observable by itself and depends on nothing but the standard library. A control

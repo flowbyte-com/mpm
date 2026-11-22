@@ -359,6 +359,7 @@ func TestAFilterCannotHideATamperedRecord(t *testing.T) {
 		PRRef:       "https://github.com/owner/name/pull/262",
 		BaseSHA:     testBase, HeadSHA: testHead, ReviewedSHA: testHead,
 		ReviewDisposition: ReviewDispositionVerdict, ReviewVerdict: VerdictPassed,
+		CI:         []CIRun{greenRun(1, testHead)},
 		Provenance: ProvenanceFor(),
 	}
 	bad := &Record{
@@ -369,6 +370,7 @@ func TestAFilterCannotHideATamperedRecord(t *testing.T) {
 		PRRef:       "https://github.com/owner/name/pull/263",
 		BaseSHA:     testBase, HeadSHA: testHead, ReviewedSHA: testHead,
 		ReviewDisposition: ReviewDispositionVerdict, ReviewVerdict: VerdictPassed,
+		CI:         []CIRun{greenRun(2, testHead)},
 		Provenance: ProvenanceFor(),
 	}
 	plan, err := NewPlan(testRepo, EvidenceBranch, []*Record{good, bad}, timeFixture())
