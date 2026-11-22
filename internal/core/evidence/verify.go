@@ -146,6 +146,18 @@ type Verifier struct {
 	// somewhere else would report a missing capture for a capture that
 	// is right there.
 	Branch string
+	// Repository is the repository the EVIDENCE lives in.
+	//
+	// It is the READER's configuration, and it is not the record's:
+	// a record names the repository the WORK is visible in, which is
+	// not necessarily the repository the evidence was published to.
+	//
+	// It must be threaded through for the same reason the branch is.
+	// A verifier that fetched the review's bytes from the RECORD's
+	// repository would read from wherever a published record says to
+	// read — and the operator's publication target is a choice, not a
+	// field of the work.
+	Repository string
 }
 
 // Verify checks one record.
@@ -375,8 +387,22 @@ func (v *Verifier) checkReviewEvidence(ctx context.Context, out *Verification, r
 		out.add(CheckReviewEvidence, CheckMissing, "no review evidence is recorded")
 		return
 	case rec.ReviewEvidence == nil || !rec.ReviewEvidence.Known():
-		out.add(CheckReviewEvidence, CheckMissing,
-			"the review's bytes are not published, so the digest cannot be checked")
+		// THE PUBLISHER'S OWN ANSWER IS THE DETAIL.
+		//
+		// The record says whether the publisher CHECKED the digest,
+		// and a reader deserves to know why there is no digest to
+		// check: a refuted digest and an unpublished one are
+		// different facts.
+		detail := "the review's bytes are not published, so the digest cannot be checked"
+		if rec.ReviewEvidence != nil {
+			switch rec.ReviewEvidence.Status {
+			case CaptureContradicted:
+				detail = "the publisher refuted the digest: the bytes did not hash to it"
+			case CaptureUnverifiable:
+				detail = "the publisher could not read the bytes, so the digest was not published"
+			}
+		}
+		out.add(CheckReviewEvidence, CheckMissing, detail)
 		return
 	}
 	ref := rec.ReviewEvidence.Ref
@@ -401,7 +427,7 @@ func (v *Verifier) checkReviewEvidence(ctx context.Context, out *Verification, r
 			"the evidence's pointer %q does not name a path inside the evidence repository", ref))
 		return
 	}
-	raw, err := v.GitHub.Content(ctx, rec.Repository, v.evidenceRef(), ref)
+	raw, err := v.GitHub.Content(ctx, v.evidenceRepository(rec), v.evidenceRef(), ref)
 	if err != nil {
 		if isMissing(err) {
 			out.add(CheckReviewEvidence, CheckMissing,
@@ -579,6 +605,25 @@ func (v *Verifier) evidenceRef() string {
 		return v.Branch
 	}
 	return EvidenceBranch
+}
+
+// evidenceRepository returns the repository the evidence files live in.
+//
+// It is the READER's repository — the one the index was read from — and
+// not the record's: the record names the repository the WORK is visible
+// in, and the operator's publication target is a separate choice.
+//
+// A verifier that was not told falls back to the record's own
+// repository, which is the right answer for a caller that verifies one
+// record against the repository it describes.
+func (v *Verifier) evidenceRepository(rec *Record) string {
+	if v.Repository != "" {
+		return v.Repository
+	}
+	if rec != nil {
+		return rec.Repository
+	}
+	return ""
 }
 
 // EvidenceBranch is the branch the published evidence lives on.

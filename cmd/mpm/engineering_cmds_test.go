@@ -392,9 +392,13 @@ func TestTheStorePublicationChecksTheCapturedDigest(t *testing.T) {
 		t.Fatalf("the corpus's records: %v", err)
 	}
 	var rec *evidence.Record
+	var reviewerRec *evidence.Record
 	for _, r := range records {
 		if r.TaskID == done.ID {
 			rec = r
+		}
+		if r.TaskID == reviewer.ID {
+			reviewerRec = r
 		}
 	}
 	if rec == nil {
@@ -410,6 +414,22 @@ func TestTheStorePublicationChecksTheCapturedDigest(t *testing.T) {
 	if !evidence.SameDigest(rec.ReviewEvidence.SHA256, storeTestDigest(body)) {
 		t.Errorf("the record's digest is %q, want %q",
 			rec.ReviewEvidence.SHA256, storeTestDigest(body))
+	}
+	// THE REVIEWER'S OWN RECORD CARRIES THE SAME ANSWER.
+	//
+	// The publisher checked this digest and published its answer on the
+	// subject's record. A reviewer record that said "nothing is known
+	// about this capture" would be contradicting the publisher about
+	// the same bytes.
+	if reviewerRec == nil {
+		t.Fatalf("the reviewer's record is missing; the corpus holds %d records", len(records))
+	}
+	if reviewerRec.ReviewEvidence == nil {
+		t.Fatal("the reviewer's record carries no review evidence")
+	}
+	if reviewerRec.ReviewEvidence.Status != rec.ReviewEvidence.Status {
+		t.Errorf("the reviewer's record says the capture is %q and the subject's says %q",
+			reviewerRec.ReviewEvidence.Status, rec.ReviewEvidence.Status)
 	}
 }
 
@@ -555,5 +575,47 @@ func TestTheFixtureCorpusIsPublishedWithItsObservedFacts(t *testing.T) {
 		if rec.Repository == "" || rec.Repository == evidence.Unknown {
 			t.Errorf("the record %s names the repository %q", rec.TaskID, rec.Repository)
 		}
+	}
+}
+
+// TestThePublicationHelpNamesEveryOption proves the help page names the
+// options the command accepts.
+//
+// A flag the help does not mention is a flag the operator does not know
+// exists.
+func TestThePublicationHelpNamesEveryOption(t *testing.T) {
+	t.Setenv("MPM_WORKSPACE", t.TempDir())
+	code, out := runEngineeringCLI(t, "help")
+	if code != 0 {
+		t.Fatalf("the help exited with %d: %s", code, out)
+	}
+	for _, flag := range []string{"--dry-run", "--fixture", "--repo", "--branch", "--json"} {
+		if !strings.Contains(out, flag) {
+			t.Errorf("the help page does not mention %s:\n%s", flag, out)
+		}
+	}
+}
+
+// TestThePublicationRefusesABranchTheConfigurationDoesNotName proves
+// the configured target wins over a flag, and that the flag is not
+// SILENTLY ignored.
+//
+// A write that went to a branch the operator did not ask for would be a
+// publication somewhere nobody chose.
+func TestThePublicationRefusesABranchTheConfigurationDoesNotName(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("MPM_WORKSPACE", workspace)
+	resetDBSingleton(t)
+	config := `{"repository":"owner/name","branch":"evidence"}`
+	if err := os.WriteFile(workspace+"/"+evidenceConfigFileName,
+		[]byte(config), 0o600); err != nil {
+		t.Fatalf("write the configuration: %v", err)
+	}
+	code, out := runEngineeringCLI(t, "publish", "--dry-run", "--branch", "somewhere-else")
+	if code == 0 {
+		t.Fatalf("the publication reported success although the branch differs:\n%s", out)
+	}
+	if !strings.Contains(out, "the configuration wins") {
+		t.Errorf("the refusal does not say the configuration wins:\n%s", out)
 	}
 }

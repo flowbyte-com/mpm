@@ -82,6 +82,24 @@ type Section struct {
 	Records []*VerifiedRecord `json:"records"`
 }
 
+// RenderingVerification is one human-readable artefact and whether its
+// bytes are the ones the index named.
+//
+// The index names every artefact with a digest, so a reader can check
+// the Markdown a person reads as exactly as they can check the record a
+// machine reads. A digest nobody checks is a claim, so the CHECK
+// checks them.
+type RenderingVerification struct {
+	// Path is the artefact's path on the evidence branch.
+	Path string `json:"path"`
+	// SHA256 is the digest the index gave it.
+	SHA256 string `json:"sha256"`
+	// OK says whether the artefact's bytes hash to that digest.
+	OK bool `json:"ok"`
+	// Detail says what could not be checked.
+	Detail string `json:"detail,omitempty"`
+}
+
 // CheckReport is the whole result of a check.
 type CheckReport struct {
 	// Source is where the evidence came from.
@@ -106,6 +124,13 @@ type CheckReport struct {
 	Sections []Section `json:"sections"`
 	// Records are every record, in report order.
 	Records []*VerifiedRecord `json:"records"`
+	// Renderings are the human-readable artefacts the index named, and
+	// whether their bytes are the ones it named.
+	//
+	// They are checked because the index gives them digests: a digest
+	// nobody checks is a claim, and a tampered queue summary would be
+	// invisible to a reader who trusted it.
+	Renderings []RenderingVerification `json:"renderings,omitempty"`
 }
 
 // RunCheck reads the published evidence and verifies it against GitHub.
@@ -139,7 +164,7 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	report.Source.PublishedAt = index.PublishedAt
 	report.Source.Retrieved = true
 
-	verifier := &Verifier{GitHub: gh, Branch: branch}
+	verifier := &Verifier{GitHub: gh, Branch: branch, Repository: repository}
 	for _, entry := range index.Records {
 		recordRaw, err := gh.Content(ctx, repository, branch, RecordsDirectory+"/"+entry.ID+".json")
 		if err != nil {
@@ -193,10 +218,65 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 			break
 		}
 	}
+
+	// THE HUMAN ARTEFACTS ARE CHECKED TOO.
+	//
+	// The index names every Markdown artefact with a digest, so the
+	// check reads them and hashes them. A digest that nobody checks is
+	// a claim, and a tampered queue summary would be invisible to a
+	// reader who trusted it.
+	report.Renderings = verifyRenderings(ctx, gh, repository, branch, index.Renderings)
+	for _, r := range report.Renderings {
+		if !r.OK {
+			report.Verified = false
+			break
+		}
+	}
+
 	report.Records = filterRecords(report.Records, filters)
 	report.ShownCount = len(report.Records)
 	report.Sections = sectionize(report.Records)
 	return report, nil
+}
+
+// verifyRenderings checks the human artefacts the index named.
+//
+// A rendering that cannot be read is NOT verified: "the artefact could
+// not be found" and "the artefact is the one the index named" are
+// different facts, and a reader who confuses them will believe a
+// tampered summary.
+func verifyRenderings(ctx context.Context, gh GitHub, repository, branch string,
+	renderings []Rendering) []RenderingVerification {
+	out := make([]RenderingVerification, 0, len(renderings))
+	for _, r := range renderings {
+		verification := RenderingVerification{Path: r.Path, SHA256: r.SHA256}
+		if r.Path == "" || r.SHA256 == "" {
+			verification.Detail = "the index named an artefact with no path or no digest"
+			out = append(out, verification)
+			continue
+		}
+		if !safeEvidencePath(r.Path) {
+			verification.Detail = "the index names a path outside the evidence repository"
+			out = append(out, verification)
+			continue
+		}
+		raw, err := gh.Content(ctx, repository, branch, r.Path)
+		if err != nil {
+			verification.Detail = fmt.Sprintf("the artefact could not be read: %v", err)
+			out = append(out, verification)
+			continue
+		}
+		got := DigestBytes(raw)
+		if !SameDigest(got, r.SHA256) {
+			verification.Detail = fmt.Sprintf("the artefact hashes to %s and the index says %s",
+				got, r.SHA256)
+			out = append(out, verification)
+			continue
+		}
+		verification.OK = true
+		out = append(out, verification)
+	}
+	return out
 }
 
 // filterRecords applies the filters.
@@ -204,9 +284,16 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 // The digest check is NOT a filter: a record whose bytes do not match
 // their identifier is always reported, because a reader who filtered it
 // away would never learn that the evidence was tampered with.
+//
+// A filter narrows what a reader LOOKS at; it may not hide what the
+// reader needs to KNOW.
 func filterRecords(records []*VerifiedRecord, filters Filters) []*VerifiedRecord {
 	out := make([]*VerifiedRecord, 0, len(records))
 	for _, r := range records {
+		if !r.DigestVerified {
+			out = append(out, r)
+			continue
+		}
 		if filters.Project != "" && r.Project != filters.Project {
 			continue
 		}

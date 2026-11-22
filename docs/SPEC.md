@@ -3226,9 +3226,9 @@ A record is named by the **digest of its own bytes**, so the same evidence alway
 
 **Nothing in the published content contains the SHA of the content that contains it.** The index names the records by their digests and the records do not name the index, so every digest a reader is given is one the reader can check.
 
-The index also names the **human-readable artefacts** — every `records/<id>.md` and the queue summary — with their digests, so a reader can check the Markdown a person reads as exactly as they can check the record a machine reads.
+The index also names the **human-readable artefacts** — every `records/<id>.md` and the queue summary — with their digests, so a reader can check the Markdown a person reads as exactly as they can check the record a machine reads. **`check` checks them too**: a digest nobody checks is a claim, and a tampered queue summary would otherwise be invisible to a reader who trusted it.
 
-A publication that holds only **part** of the work **says so**: the index carries `truncated`, `scanned` and `scan_limit`. A reader that took a partial queue for the whole one would be misled, and a silent truncation is worse than a visible one.
+A publication that holds only **part** of the work **says so**: the index carries `truncated`, `scanned` and `scan_limit`. A reader that took a partial queue for the whole one would be misled, and a silent truncation is worse than a visible one. The flag means what it says: the publication reads one row past its bound, so it knows whether anything was actually dropped — a scan that merely *reached* the bound has truncated nothing.
 
 Publication is **deterministic** for identical input evidence, apart from the publication timestamp, which is recorded as metadata in the index and never inside a record.
 
@@ -3240,7 +3240,11 @@ A **reviewer finding captured from a real host session** may be published as hos
 
 A **manifest supplied by an agent** cannot become authoritative because the agent wrote it: the publisher reads the assignment store and GitHub, and it verifies the digest of any host-captured evidence before publishing it.
 
-A **captured digest is a claim**, and the publisher **checks it against the bytes** before it publishes either. The record says which of three things was found: `verified` (the bytes are there and they hash to the digest), `unverifiable` (the bytes are somewhere the publisher cannot read, so the digest is published as the explicit unknown) or `contradicted` (the bytes are there and they do **not** hash to the digest — so the digest is **refused** and published as `unknown`, with the contradiction named). The status is published **with** the digest, so a reader can tell a checked digest from an unchecked one without looking anywhere else.
+A **captured digest is a claim**, and the publisher **checks it against the bytes** before it publishes either. The record says which of four things was found: `verified` (the bytes are there and they hash to the digest), `unverifiable` (the bytes are somewhere the publisher cannot read), `contradicted` (the bytes are there and they do **not** hash to the digest) or `none` (no digest was recorded, or nothing was captured yet). The status is published **with** the digest, so a reader can tell a checked digest from an unchecked one without looking anywhere else.
+
+**A digest the publisher did not establish is published as the explicit unknown.** An `unverifiable` digest is an unchecked claim and a `contradicted` one is a refuted claim; publishing either would publish a claim the publisher cannot stand behind, inside the content-addressed bytes. So both become `unknown`, and the **status** says which of them happened.
+
+Every captured digest is checked, whether or not a reviewer has recorded a verdict yet: a review in flight has findings whose digest was checked, and the record says so.
 
 The **observed side is screened like the claims**. A pull request's title, a review's body and a workflow's or job's name are written by other people, and the substrate never saw them — so they go through the same redactor as the store's own text, and a withheld one becomes `unknown` with the **field named** and never its content. A record that somehow carries a credential in an observed field is **refused**, not published.
 
@@ -3271,19 +3275,26 @@ A **reviewer's own record is filed by the review**: the rules above are the subj
 ```
 MPM · Check
 
-✓  evidence   flowbyte-com/mpm @ evidence
+⚠  evidence   flowbyte-com/mpm @ evidence
    snapshot   sha256:…
    published  2026-11-22T09:00:00Z
-   records    4 · verified 0 · missing 4
+   records    4 · 4 missing
 
 completed · 4
-   ○  pr-262  implementer  completed  https://github.com/…/pull/262  head bb1bf630…
-      review_evidence: the review's bytes are not published, so the digest cannot be checked
+   ○  pr-262  implementer  completed
+      https://github.com/flowbyte-com/mpm/pull/262 · head bb1bf630…
+      ○ review_evidence: the review's bytes are not published, so the digest cannot be checked
 ```
+
+The mark beside `evidence` is the report's `verified` flag: **⚠ when the corpus is not fully verified**, and ✓ only when every record in the whole corpus verified. An empty publication is not a verified one.
 
 It reports the **active** assignments, the work **awaiting independent review**, the work **awaiting CI**, the work **awaiting the operator**, the **blocked or ambiguous** assignments, the **recently completed** work, and the **stale or contradictory** evidence — and `--json` emits the same records in machine form.
 
 The report's `verified` flag covers the **whole published corpus**, not the filtered view: a reader who filtered to one project must not be told "verified" while another project's records are stale. The report says how many records the publication holds (`record_count`) and how many the filters left (`shown_count`), so a filtered view can never be mistaken for the whole thing.
+
+**A filter narrows what a reader looks at; it may not hide what the reader needs to know.** A record whose bytes do not hash to the identifier the index gave it is always reported, whatever the filters say — a reader who filtered it away would never learn that the evidence was tampered with.
+
+The flag is **strict**, and a corpus that cannot be fully verified says so. Two honest reasons a corpus is not verified: the review's bytes are not published, so the digest cannot be checked by anybody; and a store publication includes the **reviewer's own rows**, which name no pull request and therefore have nothing to check against GitHub. Neither is a failure of the publication — they are the state of the world, and the flag reports it rather than hiding it.
 
 Three properties matter more than the shape:
 
@@ -3299,7 +3310,7 @@ A published manifest is an **index of evidence**, not proof that its claims are 
 
 The decision checks are **falsifiable**: a verdict for a revision the pull request has moved past is **stale**, not verified; an approval to merge a pull request that is not merged is **failed**, not verified; and each check's detail says explicitly what was not established.
 
-The verifier looks for the review's bytes **on the branch the reader was told** — the branch is the reader's configuration, and a record may not name its own branch — and it fetches only **safe relative paths inside the evidence repository**. A published pointer is data, not a command.
+The verifier looks for the review's bytes **in the repository the reader was told, on the branch the reader was told** — the evidence lives where the publication put it, and neither is the record's to name: a record names the repository the *work* is visible in, which is not necessarily where the evidence was published. And it fetches only **safe relative paths inside the evidence repository**. A published pointer is data, not a command.
 
 Each check ends in one of five states: `verified`, `stale` (the record was true and the world has moved on), `failed` (GitHub says something else), `missing` (the thing could not be found) and `unverified` (GitHub could not be asked). **A network failure is never a successful verification**, and an unverified record is never presented as a verified one.
 

@@ -163,6 +163,17 @@ func renderCheckReport(report *evidence.CheckReport) string {
 	}
 	fmt.Fprintf(&b, "   records    %d%s · %s\n",
 		report.RecordCount, shown, verifiedSummary(report.Records))
+	if len(report.Renderings) > 0 {
+		// The index names the human artefacts with digests, and the
+		// check checks them: a digest nobody checks is a claim.
+		ok := 0
+		for _, r := range report.Renderings {
+			if r.OK {
+				ok++
+			}
+		}
+		fmt.Fprintf(&b, "   renderings %d · %d verified\n", len(report.Renderings), ok)
+	}
 	render.BlankLine(&b)
 
 	if len(report.Sections) == 0 {
@@ -195,6 +206,23 @@ func renderCheckReport(report *evidence.CheckReport) string {
 		for _, rec := range report.StaleRecords() {
 			fmt.Fprintf(&b, "   %s  %s  %s\n", recordSymbol(rec), rec.TaskID,
 				firstProblem(rec))
+		}
+		render.BlankLine(&b)
+	}
+	// THE ARTEFACTS THAT DID NOT MATCH.
+	//
+	// A reader who trusts a queue summary that was changed after
+	// publication is trusting bytes nobody checked.
+	broken := make([]evidence.RenderingVerification, 0)
+	for _, r := range report.Renderings {
+		if !r.OK {
+			broken = append(broken, r)
+		}
+	}
+	if len(broken) > 0 {
+		fmt.Fprintf(&b, "artefacts that do not match the index · %d\n", len(broken))
+		for _, r := range broken {
+			fmt.Fprintf(&b, "   ✗  %s  %s\n", r.Path, r.Detail)
 		}
 		render.BlankLine(&b)
 	}

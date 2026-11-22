@@ -184,6 +184,13 @@ func Build(tree Tree, facts map[string]Facts) ([]*Record, error) {
 // as "no review happened" and files finished work under
 // "awaiting review" forever.
 //
+// # THE MERGE RESPECTS THE ORDER TOO
+//
+// A merge is not a licence to publish an older verdict. Where the two
+// accounts DISAGREE, the LATER one wins — so a superseded verdict
+// cannot come back through the merge, and the order the candidates
+// arrived in decides nothing.
+//
 // The rule lives HERE, and not in one caller, because it is part of the
 // contract: a caller that built its own map could get it wrong, and the
 // map is not what a reader sees.
@@ -198,13 +205,23 @@ func BuildWithReviews(tree Tree, facts map[string]Facts,
 		for _, candidate := range candidates {
 			switch {
 			case !ok:
-				reviews[taskID] = candidate
+				current = candidate
 				ok = true
 			case sameReview(current, candidate):
-				reviews[taskID] = mergeReview(current, candidate)
+				current = mergeReview(current, candidate)
 			case newerReview(candidate, current):
-				reviews[taskID] = candidate
+				current = candidate
 			}
+			// THE ACCOUNT IS ACCUMULATED.
+			//
+			// Every candidate is compared with the account the PREVIOUS
+			// candidates produced, not with the one the tree started
+			// with. Comparing with the original would let a later
+			// candidate overwrite what an earlier one established — and
+			// the answer would depend on the order the candidates
+			// arrived in, which is the caller's accident and not a fact
+			// about the work.
+			reviews[taskID] = current
 		}
 	}
 	claims := append([]Claims(nil), tree.Tasks...)
@@ -226,8 +243,19 @@ func BuildWithReviews(tree Tree, facts map[string]Facts,
 // The comparison is on the update time, and the tie is broken by the
 // reviewer's id — so the answer does not depend on the order the
 // candidates were found in.
+//
+// An account whose time is UNKNOWN never wins a comparison it cannot
+// make: "I do not know when this happened" is not "this happened
+// later". So an unknown time loses to a known one.
 func newerReview(a, b ReviewInfo) bool {
-	if a.UpdatedAt != b.UpdatedAt {
+	switch {
+	case a.UpdatedAt == 0 && b.UpdatedAt == 0:
+		return a.ReviewerID > b.ReviewerID
+	case a.UpdatedAt == 0:
+		return false
+	case b.UpdatedAt == 0:
+		return true
+	case a.UpdatedAt != b.UpdatedAt:
 		return a.UpdatedAt > b.UpdatedAt
 	}
 	return a.ReviewerID > b.ReviewerID
@@ -237,45 +265,66 @@ func newerReview(a, b ReviewInfo) bool {
 //
 // Two accounts of one review name the same reviewer. Two DIFFERENT
 // reviews of one subject name two reviewers, and they compete.
+//
+// An account that names NO reviewer is a REPORTED review — one that
+// happened outside the substrate, and that the publisher was told
+// about. It cannot be told apart from the account of the same
+// review, so it is MERGED rather than chosen between: the merge keeps
+// what either of them knows, and a dropped candidate is a verdict that
+// never reaches the reader.
 func sameReview(a, b ReviewInfo) bool {
-	return a.ReviewerID != "" && a.ReviewerID == b.ReviewerID
+	if a.ReviewerID == "" || b.ReviewerID == "" {
+		return true
+	}
+	return a.ReviewerID == b.ReviewerID
 }
 
-// mergeReview folds a candidate into the account of a review.
+// mergeReview folds two accounts of the SAME review into one.
 //
-// The candidate is the MORE COMPLETE account — it comes from the ledger,
-// which knows the verdict, and from the publisher, which checked the
-// capture — so its non-empty fields win. The fields it says nothing
-// about are kept, because the tree's correlation knows things the
-// candidate does not.
+// They are two halves of one review: the tree's correlation reads the
+// reviewer's CLAIM and the corpus's candidate reads the LEDGER. The
+// merge keeps what EITHER of them knows, and where they DISAGREE the
+// LATER account wins — so a superseded verdict cannot come back
+// through the merge, and the order the accounts arrived in decides
+// nothing.
 //
 // The verdict and its provenance travel TOGETHER: a verdict reported
 // from outside the substrate is published as one, and a verdict the
 // substrate recorded is published as one. Merging them apart would let
 // a record claim a reported verdict as a recorded one.
-func mergeReview(base, candidate ReviewInfo) ReviewInfo {
+func mergeReview(base, other ReviewInfo) ReviewInfo {
 	out := base
-	if candidate.Exists {
+	// The later account wins a disagreement. Where neither is later,
+	// they are the same moment, and the one that CARRIES the verdict is
+	// the one the record exists for.
+	otherWins := other.UpdatedAt > base.UpdatedAt
+	if other.UpdatedAt == base.UpdatedAt && base.Verdict == "" && other.Verdict != "" {
+		otherWins = true
+	}
+	if other.Exists {
 		out.Exists = true
 	}
-	if candidate.ReviewerID != "" {
-		out.ReviewerID = candidate.ReviewerID
+	if other.ReviewerID != "" && (base.ReviewerID == "" || otherWins) {
+		out.ReviewerID = other.ReviewerID
 	}
-	if candidate.ReviewedSHA != "" {
-		out.ReviewedSHA = candidate.ReviewedSHA
+	if other.ReviewedSHA != "" && (base.ReviewedSHA == "" || otherWins) {
+		out.ReviewedSHA = other.ReviewedSHA
 	}
-	if candidate.FindingsSHA256 != "" {
-		out.FindingsSHA256 = candidate.FindingsSHA256
+	if other.FindingsSHA256 != "" && (base.FindingsSHA256 == "" || otherWins) {
+		out.FindingsSHA256 = other.FindingsSHA256
 	}
-	if candidate.CaptureStatus != "" {
-		out.CaptureStatus = candidate.CaptureStatus
+	if other.CaptureStatus != "" && (base.CaptureStatus == "" || otherWins) {
+		out.CaptureStatus = other.CaptureStatus
 	}
-	if candidate.EvidenceRef != "" {
-		out.EvidenceRef = candidate.EvidenceRef
+	if other.EvidenceRef != "" && (base.EvidenceRef == "" || otherWins) {
+		out.EvidenceRef = other.EvidenceRef
 	}
-	if candidate.Verdict != "" {
-		out.Verdict = candidate.Verdict
-		out.LocallyReported = candidate.LocallyReported
+	if other.Verdict != "" && (base.Verdict == "" || otherWins) {
+		out.Verdict = other.Verdict
+		out.LocallyReported = other.LocallyReported
+	}
+	if other.UpdatedAt > out.UpdatedAt {
+		out.UpdatedAt = other.UpdatedAt
 	}
 	return out
 }
@@ -369,11 +418,22 @@ func buildOne(c Claims, review ReviewInfo, facts Facts) (*Record, error) {
 		if rec.ReviewEvidence.Status == "" {
 			rec.ReviewEvidence.Status = CaptureNone
 		}
-		// A REFUSED DIGEST IS NOT PUBLISHED. If the publisher checked
-		// the bytes and they did not hash to the digest the store
-		// recorded, the digest is a claim that was REFUTED — and
-		// publishing it would publish the refutation.
-		if rec.ReviewEvidence.Status == CaptureContradicted {
+		// A DIGEST THE PUBLISHER DID NOT ESTABLISH IS NOT PUBLISHED.
+		//
+		// Two statuses mean the publisher could not establish the
+		// digest: `unverifiable` (the bytes are somewhere the
+		// publisher cannot read) and `contradicted` (the bytes are
+		// there and they do NOT hash to the digest). In the first
+		// case the digest is an UNCHECKED claim; in the second it is
+		// a REFUTED one. Publishing either would publish a claim the
+		// publisher knows it cannot stand behind — and the digest
+		// lives inside the content-addressed bytes, so it would
+		// become part of the record's permanent identity.
+		//
+		// So both become the explicit unknown, and the STATUS says
+		// which of them happened.
+		if rec.ReviewEvidence.Status == CaptureContradicted ||
+			rec.ReviewEvidence.Status == CaptureUnverifiable {
 			rec.ReviewEvidence.SHA256 = Unknown
 		}
 	}

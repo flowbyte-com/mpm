@@ -74,12 +74,14 @@ func handleEngineering(args []string) int {
 
 // printEngineeringHelp prints the family's help page.
 func printEngineeringHelp() int {
-	fmt.Println("Usage: mpm engineering publish [--dry-run] [--fixture NAME] [--json]")
+	fmt.Println("Usage: mpm engineering publish [--dry-run] [--fixture NAME] [--repo REPO] [--branch BRANCH] [--json]")
 	fmt.Println()
 	fmt.Println("Publish the engineering evidence to the repository the operator configured.")
 	fmt.Println()
 	fmt.Println("  --dry-run     build the publication and print it; write nothing")
 	fmt.Println("  --fixture     publish a named fixture corpus instead of the assignment store")
+	fmt.Println("  --repo        the repository (a dry run only; a write uses the configuration)")
+	fmt.Println("  --branch      the evidence branch (a dry run only; a write uses the configuration)")
 	fmt.Println("  --json        machine-readable output")
 	fmt.Println()
 	fmt.Println("The repository and the branch come from " + filepath.Join("~", ".mpm", evidenceConfigFileName) + ".")
@@ -150,6 +152,13 @@ func handleEngineeringPublish(args []string) int {
 		return respond("", fmt.Sprintf(
 			"Error: --repo names %s and the configured target is %s; the configuration wins\n",
 			repoFlag, target.Repository), 1)
+	} else if branchFlag != "" && branchFlag != target.Branch {
+		// The BRANCH is compared as well as the repository. A flag
+		// that was silently ignored would publish the evidence
+		// somewhere the operator did not ask for.
+		return respond("", fmt.Sprintf(
+			"Error: --branch names %s and the configured target is %s; the configuration wins\n",
+			branchFlag, target.Branch), 1)
 	}
 
 	ctx := context.Background()
@@ -261,12 +270,21 @@ const storeScanLimit = 500
 // wrong, and the map is not what a reader sees.
 func corpusFromStore(ctx context.Context, store *assignment.Store,
 	client *evidence.Client) (*evidence.Corpus, error) {
-	rows, err := store.Inbox(assignment.InboxQuery{Limit: storeScanLimit})
+	rows, err := store.Inbox(assignment.InboxQuery{Limit: storeScanLimit + 1})
 	if err != nil {
 		return nil, fmt.Errorf("read the assignments: %w", err)
 	}
 	if len(rows) == 0 {
 		return nil, fmt.Errorf("the assignment store holds no assignments")
+	}
+	// ONE ROW PAST THE BOUND.
+	//
+	// The corpus knows whether anything was actually dropped only if
+	// it can see one row more than the bound. A scan that merely
+	// REACHED the limit has not truncated anything, and publishing it
+	// as truncated would be a false alarm.
+	if len(rows) > storeScanLimit {
+		rows = rows[:storeScanLimit]
 	}
 	trees := map[string]evidence.Tree{}
 	order := make([]string, 0, len(rows))
@@ -298,7 +316,7 @@ func corpusFromStore(ctx context.Context, store *assignment.Store,
 					ReviewerID:     a.ID,
 					ReviewedSHA:    a.ReviewedSHA,
 					FindingsSHA256: a.FindingsSHA256,
-					CaptureStatus:  captureStatus(a),
+					CaptureStatus:  claim.CaptureStatus,
 					EvidenceRef:    a.EvidenceRef,
 					Verdict:        verdict,
 					UpdatedAt:      a.UpdatedAt,
@@ -315,8 +333,17 @@ func corpusFromStore(ctx context.Context, store *assignment.Store,
 		return nil, err
 	}
 	corpus := evidence.BuildCorpusFromTrees(ordered, reviews, facts)
-	corpus.Truncated = len(rows) >= storeScanLimit
+	// THE TRUNCATION IS VISIBLE, AND IT IS NOT A GUESS.
+	//
+	// One row past the bound is read, so the corpus knows whether
+	// anything was actually dropped: a scan that merely REACHED the
+	// limit has not truncated anything, and saying that it had would
+	// be a false alarm.
+	corpus.Truncated = len(rows) > storeScanLimit
 	corpus.Scanned = len(rows)
+	if corpus.Truncated {
+		corpus.Scanned = storeScanLimit
+	}
 	corpus.ScanLimit = storeScanLimit
 	return corpus, nil
 }
@@ -414,6 +441,16 @@ func assignmentClaims(a *assignment.Assignment) evidence.Claims {
 		EvidenceRef:    a.EvidenceRef,
 		AwaitingAction: a.AwaitingAction,
 		UpdatedAt:      a.UpdatedAt,
+		// THE PUBLISHER'S ANSWER ABOUT THE CAPTURE.
+		//
+		// It belongs on the CLAIM, and not only on the ledger's
+		// account of a review: the claim is what the tree's own
+		// correlation reads, so this is what the reviewer's OWN
+		// record carries — and a record that said "nothing is known
+		// about this capture" beside the subject's record saying
+		// "verified" would be contradicting the publisher about the
+		// same digest.
+		CaptureStatus: captureStatus(a),
 	}
 	// The repository comes from the assignment's OWN pull request
 	// reference: it is where the work says it is visible, and it is what

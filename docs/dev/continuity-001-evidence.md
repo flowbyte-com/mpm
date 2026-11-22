@@ -107,6 +107,11 @@ record had verified nothing about the documents anybody actually opens.
 `scanned` and `scan_limit`. A reader that took a partial queue for the whole
 one would be misled, and a silent truncation is worse than a visible one.
 
+The flag means what it says: the publication reads **one row past** its
+bound, so it knows whether anything was actually dropped. A scan that merely
+*reached* the bound has truncated nothing, and publishing it as truncated
+would be a false alarm in every report that carries the flag.
+
 **Publication is deterministic** for identical input evidence: the records are
 a pure function of the evidence, and the only field that differs between two
 publications is `published_at` in the index, which is recorded metadata.
@@ -137,18 +142,30 @@ The publisher publishes the assignment store's **claims** and GitHub's
 
 **The captured digest is CHECKED, and the answer is published.** A digest in
 the store is a **claim**: anybody can put 64 hex characters in that column. So
-the publisher reads the bytes and hashes them, and there are three answers —
-which are three different facts:
+the publisher reads the bytes and hashes them, and there are four answers —
+which are four different facts:
 
 | status | what the publisher found | what is published |
 |---|---|---|
 | `verified` | the bytes are there and they hash to the digest | the digest |
 | `unverifiable` | the bytes are somewhere the publisher cannot read | `unknown` |
 | `contradicted` | the bytes are there and they do **not** hash to the digest | `unknown`, and the contradiction is named |
+| `none` | no digest was recorded, or nothing was captured yet | `unknown` |
 
-A **refuted** digest is never published as though it were true. The status
-travels **with** the digest, so a reader can tell a checked digest from an
-unchecked one without looking anywhere else.
+A digest the publisher did not **establish** is never published as though it
+were true: an `unverifiable` digest is an unchecked claim and a `contradicted`
+one is a refuted claim, and publishing either would publish a claim the
+publisher cannot stand behind — inside the content-addressed bytes, so it
+would become part of the record's permanent identity. The status travels
+**with** the digest, so a reader can tell a checked digest from an unchecked
+one without looking anywhere else.
+
+**EVERY capture is checked**, whether or not a reviewer has recorded a verdict
+yet: a review in flight has findings whose digest was checked, and the record
+says so. The answer is published on the reviewer's **own** record as well as
+on the subject's — a reviewer record that said "nothing is known about this
+capture" beside a subject record that said "verified" would be contradicting
+the publisher about the same bytes.
 
 **Nothing that could leak is published.** The record has no field that carries
 model output at all — a review's findings are published as a digest and a
@@ -248,10 +265,13 @@ is the worst check, and `unverified` outranks `stale` — so a record whose revi
 is stale and whose CI could not be read aggregates to `unverified`, and a
 reader would never learn that the review is stale. One stale check is enough.
 
-**The verifier looks on the branch the READER was told.** The branch is the
-reader's configuration; a record may not name its own branch. So the branch is
-threaded into the verifier, and a verifier that hard-coded the default would
-report a missing capture for a capture that is right there.
+**The verifier looks on the branch the READER was told, in the repository the
+READER was told.** The branch is the reader's configuration; a record may not
+name its own branch. And the **repository** is the reader's too: a record names
+the repository the *work* is visible in, and the operator's publication target
+is a separate choice — so a verifier that fetched the review's bytes from the
+record's own repository would read from wherever a published record says to
+read, and would report a missing capture for a capture that is right there.
 
 **A published pointer is data, not a command.** The verifier fetches only safe
 relative paths inside the evidence repository, so a record that was fetched
@@ -300,6 +320,22 @@ records the publication holds (`record_count`) and how many the filters left
 (`shown_count`), so a filtered view can never be mistaken for the whole thing.
 An empty publication is not a verified one.
 
+**A filter narrows what a reader LOOKS at; it may not hide what the reader
+needs to KNOW.** A record whose bytes do not hash to the identifier the index
+gave it is always reported, whatever the filters say.
+
+**The human artefacts are checked too.** The index names every Markdown
+artefact with a digest, and `check` reads them and hashes them: a digest
+nobody checks is a claim, and a tampered queue summary would be invisible to a
+reader who trusted it.
+
+The flag is **strict**, and a corpus that cannot be fully verified says so.
+Two honest reasons: the review's bytes are not published, so no digest can be
+checked by anybody; and a store publication includes the **reviewer's own
+rows**, which name no pull request and therefore have nothing to check against
+GitHub. Neither is a failure of the publication — they are the state of the
+world, and the flag reports it rather than hiding it.
+
 The filters are the project's own dimensions (`--repo`, `--branch`,
 `--project`, `--role`, `--disposition`). There is no dashboard, and there is no
 new taxonomy.
@@ -346,6 +382,13 @@ facts for every assignment that names a pull request, exactly as it does for a
 fixture — the repository comes from the assignment's own pull request
 reference, and the observed repository replaces it when GitHub could be asked.
 
+**A store publication includes the REVIEWER'S OWN rows**, and they name no
+pull request — a review is not a pull request. So they have nothing to check
+against GitHub, and the corpus-wide `verified` flag is therefore false for
+every store publication. That is the honest state, not a defect in the
+publication: the flag says the corpus verified, and a corpus that holds a row
+nobody can verify did not.
+
 **The NEWEST review of a subject is the one that is published.** Two reviewers
 can review one subject: the head advanced and the work was re-reviewed. The
 later review says what the subject's state is now, and publishing the earlier
@@ -366,6 +409,19 @@ capture status fill in what the claim did not carry. Before this they
 competed, the claim won the tie, and the subject's record was published with
 NO verdict at all: which reads as "no review happened" and files finished work
 under "awaiting review" forever.
+
+**The merge respects the order too.** Where the two accounts DISAGREE, the
+LATER one wins — so a superseded verdict cannot come back through the merge.
+And every candidate is compared with the account the PREVIOUS candidates
+produced, not with the one the tree started with: comparing with the original
+would let a later candidate overwrite what an earlier one established, and the
+answer would depend on the order the candidates arrived in — which is the
+caller's accident, not a fact about the work.
+
+**A candidate that names no reviewer is MERGED, not dropped.** A reported
+review — one that happened outside the substrate — names no reviewer, so it
+cannot be told apart from the account of the same review. A dropped candidate
+is a verdict that never reaches the reader.
 
 ---
 
@@ -394,7 +450,7 @@ contract is the one failure mode the whole design exists to prevent.
 
 ## 10. The negative controls
 
-Twelve controls remove an invariant from the implementation and require the
+Nineteen controls remove an invariant from the implementation and require the
 acceptance suite to **fail**. A control that removes nothing measures nothing;
 a suite that does not notice is a suite that does not test the invariant.
 
@@ -412,6 +468,11 @@ a suite that does not notice is a suite that does not test the invariant.
 | a refuted digest is published | a digest the publisher REFUTED must not be published as true |
 | the ledger's account of a review is lost | two accounts of ONE review are merged, not chosen between |
 | a finished review is filed as waiting for a review | a reviewer's own record is filed by the review, not by the subject's rules |
+| the merge publishes the OLDER verdict | a merge must not let a superseded verdict come back |
+| an unestablished digest is published | a digest the publisher could NOT establish must not be published as true |
+| the verifier fetches from the record's repository | the review's bytes are fetched from the READER's repository, not the record's |
+| the artefacts are not checked | the index names the human artefacts with digests, and the check checks them |
+| a tampered record is filtered away | a filter must not hide a record whose bytes do not match its name |
 
 They run **in Go**, inside the package's own test, because the package is
 observable by itself and depends on nothing but the standard library. A control
