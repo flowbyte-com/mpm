@@ -642,7 +642,25 @@ func TestSecretsAndTranscriptsDoNotLeak(t *testing.T) {
 		PRRef:   "https://github.com/owner/name/pull/262",
 		BaseSHA: testBase, HeadSHA: testHead,
 	})
-	facts := map[string]Facts{"task-a": {GitHub: mergedPR(262, testHead)}}
+	// THE GITHUB SIDE IS SCREENED LIKE THE CLAIMS.
+	//
+	// A pull request's title, a review's body and a workflow's or job's
+	// name are written by OTHER PEOPLE, and the substrate never saw any
+	// of it. That is exactly the text that must not reach the published
+	// bytes — so the gate is exercised on that side too, not only on the
+	// store's own claims.
+	gh := mergedPR(262, testHead)
+	gh.Title = "the title " + secret
+	gh.Reviews = []GitHubReview{{
+		Author: "charlie", State: "APPROVED",
+		Body: "the findings " + private,
+		SHA:  testHead,
+	}}
+	facts := map[string]Facts{"task-a": {GitHub: gh, CI: []CIRun{{
+		ID: 1, Name: "the workflow " + transcript, HeadSHA: testHead,
+		Status: "completed", Conclusion: "success",
+		Jobs: []CIJob{{Name: "the job " + private, Status: "completed", Conclusion: "success"}},
+	}}}}
 	records, err := Build(tree, facts)
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -663,6 +681,16 @@ func TestSecretsAndTranscriptsDoNotLeak(t *testing.T) {
 	record := records[0]
 	if len(record.Redactions) == 0 {
 		t.Error("the record names no redaction")
+	}
+	joined := strings.Join(record.Redactions, ",")
+	for _, field := range []string{
+		FieldGitHub + ".title", FieldGitHub + ".review.body",
+		FieldCI + ".run.name", FieldCI + ".job.name",
+	} {
+		if !strings.Contains(joined, field) {
+			t.Errorf("the record does not name the withheld field %q: %v",
+				field, record.Redactions)
+		}
 	}
 }
 

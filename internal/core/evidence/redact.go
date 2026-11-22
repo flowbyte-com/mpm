@@ -128,6 +128,43 @@ func (r *Redactor) note(field string) {
 	r.Withheld = append(r.Withheld, field)
 }
 
+// redactObserved screens the OBSERVED side.
+//
+// # WHY THE GITHUB SIDE NEEDS THE SAME RULES
+//
+// The GitHub facts and the CI runs carry THIRD-PARTY text. A pull
+// request's title is written by whoever opened it, a review's body by
+// whoever reviewed, a workflow's name by whoever wrote the workflow.
+// That text is not the substrate's and not the publisher's — it is
+// whatever somebody wrote, and it may contain anything.
+//
+// So it goes through the SAME redactor as the store-side claims. A title
+// that looks like a credential is withheld, and the record NAMES the
+// field it withheld.
+//
+// Without this the published bytes would carry a pull request title
+// that holds a token, and it would carry it INSIDE the content-addressed
+// bytes — which makes it part of the record's permanent identity and of
+// the snapshot's identity.
+func (r *Redactor) redactObserved(facts *GitHubFacts, runs []CIRun) {
+	if facts != nil {
+		facts.Title, _ = r.Redact(FieldGitHub+".title", facts.Title)
+		facts.URL, _ = r.Redact(FieldGitHub+".url", facts.URL)
+		for i := range facts.Reviews {
+			facts.Reviews[i].Body, _ = r.Redact(FieldGitHub+".review.body", facts.Reviews[i].Body)
+			facts.Reviews[i].Author, _ = r.Redact(FieldGitHub+".review.author", facts.Reviews[i].Author)
+		}
+	}
+	for i := range runs {
+		runs[i].Name, _ = r.Redact(FieldCI+".run.name", runs[i].Name)
+		runs[i].URL, _ = r.Redact(FieldCI+".run.url", runs[i].URL)
+		for j := range runs[i].Jobs {
+			runs[i].Jobs[j].Name, _ = r.Redact(FieldCI+".job.name", runs[i].Jobs[j].Name)
+			runs[i].Jobs[j].URL, _ = r.Redact(FieldCI+".job.url", runs[i].Jobs[j].URL)
+		}
+	}
+}
+
 // secretLike reports whether a value looks like a credential.
 func secretLike(value string) bool {
 	for _, p := range secretPatterns {
@@ -202,6 +239,25 @@ func AssertPublishable(r *Record) error {
 		checks[FieldOperatorApproval+".source"] = r.OperatorApproval.Source
 		checks[FieldOperatorApproval+".evidence"] = r.OperatorApproval.Evidence
 		checks[FieldOperatorApproval+".action"] = r.OperatorApproval.Action
+	}
+	// THE OBSERVED SIDE. It is third-party text, and it is screened
+	// with the same rules as everything else: a redactor that a
+	// publisher can route around is not a redactor.
+	if r.GitHub != nil {
+		checks[FieldGitHub+".title"] = r.GitHub.Title
+		checks[FieldGitHub+".url"] = r.GitHub.URL
+		for i, review := range r.GitHub.Reviews {
+			checks[fmt.Sprintf("%s.review[%d].body", FieldGitHub, i)] = review.Body
+			checks[fmt.Sprintf("%s.review[%d].author", FieldGitHub, i)] = review.Author
+		}
+	}
+	for i, run := range r.CI {
+		checks[fmt.Sprintf("%s[%d].name", FieldCI, i)] = run.Name
+		checks[fmt.Sprintf("%s[%d].url", FieldCI, i)] = run.URL
+		for j, job := range run.Jobs {
+			checks[fmt.Sprintf("%s[%d].job[%d].name", FieldCI, i, j)] = job.Name
+			checks[fmt.Sprintf("%s[%d].job[%d].url", FieldCI, i, j)] = job.URL
+		}
 	}
 	for field, value := range checks {
 		if value == "" || value == Unknown {

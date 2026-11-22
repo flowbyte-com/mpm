@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -165,7 +166,8 @@ func handleEngineeringPublish(args []string) int {
 	if err != nil {
 		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
 	}
-	plan, err := evidence.NewPlan(target.Repository, target.Branch, records, time.Now())
+	plan, err := evidence.NewPlanFromCorpus(target.Repository, target.Branch, corpus,
+		records, time.Now())
 	if err != nil {
 		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
 	}
@@ -210,7 +212,7 @@ func buildPublicationCorpus(ctx context.Context, client *evidence.Client,
 	if err != nil {
 		return nil, err
 	}
-	return corpusFromStore(store)
+	return corpusFromStore(ctx, store, client)
 }
 
 // openAssignmentStore opens the assignment store.
@@ -225,13 +227,41 @@ func openAssignmentStore() (*assignment.Store, error) {
 	return assignment.NewStore(dm), nil
 }
 
+// The store publication's scan limit.
+//
+// It is a BOUND, not a silent truncation: a publication that holds part
+// of the queue says so, in the index and in the report.
+const storeScanLimit = 500
+
 // corpusFromStore builds a corpus from the assignment store.
 //
-// The trees come from the store's own rows, and the VERDICTS come from
-// the ledger: a verdict is a recorded decision, and the ledger is where
-// decisions are recorded.
-func corpusFromStore(store *assignment.Store) (*evidence.Corpus, error) {
-	rows, err := store.Inbox(assignment.InboxQuery{Limit: 500})
+// The trees come from the store's own rows, the VERDICTS come from the
+// ledger — a verdict is a recorded decision, and the ledger is where
+// decisions are recorded — and the OBSERVED facts come from GitHub.
+//
+// # THE OBSERVED SIDE IS NOT OPTIONAL
+//
+// A record that names no repository, no pull request state, no head and
+// no workflow run cannot be checked by anybody. So the publisher reads
+// the facts for every assignment that names a pull request, exactly as
+// it does for a fixture.
+//
+// # THE NEWEST REVIEW WINS
+//
+// Two reviewers can review one subject: the head advanced, and the work
+// was re-reviewed. The LATER review says what the subject's state is
+// now, and publishing the earlier one would publish a superseded
+// verdict as the current one.
+//
+// So the publisher hands the package EVERY review it found — the rows
+// arrive newest first, so picking the last one written to a map would
+// pick the OLDEST review — and the package applies the rule that decides
+// which one is current. The rule lives there, and not here, because it
+// is part of the contract: a caller that built its own map could get it
+// wrong, and the map is not what a reader sees.
+func corpusFromStore(ctx context.Context, store *assignment.Store,
+	client *evidence.Client) (*evidence.Corpus, error) {
+	rows, err := store.Inbox(assignment.InboxQuery{Limit: storeScanLimit})
 	if err != nil {
 		return nil, fmt.Errorf("read the assignments: %w", err)
 	}
@@ -240,7 +270,7 @@ func corpusFromStore(store *assignment.Store) (*evidence.Corpus, error) {
 	}
 	trees := map[string]evidence.Tree{}
 	order := make([]string, 0, len(rows))
-	reviews := map[string]evidence.ReviewInfo{}
+	reviews := map[string][]evidence.ReviewInfo{}
 	for _, a := range rows {
 		tree, ok := trees[a.RootID]
 		if !ok {
@@ -257,14 +287,22 @@ func corpusFromStore(store *assignment.Store) (*evidence.Corpus, error) {
 				return nil, verr
 			}
 			if verdict != "" && subject != "" {
-				reviews[subject] = evidence.ReviewInfo{
+				// EVERY REVIEW IS A CANDIDATE. The rows arrive
+				// newest first, so picking the last one written to
+				// a map would pick the OLDEST review — the
+				// opposite of what the evidence contract needs.
+				// The package picks the newest, so the publisher
+				// only has to hand it the candidates.
+				reviews[subject] = append(reviews[subject], evidence.ReviewInfo{
 					Exists:         true,
 					ReviewerID:     a.ID,
 					ReviewedSHA:    a.ReviewedSHA,
 					FindingsSHA256: a.FindingsSHA256,
+					CaptureStatus:  captureStatus(a),
 					EvidenceRef:    a.EvidenceRef,
 					Verdict:        verdict,
-				}
+					UpdatedAt:      a.UpdatedAt,
+				})
 			}
 		}
 	}
@@ -272,7 +310,88 @@ func corpusFromStore(store *assignment.Store) (*evidence.Corpus, error) {
 	for _, id := range order {
 		ordered = append(ordered, trees[id])
 	}
-	return evidence.BuildCorpusFromTrees(ordered, reviews, map[string]evidence.Facts{}), nil
+	facts, err := observedFacts(ctx, client, rows)
+	if err != nil {
+		return nil, err
+	}
+	corpus := evidence.BuildCorpusFromTrees(ordered, reviews, facts)
+	corpus.Truncated = len(rows) >= storeScanLimit
+	corpus.Scanned = len(rows)
+	corpus.ScanLimit = storeScanLimit
+	return corpus, nil
+}
+
+// captureStatus checks a captured digest against the bytes it names.
+//
+// The publisher checks it BEFORE it publishes it: a digest nobody
+// checked is a claim, and the evidence contract exists to keep claims
+// and evidence apart.
+func captureStatus(a *assignment.Assignment) string {
+	status, _ := evidence.VerifyCapturedEvidence(a.FindingsSHA256, a.EvidenceRef)
+	return status
+}
+
+// observedFacts reads GitHub's facts for the assignments that name a
+// pull request.
+//
+// It is the same read the fixture path does: the publisher asks GitHub
+// what became of the work, and it asks ONCE per pull request and once
+// per head.
+func observedFacts(ctx context.Context, client *evidence.Client,
+	rows []*assignment.Assignment) (map[string]evidence.Facts, error) {
+	facts := map[string]evidence.Facts{}
+	prCache := map[string]*evidence.GitHubFacts{}
+	runCache := map[string][]evidence.CIRun{}
+	for _, a := range rows {
+		if a.PRRef == "" || a.PRRef == evidence.Unknown {
+			continue
+		}
+		number, err := evidence.PRNumber(a.PRRef)
+		if err != nil {
+			continue
+		}
+		repository, err := evidence.RepositoryFromRef(a.PRRef)
+		if err != nil {
+			continue
+		}
+		key := repository + "#" + strconv.Itoa(number)
+		pr, seen := prCache[key]
+		if !seen {
+			fetched, ferr := client.PullRequest(ctx, repository, number)
+			if ferr != nil {
+				// A pull request that cannot be read is NOT a
+				// fatal problem: the record publishes the claims
+				// the store holds, and the check reports that the
+				// facts could not be verified.
+				fetched = nil
+			}
+			prCache[key] = fetched
+			pr = fetched
+		}
+		taskFacts := facts[a.ID]
+		taskFacts.GitHub = pr
+		head := a.HeadSHA
+		if head == "" || head == evidence.Unknown {
+			if pr != nil {
+				head = pr.HeadSHA
+			}
+		}
+		if head != "" && head != evidence.Unknown {
+			runKey := repository + "@" + head
+			runs, cached := runCache[runKey]
+			if !cached {
+				fetched, rerr := client.WorkflowRuns(ctx, repository, head)
+				if rerr != nil {
+					fetched = nil
+				}
+				runCache[runKey] = fetched
+				runs = fetched
+			}
+			taskFacts.CI = runs
+		}
+		facts[a.ID] = taskFacts
+	}
+	return facts, nil
 }
 
 // assignmentClaims turns an assignment into the publisher's claims.
@@ -295,6 +414,12 @@ func assignmentClaims(a *assignment.Assignment) evidence.Claims {
 		EvidenceRef:    a.EvidenceRef,
 		AwaitingAction: a.AwaitingAction,
 		UpdatedAt:      a.UpdatedAt,
+	}
+	// The repository comes from the assignment's OWN pull request
+	// reference: it is where the work says it is visible, and it is what
+	// a reader is given when GitHub could not be asked.
+	if repo, err := evidence.RepositoryFromRef(a.PRRef); err == nil {
+		claim.Repository = repo
 	}
 	if a.Payload != nil {
 		if target, ok := a.Payload[assignment.PayloadKeyReviewTarget].(string); ok {

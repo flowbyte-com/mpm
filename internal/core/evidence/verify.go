@@ -137,6 +137,15 @@ type GitHub interface {
 type Verifier struct {
 	// GitHub is the reader.
 	GitHub GitHub
+	// Branch is the branch the evidence lives on.
+	//
+	// It is the READER's configuration, not the record's: a record that
+	// named its own branch could be replayed against another one. And
+	// it must be threaded through, because the review's bytes live on
+	// the same branch as the index — and a verifier that looked for them
+	// somewhere else would report a missing capture for a capture that
+	// is right there.
+	Branch string
 }
 
 // Verify checks one record.
@@ -204,8 +213,8 @@ func (v *Verifier) Verify(ctx context.Context, rec *Record) (*Verification, erro
 	}
 
 	v.checkReviewEvidence(ctx, out, rec)
-	v.checkReviewVerdict(out, rec)
-	v.checkApproval(out, rec)
+	v.checkReviewVerdict(out, rec, facts)
+	v.checkApproval(out, rec, facts)
 	return out, nil
 }
 
@@ -307,6 +316,16 @@ func (v *Verifier) checkCI(ctx context.Context, out *Verification, rec *Record) 
 		byID[run.ID] = run
 	}
 	for _, recorded := range rec.CI {
+		// THE RECORD'S OWN ACCOUNT OF THE RUN. A record that names a
+		// workflow run for ANOTHER commit is contradicting itself, and
+		// the contradiction is reported before the run is even
+		// fetched.
+		if recorded.HeadSHA != "" && recorded.HeadSHA != rec.HeadSHA {
+			out.add(CheckCI, CheckFailed, fmt.Sprintf(
+				"the record's workflow run %d belongs to %s and the record's head is %s",
+				recorded.ID, recorded.HeadSHA, rec.HeadSHA))
+			continue
+		}
 		live, ok := byID[recorded.ID]
 		if !ok {
 			out.add(CheckCI, CheckMissing, fmt.Sprintf(
@@ -371,7 +390,18 @@ func (v *Verifier) checkReviewEvidence(ctx context.Context, out *Verification, r
 			"the evidence lives at %s and is not readable from the evidence repository", ref))
 		return
 	}
-	raw, err := v.GitHub.Content(ctx, rec.Repository, evidenceRef(rec), ref)
+	// THE POINTER IS DATA.
+	//
+	// It comes out of a published record, and a published record is
+	// something a reader may have fetched from anywhere. So the
+	// verifier does not fetch whatever it is told to: it fetches a
+	// path inside the evidence repository, and nothing else.
+	if !safeEvidencePath(ref) {
+		out.add(CheckReviewEvidence, CheckFailed, fmt.Sprintf(
+			"the evidence's pointer %q does not name a path inside the evidence repository", ref))
+		return
+	}
+	raw, err := v.GitHub.Content(ctx, rec.Repository, v.evidenceRef(), ref)
 	if err != nil {
 		if isMissing(err) {
 			out.add(CheckReviewEvidence, CheckMissing,
@@ -389,12 +419,21 @@ func (v *Verifier) checkReviewEvidence(ctx context.Context, out *Verification, r
 	out.add(CheckReviewEvidence, CheckVerified, rec.ReviewEvidence.SHA256)
 }
 
-// checkReviewVerdict checks that a verdict is a verdict.
+// checkReviewVerdict checks the verdict a record carries.
 //
-// The verifier NEVER invents one, and it never downgrades one that the
-// service recorded into "no verdict": the record is the claim, and the
-// check is that the claim is of a kind the service records.
-func (v *Verifier) checkReviewVerdict(out *Verification, rec *Record) {
+// # WHAT IT CAN AND CANNOT ESTABLISH
+//
+// A verdict is the substrate's own record: a reviewer's fenced
+// transition. GitHub has no idea it happened, so this check CANNOT
+// establish that it did — and it does not pretend to.
+//
+// What it DOES establish is everything a reader can check from here:
+// that the claim is well formed, that it is labelled as what it is,
+// and that it covers the revision the pull request is actually at. A
+// verdict of "passed" for a revision the head has moved past is STALE,
+// and saying "verified" would tell a reader that the work in front of
+// them was approved.
+func (v *Verifier) checkReviewVerdict(out *Verification, rec *Record, facts *GitHubFacts) {
 	switch {
 	case rec.ReviewVerdict == "":
 		if rec.ReviewDisposition == ReviewDispositionVerdict {
@@ -411,13 +450,17 @@ func (v *Verifier) checkReviewVerdict(out *Verification, rec *Record) {
 					rec.ReviewVerdict))
 			return
 		}
+		if stale, detail := staleVerdict(rec, facts); stale {
+			out.add(CheckReviewVerdict, CheckStale, detail)
+			return
+		}
 		// The verdict is a CLAIM, and the record says so. What is
-		// verified here is the LABEL: a reported verdict is not
-		// presented as a recorded one. Whether the review happened is
-		// not something GitHub can answer, and the evidence check
-		// above is where its absence is reported.
-		out.add(CheckReviewVerdict, CheckVerified,
-			"the verdict is reported, not recorded, and the record says so")
+		// verified here is the claim's SHAPE and its REVISION — not
+		// that the review happened, which is the substrate's business
+		// and is reported by the evidence check above.
+		out.add(CheckReviewVerdict, CheckVerified, fmt.Sprintf(
+			"the verdict %q is reported, not recorded, and it covers the pull request's head",
+			rec.ReviewVerdict))
 	case rec.ReviewVerdict != VerdictPassed && rec.ReviewVerdict != VerdictChangesRequested:
 		out.add(CheckReviewVerdict, CheckFailed,
 			fmt.Sprintf("the verdict %q is not one the service records", rec.ReviewVerdict))
@@ -426,16 +469,45 @@ func (v *Verifier) checkReviewVerdict(out *Verification, rec *Record) {
 			"the record carries the verdict %q but its review disposition is %q",
 			rec.ReviewVerdict, rec.ReviewDisposition))
 	default:
-		out.add(CheckReviewVerdict, CheckVerified, rec.ReviewVerdict)
+		if stale, detail := staleVerdict(rec, facts); stale {
+			out.add(CheckReviewVerdict, CheckStale, detail)
+			return
+		}
+		out.add(CheckReviewVerdict, CheckVerified, fmt.Sprintf(
+			"the record carries the recorded verdict %q and it covers the pull request's head",
+			rec.ReviewVerdict))
 	}
 }
 
-// checkApproval checks that an approval is an approval.
+// staleVerdict says whether a verdict covers a revision the pull
+// request has moved past.
+func staleVerdict(rec *Record, facts *GitHubFacts) (bool, string) {
+	if facts == nil || facts.HeadSHA == "" {
+		return false, ""
+	}
+	if rec.ReviewedSHA == Unknown || rec.ReviewedSHA == "" {
+		return false, ""
+	}
+	if facts.HeadSHA == rec.ReviewedSHA {
+		return false, ""
+	}
+	return true, fmt.Sprintf("the verdict covered %s and the pull request is at %s",
+		rec.ReviewedSHA, facts.HeadSHA)
+}
+
+// checkApproval checks the approval a record carries.
 //
-// The same rule as the verdict: the verifier never invents one, and a
-// record that claims a merge or an approval it does not have is
-// reported as a contradiction.
-func (v *Verifier) checkApproval(out *Verification, rec *Record) {
+// # WHAT IT CAN AND CANNOT ESTABLISH
+//
+// An approval is the OPERATOR's decision. GitHub has no idea it
+// happened, so this check cannot establish that it did — and it does
+// not pretend to.
+//
+// What it does establish is what a reader can check from here: that the
+// approval names a revision, that the revision is the one the pull
+// request is at, and that an approval to merge is not published for a
+// pull request that is not merged.
+func (v *Verifier) checkApproval(out *Verification, rec *Record, facts *GitHubFacts) {
 	if rec.OperatorApproval == nil {
 		out.add(CheckApproval, CheckVerified, "no approval is claimed")
 		return
@@ -444,7 +516,57 @@ func (v *Verifier) checkApproval(out *Verification, rec *Record) {
 		out.add(CheckApproval, CheckFailed, "the record carries an approval with no action")
 		return
 	}
-	out.add(CheckApproval, CheckVerified, rec.OperatorApproval.Action)
+	// THE REVISION. An approval of another revision is an approval of
+	// something else.
+	if facts != nil && facts.HeadSHA != "" && rec.OperatorApproval.Revision != "" &&
+		rec.OperatorApproval.Revision != Unknown && facts.HeadSHA != rec.OperatorApproval.Revision {
+		out.add(CheckApproval, CheckStale, fmt.Sprintf(
+			"the approval covered %s and the pull request is at %s",
+			rec.OperatorApproval.Revision, facts.HeadSHA))
+		return
+	}
+	// THE ACTION. An approval to merge a pull request that is not
+	// merged is a contradiction the reader can see.
+	if facts != nil && mentionsMerge(rec.OperatorApproval.Action) &&
+		facts.State != "merged" {
+		out.add(CheckApproval, CheckFailed, fmt.Sprintf(
+			"the record carries an approval to %q and the pull request is %s",
+			rec.OperatorApproval.Action, prState(facts)))
+		return
+	}
+	out.add(CheckApproval, CheckVerified, fmt.Sprintf(
+		"the record carries the operator's approval of %q", rec.OperatorApproval.Action))
+}
+
+// mentionsMerge says whether an approval's action is about merging.
+//
+// It is a WORD test, and it is deliberately narrow: the approval's
+// action is free text, and the one action anybody can check against
+// GitHub is a merge.
+func mentionsMerge(action string) bool {
+	return strings.Contains(strings.ToLower(action), "merge")
+}
+
+// safeEvidencePath says whether a pointer names a path inside the
+// evidence repository.
+//
+// A pointer is DATA: it comes out of a published record, and a
+// published record may have been fetched from anywhere. So the verifier
+// fetches a path inside the evidence repository and nothing else — no
+// absolute path, no parent directory, no scheme.
+func safeEvidencePath(ref string) bool {
+	if ref == "" || strings.Contains(ref, "://") {
+		return false
+	}
+	if strings.HasPrefix(ref, "/") || strings.Contains(ref, "\\") {
+		return false
+	}
+	for _, part := range strings.Split(ref, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // evidenceRef returns the ref the evidence branch's files live on.
@@ -452,7 +574,10 @@ func (v *Verifier) checkApproval(out *Verification, rec *Record) {
 // It is the branch the record was published to. The record does not carry
 // it — a record that carried its own branch would be a record that could
 // be replayed against another branch — so the verifier is told.
-func evidenceRef(rec *Record) string {
+func (v *Verifier) evidenceRef() string {
+	if v.Branch != "" {
+		return v.Branch
+	}
 	return EvidenceBranch
 }
 

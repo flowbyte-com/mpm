@@ -3226,6 +3226,10 @@ A record is named by the **digest of its own bytes**, so the same evidence alway
 
 **Nothing in the published content contains the SHA of the content that contains it.** The index names the records by their digests and the records do not name the index, so every digest a reader is given is one the reader can check.
 
+The index also names the **human-readable artefacts** — every `records/<id>.md` and the queue summary — with their digests, so a reader can check the Markdown a person reads as exactly as they can check the record a machine reads.
+
+A publication that holds only **part** of the work **says so**: the index carries `truncated`, `scanned` and `scan_limit`. A reader that took a partial queue for the whole one would be misled, and a silent truncation is worse than a visible one.
+
 Publication is **deterministic** for identical input evidence, apart from the publication timestamp, which is recorded as metadata in the index and never inside a record.
 
 #### What is published, and what is not
@@ -3236,7 +3240,29 @@ A **reviewer finding captured from a real host session** may be published as hos
 
 A **manifest supplied by an agent** cannot become authoritative because the agent wrote it: the publisher reads the assignment store and GitHub, and it verifies the digest of any host-captured evidence before publishing it.
 
+A **captured digest is a claim**, and the publisher **checks it against the bytes** before it publishes either. The record says which of three things was found: `verified` (the bytes are there and they hash to the digest), `unverifiable` (the bytes are somewhere the publisher cannot read, so the digest is published as the explicit unknown) or `contradicted` (the bytes are there and they do **not** hash to the digest — so the digest is **refused** and published as `unknown`, with the contradiction named). The status is published **with** the digest, so a reader can tell a checked digest from an unchecked one without looking anywhere else.
+
+The **observed side is screened like the claims**. A pull request's title, a review's body and a workflow's or job's name are written by other people, and the substrate never saw them — so they go through the same redactor as the store's own text, and a withheld one becomes `unknown` with the **field named** and never its content. A record that somehow carries a credential in an observed field is **refused**, not published.
+
 No **raw prompt, chat transcript, API key, environment dump, private filesystem path or unredacted runtime log** is published. The record has no field that carries model output at all — a review's findings are published as a digest and a pointer — and every string it does carry is screened for credentials, private paths and transcript-shaped text before the record is hashed.
+
+#### The queue's own vocabulary
+
+The published records are filed into the queue's sections, and the filing is **derived** from each record's own fields by one function, so the human report and the machine report cannot disagree about where a task sits.
+
+| disposition | what it means |
+|---|---|
+| `active` | the work is in flight |
+| `awaiting_review` | the work is finished and no reviewer has recorded a verdict |
+| `awaiting_ci` | the work is finished and its CI is not green — or is not known |
+| `awaiting_operator` | the work is waiting for a person |
+| `blocked` | the work was cancelled, or a reviewer asked for changes |
+| `ambiguous` | the outcome could not be determined — an unknown state, or a review of another revision |
+| `completed` | the work finished, its CI is green and nothing is pending |
+
+A finished task with **no verdict** is `awaiting_review`, not `awaiting_ci`: filing it under CI would tell an operator the queue is waiting on the wrong thing, and the reviewer would never be dispatched. A task in a state the publisher does not know is `ambiguous`, because a record that claimed a place for it would be inventing one.
+
+A **reviewer's own record is filed by the review**: the rules above are the subject's rules, and a finished review is done work. The verdict it reached belongs to the subject it judged, and the subject's own record carries that verdict.
 
 #### The read-only `check`
 
@@ -3257,6 +3283,8 @@ completed · 4
 
 It reports the **active** assignments, the work **awaiting independent review**, the work **awaiting CI**, the work **awaiting the operator**, the **blocked or ambiguous** assignments, the **recently completed** work, and the **stale or contradictory** evidence — and `--json` emits the same records in machine form.
 
+The report's `verified` flag covers the **whole published corpus**, not the filtered view: a reader who filtered to one project must not be told "verified" while another project's records are stale. The report says how many records the publication holds (`record_count`) and how many the filters left (`shown_count`), so a filtered view can never be mistaken for the whole thing.
+
 Three properties matter more than the shape:
 
 - **It works without the operator's local MPM database.** The queue comes from the published evidence and from GitHub, so a fresh reviewer on a machine that has never had MPM installed can run it. It needs no publication credential either: a public repository is readable without one.
@@ -3269,6 +3297,10 @@ The filters are the project's own dimensions — `--repo`, `--branch`, `--projec
 
 A published manifest is an **index of evidence**, not proof that its claims are still true. `check` therefore checks every material external assertion against GitHub itself: that the pull request exists and belongs to the expected repository, that its actual head equals the recorded head, that the reviewed SHA matches the intended revision, that each cited workflow run exists and belongs to the recorded commit, that a run is not described as passed while a required job is failed, pending or missing, that a merged pull request is distinguished from an open draft, and that a review or an operator decision is not invented by a missing source record.
 
+The decision checks are **falsifiable**: a verdict for a revision the pull request has moved past is **stale**, not verified; an approval to merge a pull request that is not merged is **failed**, not verified; and each check's detail says explicitly what was not established.
+
+The verifier looks for the review's bytes **on the branch the reader was told** — the branch is the reader's configuration, and a record may not name its own branch — and it fetches only **safe relative paths inside the evidence repository**. A published pointer is data, not a command.
+
 Each check ends in one of five states: `verified`, `stale` (the record was true and the world has moved on), `failed` (GitHub says something else), `missing` (the thing could not be found) and `unverified` (GitHub could not be asked). **A network failure is never a successful verification**, and an unverified record is never presented as a verified one.
 
 So if the head advances after a review, `check` shows the review as **stale for the new head**.
@@ -3277,7 +3309,7 @@ So if the head advances after a review, `check` shows the review as **stale for 
 
 Publication is a **controlled evidence operation**, not another way for an agent to gain a privilege.
 
-- The repository and the branch come from the **operator's configuration file** (`~/.mpm/evidence.json`). A missing configuration is an error, never a default: a publisher that invented a target would publish the evidence somewhere nobody chose.
+- The repository and the branch come from the **operator's configuration file** (`~/.mpm/evidence.json`). A missing configuration is an error, never a default: a publisher that invented a target would publish the evidence somewhere nobody chose. A **dry run** may be pointed at a target explicitly (`--repo`, `--branch`), because a rehearsal that needs a configuration file to exist cannot be run anywhere else — and a rehearsal writes nothing. A write always uses the configured target.
 - The **write** goes through the operator's own `gh`, so the credential never enters MPM, never enters a record, and never reaches a contained worker or Charlie's isolated reviewer.
 - The publication path is **explicit and has a dry run**: `mpm engineering publish --dry-run` builds the publication and writes nothing. It is the same plan, not a second rendering that might differ.
 - No model-facing payload may select the repository, supply an operator approval, or replace independently captured reviewer evidence. There is no agent-facing action for publication at all: the operator's shell is the door.
@@ -3288,6 +3320,8 @@ Publication is a **controlled evidence operation**, not another way for an agent
 The first published corpus is **Continuity 001's own work**: pull requests #259, #260, #261 and #262, reconstructed from the GitHub record, because that work predates the assignment store's use of it. The corpus is a **fixture** — a versioned set of claims — and the publisher reads the **observed facts** from GitHub at publication time, exactly as it does for the store's claims.
 
 The reviews of those four pull requests happened in contained sessions whose findings were never published durably, so the corpus records them as **reported** reviews with **no digest**, and `check` says the evidence cannot be checked. That is the honest state, and the corpus is not a place where a missing digest becomes an approval.
+
+A reported verdict carries **its own vocabulary** — `reported_approved` and `reported_changes_requested` — and never the service's `passed` and `changes_requested`. A reader can therefore tell a claim from a record without reading anything else, which is the whole point of keeping the two apart.
 
 ---
 

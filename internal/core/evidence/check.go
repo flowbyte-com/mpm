@@ -86,11 +86,22 @@ type Section struct {
 type CheckReport struct {
 	// Source is where the evidence came from.
 	Source Source `json:"source"`
-	// Verified says every record verified.
+	// Verified says every record in the PUBLISHED CORPUS verified.
 	//
-	// It is false when anything is stale, failed, missing or
-	// unverified, and it is the ONE field a reader can check first.
+	// It is computed over the WHOLE corpus and not over the filtered
+	// view: a reader who filtered to one project must not be told
+	// "verified" while another project's records are stale. It is
+	// false when anything is stale, failed, missing or unverified, and
+	// it is false for an empty corpus — an empty publication is not a
+	// verified one.
 	Verified bool `json:"verified"`
+	// RecordCount is how many records the publication holds.
+	//
+	// It is the count of the CORPUS, so a reader can tell a filtered
+	// view from the whole thing.
+	RecordCount int `json:"record_count"`
+	// ShownCount is how many records the filters left.
+	ShownCount int `json:"shown_count"`
 	// Sections are the queue's sections, in report order.
 	Sections []Section `json:"sections"`
 	// Records are every record, in report order.
@@ -128,7 +139,7 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 	report.Source.PublishedAt = index.PublishedAt
 	report.Source.Retrieved = true
 
-	verifier := &Verifier{GitHub: gh}
+	verifier := &Verifier{GitHub: gh, Branch: branch}
 	for _, entry := range index.Records {
 		recordRaw, err := gh.Content(ctx, repository, branch, RecordsDirectory+"/"+entry.ID+".json")
 		if err != nil {
@@ -169,15 +180,22 @@ func RunCheck(ctx context.Context, gh GitHub, repository, branch string, filters
 		})
 	}
 
-	report.Records = filterRecords(report.Records, filters)
-	report.Sections = sectionize(report.Records)
-	report.Verified = true
+	// THE VERDICT IS OVER THE WHOLE CORPUS.
+	//
+	// It is computed BEFORE the filters, because a reader who filtered
+	// to one project must not be told "verified" while another
+	// project's records are stale.
+	report.RecordCount = len(report.Records)
+	report.Verified = report.RecordCount > 0
 	for _, r := range report.Records {
 		if r.Verdict != CheckVerified {
 			report.Verified = false
 			break
 		}
 	}
+	report.Records = filterRecords(report.Records, filters)
+	report.ShownCount = len(report.Records)
+	report.Sections = sectionize(report.Records)
 	return report, nil
 }
 
@@ -214,6 +232,14 @@ func filterRecords(records []*VerifiedRecord, filters Filters) []*VerifiedRecord
 // The STALE section is not a disposition: it is what the VERIFICATION
 // found, and it is reported separately so that a reader sees both where
 // a task sits and whether its evidence still holds.
+//
+// # WHY IT USES THE PER-CHECK PREDICATE
+//
+// The AGGREGATE verdict is the WORST check, and "unverified" outranks
+// "stale". So a record whose review is stale and whose CI could not be
+// read would aggregate to "unverified" — and a reader would never learn
+// that the review is stale. The stale section therefore asks the
+// CHECKS, not the aggregate: one stale check is enough.
 func sectionize(records []*VerifiedRecord) []Section {
 	sections := make([]Section, 0, len(Dispositions())+1)
 	for _, disposition := range Dispositions() {
@@ -228,12 +254,7 @@ func sectionize(records []*VerifiedRecord) []Section {
 		}
 		sections = append(sections, Section{Disposition: disposition, Records: group})
 	}
-	stale := make([]*VerifiedRecord, 0)
-	for _, r := range records {
-		if r.Verdict == CheckStale || r.Verdict == CheckFailed {
-			stale = append(stale, r)
-		}
-	}
+	stale := StaleRecords(records)
 	if len(stale) > 0 {
 		sections = append(sections, Section{Disposition: "stale_or_contradictory", Records: stale})
 	}
@@ -241,12 +262,25 @@ func sectionize(records []*VerifiedRecord) []Section {
 }
 
 // StaleRecords returns the records whose evidence no longer holds.
-func (r *CheckReport) StaleRecords() []*VerifiedRecord {
+//
+// A record qualifies when ANY of its checks is stale or failed — not
+// when its aggregate verdict is, because the aggregate lets an
+// unverifiable check hide a stale one.
+func StaleRecords(records []*VerifiedRecord) []*VerifiedRecord {
 	var out []*VerifiedRecord
-	for _, rec := range r.Records {
+	for _, rec := range records {
+		if rec.Verification != nil && rec.Verification.Stale() {
+			out = append(out, rec)
+			continue
+		}
 		if rec.Verdict == CheckStale || rec.Verdict == CheckFailed {
 			out = append(out, rec)
 		}
 	}
 	return out
+}
+
+// StaleRecords returns the records whose evidence no longer holds.
+func (r *CheckReport) StaleRecords() []*VerifiedRecord {
+	return StaleRecords(r.Records)
 }

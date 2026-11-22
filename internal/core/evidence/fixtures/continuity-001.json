@@ -18,7 +18,7 @@
       "head_sha": "77ced9173fbf2707ad241b402085e00d7f5391eb",
       "reviewed_sha": "77ced9173fbf2707ad241b402085e00d7f5391eb",
       "review_disposition": "locally_reported",
-      "review_verdict": "approved",
+      "review_verdict": "reported_approved",
       "review_evidence_ref": "https://github.com/flowbyte-com/mpm/pull/259",
       "review_evidence_sha256": "unknown"
     },
@@ -35,7 +35,7 @@
       "head_sha": "9bd04b7c01e68f17713b818e7649340cd82a5b55",
       "reviewed_sha": "9bd04b7c01e68f17713b818e7649340cd82a5b55",
       "review_disposition": "locally_reported",
-      "review_verdict": "approved",
+      "review_verdict": "reported_approved",
       "review_evidence_ref": "https://github.com/flowbyte-com/mpm/pull/260",
       "review_evidence_sha256": "unknown"
     },
@@ -52,7 +52,7 @@
       "head_sha": "a82b08d1519984d0916bf57afcb944b22ffd91ce",
       "reviewed_sha": "a82b08d1519984d0916bf57afcb944b22ffd91ce",
       "review_disposition": "locally_reported",
-      "review_verdict": "approved",
+      "review_verdict": "reported_approved",
       "review_evidence_ref": "https://github.com/flowbyte-com/mpm/pull/261",
       "review_evidence_sha256": "unknown"
     },
@@ -69,7 +69,7 @@
       "head_sha": "bb1bf630c02dc46887e11f1f460470d8ad3e6716",
       "reviewed_sha": "bb1bf630c02dc46887e11f1f460470d8ad3e6716",
       "review_disposition": "locally_reported",
-      "review_verdict": "approved",
+      "review_verdict": "reported_approved",
       "review_evidence_ref": "https://github.com/flowbyte-com/mpm/pull/262",
       "review_evidence_sha256": "unknown"
     }

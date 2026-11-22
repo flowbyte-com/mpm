@@ -160,13 +160,18 @@ const (
 // recorded. It is published as what it is: a REPORTED verdict, with its
 // own vocabulary, and never as the service's verdict.
 //
-// The two vocabularies are kept apart on purpose. A reader that saw
-// "approved" where the service writes "passed" could not tell a claim
-// from a record, and that is the confusion the whole evidence contract
-// exists to prevent.
+// # WHY THE VOCABULARY IS PREFIXED
+//
+// The service records `passed` and `changes_requested`. A reader that saw
+// `changes_requested` could not tell a reported one from a recorded one
+// unless it also read the review disposition — and the whole point of
+// keeping the two apart is that a reader should not have to.
+// So every reported verdict says so in the value itself: `reported_…`.
+// The vocabulary is not a nicety; it is the difference between a claim
+// and a record, made visible without looking anything else up.
 const (
-	ReportedApproved         = "approved"
-	ReportedChangesRequested = "changes_requested"
+	ReportedApproved         = "reported_approved"
+	ReportedChangesRequested = "reported_changes_requested"
 )
 
 // EvidenceRef points at the bytes a piece of evidence consists of.
@@ -184,6 +189,17 @@ type EvidenceRef struct {
 	// NEVER the digest of something else: a missing digest is a missing
 	// digest.
 	SHA256 string `json:"sha256"`
+	// Status says whether the publisher CHECKED the digest against the
+	// bytes.
+	//
+	// It is "verified" when the bytes were read and they hash to the
+	// digest, "unverifiable" when they could not be read, and
+	// "contradicted" when they were read and they do NOT hash to it.
+	//
+	// A digest that was never checked says so here, so a reader can
+	// tell a checked digest from an unchecked one without looking
+	// anywhere else.
+	Status string `json:"status,omitempty"`
 }
 
 // Known reports whether the digest is a real digest.
@@ -447,6 +463,21 @@ var observedFields = []string{
 }
 
 // recordedFields are the fields the assignment store asserts.
+//
+// # THE DISPOSITION IS A DERIVATION, NOT AN ASSERTION
+//
+// `disposition` is listed here because it is computed from the record's
+// OWN fields — the state, the verdict, the pending action — and every one
+// of those is something the store asserts about itself. But the
+// derivation also folds in the OBSERVED CI, so the category says where
+// the record's fields come from, not that the disposition is a bare
+// assertion.
+//
+// A reader told "disposition: recorded" must not read it as "the store
+// said so". So the record says what the disposition IS: it is derived,
+// by one function, from the fields the record carries — and the record
+// carries those fields, with their own categories, so the reader can
+// take the derivation apart.
 var recordedFields = []string{
 	FieldProject,
 	FieldRootID,
@@ -581,9 +612,16 @@ func Validate(r *Record) error {
 		}
 	}
 	if r.PendingOperatorAction != "" && r.OperatorApproval != nil {
-		return fmt.Errorf(
-			"evidence: the record carries an approval AND a pending operator action; " +
-				"an action that was taken is not pending")
+		// The store keeps the AWAITED action on the row after the
+		// operator acts on it, so a record may carry both an approval
+		// and the action that was asked for. What it may not carry is
+		// the SAME action as both pending and taken.
+		if r.PendingOperatorAction == r.OperatorApproval.Action {
+			return fmt.Errorf(
+				"evidence: the record carries the approval of %q and asks for %q; "+
+					"an action that was taken is not pending",
+				r.OperatorApproval.Action, r.PendingOperatorAction)
+		}
 	}
 	want := ProvenanceFor()
 	if !sameStrings(r.Provenance.Observed, want.Observed) ||

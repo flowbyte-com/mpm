@@ -176,20 +176,24 @@ func (f *Fixture) Tree() Tree {
 // A fixture's review is a REPORTED review: it happened in a session, not
 // in the substrate's ledger. It is published as a claim, and the record
 // says so.
-func (f *Fixture) Reviews() map[string]ReviewInfo {
-	out := map[string]ReviewInfo{}
+//
+// The map holds CANDIDATES, and the package picks the newest of them —
+// so the rule that decides which review is current is the same rule for
+// the fixture and for the store.
+func (f *Fixture) Reviews() map[string][]ReviewInfo {
+	out := map[string][]ReviewInfo{}
 	for _, t := range f.Tasks {
 		if t.ReviewDisposition == "" {
 			continue
 		}
-		out[t.TaskID] = ReviewInfo{
+		out[t.TaskID] = append(out[t.TaskID], ReviewInfo{
 			Exists:          true,
 			ReviewedSHA:     t.ReviewedSHA,
 			FindingsSHA256:  t.ReviewEvidenceSHA256,
 			EvidenceRef:     t.ReviewEvidenceRef,
 			Verdict:         t.ReviewVerdict,
 			LocallyReported: t.ReviewDisposition == ReviewDispositionLocallyReported,
-		}
+		})
 	}
 	return out
 }
@@ -199,9 +203,22 @@ type Corpus struct {
 	// Trees are the trees being published.
 	Trees []Tree
 	// Reviews are the review facts, keyed by task id.
-	Reviews map[string]ReviewInfo
+	//
+	// Each task's entry holds the CANDIDATES — every review anybody
+	// recorded of it — and the newest one is the one that is published.
+	Reviews map[string][]ReviewInfo
 	// Facts are the observed facts, keyed by task id.
 	Facts map[string]Facts
+	// Truncated says the corpus holds only PART of the work.
+	//
+	// It is published, because a reader that took a partial queue for
+	// the whole one would be misled — and a silent truncation is worse
+	// than a visible one.
+	Truncated bool
+	// Scanned is how many assignments the corpus was read from.
+	Scanned int
+	// ScanLimit is the bound the corpus was read under.
+	ScanLimit int
 }
 
 // BuildCorpusFromFixture reads a fixture and asks GitHub what became of
@@ -250,84 +267,26 @@ func BuildCorpusFromFixture(ctx context.Context, gh GitHub, f *Fixture) (*Corpus
 
 // BuildCorpusFromTrees builds a corpus from the assignment store's trees
 // and the facts read from GitHub.
-func BuildCorpusFromTrees(trees []Tree, reviews map[string]ReviewInfo,
+func BuildCorpusFromTrees(trees []Tree, reviews map[string][]ReviewInfo,
 	facts map[string]Facts) *Corpus {
 	return &Corpus{Trees: trees, Reviews: reviews, Facts: facts}
 }
 
 // Records builds the corpus's records.
+//
+// The corpus's review facts are merged with the tree's own correlation,
+// and the NEWEST review of a task wins — the rule lives in
+// BuildWithReviews, so it is the same rule for every publisher.
 func (c *Corpus) Records() ([]*Record, error) {
 	var out []*Record
 	for _, tree := range c.Trees {
-		records, err := Build(tree, c.Facts)
+		records, err := BuildWithReviews(tree, c.Facts, c.Reviews)
 		if err != nil {
 			return nil, err
-		}
-		// A corpus may carry the review facts of a tree the claims did
-		// not: a fixture records the review of a task beside the task,
-		// rather than as a reviewer assignment.
-		for _, r := range records {
-			if review, ok := c.Reviews[r.TaskID]; ok {
-				merged, err := applyReview(r, review)
-				if err != nil {
-					return nil, err
-				}
-				records[mergeIndex(records, r)] = merged
-			}
 		}
 		out = append(out, records...)
 	}
 	return out, nil
-}
-
-// applyReview folds a corpus-level review into a record.
-func applyReview(r *Record, review ReviewInfo) (*Record, error) {
-	updated := *r
-	switch {
-	case review.LocallyReported:
-		updated.ReviewDisposition = ReviewDispositionLocallyReported
-		// The REPORTED verdict is carried as what it is: a verdict
-		// that was reported outside the substrate, published with its
-		// own vocabulary and never as the service's verdict.
-		updated.ReviewVerdict = review.Verdict
-	case review.Verdict != "":
-		updated.ReviewDisposition = ReviewDispositionVerdict
-		updated.ReviewVerdict = review.Verdict
-	case review.FindingsSHA256 != "" || review.EvidenceRef != "":
-		updated.ReviewDisposition = ReviewDispositionFindingsCaptured
-	default:
-		updated.ReviewDisposition = ReviewDispositionNone
-	}
-	if review.ReviewedSHA != "" {
-		updated.ReviewedSHA = unknownSHA(review.ReviewedSHA)
-	}
-	if updated.ReviewDisposition != ReviewDispositionNone {
-		updated.ReviewEvidence = &EvidenceRef{
-			Ref:    review.EvidenceRef,
-			SHA256: unknownDigest(review.FindingsSHA256),
-		}
-		if updated.ReviewEvidence.Ref == "" {
-			updated.ReviewEvidence.Ref = Unknown
-		}
-	}
-	updated.Disposition = DeriveDisposition(&updated)
-	if err := Validate(&updated); err != nil {
-		return nil, err
-	}
-	if err := AssertPublishable(&updated); err != nil {
-		return nil, err
-	}
-	return &updated, nil
-}
-
-// mergeIndex finds a record's position by identity.
-func mergeIndex(records []*Record, target *Record) int {
-	for i, r := range records {
-		if r == target {
-			return i
-		}
-	}
-	return -1
 }
 
 // FixturePath returns the path of a named fixture inside the embedded

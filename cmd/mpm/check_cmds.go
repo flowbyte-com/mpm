@@ -154,8 +154,15 @@ func renderCheckReport(report *evidence.CheckReport) string {
 	fmt.Fprintf(&b, "%s  evidence   %s @ %s\n", status, report.Source.Repository, report.Source.Branch)
 	fmt.Fprintf(&b, "   snapshot   %s\n", report.Source.SnapshotID)
 	fmt.Fprintf(&b, "   published  %s\n", report.Source.PublishedAt)
-	fmt.Fprintf(&b, "   records    %d · %s\n",
-		len(report.Records), verifiedSummary(report.Records))
+	// The corpus count, and the filtered count when the filters hid
+	// something: a reader must never mistake a filtered view for the
+	// whole publication.
+	shown := ""
+	if report.ShownCount != report.RecordCount {
+		shown = fmt.Sprintf(" · showing %d", report.ShownCount)
+	}
+	fmt.Fprintf(&b, "   records    %d%s · %s\n",
+		report.RecordCount, shown, verifiedSummary(report.Records))
 	render.BlankLine(&b)
 
 	if len(report.Sections) == 0 {

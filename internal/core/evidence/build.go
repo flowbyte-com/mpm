@@ -36,6 +36,14 @@ type Claims struct {
 	RootID string
 	// ProjectID is the project it belongs to.
 	ProjectID string
+	// Repository is "owner/name" — where the work is visible.
+	//
+	// It is a CLAIM, and it is what the publisher reads the
+	// assignment's own pull request reference from. The OBSERVED
+	// repository — the one GitHub reports — takes precedence when the
+	// facts could be read, and this one is what a reader is given when
+	// they could not.
+	Repository string
 	// Title is the assignment's title.
 	Title string
 	// Objective is the assignment's one-line objective.
@@ -58,6 +66,12 @@ type Claims struct {
 	ReviewedSHA string
 	// FindingsSHA256 is the digest of the host-captured findings.
 	FindingsSHA256 string
+	// CaptureStatus says whether the publisher CHECKED that digest
+	// against the bytes.
+	//
+	// It is set by the publisher, not by the store: the store holds a
+	// claim, and the publisher is what checks it.
+	CaptureStatus string
 	// EvidenceRef is where the captured evidence lives.
 	EvidenceRef string
 	// ReviewTarget is the assignment a reviewer reviews.
@@ -111,7 +125,13 @@ type ReviewInfo struct {
 	ReviewedSHA string
 	// FindingsSHA256 is the digest of the host-captured findings.
 	FindingsSHA256 string
-	// EvidenceRef is where the captured evidence lives.
+	// CaptureStatus says whether the publisher CHECKED that digest
+	// against the bytes.
+	//
+	// It is set by the publisher, not by the store: the store holds a
+	// claim, and the publisher is what checks it.
+	CaptureStatus string
+	// EvidenceRef is where the captured evidence live.
 	EvidenceRef string
 	// Verdict is the recorded verdict, if any.
 	Verdict string
@@ -121,6 +141,11 @@ type ReviewInfo struct {
 	// Such a review is published as a CLAIM. It is never dressed up as
 	// a verdict the service recorded.
 	LocallyReported bool
+	// UpdatedAt is when the review was last updated.
+	//
+	// It is what decides which of two reviews of the same subject is
+	// the current one.
+	UpdatedAt int64
 }
 
 // Build turns one tree and its facts into the tree's records.
@@ -128,10 +153,60 @@ type ReviewInfo struct {
 // The records are returned in a stable order — by root, then by task id —
 // so the publication is deterministic.
 func Build(tree Tree, facts map[string]Facts) ([]*Record, error) {
+	return BuildWithReviews(tree, facts, nil)
+}
+
+// BuildWithReviews turns one tree, its facts and an extra set of review
+// facts into the tree's records.
+//
+// # THE NEWEST REVIEW WINS
+//
+// Two reviewers can review one subject: the head advanced and the work
+// was re-reviewed. The LATER review says what the subject's state is
+// now, and publishing the earlier one would publish a SUPERSEDED
+// verdict as the current one — the failure the evidence contract exists
+// to prevent.
+//
+// So every candidate review for a task is compared and only the newest
+// is used. The tie is broken by the reviewer's id, so the result does
+// not depend on the order the candidates arrived in.
+//
+// # TWO ACCOUNTS OF ONE REVIEW ARE MERGED, NOT CHOSEN BETWEEN
+//
+// A review can be described twice: the tree's own correlation reads the
+// reviewer's CLAIM, and the corpus's candidates read the LEDGER. Those
+// are two halves of ONE review, not two accounts of it — so they are
+// merged, and the candidate's verdict and capture status fill in what
+// the claim did not carry.
+//
+// Before this, the two competed: the claim won the tie, and the
+// subject's record was published with NO verdict at all — which reads
+// as "no review happened" and files finished work under
+// "awaiting review" forever.
+//
+// The rule lives HERE, and not in one caller, because it is part of the
+// contract: a caller that built its own map could get it wrong, and the
+// map is not what a reader sees.
+func BuildWithReviews(tree Tree, facts map[string]Facts,
+	extra map[string][]ReviewInfo) ([]*Record, error) {
 	if tree.RootID == "" {
 		return nil, fmt.Errorf("evidence: the tree names no root assignment")
 	}
 	reviews := correlateReviews(tree)
+	for taskID, candidates := range extra {
+		current, ok := reviews[taskID]
+		for _, candidate := range candidates {
+			switch {
+			case !ok:
+				reviews[taskID] = candidate
+				ok = true
+			case sameReview(current, candidate):
+				reviews[taskID] = mergeReview(current, candidate)
+			case newerReview(candidate, current):
+				reviews[taskID] = candidate
+			}
+		}
+	}
 	claims := append([]Claims(nil), tree.Tasks...)
 	sortClaims(claims)
 
@@ -146,6 +221,65 @@ func Build(tree Tree, facts map[string]Facts) ([]*Record, error) {
 	return out, nil
 }
 
+// newerReview says whether a review is more recent than another.
+//
+// The comparison is on the update time, and the tie is broken by the
+// reviewer's id — so the answer does not depend on the order the
+// candidates were found in.
+func newerReview(a, b ReviewInfo) bool {
+	if a.UpdatedAt != b.UpdatedAt {
+		return a.UpdatedAt > b.UpdatedAt
+	}
+	return a.ReviewerID > b.ReviewerID
+}
+
+// sameReview says whether two accounts describe the SAME review.
+//
+// Two accounts of one review name the same reviewer. Two DIFFERENT
+// reviews of one subject name two reviewers, and they compete.
+func sameReview(a, b ReviewInfo) bool {
+	return a.ReviewerID != "" && a.ReviewerID == b.ReviewerID
+}
+
+// mergeReview folds a candidate into the account of a review.
+//
+// The candidate is the MORE COMPLETE account — it comes from the ledger,
+// which knows the verdict, and from the publisher, which checked the
+// capture — so its non-empty fields win. The fields it says nothing
+// about are kept, because the tree's correlation knows things the
+// candidate does not.
+//
+// The verdict and its provenance travel TOGETHER: a verdict reported
+// from outside the substrate is published as one, and a verdict the
+// substrate recorded is published as one. Merging them apart would let
+// a record claim a reported verdict as a recorded one.
+func mergeReview(base, candidate ReviewInfo) ReviewInfo {
+	out := base
+	if candidate.Exists {
+		out.Exists = true
+	}
+	if candidate.ReviewerID != "" {
+		out.ReviewerID = candidate.ReviewerID
+	}
+	if candidate.ReviewedSHA != "" {
+		out.ReviewedSHA = candidate.ReviewedSHA
+	}
+	if candidate.FindingsSHA256 != "" {
+		out.FindingsSHA256 = candidate.FindingsSHA256
+	}
+	if candidate.CaptureStatus != "" {
+		out.CaptureStatus = candidate.CaptureStatus
+	}
+	if candidate.EvidenceRef != "" {
+		out.EvidenceRef = candidate.EvidenceRef
+	}
+	if candidate.Verdict != "" {
+		out.Verdict = candidate.Verdict
+		out.LocallyReported = candidate.LocallyReported
+	}
+	return out
+}
+
 // buildOne turns one task's claims, its review and its facts into a
 // record.
 func buildOne(c Claims, review ReviewInfo, facts Facts) (*Record, error) {
@@ -155,7 +289,7 @@ func buildOne(c Claims, review ReviewInfo, facts Facts) (*Record, error) {
 	r := &Redactor{}
 	rec := &Record{
 		FormatVersion:     FormatVersion,
-		Repository:        Unknown,
+		Repository:        unknownOr(c.Repository),
 		Project:           c.ProjectID,
 		RootID:            c.RootID,
 		TaskID:            c.ID,
@@ -188,6 +322,16 @@ func buildOne(c Claims, review ReviewInfo, facts Facts) (*Record, error) {
 		approval.Source, _ = r.Redact(FieldOperatorApproval+".source", approval.Source)
 		approval.Evidence, _ = r.Redact(FieldOperatorApproval+".evidence", approval.Evidence)
 		rec.OperatorApproval = &approval
+		// AN ACTION THAT WAS TAKEN IS NOT PENDING.
+		//
+		// The store keeps the awaited action on the row after the
+		// operator acts on it, because the action is the record of
+		// what was asked. A record that published both would say the
+		// same action is pending and taken, and the queue would show
+		// the work twice.
+		if rec.PendingOperatorAction == approval.Action {
+			rec.PendingOperatorAction = ""
+		}
 	}
 
 	// THE REVIEW.
@@ -198,6 +342,10 @@ func buildOne(c Claims, review ReviewInfo, facts Facts) (*Record, error) {
 	switch {
 	case review.LocallyReported:
 		rec.ReviewDisposition = ReviewDispositionLocallyReported
+		// The REPORTED verdict is carried as what it is: a verdict
+		// that was reported outside the substrate, published with its
+		// own vocabulary and never as the service's verdict.
+		rec.ReviewVerdict = review.Verdict
 	case review.Exists && review.Verdict != "":
 		rec.ReviewDisposition = ReviewDispositionVerdict
 		rec.ReviewVerdict = review.Verdict
@@ -213,23 +361,42 @@ func buildOne(c Claims, review ReviewInfo, facts Facts) (*Record, error) {
 		rec.ReviewEvidence = &EvidenceRef{
 			Ref:    review.EvidenceRef,
 			SHA256: unknownDigest(review.FindingsSHA256),
+			Status: review.CaptureStatus,
 		}
 		if rec.ReviewEvidence.Ref == "" {
 			rec.ReviewEvidence.Ref = Unknown
 		}
+		if rec.ReviewEvidence.Status == "" {
+			rec.ReviewEvidence.Status = CaptureNone
+		}
+		// A REFUSED DIGEST IS NOT PUBLISHED. If the publisher checked
+		// the bytes and they did not hash to the digest the store
+		// recorded, the digest is a claim that was REFUTED — and
+		// publishing it would publish the refutation.
+		if rec.ReviewEvidence.Status == CaptureContradicted {
+			rec.ReviewEvidence.SHA256 = Unknown
+		}
 	}
 
 	// THE OBSERVED SIDE.
+	//
+	// The facts are COPIED, deeply: the redaction below rewrites the
+	// copies, and the reader's own values must not change underneath
+	// it. And they are SCREENED, because the pull request's title, a
+	// review's body and a workflow's name are third-party text that the
+	// substrate never saw.
 	if facts.GitHub != nil {
 		gh := *facts.GitHub
+		gh.Reviews = append([]GitHubReview(nil), facts.GitHub.Reviews...)
 		rec.GitHub = &gh
 		if gh.Repository != "" {
 			rec.Repository = gh.Repository
 		}
 	}
 	if len(facts.CI) > 0 {
-		rec.CI = facts.CI
+		rec.CI = copyRuns(facts.CI)
 	}
+	r.redactObserved(rec.GitHub, rec.CI)
 
 	// THE DISPOSITION. It is derived from the record's OWN fields, by
 	// one function, so the human report and the machine report cannot
@@ -248,24 +415,77 @@ func buildOne(c Claims, review ReviewInfo, facts Facts) (*Record, error) {
 	return rec, nil
 }
 
+// copyRuns copies a set of workflow runs and their jobs.
+//
+// The copy is DEEP: the redaction rewrites the names inside the jobs,
+// and the reader's own runs must not change underneath it.
+func copyRuns(runs []CIRun) []CIRun {
+	out := make([]CIRun, 0, len(runs))
+	for _, run := range runs {
+		copied := run
+		if len(run.Jobs) > 0 {
+			copied.Jobs = append([]CIJob(nil), run.Jobs...)
+		}
+		out = append(out, copied)
+	}
+	return out
+}
+
 // DeriveDisposition says where a task sits in the engineering queue.
 //
 // The rules, in order:
 //
 //  1. CANCELLED work is blocked.
-//  2. A review that ASKED FOR CHANGES is blocked: the work needs a new
+//  2. A REVIEWER'S OWN RECORD IS FILED BY THE REVIEW (see below).
+//  3. A review that ASKED FOR CHANGES is blocked: the work needs a new
 //     assignment, and the old one is the record of what was tried.
-//  3. A PENDING OPERATOR ACTION is waiting for a person.
-//  4. FINISHED work with no green CI is waiting for CI.
-//  5. FINISHED work with green CI and nothing pending is completed.
-//  6. FINISHED work with no review verdict is waiting for a review.
-//  7. Everything else is active.
+//  4. A PENDING OPERATOR ACTION is waiting for a person.
+//  5. FINISHED work with no verdict of any kind is waiting for a review.
+//  6. FINISHED work whose CI is not green is waiting for CI.
+//  7. FINISHED work whose review covered ANOTHER revision is ambiguous:
+//     the outcome for the current head cannot be determined.
+//  8. FINISHED work with green CI and nothing pending is completed.
+//  9. Work in a state this publisher knows is active.
+//  10. Work in a state this publisher does NOT know is ambiguous: the
+//     substrate says something the record cannot place, and a record
+//     that claimed a place would be inventing one.
+//
+// # A REVIEWER'S OWN RECORD IS FILED BY THE REVIEW
+//
+// The rules below are the SUBJECT's rules: they ask whether the WORK's
+// CI is green and whether a verdict about the WORK is outstanding.
+// Neither question is about the review itself.
+//
+// A reviewer's assignment IS the review. So a finished review is DONE
+// work, and it is filed as completed — whatever verdict it reached
+// belongs to the subject it judged, and the subject's own record
+// carries that verdict. Without this rule a finished review was filed
+// under "awaiting review", which tells an operator the queue is waiting
+// for a reviewer who has already finished.
+//
+// # WHY A REPORTED VERDICT COUNTS AS A REVIEW
+//
+// Rule 5 asks whether there is a VERDICT, not whether the substrate
+// recorded one. A review that happened in a contained session and was
+// reported afterwards has a verdict; it is published as a REPORTED
+// verdict, the record says so, and the review-evidence check reports
+// that its bytes cannot be verified. Filing it as "awaiting review"
+// would say that no review happened, which is false.
 func DeriveDisposition(r *Record) string {
 	switch r.State {
 	case "cancelled":
 		return DispositionBlocked
 	}
-	if r.ReviewVerdict == VerdictChangesRequested {
+	if r.Role == "reviewer" {
+		if finishedState(r.State) {
+			return DispositionCompleted
+		}
+		if activeState(r.State) {
+			return DispositionActive
+		}
+		return DispositionAmbiguous
+	}
+	if r.ReviewVerdict == VerdictChangesRequested || r.ReviewVerdict == ReportedChangesRequested {
 		return DispositionBlocked
 	}
 	if r.PendingOperatorAction != "" && r.PendingOperatorAction != Unknown {
@@ -274,26 +494,51 @@ func DeriveDisposition(r *Record) string {
 	if r.State == "awaiting_operator" {
 		return DispositionAwaitingOperator
 	}
-	finished := r.State == "completed" || r.State == "review_passed" ||
-		r.State == "operator_approved"
-	if finished {
+	if finishedState(r.State) {
+		if r.ReviewVerdict == "" {
+			// FINISHED work with no verdict is waiting for a REVIEWER,
+			// not for CI. Filing it under CI would tell an operator
+			// the queue is waiting on the wrong thing.
+			return DispositionAwaitingReview
+		}
 		green, known, _ := CIVerdict(r.CI, r.HeadSHA)
 		if !green {
-			if !known {
-				// The CI is UNKNOWN, and an unknown CI is not a green
-				// one: the work is waiting for a CI that nobody has
-				// established yet.
-				return DispositionAwaitingCI
-			}
+			// The CI is UNKNOWN, and an unknown CI is not a green
+			// one: the work is waiting for a CI that nobody has
+			// established yet.
+			_ = known
 			return DispositionAwaitingCI
+		}
+		if r.ReviewedSHA != Unknown && r.HeadSHA != Unknown && r.ReviewedSHA != r.HeadSHA {
+			// The review covered another revision, so the work's
+			// OUTCOME for this head cannot be determined: the approval
+			// is not about what is in front of the reader.
+			return DispositionAmbiguous
 		}
 		return DispositionCompleted
 	}
-	if r.State == "enqueued" || r.State == "delivered" || r.State == "acknowledged" ||
-		r.State == "accepted" || r.State == "in_progress" {
+	if activeState(r.State) {
 		return DispositionActive
 	}
-	return DispositionActive
+	return DispositionAmbiguous
+}
+
+// finishedState says whether a state means the work is DONE.
+func finishedState(state string) bool {
+	switch state {
+	case "completed", "review_passed", "operator_approved":
+		return true
+	}
+	return false
+}
+
+// activeState says whether a state means the work is IN FLIGHT.
+func activeState(state string) bool {
+	switch state {
+	case "enqueued", "delivered", "acknowledged", "accepted", "in_progress":
+		return true
+	}
+	return false
 }
 
 // CIVerdict says whether the CI for a head is green.
@@ -372,8 +617,10 @@ func correlateReviews(tree Tree) map[string]ReviewInfo {
 			ReviewerID:     rev.ID,
 			ReviewedSHA:    rev.ReviewedSHA,
 			FindingsSHA256: rev.FindingsSHA256,
+			CaptureStatus:  rev.CaptureStatus,
 			EvidenceRef:    rev.EvidenceRef,
 			Verdict:        rev.Verdict,
+			UpdatedAt:      rev.UpdatedAt,
 		}
 		// A reviewer's own record is about the REVIEW it performed.
 		out[rev.ID] = info
@@ -427,6 +674,60 @@ func PRNumber(ref string) (int, error) {
 }
 
 var pullURLPattern = regexp.MustCompile(`/pull/(\d+)`)
+
+// RepositoryFromRef reads "owner/name" out of a repository reference.
+//
+// A pull request's URL names the repository the work is visible in, and
+// that is where a publisher looks for it. It is the store's own claim
+// about where the work went, and the OBSERVED repository replaces it
+// when GitHub could be asked.
+//
+// A reference it cannot read is an error rather than a guess: a wrong
+// repository would publish the evidence about somebody else's project.
+func RepositoryFromRef(ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || ref == Unknown {
+		return "", fmt.Errorf("evidence: the reference names no repository")
+	}
+	rest := ref
+	if i := strings.Index(ref, "://"); i >= 0 {
+		scheme := ref[:i]
+		rest = ref[i+3:]
+		if scheme != "http" && scheme != "https" {
+			return "", fmt.Errorf("evidence: the reference %q is not an HTTP reference", ref)
+		}
+		if j := strings.Index(rest, "/"); j >= 0 {
+			rest = rest[j+1:]
+		} else {
+			rest = ""
+		}
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", fmt.Errorf("evidence: the reference %q names no repository", ref)
+	}
+	if len(parts) > 2 {
+		switch parts[2] {
+		case "pull", "pulls", "issues", "commit", "commits", "tree", "blob":
+			parts = parts[:2]
+		default:
+			return "", fmt.Errorf("evidence: the reference %q names no repository", ref)
+		}
+	}
+	if _, _, err := ParseRepository(parts[0] + "/" + parts[1]); err != nil {
+		return "", err
+	}
+	return parts[0] + "/" + parts[1], nil
+}
+
+// unknownOr returns the explicit unknown for an empty value.
+func unknownOr(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return Unknown
+	}
+	return value
+}
 
 // unknownSHA returns the explicit unknown for a SHA nobody knows.
 //

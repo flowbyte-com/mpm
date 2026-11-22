@@ -59,6 +59,23 @@ type IndexEntry struct {
 	Title string `json:"title,omitempty"`
 }
 
+// Rendering is one human-readable artefact of a publication.
+//
+// It is a POINTER with a digest, like a record: the artefact is what a
+// person reads, and the digest is how a reader checks that the bytes
+// they are reading are the bytes the publication produced.
+//
+// Before this, the human artefacts were covered by nothing: the index
+// named only the machine-readable records, so a reader who verified a
+// record had verified nothing about the Markdown a person actually
+// reads. Now every artefact is named and checkable.
+type Rendering struct {
+	// Path is the artefact's path on the evidence branch.
+	Path string `json:"path"`
+	// SHA256 is the digest of the artefact's bytes.
+	SHA256 string `json:"sha256"`
+}
+
 // Index is the published pointer at the current snapshot.
 //
 // It carries the PUBLICATION METADATA — when it was published, and where
@@ -83,6 +100,17 @@ type Index struct {
 	RecordCount int `json:"record_count"`
 	// Records are the snapshot's records.
 	Records []IndexEntry `json:"records"`
+	// Renderings are the human-readable artefacts, with their digests.
+	Renderings []Rendering `json:"renderings,omitempty"`
+	// Truncated says the publication holds only PART of the work.
+	//
+	// A reader that took a partial queue for the whole one would be
+	// misled, so the truncation is published rather than assumed away.
+	Truncated bool `json:"truncated,omitempty"`
+	// Scanned is how many assignments the publication was read from.
+	Scanned int `json:"scanned,omitempty"`
+	// ScanLimit is the bound the read was under.
+	ScanLimit int `json:"scan_limit,omitempty"`
 }
 
 // File is one file of a publication.
@@ -117,6 +145,17 @@ type Plan struct {
 // rendered: two records for one assignment are not two facts about it,
 // and publishing both would let a reader believe there were two.
 func NewPlan(repository, branch string, records []*Record, publishedAt time.Time) (*Plan, error) {
+	return NewPlanFromCorpus(repository, branch, nil, records, publishedAt)
+}
+
+// NewPlanFromCorpus builds the publication for a corpus.
+//
+// The corpus carries what the publisher knows about the READ it made —
+// whether it was truncated, and under what bound — and that is
+// published, because a reader that took a partial queue for the whole
+// one would be misled.
+func NewPlanFromCorpus(repository, branch string, corpus *Corpus, records []*Record,
+	publishedAt time.Time) (*Plan, error) {
 	if repository == "" {
 		return nil, fmt.Errorf("evidence: the publication names no repository")
 	}
@@ -179,6 +218,29 @@ func NewPlan(repository, branch string, records []*Record, publishedAt time.Time
 		SnapshotID:    snapshot,
 		RecordCount:   len(records),
 	}
+	if corpus != nil {
+		index.Truncated = corpus.Truncated
+		index.Scanned = corpus.Scanned
+		index.ScanLimit = corpus.ScanLimit
+	}
+	// THE HUMAN ARTEFACTS ARE NAMED AND CHECKED.
+	//
+	// Every file the publication wrote other than the index is named
+	// here with its digest, so a reader can check the Markdown a person
+	// reads as exactly as they can check the record a machine reads.
+	for _, f := range plan.Files {
+		if f.Path == IndexPath {
+			continue
+		}
+		if strings.HasSuffix(f.Path, ".json") {
+			// The records are named by the index's own entries.
+			continue
+		}
+		index.Renderings = append(index.Renderings, Rendering{
+			Path:   f.Path,
+			SHA256: DigestBytes(f.Content),
+		})
+	}
 	for _, r := range records {
 		id, err := RecordID(r)
 		if err != nil {
@@ -198,6 +260,9 @@ func NewPlan(repository, branch string, records []*Record, publishedAt time.Time
 			return index.Records[i].RootID < index.Records[j].RootID
 		}
 		return index.Records[i].TaskID < index.Records[j].TaskID
+	})
+	sort.SliceStable(index.Renderings, func(i, j int) bool {
+		return index.Renderings[i].Path < index.Renderings[j].Path
 	})
 	raw, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
@@ -226,6 +291,11 @@ func ParseIndex(raw []byte) (*Index, error) {
 	if idx.RecordCount != len(idx.Records) {
 		return nil, fmt.Errorf("evidence: the index claims %d records and lists %d",
 			idx.RecordCount, len(idx.Records))
+	}
+	for _, r := range idx.Renderings {
+		if r.Path == "" || r.SHA256 == "" {
+			return nil, fmt.Errorf("evidence: the index names a rendering with no path or no digest")
+		}
 	}
 	return &idx, nil
 }
