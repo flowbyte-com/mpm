@@ -440,9 +440,11 @@ class DocumentedCommandsActuallyExist(unittest.TestCase):
         )
         # WHITESPACE IS NOT PART OF THE CONTRACT. The router is a Go map
         # and gofmt aligns its entries; an assertion on the exact run of
-        # spaces breaks the moment the longest key in the block changes
-        # (and adding `engineering` did exactly that). The names and the
-        # dispatch flag are the contract, not the padding.
+        # spaces breaks the moment gofmt re-aligns a block. The base tree
+        # was not gofmt-clean, and a gofmt pass in this branch re-aligned
+        # the "Feature namespaces" block (the `reference` entry among
+        # them). The names and the dispatch flag are the contract, not
+        # the padding.
         self.assertRegex(
             router,
             r'"reference":\s+\{Name: "reference"',
