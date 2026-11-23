@@ -187,10 +187,8 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 		return nil, fmt.Errorf("%w: the reviewer produced no session state (%v)",
 			ErrReviewerUnavailable, runErr)
 	}
-	if len(state.Permissions) > 0 {
-		return nil, fmt.Errorf(
-			"%w: the reviewer session carries a SESSION-LEVEL permission grant, which "+
-				"overrides the agent definition's denies", ErrReviewerUnavailable)
+	if violation := reviewerSessionOverrideViolation(state.Permissions); violation != "" {
+		return nil, fmt.Errorf("%w: %s", ErrReviewerUnavailable, violation)
 	}
 
 	digest := sha256.Sum256([]byte(findings))
@@ -247,42 +245,330 @@ func (r *Runtime) verifyReviewer(ctx context.Context) error {
 		return fmt.Errorf("%w: the runtime does not know an agent named %q",
 			ErrReviewerUnavailable, ReviewerAgentName)
 	}
-	// THE HOST PREPENDS A WILDCARD ALLOW, so "no wildcard allow exists"
-	// is impossible to assert. What CAN be asserted is what the host
-	// actually evaluates under last-match-wins: the LAST rule matching
-	// action "*" must be a DENY, and no sensitive action may be allowed.
-	lastWildcardDeny := false
-	for i := len(found.Permissions) - 1; i >= 0; i-- {
-		p := found.Permissions[i]
-		if p.Action != "*" {
-			continue
-		}
-		lastWildcardDeny = p.Effect == "deny"
-		break
+	if violation := reviewerPermissionViolation(found.Permissions); violation != "" {
+		return fmt.Errorf("%w: %s", ErrReviewerUnavailable, violation)
 	}
-	if !lastWildcardDeny {
-		return fmt.Errorf("%w: %q's resolved rules do not END in a wildcard deny, so "+
-			"every action it does not name explicitly is open",
-			ErrReviewerUnavailable, ReviewerAgentName)
+	return nil
+}
+
+// reviewerPermissionViolation evaluates the ORDERED permission rules the
+// host resolved for the reviewer.
+//
+// # WHY ORDER MATTERS
+//
+// The host prepends its own rules and appends the agent definition, and
+// evaluates the result with last-match-wins. A rule that ALLOWS an action is
+// therefore not effective merely because it appears; a later matching DENY
+// overrides it. OpenCode 2.3.2 supplies, in order, a `* *` allow, read rules
+// for `.env` files (including `read *.env.example` allow), a `* *` deny,
+// `sandbox_exec *` allow, `read *` deny, and the remaining explicit action
+// denies.
+//
+// The old verifier scanned forward and rejected every explicit allow, so the
+// host's `.env.example` allow — already overridden by the final `read * deny`
+// — made the reviewer unstartable.
+//
+// # WHAT "COVERS" MEANS
+//
+// A later deny overrides an allow only when the deny's action and resource
+// patterns cover the allow's whole pattern. The proof is deliberately
+// conservative: universal patterns, exact equality, a literal allow matched
+// by a deny glob, a one-star deny whose prefix and suffix contain the allow's,
+// and a `*middle*` deny whose literal is wholly inside one of the allow's
+// literal parts. Shapes it cannot prove are refused rather than assumed safe.
+// A broad allow is therefore never collapsed into an action-wide permission
+// because a narrower later rule denied one example.
+func reviewerPermissionViolation(perms []SessionPerm) string {
+	// UNMEASURED SYNTAX IS REFUSED OUTRIGHT. A later deny using it cannot
+	// be proved to cover anything, and a sandbox allow using it cannot be
+	// proved to provide a usable execution path. Treating "cannot prove"
+	// as "does not cover" would accept an unproven sandbox.
+	for _, p := range perms {
+		switch p.Effect {
+		case "allow", "deny", "ask":
+		default:
+			return fmt.Sprintf(
+				"%q's resolved rules carry an unknown permission effect %q",
+				ReviewerAgentName, p.Effect)
+		}
+		if permissionHasUnprovenSyntax(p.Action, false, p.Effect == "allow") ||
+			permissionHasUnprovenSyntax(p.Resource, true, p.Effect == "allow") {
+			return fmt.Sprintf(
+				"%q's resolved rules contain permission syntax this verifier cannot prove",
+				ReviewerAgentName)
+		}
+	}
+
+	// THE WILDCARD MUST END IN A DENY THAT COVERS EVERY RESOURCE.
+	//
+	// The host prepends a wildcard allow, so "no wildcard allow exists" is
+	// impossible to assert. The last wildcard-action rule decides the
+	// actions the definition does not name, and it must deny everything; a
+	// deny narrowed to `secret*` leaves the rest open.
+	lastWildcard := -1
+	for i, p := range perms {
+		if p.Action == "*" {
+			lastWildcard = i
+		}
+	}
+	if lastWildcard < 0 ||
+		perms[lastWildcard].Effect != "deny" ||
+		!permissionResourceIsUniversal(perms[lastWildcard].Resource) {
+		return fmt.Sprintf(
+			"%q's resolved rules do not END in an all-resource wildcard deny, so "+
+				"every action it does not name explicitly is open", ReviewerAgentName)
 	}
 
 	hasSandbox := false
-	for _, p := range found.Permissions {
+	for i, p := range perms {
 		if p.Effect != "allow" || p.Action == "*" {
+			continue
+		}
+		if permissionAllowOverridden(perms, i) {
 			continue
 		}
 		if p.Action == "sandbox_exec" {
 			hasSandbox = true
 			continue
 		}
-		return fmt.Errorf("%w: %q allows %q beside `sandbox_exec`",
-			ErrReviewerUnavailable, ReviewerAgentName, p.Action)
+		return fmt.Sprintf("%q allows %q beside `sandbox_exec`",
+			ReviewerAgentName, p.Action)
 	}
+
+	// AN EFFECTIVE ASK IS A REQUESTABLE ACTION, NOT A DENY. It is unsafe
+	// unless a later allow or deny fully covers it. The original host
+	// `.env` asks are covered by the later `read * deny`.
+	for i, p := range perms {
+		if p.Effect != "ask" {
+			continue
+		}
+		overridden := false
+		for j := i + 1; j < len(perms); j++ {
+			q := perms[j]
+			if q.Effect != "allow" && q.Effect != "deny" {
+				continue
+			}
+			if !permissionActionCovers(q.Action, p.Action) ||
+				!permissionResourceCovers(q.Resource, p.Resource) {
+				continue
+			}
+			overridden = true
+			break
+		}
+		if !overridden {
+			return fmt.Sprintf("%q leaves %q requestable by an effective `ask`",
+				ReviewerAgentName, p.Action)
+		}
+	}
+
 	if !hasSandbox {
-		return fmt.Errorf("%w: %q does not allow `sandbox_exec`, so it has no confined "+
-			"execution path", ErrReviewerUnavailable, ReviewerAgentName)
+		return fmt.Sprintf("%q does not allow `sandbox_exec` effectively, so it has no "+
+			"confined execution path", ReviewerAgentName)
 	}
-	return nil
+	return ""
+}
+
+// permissionAllowOverridden reports whether a later rule makes an allow
+// ineffective. A later deny denies it; a later ask turns it into a request.
+// Either way the allow is not effective.
+func permissionAllowOverridden(perms []SessionPerm, allowIndex int) bool {
+	p := perms[allowIndex]
+	for j := allowIndex + 1; j < len(perms); j++ {
+		q := perms[j]
+		if q.Effect != "deny" && q.Effect != "ask" {
+			continue
+		}
+		if !permissionActionCovers(q.Action, p.Action) ||
+			!permissionResourceCovers(q.Resource, p.Resource) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// permissionActionCovers reports whether a deny rule's action pattern covers
+// the whole of an allow rule's action pattern.
+//
+// A literal allow can be covered by a deny glob (`opencode_*` covers
+// `opencode_foo`). When the allow is itself a glob, only equality or a
+// universal deny proves coverage.
+func permissionActionCovers(deny, allow string) bool {
+	if deny == "*" || deny == allow {
+		return true
+	}
+	// Escapes, single-character classes and `**` have no measured host
+	// semantics in the resolved list. Refuse them rather than guess.
+	if permissionHasUnprovenSyntax(deny, false, false) ||
+		permissionHasUnprovenSyntax(allow, false, true) {
+		return false
+	}
+	if !strings.ContainsAny(allow, "*?[\\") {
+		return permissionActionMatches(deny, allow)
+	}
+	return false
+}
+
+// permissionResourceCovers reports whether a deny rule's resource pattern
+// covers the whole of an allow rule's resource pattern.
+//
+// The recognisable shapes are the ones the resolved permission list uses:
+// a universal deny, an exact match, a literal allow matched by a deny glob,
+// a one-star deny whose literal prefix/suffix contain the allow's, and a
+// `*middle*` deny whose literal is wholly inside one of the allow's literal
+// parts. The span the deny's star must consume is required to be slash-free.
+// Everything else — including escapes, `?`, character classes and `**` — is
+// refused, not assumed safe.
+func permissionResourceCovers(deny, allow string) bool {
+	if deny == "*" || deny == allow {
+		return true
+	}
+	// Escapes, single-character classes and `**` have no measured host
+	// semantics in the resolved list. Refuse them rather than guess.
+	if permissionHasUnprovenSyntax(deny, true, false) ||
+		permissionHasUnprovenSyntax(allow, true, true) {
+		return false
+	}
+	if !strings.ContainsAny(allow, "*?[\\") {
+		// The allow names one concrete resource; a deny glob that matches
+		// it covers it.
+		return permissionResourceMatches(deny, allow)
+	}
+	allowPrefix, allowSuffix, allowSingle := permissionSplitOneStar(allow)
+	if !allowSingle {
+		return false
+	}
+	// A one-star deny `prefix*suffix` covers `allowPrefix*allowSuffix`
+	// when the deny's prefix is a prefix of the allow's and the deny's
+	// suffix is a suffix of the allow's. The deny's `*` cannot cross a
+	// path separator, so the covered middle must be slash-free.
+	if denyPrefix, denySuffix, denySingle := permissionSplitOneStar(deny); denySingle {
+		if !strings.HasPrefix(allowPrefix, denyPrefix) ||
+			!strings.HasSuffix(allowSuffix, denySuffix) {
+			return false
+		}
+		middle := allowPrefix[len(denyPrefix):] +
+			allowSuffix[:len(allowSuffix)-len(denySuffix)]
+		return !strings.Contains(middle, "/")
+	}
+	// A `*middle*` deny covers a one-star allow when the middle literal
+	// lies wholly inside the allow's prefix or suffix, and the literal
+	// parts the two stars must span contain no path separator.
+	if strings.HasPrefix(deny, "*") && strings.HasSuffix(deny, "*") &&
+		strings.Count(deny, "*") == 2 {
+		middle := strings.TrimSuffix(strings.TrimPrefix(deny, "*"), "*")
+		if middle == "" {
+			return false
+		}
+		var outside string
+		switch {
+		case strings.Contains(allowPrefix, middle):
+			outside = strings.Replace(allowPrefix, middle, "", 1) + allowSuffix
+		case strings.Contains(allowSuffix, middle):
+			outside = allowPrefix + strings.Replace(allowSuffix, middle, "", 1)
+		default:
+			return false
+		}
+		return !strings.Contains(outside, "/")
+	}
+	return false
+}
+
+// permissionHasUnprovenSyntax reports whether a pattern uses syntax whose
+// host semantics were not measured. `**` is checked on the pattern itself,
+// not on a concatenation: two adjacent single-star patterns must not look
+// like a double star.
+//
+// A resource pattern may use one star, or the measured two-star `*middle*`
+// form used by the host's `.env.*` ASK and by a deny that covers a narrower
+// allow. A two-star resource ALLOW is refused: the coverage proof cannot
+// bound an allow's two-star shape, and an allow is exactly where a later
+// deny could be missed. Action patterns get at most one star.
+func permissionHasUnprovenSyntax(pattern string, resource, allowEffect bool) bool {
+	if pattern == "" {
+		return true
+	}
+	if strings.ContainsAny(pattern, "?[\\") || strings.Contains(pattern, "**") {
+		return true
+	}
+	stars := strings.Count(pattern, "*")
+	if stars <= 1 {
+		return false
+	}
+	if !resource || stars != 2 ||
+		!strings.HasPrefix(pattern, "*") || !strings.HasSuffix(pattern, "*") {
+		return true
+	}
+	middle := strings.TrimSuffix(strings.TrimPrefix(pattern, "*"), "*")
+	if middle == "" {
+		return true
+	}
+	// The measured `.env.*` shape is an ask/deny. A two-star allow is
+	// refused rather than treated as effective without a coverage proof.
+	return allowEffect
+}
+
+// permissionSplitOneStar splits a pattern containing exactly one `*` into its
+// literal prefix and suffix. A literal pattern (no star) is not a one-star
+// pattern; callers handle that case before calling.
+func permissionSplitOneStar(pattern string) (prefix, suffix string, ok bool) {
+	if strings.Count(pattern, "*") != 1 || strings.ContainsAny(pattern, "?[\\") {
+		return "", "", false
+	}
+	i := strings.IndexByte(pattern, '*')
+	return pattern[:i], pattern[i+1:], true
+}
+
+// permissionActionMatches reports whether an action pattern applies to a
+// concrete action name. The host's `opencode_*` family is a real glob, not a
+// literal name.
+func permissionActionMatches(pattern, action string) bool {
+	if pattern == "*" || pattern == action {
+		return true
+	}
+	if !strings.ContainsAny(pattern, "*?[") {
+		return false
+	}
+	matched, err := filepath.Match(pattern, action)
+	return err == nil && matched
+}
+
+// permissionResourceMatches reports whether a resource pattern applies to a
+// concrete resource.
+//
+// A bare `*` is the host's catch-all and matches every resource. Other
+// patterns use filepath.Match semantics, so `*.env` does not silently become
+// an action-wide permission. It also does not swallow path separators. A
+// `**` is not treated as universal here; the coverage proof refuses it unless
+// the patterns are exactly equal, because its host semantics were not
+// measured.
+func permissionResourceMatches(pattern, resource string) bool {
+	if pattern == "*" || pattern == resource {
+		return true
+	}
+	if !strings.ContainsAny(pattern, "*?[") {
+		return false
+	}
+	matched, err := filepath.Match(pattern, resource)
+	return err == nil && matched
+}
+
+// permissionResourceIsUniversal reports whether a wildcard deny covers every
+// resource. Only the host's bare catch-alls do; `secret*` does not.
+func permissionResourceIsUniversal(pattern string) bool {
+	return pattern == "*"
+}
+
+// reviewerSessionOverrideViolation refuses a session-level permission grant.
+//
+// A session grant overrides the agent definition, so even a perfect
+// definition check would not describe the session that actually ran.
+func reviewerSessionOverrideViolation(perms []SessionPerm) string {
+	if len(perms) == 0 {
+		return ""
+	}
+	return "the reviewer session carries a SESSION-LEVEL permission grant, which " +
+		"overrides the agent definition's denies"
 }
 
 // writeReviewConfig writes a DISPOSABLE OpenCode configuration that loads the

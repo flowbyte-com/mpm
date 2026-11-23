@@ -338,8 +338,28 @@ Unchanged in spirit and **not weakened**:
   — verified by an actual attempted invocation rather than by reading the
   definition;
 * a session-level grant on a reviewer session is the negative control: the
-  host honours it, the worker's containment does not, and the adapter refuses
-  it before execution.
+  host honours it, and the adapter refuses to **accept the result**. The
+  check runs after the reviewer process, so the grant was effective during
+  that run; the namespace, not the permission declaration, is the boundary.
+
+The verifier reads the **ordered** resolved list and applies the host's
+last-match-wins rule to both actions and resources. It is a conservative
+coverage proof, not a full host-matcher implementation: it refuses a shape it
+cannot prove. A host-prepended allow that a later agent deny overrides —
+OpenCode 2.3.2's `read *.env.example` allow, overridden by `read * deny` — is
+not treated as effective. An allow that survives is refused, including
+`shell`, `execute`, network, subagent, skill and MPM actions; `sandbox_exec`
+must itself survive, not merely appear before an overridden rule. Resource
+patterns are matched, not collapsed into action-wide permissions, and a broad
+allow is not accepted because a narrow later deny happened to match one
+example. An effective `ask` is requestable, not denied, so it is unsafe unless
+a later allow or deny fully covers it; the host's original `.env` asks are
+covered by the later `read * deny`. Unknown permission effects fail closed,
+and escapes, `?`, character classes, `**`, empty patterns, multi-star action
+patterns, and two-star resource allows are refused because their host
+semantics were not measured. The measured two-star `*middle*` resource form is
+accepted for an ask or a deny; the host's `.env.*` asks pass, and a two-star
+deny can cover a narrower one-star allow.
 
 **There is no fallback to a less restricted reviewer.** If the sandbox or the
 reviewer configuration is unavailable, the review refuses to start.
