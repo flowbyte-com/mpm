@@ -1,0 +1,370 @@
+// check_cmds.go — `mpm check`: the read-only engineering check.
+//
+// ONE COMMAND, ONE JOB: tell an operator (or a reviewer, or another
+// session) what the engineering queue is, and whether the evidence behind
+// it still holds.
+//
+// # IT IS THE READ-ONLY PATH
+//
+// `check` reads the PUBLISHED evidence and reads GitHub. It does not read
+// the assignment store, it does not write to anything, and it does not
+// start an agent. A fresh reviewer with a URL and a network can run it on
+// a machine that has never had MPM installed.
+//
+// # IT DOES NOT REPORT STALE AS CURRENT
+//
+// When the published index cannot be retrieved, the command says so and
+// exits non-zero. It never falls back to a local copy and calls it
+// current: a reader who cannot reach the evidence must be told that it
+// does not know.
+//
+// # IT NEEDS NO PUBLICATION CREDENTIALS
+//
+// The only credential it can use is an OPTIONAL read token, and a public
+// repository needs none at all. The publisher's write credential is not
+// reachable from here.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/flowbyte-com/mpm-core/evidence"
+	"github.com/flowbyte-com/mpm/cmd/mpm/render"
+)
+
+// checkRepository is the repository the check reads by default.
+//
+// It is this project's own repository, and it is a DEFAULT and not a
+// constant of the evidence format: --repo points the check elsewhere, and
+// the published format says nothing about which repository it describes.
+const checkRepository = "flowbyte-com/mpm"
+
+// checkTokenEnv is the OPTIONAL read credential.
+//
+// A public repository needs no credential at all, and this variable is
+// never required. It is a READ token: the check has no write path at
+// all, so a token that could write is not needed and is not asked for.
+const checkTokenEnv = "MPM_GITHUB_TOKEN"
+
+// checkAPIEnv overrides the API's root.
+//
+// It is an ENTERPRISE and TEST seam: a GitHub Enterprise instance has its
+// own API root, and a test needs a local one. It changes WHERE the
+// reader asks, never WHAT it accepts.
+const checkAPIEnv = "MPM_GITHUB_API"
+
+// printCheckHelp prints the check's help page.
+//
+// It is INERT: it reads nothing, writes nothing, and needs no database.
+func printCheckHelp() int {
+	var b strings.Builder
+	render.Heading(&b, "Check")
+	render.BlankLine(&b)
+	b.WriteString("Show the engineering queue and verify its evidence against GitHub.\n\n")
+	b.WriteString("The check reads the published evidence and GitHub. It writes nothing, starts\n")
+	b.WriteString("nothing, and needs no local database and no publication credential.\n\n")
+	b.WriteString("  --json          machine-readable output\n")
+	b.WriteString("  --repo          the repository to read (default " + checkRepository + ")\n")
+	b.WriteString("  --branch        the evidence branch (default " + evidence.EvidenceBranch + ")\n")
+	b.WriteString("  --project       only this project's records\n")
+	b.WriteString("  --role          only this role's records\n")
+	b.WriteString("  --disposition   only this disposition's records\n")
+	b.WriteString("\nExit status: 0 when the whole published corpus verified, 1 when it did\n")
+	b.WriteString("not or could not be read. The report is printed when the corpus was\n")
+	b.WriteString("read; when it could not be read, the error is printed.\n")
+	return respond(b.String(), "", 0)
+}
+
+// handleCheck runs the read-only engineering check.
+func handleCheck(args []string) int {
+	jsonOutput, rest := ExtractJSONFlag(args)
+	repo := checkRepository
+	branch := evidence.EvidenceBranch
+	var filters evidence.Filters
+
+	cleaned := make([]string, 0, len(rest))
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		switch {
+		case arg == "--repo" || arg == "--branch" || arg == "--project" ||
+			arg == "--role" || arg == "--disposition":
+			if i+1 >= len(rest) {
+				return respond("", fmt.Sprintf("Error: %s needs a value\n", arg), 1)
+			}
+			value := rest[i+1]
+			i++
+			switch arg {
+			case "--repo":
+				repo = value
+			case "--branch":
+				branch = value
+			case "--project":
+				filters.Project = value
+			case "--role":
+				filters.Role = value
+			case "--disposition":
+				filters.Disposition = value
+			}
+		default:
+			cleaned = append(cleaned, arg)
+		}
+	}
+	if len(cleaned) > 0 {
+		return respond("", fmt.Sprintf(
+			"Error: check takes no positional arguments (%s)\n", strings.Join(cleaned, " ")), 1)
+	}
+
+	client := evidence.NewClient(os.Getenv(checkTokenEnv))
+	if base := strings.TrimSpace(os.Getenv(checkAPIEnv)); base != "" {
+		client.BaseURL = base
+	}
+	report, err := evidence.RunCheck(context.Background(), client, repo, branch, filters)
+	if err != nil {
+		// The index could not be retrieved or read. That is an ERROR,
+		// not an empty queue: a reader who cannot reach the evidence
+		// must be told that, and must not be shown the last thing the
+		// tool saw as if it were current.
+		return respond("", fmt.Sprintf("Error: %v\n", err), 1)
+	}
+
+	// THE EXIT STATUS AGREES WITH THE REPORT.
+	//
+	// A caller that reads the exit status must not be told "success" by a
+	// report whose own verdict is "not verified": a CI gate would pass
+	// while the evidence it was gating says it does not hold. The report
+	// is printed either way, because the reader needs to see WHY.
+	code := checkExitCode(report)
+	if jsonOutput {
+		raw, merr := json.MarshalIndent(report, "", "  ")
+		if merr != nil {
+			return respond("", fmt.Sprintf("Error: encode the report: %v\n", merr), 1)
+		}
+		return respond(string(raw)+"\n", "", code)
+	}
+	return respond(renderCheckReport(report), "", code)
+}
+
+// checkExitCode is the command's exit status for a report.
+//
+// It is 0 exactly when the report verified the whole corpus, and 1
+// otherwise. A report that is not verified says so in its own mark and
+// in the states it prints; the exit status is the same fact for a
+// script.
+func checkExitCode(report *evidence.CheckReport) int {
+	if report != nil && report.Verified {
+		return 0
+	}
+	return 1
+}
+
+// renderCheckReport renders the check for a human reader.
+//
+// It renders the SAME report the machine mode emits — one set of
+// records, two renderings — and it never prints raw JSON.
+func renderCheckReport(report *evidence.CheckReport) string {
+	var b strings.Builder
+	render.Heading(&b, "Check")
+	render.BlankLine(&b)
+
+	status := "✓"
+	if !report.Verified {
+		status = "⚠"
+	}
+	fmt.Fprintf(&b, "%s  evidence   %s @ %s\n", status, report.Source.Repository, report.Source.Branch)
+	fmt.Fprintf(&b, "   snapshot   %s\n", report.Source.SnapshotID)
+	if report.SnapshotDetail != "" {
+		// THE SNAPSHOT ID IS PRINTED, SO IT IS CHECKED — or the report
+		// says it could not be.
+		//
+		// A reader may record it as the corpus's identity; an index
+		// that renamed the snapshot while the records verify is an
+		// index that lies about what is being looked at, and a record
+		// that could not be established leaves nothing to check it
+		// against.
+		fmt.Fprintf(&b, "   ✗ snapshot %s\n", report.SnapshotDetail)
+	}
+	fmt.Fprintf(&b, "   published  %s\n", report.Source.PublishedAt)
+	if report.IndexDetail != "" {
+		// THE INDEX AND THE PUBLICATION IT POINTS AT.
+		//
+		// A reader reaches the index by a repository and a branch; an
+		// index that names another source was moved, and what the
+		// reader is looking at is not what it describes.
+		fmt.Fprintf(&b, "   ✗ index %s\n", report.IndexDetail)
+	}
+	// THE PUBLICATION AND THE VIEW.
+	//
+	// The publication holds RecordCount records, and the report SHOWS
+	// ShownCount of them — the filtered view plus the records a filter
+	// may not hide. The states below are the SHOWN ones, so the numbers
+	// on the line add up: a reader who filtered to one project sees the
+	// states of the records they are looking at, and the count of the
+	// whole publication beside it.
+	shown := ""
+	if report.ShownCount != report.RecordCount {
+		shown = fmt.Sprintf(" · showing %d", report.ShownCount)
+	}
+	fmt.Fprintf(&b, "   records    %d published%s · %s\n",
+		report.RecordCount, shown, verifiedSummary(report.Records))
+	if report.UnverifiedOutside > 0 {
+		// THE ⚠ HAS A CAUSE THE VIEW DOES NOT SHOW.
+		//
+		// The verdict covers the whole corpus, so a filtered view whose
+		// own records all verified still says ⚠. A reader who was not
+		// told how many records outside the view did not verify would
+		// see a warning with no reason for it.
+		fmt.Fprintf(&b, "   ✗ %d record(s) outside this view are not verified\n",
+			report.UnverifiedOutside)
+	}
+	if report.Truncated {
+		// THE PUBLICATION IS PARTIAL, AND THE READER IS TOLD.
+		//
+		// The publication was cut at the bound, so the queue below is
+		// part of the work and not all of it. A reader who takes a
+		// partial queue for the whole one is reading fiction. The
+		// bound is the PUBLICATION's claim: the check has no
+		// independent source for it, and the summary's own bytes are
+		// checked separately.
+		bounded := "the publication records a bound"
+		if report.ScanLimit > 0 {
+			bounded = fmt.Sprintf("the publication records a bound of %d assignments", report.ScanLimit)
+		}
+		fmt.Fprintf(&b, "   partial    %s; more work exists and the rows past the bound were dropped\n",
+			bounded)
+	}
+	if len(report.Renderings) > 0 {
+		// The index names the human artefacts with digests, and the
+		// check checks them: a digest nobody checks is a claim.
+		ok := 0
+		for _, r := range report.Renderings {
+			if r.OK {
+				ok++
+			}
+		}
+		fmt.Fprintf(&b, "   renderings %d · %d verified\n", len(report.Renderings), ok)
+	}
+	render.BlankLine(&b)
+
+	if report.ShownCount == 0 {
+		// THE PUBLICATION AND THE VIEW ARE DIFFERENT THINGS.
+		//
+		// "The queue is empty" is a claim about the PUBLICATION. A
+		// filter that matched nothing says nothing about the queue's
+		// contents, and printing the publication's emptiness would tell
+		// a reader there is no work when there is.
+		if report.RecordCount == 0 {
+			b.WriteString("The publication holds no records.\n")
+		} else {
+			fmt.Fprintf(&b, "No records match the filters; the publication holds %d.\n",
+				report.RecordCount)
+		}
+		render.BlankLine(&b)
+	} else if len(report.Sections) == 0 {
+		b.WriteString("No records could be filed into the queue.\n")
+		render.BlankLine(&b)
+	} else {
+		for _, section := range report.Sections {
+			// The stale section is rendered BELOW, on its own, carrying
+			// only the problem. Rendering it here as well would print
+			// the same records twice.
+			if section.Disposition == evidence.StaleSection {
+				continue
+			}
+			fmt.Fprintf(&b, "%s · %d\n", section.Disposition, len(section.Records))
+			for _, rec := range section.Records {
+				fmt.Fprintf(&b, "   %s  %s  %s  %s\n",
+					recordSymbol(rec), rec.TaskID, rec.Role, rec.Disposition)
+				fmt.Fprintf(&b, "      %s · head %s\n", rec.PRRef, rec.HeadSHA)
+				if detail := firstProblem(rec); detail != "" {
+					fmt.Fprintf(&b, "      %s %s\n", recordSymbol(rec), detail)
+				}
+			}
+			render.BlankLine(&b)
+		}
+		if len(report.StaleRecords()) > 0 {
+			// The stale section repeats the records, so it carries ONLY
+			// the problem. A reader who has just read the queue does not
+			// need the pointers again.
+			fmt.Fprintf(&b, "stale or contradictory · %d\n", len(report.StaleRecords()))
+			for _, rec := range report.StaleRecords() {
+				fmt.Fprintf(&b, "   %s  %s  %s\n", recordSymbol(rec), rec.TaskID,
+					firstProblem(rec))
+			}
+			render.BlankLine(&b)
+		}
+	}
+	// THE ARTEFACTS THAT ARE NOT VERIFIED.
+	//
+	// A reader who trusts a queue summary that was changed after
+	// publication is trusting bytes nobody checked — and this section is
+	// printed even when no record matches the filter, because a broken
+	// artefact is as much the reason for the ⚠ as a broken record.
+	broken := make([]evidence.RenderingVerification, 0)
+	for _, r := range report.Renderings {
+		if !r.OK {
+			broken = append(broken, r)
+		}
+	}
+	if len(broken) > 0 {
+		fmt.Fprintf(&b, "artefacts not verified · %d\n", len(broken))
+		for _, r := range broken {
+			fmt.Fprintf(&b, "   ✗  %s  %s\n", r.Path, r.Detail)
+		}
+		render.BlankLine(&b)
+	}
+	return b.String()
+}
+
+// recordSymbol is the status symbol for one verified record.
+func recordSymbol(rec *evidence.VerifiedRecord) string {
+	switch rec.Verdict {
+	case evidence.CheckVerified:
+		return "✓"
+	case evidence.CheckStale, evidence.CheckFailed:
+		return "✗"
+	case evidence.CheckUnverified:
+		return "⚠"
+	default:
+		return "○"
+	}
+}
+
+// firstProblem returns the first check that is not a verification.
+//
+// It is the ONE thing a reader needs first: what is wrong, in one line.
+func firstProblem(rec *evidence.VerifiedRecord) string {
+	if rec.Verification == nil {
+		return ""
+	}
+	for _, check := range rec.Verification.Checks {
+		if check.Status != evidence.CheckVerified {
+			return fmt.Sprintf("%s: %s", check.Name, check.Detail)
+		}
+	}
+	return ""
+}
+
+// verifiedSummary counts the records by their verification state.
+func verifiedSummary(records []*evidence.VerifiedRecord) string {
+	counts := map[string]int{}
+	for _, rec := range records {
+		counts[rec.Verdict]++
+	}
+	parts := make([]string, 0, len(counts))
+	for _, status := range []string{
+		evidence.CheckVerified, evidence.CheckStale, evidence.CheckFailed,
+		evidence.CheckMissing, evidence.CheckUnverified,
+	} {
+		if counts[status] > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", counts[status], status))
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, " · ")
+}

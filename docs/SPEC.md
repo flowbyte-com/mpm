@@ -3188,6 +3188,158 @@ The selection is deterministic — `(created_at, id)` — so two dispatchers tha
 
 It does not publish evidence anywhere (that is PR 5), merge, deploy or approve anything, create a root or a project, run a pilot, add a credential manager or a model router, replace OpenCode, or run a loop of its own. The design of record is `docs/dev/continuity-001-dispatcher.md`.
 
+### 6.17 The engineering evidence and the read-only `check` (Continuity 001, PR 5)
+
+PR 4 shipped the decision of *which* assignment runs next. What it did not ship is a way for **another session, a reviewer or an operator** to find that work and to check it — and the only way to find it, until now, was a pasted handover.
+
+PR 5 ships that gap: a **versioned, machine-readable evidence record** of engineering work, **published to a location an independent reader can reach**, and a **read-only `check`** that reads the published evidence and verifies it against GitHub before anybody believes it.
+
+MPM coordinates. GitHub is the externally inspectable engineering record. **Neither system may invent approval, review completion or successful execution**, and the whole design of this section is that neither can.
+
+#### The four things that are not interchangeable
+
+The evidence contract keeps four facts apart, because conflating them is how a queue becomes a fiction:
+
+| fact | what it is | what it is not |
+|---|---|---|
+| a runtime reported success | the adapter's own report of an attempt | task completion |
+| captured findings | bytes the HOST captured over what a reviewer produced | a review verdict |
+| a review verdict | the reviewer's own fenced transition | operator approval |
+| an operator approval | a recorded decision with an action, a revision and an evidence pointer | a merge |
+
+Each lives in its own field, and each carries a **provenance category**: `observed` (a fact about the outside world, checked against GitHub), `recorded` (a claim the assignment store makes about itself), or `decision` (somebody's verdict or somebody's approval). The categories are published **with** the record, so a reader never has to know this section's rules to know what it is reading.
+
+**Unknown values are explicit.** An unknown SHA is the string `unknown` — never the current branch head, never an empty field a reader might mistake for a fact. A record that says `unknown` is telling the truth about a gap; a record that says the head instead is telling a lie about a review.
+
+#### The published layout
+
+The evidence lives on a branch of the repository it describes (`evidence` by default), so a reader needs nothing but a URL and a network:
+
+```
+index.json                 the MUTABLE pointer at the current snapshot
+records/<id>.json          one IMMUTABLE evidence record
+records/<id>.md            the same record, human-readable
+summaries/queue.md         the engineering queue, human-readable
+```
+
+A record is named by the **digest of its own bytes**, so the same evidence always lands on the same file and a republication is invisible rather than noisy; a reader can download a record, hash it, and compare the hash with the name the index gave it. The **index** is the one mutable file: it names the current snapshot and says when it was published.
+
+**The format is versioned, and the version covers the DERIVATIONS.** The queue's filing and the human renderings are rules of this contract, derived from the record — so a change to either changes what a reader must accept, and the version changes with it. A reader **refuses** an index whose version it does not understand, rather than checking its bytes against rules that version never used: an older publication is not a forgery, and the only compatibility signal must not stay silent.
+
+**Nothing in the published content contains the SHA of the content that contains it.** The index names the records by their digests and the records do not name the index, so every digest a reader is given is one the reader can check.
+
+The index also names the **human-readable artefacts** — every `records/<id>.md` and the queue summary — with their digests, so a reader can check the Markdown a person reads as exactly as they can check the record a machine reads. **`check` checks the digest the index published, and it re-renders the artefact where it can.** A record's page is re-rendered from the record it belongs to; the queue summary is re-rendered from the record set and the publication's own metadata when the records and the snapshot are established. A digest nobody checks is a claim, and an artefact that matches a forged index digest but is not the record's rendering would otherwise be invisible to a reader who trusted it. When the re-render **cannot** be computed — a record the check could not establish, or a summary whose snapshot is not the records' digest — the artefact is **not verified**: the report still checks its published digest and says the rendering could not be established. The layout is **exhaustive**: a rendering is the queue summary or a listed record's page, and nothing else. An artefact outside the layout has no record it could be the rendering of, so an index that named an extra page would be refused, not believed. A record is **established** when it decodes and its bytes hash to its identifier; a record the check could not establish is one whose bytes are not the ones the index names, or whose bytes are not a record at all. The page of an unestablished record is still **required**: the index must name it, its published digest is checked when it does, and it is **not verified** — there is nothing to re-render it from. A page the index does not name is reported as missing.
+
+A publication that holds only **part** of the work **says so**: the index carries `truncated`, `scanned` and `scan_limit`. A reader that took a partial queue for the whole one would be misled, and a silent truncation is worse than a visible one. The flag means what it says: the publication reads one row past its bound, so it knows whether anything was actually dropped — a scan that merely *reached* the bound has truncated nothing. The bound sits **below** the store's own listing limit, because a store clamps every listing and a bound at the clamp could never see the row past it; the flag is decided while that row is still in hand. The flag reaches the **reader**, not only a machine file: `mpm check` prints a `partial` line, its JSON carries the three fields, and the queue summary says the publication holds part of the work.
+
+Publication is **deterministic** for identical input evidence, apart from the publication timestamp, which is recorded as metadata in the index and never inside a record.
+
+#### What is published, and what is not
+
+The publisher publishes the assignment store's **claims** and GitHub's **observed facts**, and it never publishes a review nobody recorded or an approval nobody gave. Where the evidence is missing, the record says so.
+
+A **reviewer finding captured from a real host session** may be published as host-captured evidence. It is **not** a GitHub review unless such a review actually exists, and the record keeps the two apart: the captured findings are a digest and a pointer, and a verdict is a separate field.
+
+A **manifest supplied by an agent** cannot become authoritative because the agent wrote it: the publisher reads the assignment store and GitHub, and it verifies the digest of any host-captured evidence before publishing it.
+
+A **captured digest is a claim**, and the publisher **checks it against the bytes** before it publishes either. The record says which of four things was found: `verified` (the bytes are there and they hash to the digest), `unverifiable` (the bytes are somewhere the publisher cannot read), `contradicted` (the bytes are there and they do **not** hash to the digest) or `none` (no digest was recorded, or nothing was captured yet). The status is published **with** the digest, so a reader can tell a checked digest from an unchecked one without looking anywhere else.
+
+**A digest the publisher did not establish is published as the explicit unknown.** An `unverifiable` digest is an unchecked claim and a `contradicted` one is a refuted claim; publishing either would publish a claim the publisher cannot stand behind, inside the content-addressed bytes. So both become `unknown`, and the **status** says which of them happened.
+
+Every captured digest is checked, whether or not a reviewer has recorded a verdict yet: a review in flight has findings whose digest was checked, and the record says so.
+
+The **observed side is screened like the claims**. A pull request's title, a review's body and a workflow's or job's name are written by other people, and the substrate never saw them — so they go through the same redactor as the store's own text, and a withheld one becomes `unknown` with the **field named** and never its content. A record that somehow carries a credential in an observed field is **refused**, not published.
+
+No **raw prompt, chat transcript, API key, environment dump, private filesystem path or unredacted runtime log** is published. The record has no field that carries model output at all — a review's findings are published as a digest and a pointer — and every string it does carry is screened for credentials, private paths, **absolute paths on the publishing machine** and transcript-shaped text before the record is hashed.
+
+The **evidence pointer is screened like every other string**. The store records the capture where the host wrote it, which is an absolute path on the publishing machine: publishing it would put the operator's disk layout inside the content-addressed bytes, and it would make the checker fetch a path the record chose. So the pointer is withheld (`unknown`) while the digest and the capture status still say what the publisher established. A reader is not told the record **failed**: the publisher checked the digest against bytes it could read, so the check reports that the capture cannot be checked by anybody, and says what the publisher established.
+
+#### The queue's own vocabulary
+
+The published records are filed into the queue's sections, and the filing is **derived** from each record's own fields by one function, so the human report and the machine report cannot disagree about where a task sits.
+
+| disposition | what it means |
+|---|---|
+| `active` | the work is in flight |
+| `awaiting_review` | the work is finished and no reviewer has recorded a verdict |
+| `awaiting_ci` | the work is finished and its CI is not green — or is not known |
+| `awaiting_operator` | the work is waiting for a person |
+| `blocked` | the work was cancelled, or a reviewer asked for changes |
+| `ambiguous` | the outcome could not be determined — an unknown state, or a review of another revision |
+| `completed` | the work finished, its CI is green and nothing is pending |
+
+A finished task with **no verdict** is `awaiting_review`, not `awaiting_ci`: filing it under CI would tell an operator the queue is waiting on the wrong thing, and the reviewer would never be dispatched. A task in a state the publisher does not know is `ambiguous`, because a record that claimed a place for it would be inventing one.
+
+A **reviewer's own record is filed by the review**: the rules above are the subject's rules, and a finished review is done work. The verdict it reached belongs to the subject it judged, and the subject's own record carries that verdict.
+
+#### The read-only `check`
+
+`mpm check` reports the latest engineering queue and verifies it:
+
+```
+MPM · Check
+
+⚠  evidence   flowbyte-com/mpm @ evidence
+   snapshot   sha256:…
+   published  2026-11-22T09:00:00Z
+   records    4 published · 4 missing
+
+completed · 4
+   ○  pr-262  implementer  completed
+      https://github.com/flowbyte-com/mpm/pull/262 · head bb1bf630…
+      ○ review_evidence: the review's bytes are not published, so the digest cannot be checked
+```
+
+The mark beside `evidence` is the report's `verified` flag: **⚠ when the corpus is not fully verified**, and ✓ only when every record in the whole corpus verified. An empty publication is not a verified one.
+
+It reports the **active** assignments, the work **awaiting independent review**, the work **awaiting CI**, the work **awaiting the operator**, the **blocked or ambiguous** assignments, the **recently completed** work, and the **stale or contradictory** evidence — and `--json` emits the same records in machine form.
+
+The report's `verified` flag covers the **whole published corpus**, not the filtered view: a reader who filtered to one project must not be told "verified" while another project's records are stale. The report says how many records the publication holds (`record_count`) and how many it **shows** (`shown_count` — the filtered view plus any record a filter may not hide), so a filtered view can never be mistaken for the whole thing. The states the report prints are the **shown** records' states, so the numbers on the line add up: the publication's count, the shown count, and the states of what is shown. When the filter excludes records that did not verify, the report says how many (`unverified_outside`): a ⚠ must not arrive without a reason. An index that contradicts its own source is reported as `index_detail`.
+
+**A filter narrows what a reader looks at; it may not hide what the reader needs to know.** A record whose bytes do not hash to the identifier the index gave it is always reported, whatever the filters say — a reader who filtered it away would never learn that the evidence was tampered with. So is a record whose evidence is stale or contradicted: it is the cause of the report's ⚠, and hiding it would leave the warning without a reason. A filter that matches no records says so, and does not claim the queue is empty — and a broken artefact is still reported on that path, because it is a cause of the ⚠ too.
+
+The flag is **strict**, and a corpus that cannot be fully verified says so. Two honest reasons a corpus is not verified: the review's bytes are not published, so the digest cannot be checked by anybody; and a store publication includes the **reviewer's own rows**, which name no pull request and therefore have nothing to check against GitHub. Neither is a failure of the publication — they are the state of the world, and the flag reports it rather than hiding it.
+
+Three properties matter more than the shape:
+
+- **It works without the operator's local MPM database.** The queue comes from the published evidence and from GitHub, so a fresh reviewer on a machine that has never had MPM installed can run it. It needs no publication credential either: a public repository is readable without one.
+- **It is strictly read-only.** It writes nothing to the substrate, nothing to GitHub, and it starts nothing.
+- **It does not report stale information as current.** If the published index cannot be retrieved or verified, the command reports that condition and exits **non-zero**. It never falls back to a local copy and calls it current. The exit status agrees with the report's own verdict: `0` exactly when the whole corpus verified, `1` otherwise — and the report is printed when the corpus was read; when it could not be read, the error is printed. A record whose bytes do not hash to the identifier the index gave it is reported as a record, a record whose bytes are not a record is reported as a record too, and an index whose record identifiers are not digests is refused before any path is built from them.
+
+**The reader runs the publisher's own gates.** A record that is published but wrong is worse than a missing one, because it is believed — so `check` applies the same validity and redaction gates the publisher applies before it publishes (`Validate`, `AssertPublishable`), and it re-derives the queue's filing from the record's own fields: a record that files itself where its fields do not put it is **failed**, and the queue **files it where its fields put it** rather than under its claim. The human artefacts are re-rendered **from the records** and compared with what the index names, so the Markdown a person reads is bound to the record a machine verified rather than to the mutable pointer — and when the summary and the index's snapshot or truncation fields disagree, the report names that disagreement rather than blaming the artefact. The index's **entry fields** (root, task, pull request, disposition, title) must agree with the record they name, and its **`snapshot_id`** is recomputed from the records it lists: an index that lists one record or one artefact twice, lists **two records for one assignment**, names a snapshot the records do not hash to, or contradicts its own records, is not a verified corpus. When a record could not be established, the snapshot cannot be bound to the corpus: the report says so rather than checking the established subset's digest against the whole corpus's identifier. The index must also name the **source** it was published to (`repository`, `branch`): an index that omits it, or names another, is reported as a contradiction (`index_detail`) rather than verified.
+
+The filters are the project's own dimensions — `--repo`, `--branch`, `--project`, `--role`, `--disposition` — and there is no dashboard.
+
+#### The verification, against GitHub and not against the manifest
+
+A published manifest is an **index of evidence**, not proof that its claims are still true. `check` therefore checks every material external assertion against GitHub itself: that the pull request exists and belongs to the expected repository, that its actual head equals the recorded head, that the reviewed SHA matches the intended revision, that each cited workflow run exists and belongs to the recorded commit, that a run is not described as passed while a required job is failed, pending or missing, that a merged pull request is distinguished from an open draft, and that a review or an operator decision is not invented by a missing source record.
+
+The decision checks are **falsifiable**: a verdict for a revision the pull request has moved past is **stale**, not verified; an approval to merge a pull request that is not merged is **failed**, not verified; and each check's detail says explicitly what was not established.
+
+The verifier looks for the review's bytes **in the repository the reader was told, on the branch the reader was told** — the evidence lives where the publication put it, and neither is the record's to name: a record names the repository the *work* is visible in, which is not necessarily where the evidence was published. And it fetches only **safe relative paths inside the evidence repository**. A published pointer is data, not a command. There is **no fallback** to the record's own repository: a record is data too, so a verifier that was not told where the evidence lives reports that the check could not be made rather than reading from wherever the record points.
+
+Each check ends in one of five states: `verified`, `stale` (the record was true and the world has moved on), `failed` (GitHub says something else), `missing` (the thing could not be found) and `unverified` (GitHub could not be asked). **A network failure is never a successful verification**, and an unverified record is never presented as a verified one.
+
+So if the head advances after a review, `check` shows the review as **stale for the new head**.
+
+#### The publication authority
+
+Publication is a **controlled evidence operation**, not another way for an agent to gain a privilege.
+
+- The repository and the branch come from the **operator's configuration file** (`~/.mpm/evidence.json`). A missing configuration is an error, never a default: a publisher that invented a target would publish the evidence somewhere nobody chose. A **dry run** may be pointed at a target explicitly (`--repo`, `--branch`), because a rehearsal that needs a configuration file to exist cannot be run anywhere else — and a rehearsal writes nothing. A write always uses the configured target.
+- The **write** goes through the operator's own `gh`, so the credential never enters MPM, never enters a record, and never reaches a contained worker or Charlie's isolated reviewer.
+- The publication path is **explicit and has a dry run**: `mpm engineering publish --dry-run` builds the publication and writes nothing. It is the same plan, not a second rendering that might differ.
+- No model-facing payload may select the repository, supply an operator approval, or replace independently captured reviewer evidence. There is no agent-facing action for publication at all: the operator's shell is the door.
+- The read-only `check` path needs **no publication credentials** and works with read-only GitHub access.
+
+#### The first corpus
+
+The first published corpus is **Continuity 001's own work**: pull requests #259, #260, #261 and #262, reconstructed from the GitHub record, because that work predates the assignment store's use of it. The corpus is a **fixture** — a versioned set of claims — and the publisher reads the **observed facts** from GitHub at publication time, exactly as it does for the store's claims.
+
+The reviews of those four pull requests happened in contained sessions whose findings were never published durably, so the corpus records them as **reported** reviews with **no digest**, and `check` says the evidence cannot be checked. That is the honest state, and the corpus is not a place where a missing digest becomes an approval.
+
+A reported verdict carries **its own vocabulary** — `reported_approved` and `reported_changes_requested` — and never the service's `passed` and `changes_requested`. A reader can therefore tell a claim from a record without reading anything else, which is the whole point of keeping the two apart.
+
 ---
 
 ## 7. Core Stability
@@ -4156,6 +4308,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`capability`** — Manage capabilities (seed, lifecycle, governance)
 - **`cascade`** — Materialize cascade intents
 - **`challenge`** — Flag memory as obsolete; 'list' enumerates challenged rows, 'restore <id>' undoes one (issue #20)
+- **`check`** — Show the engineering queue and verify its evidence against GitHub (--json)
 - **`compact`** — Operator commands for the compaction deferral lifecycle (deferred|requeue-deferred)
 - **`config`** — Configure LLM and embedding profiles manually (wizard | show | get | set | profile | component | capability)
 - **`continue`** — Resume previous session — composes working context, wake context, decisions, skills, theories
@@ -4167,6 +4320,7 @@ Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. 
 - **`directives`** — Show behavioral directives
 - **`doctor`** _(aliases: doc)_ — Run substrate diagnostics (--explain for FTS5 query plan, --deep-scan for FTS/integrity audit, --deep-scan --fix to clean soft-delete ghosts)
 - **`drills`** — Behavioural drill execution + compatibility matrix (list|show|run|report)
+- **`engineering`** — Publish the engineering evidence (publish)
 - **`evidence`** — Manage evidence (add|list) — confidence foundation
 - **`export`** — Export memories to JSON (structured object with the package loss marker)
 - **`gc`** — Run decay sweep (--dry-run, --review, --purge)

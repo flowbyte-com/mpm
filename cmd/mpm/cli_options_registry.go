@@ -94,9 +94,14 @@ func init() {
 		// contract both assumed it worked. The machine-readable status
 		// was unreachable from the CLI. Declared rather than removed
 		// because the JSON surface is the one this change extends.
-		"status":      {"json", "j"},
-		"info":        {"user", "value"},
-		"wake":        {"compact", "strict"},
+		"status": {"json", "j"},
+		"info":   {"user", "value"},
+		"wake":   {"compact", "strict"},
+		// The engineering queue's read-only door and the operator's
+		// publication door. `engineering` dispatches its leaves below
+		// the router, so its entry names the LEAF's vocabulary.
+		"check":       {"json", "j", "repo", "branch", "project", "role", "disposition"},
+		"engineering": {"dry-run", "fixture", "json", "j", "repo", "branch"},
 		"why":         {"kind"},
 		"lint":        {"dir", "show-clean", "strict"},
 		"integration": {},
