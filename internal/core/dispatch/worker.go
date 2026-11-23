@@ -126,8 +126,8 @@ func (e *Engine) briefFor(a *assignment.Assignment) string {
 	subject, _ := a.Payload[assignment.PayloadKeyReviewTarget].(string)
 	brief := fmt.Sprintf(
 		"Review the work of assignment %s independently. Report what is wrong with it, "+
-			"with file and line references. End with exactly one final line: "+
-			"`VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`.", subject)
+			"with file and line references. End with exactly one final line, without "+
+			"backticks: VERDICT: APPROVED or VERDICT: CHANGES REQUESTED.", subject)
 	if len(brief) > maxBriefBytes {
 		brief = brief[:maxBriefBytes]
 	}
