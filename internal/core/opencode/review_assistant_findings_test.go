@@ -37,3 +37,14 @@ func TestAssistantFindingsExcludePromptToolAndDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+func TestAssistantFindingsKeepMessageBoundaries(t *testing.T) {
+	msgs := []reviewMessage{
+		{Type: "assistant", Content: json.RawMessage(`[{"type":"text","text":"the review"}]`)},
+		{Type: "assistant", Content: json.RawMessage(`[{"type":"text","text":"VERDICT: APPROVED"}]`)},
+	}
+	got := assistantAuthoredFindings(msgs)
+	if got != "the review\nVERDICT: APPROVED" {
+		t.Fatalf("the message boundary was lost: %q", got)
+	}
+}

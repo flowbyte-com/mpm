@@ -648,9 +648,15 @@ func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string
 func assistantAuthoredFindings(msgs []reviewMessage) string {
 	var b strings.Builder
 	for _, m := range msgs {
-		if m.Type == "assistant" {
-			b.WriteString(assistantAuthoredText(m.Content))
+		if m.Type != "assistant" {
+			continue
 		}
+		// Keep message boundaries: a verdict in the next assistant turn
+		// must start on its own line, not be concatenated onto prose.
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(assistantAuthoredText(m.Content))
 	}
 	return b.String()
 }
@@ -762,6 +768,9 @@ func assistantAuthoredText(raw json.RawMessage) string {
 	for _, p := range parts {
 		if p.Type != "text" {
 			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
 		}
 		b.WriteString(p.Text)
 	}
