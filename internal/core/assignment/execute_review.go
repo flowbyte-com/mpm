@@ -2,6 +2,7 @@ package assignment
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -50,6 +51,11 @@ type ExecuteReviewParams struct {
 	// ExpectedRevision is what the operator believes is under review. The
 	// host checks it against what it observes; a mismatch is a refusal.
 	ExpectedRevision string
+	// ExpectedModel is the reviewer model the operator authorised. The
+	// host checks the SESSION's own model against it; empty means the
+	// caller did not name one and the runtime's own check is the only
+	// binding.
+	ExpectedModel string
 }
 
 // ExecuteReviewResult is what one review produced.
@@ -160,75 +166,77 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		ExpectedRevision: p.ExpectedRevision,
 	})
 	if err != nil {
-		// A review that could not run is a REFUSAL, recorded truthfully.
+		// A REVIEW THAT COULD NOT START is a retryable refusal: no
+		// reviewer session ran, so a later attempt cannot duplicate
+		// inference.
+		//
+		// A REVIEW THAT STARTED BUT COULD NOT BE CAPTURED is different.
+		// The model may have run and produced billable output, so the
+		// attempt is AMBIGUOUS and a second run would duplicate it.
+		// OpenCode marks that class with ErrReviewIncomplete.
+		if errors.Is(err, oc.ErrReviewIncomplete) {
+			_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
+				AttemptID: attempt.ID, Epoch: p.Epoch, Error: boundedReason(err),
+			})
+			return nil, fmt.Errorf("%w: %w", ErrReviewAmbiguous, err)
+		}
 		_, _ = s.MarkAttemptFailed(SessionStateParams{
 			AttemptID: attempt.ID, Epoch: p.Epoch, Error: boundedReason(err),
 		})
 		return nil, err
 	}
 
+	// EVERY REFUSAL AFTER A RESULT IS RECOVERY-REQUIRED, not a retry.
+	// The session may already have consumed a paid review, so marking the
+	// attempt FAILED would let a later pass launch a second one.
+	refuse := func(outcome, detail string) error {
+		_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
+			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: outcome, Error: detail,
+		})
+		return fmt.Errorf("%w: %s", ErrReviewAmbiguous, detail)
+	}
+
 	// WHAT THE REVIEWER ACTUALLY WAS, before its output is believed.
 	if res.SessionID != sessionID {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch,
-			Error: "the review returned a different native session id",
-		})
-		return nil, fmt.Errorf("%w: the review returned session %q, want %q",
-			ErrConstraint, res.SessionID, sessionID)
+		return nil, refuse(res.Outcome, fmt.Sprintf(
+			"the review returned session %q, want %q", res.SessionID, sessionID))
 	}
 	if res.Agent != "mpm-reviewer" {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch,
-			Error: "the review ran as agent " + res.Agent,
-		})
-		return nil, fmt.Errorf("%w: the review ran as agent %q, not mpm-reviewer",
-			ErrConstraint, res.Agent)
+		return nil, refuse(res.Outcome, fmt.Sprintf(
+			"the review ran as agent %q, not mpm-reviewer", res.Agent))
+	}
+	// THE SESSION'S MODEL IS CHECKED, not only the configured one. A
+	// runtime that reports another provider or model did not run the
+	// review the operator authorised; the verdict it produced cannot be
+	// bound to the measured credential boundary.
+	if p.ExpectedModel != "" && res.Model != p.ExpectedModel {
+		return nil, refuse(res.Outcome, fmt.Sprintf(
+			"the review ran model %q, want %q", res.Model, p.ExpectedModel))
 	}
 	// A SESSION-LEVEL GRANT IS A WIDENING. The real runtime refuses it
 	// before returning; this check covers a runtime that did not.
 	if len(res.Permissions) > 0 {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch,
-			Error: "the review session carried a permission override",
-		})
-		return nil, fmt.Errorf("%w: the review session carried a permission override",
-			ErrConstraint)
+		return nil, refuse(res.Outcome, "the review session carried a permission override")
 	}
 	if res.Outcome != "succeeded" {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: res.Outcome,
-			Error: "the reviewer did not report a successful terminal outcome",
-		})
-		return nil, fmt.Errorf("%w: the reviewer's terminal outcome is %q, not %q",
-			ErrConstraint, res.Outcome, "succeeded")
+		return nil, refuse(res.Outcome, fmt.Sprintf(
+			"the reviewer's terminal outcome is %q, not %q", res.Outcome, "succeeded"))
 	}
 	if strings.TrimSpace(res.Findings) == "" {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: res.Outcome,
-			Error: "the reviewer produced no findings",
-		})
-		return nil, fmt.Errorf("%w: the reviewer produced no findings", ErrConstraint)
+		return nil, refuse(res.Outcome, "the reviewer produced no findings")
 	}
 
 	// THE EVIDENCE IS DERIVED, NOT SUPPLIED.
 	if res.FindingsSHA256 == "" || res.ReviewedRevision == "" {
-		_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch,
-			Error: "the review produced no capture",
-		})
-		return nil, fmt.Errorf("%w: the review produced no captured evidence", ErrConstraint)
+		return nil, refuse(res.Outcome, "the review produced no captured evidence")
 	}
 	// THE REVISION IS BOUND BEFORE THE VERDICT. The runtime checks the
 	// checkout HEAD against ExpectedRevision; this check also covers a
 	// fake or a runtime that did not perform that comparison.
 	if p.ExpectedRevision != "" && res.ReviewedRevision != p.ExpectedRevision {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch,
-			Error: "the review captured a different revision than requested",
-		})
-		return nil, fmt.Errorf(
-			"%w: the review captured %s, want the authorised revision %s",
-			ErrReviewVerdict, res.ReviewedRevision, p.ExpectedRevision)
+		return nil, refuse(res.Outcome, fmt.Sprintf(
+			"the review captured %s, want the authorised revision %s",
+			res.ReviewedRevision, p.ExpectedRevision))
 	}
 
 	// THE VERDICT COMES FROM THE ASSISTANT'S OWN TEXT, NOT THE FLATTENED

@@ -8,6 +8,36 @@ import (
 	"testing"
 )
 
+// TestIsolatedEnvCarriesOnlyTheReviewersOwnCredential pins the environment
+// the isolated process receives. The worker's sidecar key must never appear,
+// and a reviewer without a provider key must carry no provider credential at
+// all.
+func TestIsolatedEnvCarriesOnlyTheReviewersOwnCredential(t *testing.T) {
+	root := t.TempDir()
+	withKey := Config{
+		Root: root,
+		// The worker's sidecar credential is deliberately present on the
+		// config: IsolatedEnv must still not pass it.
+		Sidecar:        SidecarConfig{APIKey: "marker-worker-sidecar"},
+		ProviderKey:    "marker-reviewer",
+		ProviderKeyEnv: "MINIMAX_API_KEY",
+	}
+	env := strings.Join(IsolatedEnv(withKey), "\n")
+	if !strings.Contains(env, "MINIMAX_API_KEY=marker-reviewer") {
+		t.Fatalf("the reviewer credential was not passed:\n%s", env)
+	}
+	if strings.Contains(env, "marker-worker-sidecar") {
+		t.Fatalf("the worker's sidecar credential reached the isolated env:\n%s", env)
+	}
+
+	withoutKey := withKey
+	withoutKey.ProviderKey = ""
+	env = strings.Join(IsolatedEnv(withoutKey), "\n")
+	if strings.Contains(env, "MINIMAX_API_KEY") || strings.Contains(env, "marker-worker-sidecar") {
+		t.Fatalf("a provider credential was passed without one configured:\n%s", env)
+	}
+}
+
 // TestReviewerProviderCredentialExposesTheMeasuredModel is OPTIONAL: it
 // needs a real OpenCode v2.3.2 binary. It performs NO inference. It pins the
 // mechanism the dispatcher uses: the dedicated reviewer key is passed as

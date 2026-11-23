@@ -952,11 +952,16 @@ def bwrap_args(tree: dict, fds: dict | None = None) -> list:
         # The reviewer's own tree: read-write, by descriptor.
         for name in TREE:
             args += ["--bind-fd", str(fds[name]), f"{PREFIX}/{name}"]
-    # THE PID NAMESPACE MUST EXIST BEFORE /proc IS MOUNTED. The first
-    # version mounted /proc and only then asked bubblewrap to unshare the
-    # PID namespace; the mount therefore exposed the HOST's /proc, and a
-    # command could read the caller's environment through
-    # /proc/1/environ. The unshare flags are emitted first.
+    # THE UNSHARE FLAGS ARE EMITTED BEFORE /proc FOR READABILITY AND
+    # DEFENCE IN DEPTH — NOT BECAUSE THE ORDER ALONE IS THE PROTECTION.
+    #
+    # Bubblewrap 0.11.1 batches namespace options into ONE clone before it
+    # performs any mount, so reversing these two groups does not change
+    # what /proc is. The measured leak ("/proc/1/environ" carried the
+    # caller's environment) was bubblewrap's OWN init inheriting the
+    # wrapper's environment; the fix is that the wrapper passes a SCRUBBED
+    # environment to bubblewrap (see `sandbox_environment`), and
+    # `--clearenv` removes it from the command.
     args += [
         "--unshare-all",
         "--unshare-user",
@@ -1066,6 +1071,12 @@ def execute(tree: dict, command: list, cwd: str | None = None,
                 text=True,
                 timeout=timeout,
                 pass_fds=tuple(fds.values()),
+                # EXPLICIT, NOT INHERITED. `scrub_credentials()` removes
+                # the names from `os.environ`, but passing the environment
+                # explicitly is what makes bubblewrap's init (/proc/1)
+                # independent of any future mutation of this process's
+                # mapping.
+                env=sandbox_environment(),
             )
         except subprocess.TimeoutExpired as exc:
             return {
@@ -1189,7 +1200,15 @@ def _write_envelope(envelope: dict) -> None:
 # Credentials that belong to the INFERENCE process, never to the sandboxed
 # command or to bubblewrap's own init process. `--clearenv` clears the
 # COMMAND's environment, not bubblewrap's init process (/proc/1), so the
-# wrapper scrubs its own environment before it spawns bwrap.
+# wrapper REMOVES these names from its mapping before it spawns bwrap, and
+# `execute` passes the scrubbed mapping explicitly.
+#
+# NOTE: `os.environ.pop` updates the mapping; it does not overwrite the bytes
+# the kernel recorded for this process at exec time. The wrapper's own
+# /proc/<pid>/environ can therefore still contain a pre-scrub value until the
+# process exits. That process is on the HOST, outside the sandbox's PID
+# namespace, so the command cannot reach it — but the scrub is an
+# environment-passing boundary, not a process-memory eraser.
 SCRUBBED_ENVIRONMENT = (
     "MINIMAX_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -1203,6 +1222,21 @@ SCRUBBED_ENVIRONMENT = (
 def scrub_credentials() -> None:
     for name in SCRUBBED_ENVIRONMENT:
         os.environ.pop(name, None)
+
+
+def sandbox_environment(source: dict | None = None) -> dict:
+    """The environment bubblewrap and its init process receive.
+
+    A credential belongs to the INFERENCE process. It must not be inherited
+    by the sandbox helper's child — not the command, and not bubblewrap's
+    own init, whose `/proc/1/environ` is readable inside the namespace.
+
+    The function is pure so the passing rule can be tested without a
+    namespace: `execute` calls it at the spawn, and the test feeds it a
+    marker mapping.
+    """
+    values = os.environ if source is None else source
+    return {k: v for k, v in values.items() if k not in SCRUBBED_ENVIRONMENT}
 
 
 def main(argv: list | None = None) -> int:

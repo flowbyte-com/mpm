@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -145,7 +146,60 @@ func TestReviewerRuntimeIsCachedWithItsCredentialBoundary(t *testing.T) {
 	if !ok {
 		t.Fatalf("the first runtime is %T, want *oc.Runtime", first)
 	}
-	if firstRT.Config().ProviderKey != "marker-reviewer" {
+	if firstRT.Config().Model != DefaultReviewModel {
+		t.Fatalf("the cached runtime model is %q, want %q",
+			firstRT.Config().Model, DefaultReviewModel)
+	}
+	if firstRT.Config().ProviderKey != "marker-reviewer" ||
+		firstRT.Config().ProviderKeyEnv != "MINIMAX_API_KEY" {
 		t.Fatal("the cached runtime lost its credential boundary")
+	}
+}
+
+// TestReviewerProviderEnvMapsOnlyTheMeasuredFamily pins the closed mapping.
+// The CN endpoint and other providers were not measured, so they are refused
+// rather than guessed at.
+func TestReviewerProviderEnvMapsOnlyTheMeasuredFamily(t *testing.T) {
+	for _, tc := range []struct {
+		model   string
+		wantEnv string
+		wantErr bool
+	}{
+		{"minimax-coding-plan/MiniMax-M3.1-Flash", "MINIMAX_API_KEY", false},
+		{"minimax-coding-plan/MiniMax-M2.7", "MINIMAX_API_KEY", false},
+		{"minimax-cn-coding-plan/MiniMax-M3.1-Flash", "", true},
+		{"deepseek/deepseek-chat", "", true},
+		{"", "", true},
+	} {
+		env, err := ReviewerProviderEnv(tc.model)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%q was mapped to %q, want a refusal", tc.model, env)
+			}
+			continue
+		}
+		if err != nil || env != tc.wantEnv {
+			t.Errorf("%q -> (%q, %v), want (%q, nil)", tc.model, env, err, tc.wantEnv)
+		}
+	}
+}
+
+// TestReviewRefusalReasonsSeparateIncompleteFromUnavailable is the recovery
+// distinction: a review that STARTED but could not be captured must require
+// an operator, while a review that never started is a plain unavailability.
+func TestReviewRefusalReasonsSeparateIncompleteFromUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"post-inference capture", fmt.Errorf("%w: capture", oc.ErrReviewIncomplete), ReasonRecoveryRequired},
+		{"ambiguous result", assignment.ErrReviewAmbiguous, ReasonRecoveryRequired},
+		{"missing verdict", assignment.ErrReviewVerdict, ReasonRecoveryRequired},
+		{"never started", oc.ErrReviewerUnavailable, ReasonReviewerUnavailable},
+	} {
+		if got := classifyReviewRefusal(tc.err); got != tc.want {
+			t.Errorf("%s: reason %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

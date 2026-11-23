@@ -235,6 +235,13 @@ func assignmentVerbExecuteReview(store *assignment.Store, f *assignmentFlags) (i
 	if !filepath.IsAbs(f.workspace) {
 		return nil, fmt.Errorf("the repository under review must be an absolute path, got %q", f.workspace)
 	}
+	// THE EXACT REVISION IS PART OF THE REVIEW. The dispatcher already
+	// refuses to review without one; the explicit verb must not be a
+	// weaker path that silently reviews whatever HEAD happens to be.
+	if strings.TrimSpace(f.reviewedSHA) == "" {
+		return nil, fmt.Errorf(
+			"execute-review needs --reviewed-sha (the exact revision to review)")
+	}
 
 	mpmDir := config.GetMPMDir()
 	root := filepath.Join(mpmDir, "opencode", "reviews", f.id)
@@ -313,5 +320,6 @@ func assignmentVerbExecuteReview(store *assignment.Store, f *assignmentFlags) (i
 		Brief:            f.brief,
 		Title:            "review " + f.id,
 		ExpectedRevision: f.reviewedSHA,
+		ExpectedModel:    model,
 	})
 }

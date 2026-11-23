@@ -168,7 +168,9 @@ dispatcher maps it to OpenCode's `MINIMAX_API_KEY` variable **inside the
 reviewer process only**. The plugin scrubs provider credentials from the
 `sandbox_exec` helper and bubblewrap clears the command environment, so
 the model-controlled command does not receive them. A model outside the
-measured MiniMax families is refused, not tried with another provider.
+measured family `minimax-coding-plan/*` is refused, not tried with another
+provider; the CN endpoint was not measured. The SESSION's own model is
+checked against the configured one before its result is accepted.
 
 **AN UNKNOWN KEY IS AN ERROR.** A silently ignored key is a typo the
 operator cannot see: they wrote `lease_second` and the dispatcher used
@@ -436,15 +438,26 @@ the reviewer's session through exactly that command — so without the
 tree, every inspection fails with `chdir …: no such file or directory`
 and a review can only ever be reported, never recovered.
 
-The dispatcher passes the review's expected revision into the review
-runtime. The runtime checks the controlled review checkout's HEAD against
-it before running, and the verdict transaction checks the captured
-revision again. The transcript carries the full audited exchange; the
-verdict is parsed ONLY from `AssistantFindings` (assistant-authored text),
-must be the final non-empty line, and must be one of `VERDICT: APPROVED` or
-`VERDICT: CHANGES REQUESTED`. User prompts, tool output and diagnostics are
-not verdict sources. Evidence capture and the fenced verdict write share one
-transaction, so a crash cannot persist one without the other.
+The dispatcher passes the review's expected revision and expected model into
+the review runtime. The runtime checks the controlled review checkout's HEAD
+and the SESSION's own model before returning, and the verdict transaction
+checks the captured revision again. The transcript carries the full audited
+exchange; the verdict is parsed ONLY from `AssistantFindings`
+(assistant-authored text), must be the final non-empty line, and must be one
+of `VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`. User prompts, tool
+output and diagnostics are not verdict sources. The evidence COLUMNS and the
+fenced verdict write share one transaction, so a crash cannot persist one
+without the other; the on-disk transcript file is written first and retained
+for diagnosis, so it is an artifact rather than a third transactional fact.
+
+A review that STARTS but cannot be captured faithfully (message capture,
+session state, a session-level permission grant, a model mismatch, the
+evidence write) is `ErrReviewIncomplete`: the attempt is marked AMBIGUOUS and
+the dispatcher reports `recovery_required`. A second dispatch refuses rather
+than spend another review. Only a pre-launch refusal is marked FAILED and
+retryable. The public `mpm assignment record-review` verb remains an
+operator/agent API that accepts a caller-supplied verdict; it does not
+transcribe a terminal transcript and is not the dispatcher's path.
 
 Four facts stay apart, and the report never collapses them:
 

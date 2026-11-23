@@ -14,6 +14,17 @@ import (
 // decision.
 var ErrReviewVerdict = errors.New("assignment: the captured review has no unambiguous assistant verdict")
 
+// ErrReviewAmbiguous says a reviewer process produced a result, but the host
+// could not accept it as THIS review: a different session, agent or model
+// ran; a session-level permission override was present; the outcome was not
+// success; the capture was missing or named a different revision.
+//
+// It is RECOVERY-REQUIRED, not a retryable failure. The model may already
+// have run and produced billable output, so starting a second reviewer could
+// duplicate inference. The attempt is marked AMBIGUOUS and a later dispatch
+// refuses until an operator reconciles it.
+var ErrReviewAmbiguous = errors.New("assignment: the review attempt needs operator recovery")
+
 // The only accepted terminal verdict lines. They are exact: no markdown, no
 // punctuation and no case folding.
 const (

@@ -51,6 +51,18 @@ import (
 // fall back to, so a review that cannot start says so.
 var ErrReviewerUnavailable = errors.New("opencode: the reviewer's configuration is unavailable")
 
+// ErrReviewIncomplete says the reviewer process STARTED, but its result could
+// not be captured faithfully: the message stream failed to read, the session
+// state was missing, a session-level permission grant was present, the
+// session's model was not the configured one, or the evidence file could not
+// be written.
+//
+// It is NOT a pre-launch refusal. The model may already have run and produced
+// billable output, so the assignment attempt must be treated as AMBIGUOUS:
+// retrying could duplicate inference. Callers distinguish it from
+// ErrReviewerUnavailable, which means nothing ran.
+var ErrReviewIncomplete = errors.New("opencode: the reviewer started but its result is incomplete")
+
 // ReviewerAgentName is the installed reviewer definition.
 const ReviewerAgentName = "mpm-reviewer"
 
@@ -185,27 +197,28 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 	// counting it would let a prompt be mistaken for a verdict.
 	findings, assistantFindings, state, err := r.captureMessages(ctx, req.SessionID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrReviewIncomplete, err)
 	}
 	if state == nil {
-		return nil, fmt.Errorf("%w: the reviewer produced no session state (%v)",
-			ErrReviewerUnavailable, runErr)
+		return nil, fmt.Errorf("%w: %w: the reviewer produced no session state (%v)",
+			ErrReviewIncomplete, ErrReviewerUnavailable, runErr)
 	}
 	if violation := reviewerSessionOverrideViolation(state.Permissions); violation != "" {
-		return nil, fmt.Errorf("%w: %s", ErrReviewerUnavailable, violation)
+		return nil, fmt.Errorf("%w: %w: %s",
+			ErrReviewIncomplete, ErrReviewerUnavailable, violation)
 	}
 
-	digest := sha256.Sum256([]byte(findings))
-	res := &ReviewResult{
-		SessionID:         req.SessionID,
-		FindingsSHA256:    hex.EncodeToString(digest[:]),
-		Findings:          findings,
-		AssistantFindings: assistantFindings,
-		Outcome:           state.Outcome,
-		Agent:             state.Agent,
-		Model:             state.Model.ProviderID + "/" + state.Model.ID,
-		Permissions:       state.Permissions,
+	// THE SESSION'S OWN MODEL IS CHECKED. The configured model only says
+	// what was ASKED for; the session state says what ran. A runtime that
+	// fell back to another provider (or another model) did not run the
+	// review the operator authorised.
+	actualModel := state.Model.ProviderID + "/" + state.Model.ID
+	if cfg.Model != "" && actualModel != cfg.Model {
+		return nil, fmt.Errorf("%w: %w: the reviewer session ran model %q, want %q",
+			ErrReviewIncomplete, ErrReviewerUnavailable, actualModel, cfg.Model)
 	}
+
+	res := reviewResultFromCapture(req.SessionID, pinned, findings, assistantFindings, state)
 
 	// THE REVISION IS THE PINNED ONE, not a fresh observation.
 	res.ReviewedRevision = pinned
@@ -224,13 +237,37 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 	}
 	body, _ := json.MarshalIndent(payload, "", "  ")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, fmt.Errorf("opencode: create the evidence directory: %w", err)
+		return nil, fmt.Errorf("%w: create the evidence directory: %w",
+			ErrReviewIncomplete, err)
 	}
 	if err := os.WriteFile(path, body, 0o600); err != nil {
-		return nil, fmt.Errorf("opencode: write the review evidence: %w", err)
+		return nil, fmt.Errorf("%w: write the review evidence: %w",
+			ErrReviewIncomplete, err)
 	}
 	res.EvidencePath = path
 	return res, nil
+}
+
+// reviewResultFromCapture assembles the host-observed result.
+//
+// It exists as a named function so the PRODUCTION wiring can be tested: the
+// transcript and the assistant-authored text are different values, and a
+// review that put the transcript in `AssistantFindings` would let a prompt or
+// tool line be transcribed as a verdict. A fake runtime cannot catch that
+// swap because it supplies both fields itself.
+func reviewResultFromCapture(sessionID, pinned, findings, assistantFindings string,
+	state *SessionState) *ReviewResult {
+	digest := sha256.Sum256([]byte(findings))
+	return &ReviewResult{
+		SessionID:         sessionID,
+		FindingsSHA256:    hex.EncodeToString(digest[:]),
+		Findings:          findings,
+		AssistantFindings: assistantFindings,
+		Outcome:           state.Outcome,
+		Agent:             state.Agent,
+		Model:             state.Model.ProviderID + "/" + state.Model.ID,
+		Permissions:       state.Permissions,
+	}
 }
 
 // verifyReviewer proves the definition exists and is default-deny with

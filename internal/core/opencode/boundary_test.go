@@ -913,12 +913,15 @@ func TestToolActivityCannotSatisfyTheAuthorshipGate(t *testing.T) {
 	}
 }
 
-// TestContainmentMountsProcAfterUnshare pins the ordering that keeps the
-// HOST's /proc out of the sandbox.
+// TestContainmentMountsProcAfterUnshare pins the EMITTED ORDER as a
+// readability/defence-in-depth invariant.
 //
-// The first version mounted --proc before the unshare flags. That exposed the
-// caller's /proc under the sandbox path, so a command could read
-// /proc/1/environ. The unshare flags must come first.
+// It is NOT the security fix. Bubblewrap 0.11.1 batches namespace options
+// into one clone before any mount, so this order alone does not change what
+// /proc is; the protection is Runtime.Run's explicit exec.Cmd.Env. The test
+// remains because a future reviewer reading the argv should not have to
+// re-derive why the unshare flags precede the mount, and because the order
+// is what the documentation describes.
 func TestContainmentMountsProcAfterUnshare(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(t.TempDir(), "workspace")

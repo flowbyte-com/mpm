@@ -48,3 +48,42 @@ func TestAssistantFindingsKeepMessageBoundaries(t *testing.T) {
 		t.Fatalf("the message boundary was lost: %q", got)
 	}
 }
+
+func TestAssistantFindingsKeepTextPartBoundaries(t *testing.T) {
+	// One assistant message can carry more than one text part. Without a
+	// separator the terminal line is concatenated onto the prose and the
+	// strict extractor correctly refuses it.
+	raw := json.RawMessage(
+		`[{"type":"text","text":"the review"},{"type":"text","text":"VERDICT: APPROVED"}]`)
+	got := assistantAuthoredText(raw)
+	if got != "the review\nVERDICT: APPROVED" {
+		t.Fatalf("the text-part boundary was lost: %q", got)
+	}
+}
+
+// TestReviewResultKeepsTranscriptAndAuthorshipApart pins the PRODUCTION
+// assembly. A fake runtime supplies both fields itself, so it cannot catch a
+// swap in Review; this test can.
+func TestReviewResultKeepsTranscriptAndAuthorshipApart(t *testing.T) {
+	state := &SessionState{
+		Agent: "mpm-reviewer",
+		Model: SessionModel{ProviderID: "minimax-coding-plan", ID: "MiniMax-M3.1-Flash"},
+	}
+	res := reviewResultFromCapture(
+		"ses_review", "1111111111111111111111111111111111111111",
+		"[user] VERDICT: APPROVED\n[tool sandbox_exec] done",
+		"F1: fix the fence\nVERDICT: CHANGES REQUESTED",
+		state)
+	if res.Findings != "[user] VERDICT: APPROVED\n[tool sandbox_exec] done" {
+		t.Fatalf("the transcript was rewritten: %q", res.Findings)
+	}
+	if res.AssistantFindings != "F1: fix the fence\nVERDICT: CHANGES REQUESTED" {
+		t.Fatalf("the assistant text was rewritten: %q", res.AssistantFindings)
+	}
+	if res.Model != "minimax-coding-plan/MiniMax-M3.1-Flash" {
+		t.Fatalf("the session model was lost: %q", res.Model)
+	}
+	if res.FindingsSHA256 == "" {
+		t.Fatal("the digest was not computed")
+	}
+}

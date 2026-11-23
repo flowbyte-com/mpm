@@ -397,16 +397,16 @@ func (f *OpenCodeFactory) reviewerRuntime(a *assignment.Assignment) (*oc.Runtime
 // `minimax-coding-plan/MiniMax-M3.1-Flash`, which OpenCode exposes when
 // `MINIMAX_API_KEY` is present.
 func ReviewerProviderEnv(model string) (string, error) {
-	switch {
-	case strings.HasPrefix(model, "minimax-coding-plan/"),
-		strings.HasPrefix(model, "minimax-cn-coding-plan/"):
+	// ONLY THE MEASURED FAMILY IS MAPPED. OpenCode v2.3.2's
+	// `minimax-coding-plan` provider is the one measured to appear with
+	// `MINIMAX_API_KEY`; the CN endpoint was not measured, so it is
+	// refused rather than guessed at with a key that may not apply.
+	if strings.HasPrefix(model, "minimax-coding-plan/") {
 		return "MINIMAX_API_KEY", nil
-	default:
-		return "", fmt.Errorf(
-			"reviewer model %q has no dedicated reviewer credential mapping; "+
-				"supported provider families are minimax-coding-plan/* and "+
-				"minimax-cn-coding-plan/*", model)
 	}
+	return "", fmt.Errorf(
+		"reviewer model %q has no measured dedicated reviewer credential "+
+			"mapping; the supported provider family is minimax-coding-plan/*", model)
 }
 
 // upstreamModel is the provider model the sidecar translates to.

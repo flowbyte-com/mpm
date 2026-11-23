@@ -115,6 +115,7 @@ func (f *fakeRuntime) Review(_ context.Context, req oc.ReviewRequest) (*oc.Revie
 		FindingsSHA256:    strings.Repeat("e", 64),
 		Outcome:           "succeeded",
 		Agent:             "mpm-reviewer",
+		Model:             DefaultReviewModel,
 		Findings:          "the findings",
 		AssistantFindings: "the findings\nVERDICT: APPROVED",
 		EvidencePath:      "/evidence/review.json",

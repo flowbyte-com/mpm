@@ -275,10 +275,17 @@ func (spec Spec) Argv() ([]string, error) {
 		"--bind", filepath.Join(spec.Root, "ocache"), PrefixOCache,
 		"--bind", filepath.Join(spec.Root, "ostate"), PrefixOState,
 		"--bind", filepath.Join(spec.Root, "findings"), PrefixFind,
-		// THE PID NAMESPACE MUST EXIST BEFORE /proc IS MOUNTED. Mounting
-		// first exposed the HOST's /proc under a name that looked like
-		// the sandbox's, so a process inside could read the caller's
-		// environment through /proc/1/environ.
+		// THE UNSHARE FLAGS ARE EMITTED BEFORE /proc FOR READABILITY AND
+		// DEFENCE IN DEPTH — NOT BECAUSE THE ORDER ALONE IS THE
+		// PROTECTION.
+		//
+		// Bubblewrap 0.11.1 batches namespace options into ONE clone
+		// before any mount, so reversing the two groups does not change
+		// what /proc is. The measured leak — bubblewrap's init
+		// (/proc/1/environ) carrying the caller's environment — was
+		// closed by giving bubblewrap's own process an explicit, short
+		// environment (see Runtime.Run's exec.Cmd.Env), not by the
+		// ordering.
 		"--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
 		"--unshare-user",
 		"--disable-userns", "--assert-userns-disabled",
@@ -296,9 +303,10 @@ func (spec Spec) Argv() ([]string, error) {
 		inner = append(inner, "--setenv", k, spec.Env[k])
 	}
 	inner = append(inner,
-		// The unshare flags are emitted before /proc above. The INNER
-		// user namespace is required by --disable-userns, and it is safe
-		// because the network namespace was already created by the
+		// The unshare flags are emitted before /proc above (see the note
+		// there: this is defence in depth, not the security fix). The
+		// INNER user namespace is required by --disable-userns, and it is
+		// safe because the network namespace was already created by the
 		// OUTER unshare.
 		"--chdir", PrefixWorker,
 		"--",

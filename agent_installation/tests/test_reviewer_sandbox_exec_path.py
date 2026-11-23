@@ -399,8 +399,13 @@ class ReviewerExecutionPathTest(unittest.TestCase):
 
         The credential is inherited by the host-side wrapper when the
         OpenCode process starts it, so the wrapper's env is a real threat
-        surface. The wrapper scrubs it, and bwrap clears the command env.
-        This probe checks the command's own environment and /proc.
+        surface. The wrapper removes it from the environment it passes to
+        bubblewrap, and bwrap clears the command env.
+
+        The probe reads the command's environment, /proc/1, /proc/self AND
+        every numeric PID visible in /proc. If the host's /proc were mounted
+        (or the PID namespace were lost), one of those reads would expose the
+        wrapper's process; the marker assertion below would then fail.
         """
         name = "MINIMAX_API_KEY"
         marker = "MARKER-NOT-A-REAL-CREDENTIAL"
@@ -412,7 +417,9 @@ class ReviewerExecutionPathTest(unittest.TestCase):
                     "/bin/sh",
                     "-c",
                     "env; echo ---; cat /proc/1/environ; echo ---; "
-                    "cat /proc/self/environ; echo ---; ls /proc",
+                    "cat /proc/self/environ; echo ---; ls /proc; echo ---; "
+                    "for p in /proc/[0-9]*; do echo \"PID $p\"; "
+                    "cat \"$p/environ\" 2>/dev/null; done",
                 ],
                 cwd="tmp",
                 env={

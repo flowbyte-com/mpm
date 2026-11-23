@@ -98,6 +98,9 @@ func (e *Engine) dispatchReview(ctx context.Context, claimed *assignment.Assignm
 		Brief:            e.briefFor(claimed),
 		Title:            "review of " + claimed.ID,
 		ExpectedRevision: expected,
+		// The model the factory configured is the model the review was
+		// authorised to use. A result from another one is refused.
+		ExpectedModel: e.cfg.ReviewerModel,
 	})
 	if err != nil {
 		outcome.Reason = classifyReviewRefusal(err)
@@ -202,10 +205,14 @@ func classifyReviewRefusal(err error) string {
 		return ReasonBudgetExhausted
 	case errors.Is(err, assignment.ErrStaleClaim):
 		return ReasonStaleEpoch
+	case errors.Is(err, oc.ErrReviewIncomplete),
+		errors.Is(err, assignment.ErrReviewAmbiguous),
+		errors.Is(err, assignment.ErrReviewVerdict):
+		// A reviewer may already have run. Recovery is the operator's
+		// job; a second dispatch must not spend another review.
+		return ReasonRecoveryRequired
 	case errors.Is(err, oc.ErrReviewerUnavailable):
 		return ReasonReviewerUnavailable
-	case errors.Is(err, assignment.ErrReviewVerdict):
-		return ReasonRecoveryRequired
 	case errors.Is(err, assignment.ErrRecordOnlyRefused):
 		// The adapter could not record an observed outcome, and the
 		// caller asked for no launch. The attempt stays OUTSTANDING and

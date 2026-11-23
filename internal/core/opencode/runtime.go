@@ -52,8 +52,10 @@ import (
 // containment (for the read-only inspection commands). Inside the
 // containment the environment is Spec.Env, which is shorter still.
 //
-// Neither carries a provider credential: inference goes through the
-// sidecar, so the runtime authenticates to a socket, not to a provider.
+// A WORKER carries no provider credential: inference goes through the
+// sidecar, so it authenticates to a socket, not to a provider. A REVIEWER
+// carries its own dedicated provider credential (Config.ProviderKey), and
+// that pair is the only provider credential this function ever adds.
 func IsolatedEnv(cfg Config) []string {
 	env := []string{
 		"HOME=" + filepath.Join(cfg.Root, "home"),
@@ -96,8 +98,9 @@ type Config struct {
 	// refused BEFORE any session is created, regardless of whether the
 	// runtime would have failed anyway.
 	AllowedAgents []string
-	// Sidecar is the sidecar configuration. Its APIKey is the only
-	// credential in the process, and it never leaves it.
+	// Sidecar is the WORKER's sidecar configuration. Its APIKey stays in
+	// the sidecar process; a reviewer runtime leaves Sidecar empty and
+	// carries its own ProviderKey instead.
 	Sidecar SidecarConfig
 	// ProviderKey and ProviderKeyEnv are the REVIEWER's dedicated
 	// provider credential. They are set only for the reviewer runtime;

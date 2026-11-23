@@ -349,10 +349,25 @@ from the worker's `MPM_OPENCODE_SIDECAR_KEY`. The adapter maps the measured
 `minimax-coding-plan/MiniMax-M3.1-Flash` model to OpenCode's
 `MINIMAX_API_KEY` **in the isolated reviewer process only**. It has no
 fallback to an ambient provider key, the worker key or the operator's auth
-store, and a model outside the measured MiniMax families is refused. The
-plugin's sandbox helper scrubs provider credentials before it spawns, and
-`reviewer_bwrap.py` clears them from its own process before bubblewrap; the
-command itself receives a cleared environment and a private `/proc`.
+store, and a model outside the measured family `minimax-coding-plan/*` is
+refused rather than tried with another provider. The CN endpoint was not
+measured and is refused too.
+
+Both the CONFIGURED model and the SESSION's own reported model are checked.
+`Review` compares `session.model` with the configured model before returning,
+and `ExecuteReview` checks the result against the model the dispatcher or the
+explicit verb authorised. A runtime that silently fell back to another
+provider does not produce an acceptable verdict.
+
+The plugin's `sandboxProcessEnv` removes provider credentials before it
+spawns its helper; `reviewer_bwrap.py` removes them from the environment it
+passes to bubblewrap; bubblewrap's `--clearenv` then clears the command's
+environment. The wrapper's own `/proc/<pid>/environ` can retain the
+pre-scrub bytes until the process exits — `os.environ.pop` updates the
+mapping, it does not erase the kernel's exec-time record — but that process
+is on the HOST, outside the sandbox's PID namespace, so the command cannot
+reach it. The scrub is an environment-passing boundary, not a process-memory
+eraser.
 
 The verifier reads the **ordered** resolved list and applies the host's
 last-match-wins rule to both actions and resources. It is a conservative
@@ -390,7 +405,9 @@ write**:
 
 It records evidence, and the host then transcribes the reviewer's own
 terminal verdict from the assistant-authored text into the same fenced
-transaction. The verdict is not an independent host decision: the text must
+transaction. The transaction covers the EVIDENCE COLUMNS and the verdict;
+the on-disk transcript file is written first and retained for diagnosis even
+when no verdict is recorded, so it is an artifact, not a second atomic fact. The verdict is not an independent host decision: the text must
 be the reviewer's final line, exactly `VERDICT: APPROVED` or
 `VERDICT: CHANGES REQUESTED`; prompts, tool output and diagnostics are not
 sources. The subject moves only through the existing reviewer transition,
