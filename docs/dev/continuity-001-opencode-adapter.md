@@ -341,6 +341,16 @@ Unchanged in spirit and **not weakened**:
   host honours it, the worker's containment does not, and the adapter refuses
   it before execution.
 
+The verifier reads the **ordered** resolved list and applies the host's
+last-match-wins rule to both actions and resources. A host-prepended allow that
+a later agent deny overrides — OpenCode 2.3.2's `read *.env.example` allow,
+overridden by `read * deny` — is not treated as effective. An allow that
+survives is refused, including `shell`, `execute`, network, subagent, skill and
+MPM actions; `sandbox_exec` must itself survive, not merely appear before an
+overridden rule. Resource patterns are matched, not collapsed into action-wide
+permissions, and a broad allow is not accepted because a narrow later deny
+happened to match one example.
+
 **There is no fallback to a less restricted reviewer.** If the sandbox or the
 reviewer configuration is unavailable, the review refuses to start.
 
