@@ -8,13 +8,14 @@
 // delegates it, records a review verdict, hands it to the operator's
 // gate, cancels it, and reads its inbox, its row and its ledger.
 //
-// TWO OPERATIONS ARE NOT HERE, AND THEIR ABSENCE IS THE POINT:
+// THREE OPERATIONS ARE NOT HERE, AND THEIR ABSENCE IS THE POINT:
 //
+//   - creating a PROJECT identity,
 //   - creating a ROOT assignment, and
 //   - recording an OPERATOR APPROVAL.
 //
-// Neither appears as an action, neither appears in the schema, and
-// neither can be reached through this handler. They are not "refused at
+// None appears as an action, none appears in the schema, and none can be
+// reached through this handler. They are not "refused at
 // call time by a flag" — they are ABSENT, so there is nothing to
 // dispatch to. The shred precedent refuses at the execution point
 // because the action had to keep working for the operator; here the

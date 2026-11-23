@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	oc "github.com/flowbyte-com/mpm-core/opencode"
 )
 
 // The dispatcher's configuration.
@@ -89,6 +91,15 @@ type Config struct {
 	// choose a workspace it was not told about.
 	WorkspaceRoot string `json:"workspace_root"`
 
+	// RepositoryPath is the SOURCE repository the host creates each
+	// assignment's worktree from. It must be a non-bare Git checkout, and
+	// it must not contain, or sit inside, the workspace root.
+	//
+	// The WORKER never sees this path: it is bound to the worktree, not
+	// the repository, and it has no Git commands. The host creates the
+	// worktree, stages and commits.
+	RepositoryPath string `json:"repository_path"`
+
 	// WorkerAgent is the agent definition an IMPLEMENTER runs under. It
 	// is the file-edit-only worker definition, and nothing else.
 	WorkerAgent string `json:"worker_agent"`
@@ -144,6 +155,7 @@ func DefaultConfig() Config {
 		DrainTimeoutSeconds:      0,
 		DrainPollIntervalSeconds: 0,
 		WorkspaceRoot:            "",
+		RepositoryPath:           "",
 		WorkerAgent:              "mpm-worker",
 		ReviewerAgent:            "mpm-reviewer",
 		ReviewerModel:            DefaultReviewModel,
@@ -216,6 +228,9 @@ func (c Config) Validate() error {
 	if c.WorkspaceRoot == "" {
 		return fmt.Errorf("dispatch: the configuration is enabled but names no workspace root")
 	}
+	if c.RepositoryPath == "" {
+		return fmt.Errorf("dispatch: the configuration is enabled but names no source repository")
+	}
 	if c.WorkerAgent == "" {
 		return fmt.Errorf("dispatch: the configuration is enabled but names no worker agent definition")
 	}
@@ -264,6 +279,30 @@ func (c Config) Validate() error {
 	if !filepath.IsAbs(c.WorkspaceRoot) {
 		return fmt.Errorf(
 			"dispatch: the workspace root %q is not an absolute path", c.WorkspaceRoot)
+	}
+	if !filepath.IsAbs(c.RepositoryPath) {
+		return fmt.Errorf(
+			"dispatch: the source repository %q is not an absolute path", c.RepositoryPath)
+	}
+	// THE TWO PATHS MUST NOT CONTAIN ONE ANOTHER. A workspace root inside
+	// the repository would put worktrees in the source tree, and a
+	// repository inside the workspace root would expose the repository
+	// to the worker's writable bind.
+	// EQUALITY IS CONTAINMENT TOO: a root that IS the repository would
+	// create worktrees inside the source checkout.
+	if sameOrWithin(c.RepositoryPath, c.WorkspaceRoot) || sameOrWithin(c.WorkspaceRoot, c.RepositoryPath) {
+		return fmt.Errorf(
+			"dispatch: the workspace root %q and the source repository %q must not be the same or contain one another",
+			c.WorkspaceRoot, c.RepositoryPath)
+	}
+	// THE WORKER'S NAMESPACE BINDS /usr AND /usr/local READ-ONLY. A
+	// repository there would put its Git metadata inside the namespace.
+	for _, dir := range oc.RuntimeDirs() {
+		if sameOrWithin(dir, c.RepositoryPath) {
+			return fmt.Errorf(
+				"dispatch: the source repository %q is inside %q, which the worker's namespace binds",
+				c.RepositoryPath, dir)
+		}
 	}
 	if !filepath.IsAbs(c.ReviewRepoPath) {
 		return fmt.Errorf(

@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/flowbyte-com/mpm-core/assignment"
 	oc "github.com/flowbyte-com/mpm-core/opencode"
@@ -127,15 +125,29 @@ const maxBriefBytes = 2000
 // root it lives under, and the worktree is the assignment's own directory
 // inside it. That is what makes two runs of the same assignment find the
 // same tree — a retry must not find a different one.
+//
+// The provisioner is HOST-side: it creates the Git worktree from the
+// assignment's base revision and verifies an existing one before reuse.
+// The worker only ever sees the checked-out files.
 func (e *Engine) workspaceFor(a *assignment.Assignment) (string, error) {
-	if e.cfg.WorkspaceRoot == "" {
-		return "", fmt.Errorf("dispatch: no workspace root is configured")
+	if e.provisioner == nil {
+		return "", fmt.Errorf("dispatch: no workspace provisioner is configured")
 	}
-	workspace := filepath.Join(e.cfg.WorkspaceRoot, a.ID)
-	if err := os.MkdirAll(workspace, 0o700); err != nil {
-		return "", fmt.Errorf("dispatch: create the worktree for %s: %w", a.ID, err)
+	return e.provisioner.Ensure(a)
+}
+
+// workspaceForExisting is the recovery path's workspace: it verifies one
+// that already exists and NEVER creates one.
+//
+// An outstanding attempt implies a launch, and a launch implies the
+// worktree existed before the session started. A missing worktree is a
+// fact a human must explain; creating one while a lease or an older
+// session may still be live would be a second writer's workspace.
+func (e *Engine) workspaceForExisting(a *assignment.Assignment) (string, error) {
+	if e.provisioner == nil {
+		return "", fmt.Errorf("dispatch: no workspace provisioner is configured")
 	}
-	return workspace, nil
+	return e.provisioner.Reuse(a)
 }
 
 // classifyAdapterRefusal maps an adapter refusal onto a reason code.

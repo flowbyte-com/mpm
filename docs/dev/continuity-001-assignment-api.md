@@ -48,8 +48,15 @@ authentication. PR 1's ledger says the same thing in its own comment:
 
 ### 2.2 What is enforced anyway
 
-Two things are enforced **structurally**, not by a flag:
+Three things are enforced **structurally**, not by a flag:
 
+0. **Project creation is not in the tool registry.** A project is the
+   containment boundary every assignment names. It is created only by the
+   operator verb `mpm assignment create-project --id cpj-<16 hex>`. The
+   operation takes an `OperatorAuthority`, is absent from the registry,
+   and is idempotent for a live identity; a withdrawn identity is a
+   conflict, not a resurrection. It writes the `projects` row and nothing
+   else — not the `project_names` domain, not a thread, not a checkpoint.
 1. **Root creation is not in the tool registry.** The registry is the single
    source of truth shared by `mpm call <tool>` and the MCP server
    (`internal/core/tools/registry.go`). A root can be created only by the
@@ -144,6 +151,7 @@ implied.
 
 | operation | transition | who |
 |---|---|---|
+| `CreateProject` | — (a new project row) | operator only |
 | `CreateRoot` | — (a new root) | operator only |
 | `Delegate` | — (a new child) | agent, bounded by the root |
 | `Deliver` | `enqueued → delivered` | runtime |
@@ -423,6 +431,7 @@ verb is a flag set that surprises. A list-valued flag is comma-separated
 for a list (`mpm handoff write --tag a,b,c`).
 
 ```
+mpm assignment create-project    --id cpj-<16 lowercase hex>
 mpm assignment create-root       --project-id --title --objective --recipient
                                  --idempotency-key
                                  --permitted-operation read,write
@@ -464,8 +473,12 @@ mpm assignment note               --id --note
 
 `--json` is accepted by every verb and emits the service's own projection.
 
-`create-root` and `record-approval` are **operator verbs**: they are not in
-the registry, so no MCP action and no `mpm call` action reaches them.
+`create-project`, `create-root` and `record-approval` are **operator
+verbs**: they are not in the registry, so no MCP action and no `mpm call`
+action reaches them. `create-project` accepts the identity the project
+model defines (`cpj-` and 16 lowercase hexadecimal characters); a repeated
+request returns the existing live row with `created: false`, and a
+withdrawn identity is refused.
 
 **`--payload` CARRIES THE REVIEWER'S TARGET.** The reviewer's target is
 fixed by the delegation that creates it, and that delegation is the only
@@ -488,8 +501,10 @@ ones an agent may safely perform:
 `refuse`, `claim`, `renew`, `start`, `complete`, `delegate`, `cancel`,
 `note`, `record-review`, `handoff` — **seventeen**.
 
-**`create-root` and `record-approval` are absent.** A test enumerates the
-registry and fails if any action can create a root or record an approval.
+**`create-project`, `create-root` and `record-approval` are absent.** A
+test enumerates the registry and fails if any action can create a project,
+create a root or record an approval — under any action name or payload
+shape.
 
 ---
 
@@ -1066,7 +1081,7 @@ harness's *printed* count against the same figure.
 
 **THE MATRICES ARE THIRTY-EIGHT AND FOUR ENTRIES** (§5.19).
 
-**THE FOUR SUITES HOLD SEVENTY-TWO TEST FUNCTIONS**, and that figure is
+**THE FOUR SUITES HOLD SEVENTY-FIVE TEST FUNCTIONS**, and that figure is
 computed from the tree rather than copied into it: the Go pin counts the
 test functions in the four suites and requires the count to be the
 published one, so a suite that lost a test cannot leave the number
@@ -1455,7 +1470,7 @@ in a scratch copy so the operator's workflow is never touched. The
 pristine tree passes in both.
 
 **THE COUNTS MOVE WITH THE FIXES.** The four suites now hold
-**seventy-two** test functions (§5.14's figure, computed from the tree),
+**seventy-five** test functions (the §5.14 figure, computed from the tree),
 the harness publishes **sixteen** controls, its self-test runs
 **eighty-two** checks, and the two matrices are **thirty-eight** and
 **four** entries.
@@ -1642,7 +1657,7 @@ baseline of **36 tests** with **0 skipped**, **14/14** load-bearing
 controls failing exactly what they declared, **2** defence in depth,
 exit 0. The self-test is still **eighty-two** checks, the matrices are
 still **thirty-eight** and **four**, and the four suites now hold
-**seventy-two** test functions — the three new pins are the difference.
+**seventy-five** test functions — the three new pins are the difference.
 
 **THE CLASS SO FAR.** Seventeen rounds, and the findings have one
 shape: **a claim the harness carries that nothing checked**. The first

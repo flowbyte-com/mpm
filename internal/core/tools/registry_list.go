@@ -1039,9 +1039,9 @@ Do not use when: you just want to store a fact or insight (mpm_memory save).`,
 		Name: "mpm_assignment",
 		Description: `Durable multi-agent assignment coordination: work addressed to an agent, with leases, a ledger and an operator gate.
 Use when: you have been handed work (action=inbox to list what is addressed to you); you are taking work (action=acknowledge, then action=accept to commit to it); you are holding work (action=claim takes a fenced lease, action=renew extends it, action=start, action=complete); you are splitting work (action=delegate creates a bounded child inside the root's budgets); you are reviewing someone else's work (action=record-review); or you are withdrawing (action=cancel, action=refuse).
-Do not use when: you want to create the top-level work order (an operator creates the root — no agent action can); you want to approve something (the operator's gate is reached by action=handoff and only the operator can approve it); you want general notes (use mpm_memory).
+Do not use when: you want to create a project or the top-level work order (an operator creates both — no agent action can); you want to approve something (the operator's gate is reached by action=handoff and only the operator can approve it); you want general notes (use mpm_memory).
 Delivery is at-least-once, never exactly-once: re-read your inbox, and every action is idempotent in effect because the state machine refuses a transition that is not legal from the current state.
-Authority boundary: creating a root and recording an operator approval are ABSENT from this tool — not refused by a flag, not present at all. A confirmation field is not a credential.`,
+Authority boundary: creating a project, creating a root and recording an operator approval are ABSENT from this tool — not refused by a flag, not present at all. A confirmation field is not a credential.`,
 		Schema: json.RawMessage(`{
 			"type": "object",
 			"properties": {

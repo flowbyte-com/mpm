@@ -14,7 +14,8 @@
 // `capture-review-evidence` writes the reviewed revision and the findings
 // digest. An agent-facing action for that would let an implementer
 // manufacture the record its own work is judged by — the same rule that
-// keeps `create-root` and `record-approval` off the registry.
+// keeps `create-project`, `create-root` and `record-approval` off the
+// registry.
 package main
 
 import (
@@ -49,9 +50,6 @@ const (
 	// Where the MPM OpenCode plugin lives. The REVIEWER's `sandbox_exec`
 	// comes from it, so a review cannot start without it.
 	envOpenCodePlugin = dispatch.EnvOpenCodePlugin
-	// The fallback credential source. It is the operator's own provider
-	// key, and it stays in this process.
-	envDeepSeekKey = dispatch.EnvFallbackProviderKey
 )
 
 const defaultSidecarUpstream = "https://api.deepseek.com"
@@ -76,13 +74,10 @@ func assignmentVerbExecute(store *assignment.Store, f *assignmentFlags) (interfa
 	// disk, never placed in argv, and never passed into the namespace.
 	key := os.Getenv(envSidecarKey)
 	if key == "" {
-		key = os.Getenv(envDeepSeekKey)
-	}
-	if key == "" {
 		return nil, fmt.Errorf(
-			"no sidecar credential: set %s (or %s). The worker cannot be given a "+
+			"no sidecar credential: set %s. The worker cannot be given a "+
 				"provider key, so inference runs through the sidecar, and the sidecar "+
-				"needs one.", envSidecarKey, envDeepSeekKey)
+				"needs one.", envSidecarKey)
 	}
 	upstream := os.Getenv(envSidecarUpstream)
 	if upstream == "" {

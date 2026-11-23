@@ -259,6 +259,17 @@ func TestTheRealFactoryRefusesAMissingCredential(t *testing.T) {
 	if !strings.Contains(err.Error(), "credential") {
 		t.Errorf("the refusal does not name the credential: %v", err)
 	}
+	// THE GENERAL PROVIDER KEY IS NOT A FALLBACK. A dispatcher that
+	// picked it up would be running on a credential the operator did not
+	// prepare for this boundary.
+	t.Setenv("DEEPSEEK_API_KEY", "a-provider-key-that-must-not-be-used")
+	_, err = NewOpenCodeFactory(testConfig(t))
+	if err == nil {
+		t.Fatal("the factory accepted the general provider key as a fallback")
+	}
+	if !strings.Contains(err.Error(), "MPM_OPENCODE_SIDECAR_KEY") {
+		t.Errorf("the fallback refusal does not name the sidecar key: %v", err)
+	}
 }
 
 // TestTheRealFactoryRefusesAWorkerWithNoWorkspace proves the

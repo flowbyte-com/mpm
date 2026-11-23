@@ -16,11 +16,14 @@
 package dispatch
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/flowbyte-com/mpm-core/assignment"
 )
 
 // TestAMissingConfigurationFileMeansDisabled proves the safe default.
@@ -110,6 +113,7 @@ func TestTheDocumentedConfigurationIsUsable(t *testing.T) {
   "drain_timeout_seconds": 120,
   "drain_poll_interval_seconds": 5,
   "workspace_root": "/var/lib/mpm/workspaces",
+  "repository_path": "/srv/mpm-repo",
   "worker_agent": "mpm-worker",
   "reviewer_agent": "mpm-reviewer",
   "review_repo_path": "/srv/repo",
@@ -134,6 +138,50 @@ func TestTheDocumentedConfigurationIsUsable(t *testing.T) {
 	}
 }
 
+// TestTheConfiguredPathsMustNotContainOneAnother proves equality is
+// containment too.
+func TestTheConfiguredPathsMustNotContainOneAnother(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.Concurrency = 1
+	cfg.LeaseSeconds = 900
+	cfg.RuntimeTimeoutSeconds = 600
+	cfg.LeaseMarginSeconds = 300
+	cfg.CandidateLimit = 10
+	cfg.WorkspaceRoot = "/srv/work"
+	cfg.RepositoryPath = "/srv/work"
+	cfg.ReviewRepoPath = "/srv/repo"
+	if err := cfg.Validate(); err == nil {
+		t.Error("a workspace root equal to the repository was accepted")
+	}
+	cfg.RepositoryPath = "/srv/work/repo"
+	if err := cfg.Validate(); err == nil {
+		t.Error("a repository inside the workspace root was accepted")
+	}
+}
+
+// TestTheRepositoryMustNotBeInsideARuntimeDir proves the config refuses
+// a repository the worker's namespace would bind.
+func TestTheRepositoryMustNotBeInsideARuntimeDir(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.Concurrency = 1
+	cfg.LeaseSeconds = 900
+	cfg.RuntimeTimeoutSeconds = 600
+	cfg.LeaseMarginSeconds = 300
+	cfg.CandidateLimit = 10
+	cfg.WorkspaceRoot = "/srv/work"
+	cfg.RepositoryPath = "/usr/local/src/repo"
+	cfg.ReviewRepoPath = "/srv/repo"
+	if err := cfg.Validate(); err == nil {
+		t.Error("a repository inside /usr/local was accepted")
+	}
+	cfg.RepositoryPath = "/usr/src/repo"
+	if err := cfg.Validate(); err == nil {
+		t.Error("a repository inside /usr was accepted")
+	}
+}
+
 // TestTheLeaseMustCoverTheRuntimeWindow proves the refusal that keeps a
 // launch recordable.
 //
@@ -148,6 +196,7 @@ func TestTheLeaseMustCoverTheRuntimeWindow(t *testing.T) {
 	cfg.LeaseMarginSeconds = 300
 	cfg.CandidateLimit = 10
 	cfg.WorkspaceRoot = "/tmp/workspaces"
+	cfg.RepositoryPath = "/srv/mpm-repo"
 	cfg.ReviewRepoPath = "/srv/repo"
 
 	err := cfg.Validate()
@@ -180,6 +229,7 @@ func TestTheReviewerMayNotBeTheWorker(t *testing.T) {
 	cfg.LeaseMarginSeconds = 300
 	cfg.CandidateLimit = 10
 	cfg.WorkspaceRoot = "/tmp/workspaces"
+	cfg.RepositoryPath = "/srv/mpm-repo"
 	cfg.ReviewRepoPath = "/srv/repo"
 	cfg.WorkerAgent = "mpm-worker"
 	cfg.ReviewerAgent = "mpm-worker"
@@ -211,6 +261,7 @@ func TestAnUnpinnedWorkerAgentIsRefused(t *testing.T) {
 	cfg.LeaseMarginSeconds = 300
 	cfg.CandidateLimit = 10
 	cfg.WorkspaceRoot = "/tmp/workspaces"
+	cfg.RepositoryPath = "/srv/mpm-repo"
 	cfg.ReviewRepoPath = "/srv/repo"
 	cfg.WorkerAgent = "some-other-agent"
 
@@ -239,6 +290,7 @@ func TestARelativePathIsRefused(t *testing.T) {
 	cfg.LeaseMarginSeconds = 300
 	cfg.CandidateLimit = 10
 	cfg.WorkspaceRoot = "relative/workspaces"
+	cfg.RepositoryPath = "/srv/mpm-repo"
 	cfg.ReviewRepoPath = "/srv/repo"
 
 	err := cfg.Validate()
@@ -250,6 +302,7 @@ func TestARelativePathIsRefused(t *testing.T) {
 	}
 
 	cfg.WorkspaceRoot = "/srv/workspaces"
+	cfg.RepositoryPath = "/srv/mpm-repo"
 	cfg.ReviewRepoPath = "relative/repo"
 	err = cfg.Validate()
 	if err == nil {
@@ -285,5 +338,35 @@ func TestTheConfigurationIsAPlainJSONObject(t *testing.T) {
 		if _, ok := decoded[key]; !ok {
 			t.Errorf("the configuration has no %q key: %s", key, raw)
 		}
+	}
+}
+
+// TestANewEngineRefusesAnUnusableRepositoryBeforeAnyClaim proves the
+// repository is checked before an engine exists.
+//
+// A bad repository discovered after the first claim would leave a live
+// lease and no attempt, so the dispatch-attempt cap could never bound
+// the retry.
+func TestANewEngineRefusesAnUnusableRepositoryBeforeAnyClaim(t *testing.T) {
+	store, _ := testStore(t)
+	factory := func(context.Context, *assignment.Assignment, string) (
+		assignment.Runtime, assignment.ReviewRuntime, error) {
+		return newFakeRuntime(), nil, nil
+	}
+
+	cfg := testConfig(t)
+	cfg.RepositoryPath = t.TempDir() // a directory, but not a Git repository
+	if _, err := NewEngine(store, cfg, factory); err == nil {
+		t.Error("an engine was built over a directory that is not a Git repository")
+	}
+
+	cfg.RepositoryPath = filepath.Join(t.TempDir(), "absent")
+	if _, err := NewEngine(store, cfg, factory); err == nil {
+		t.Error("an engine was built over a repository path that does not exist")
+	}
+
+	cfg.RepositoryPath, _ = testRepository(t)
+	if _, err := NewEngine(store, cfg, factory); err != nil {
+		t.Errorf("a usable repository was refused: %v", err)
 	}
 }

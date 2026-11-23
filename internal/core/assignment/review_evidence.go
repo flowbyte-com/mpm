@@ -32,8 +32,9 @@ import (
 //
 // WHY IT TAKES NO `OperatorAuthority`
 //
-// The operator's two verbs are the root's creation and the approval, and
-// both change what the OPERATOR authorises. Capturing a digest writes
+// The operator-only verbs are project creation, root creation and
+// approval recording, and all of them change what the OPERATOR
+// authorises. Capturing a digest writes
 // nothing about authorisation — it records what a runtime produced, as
 // observed by the host. It is fenced on the reviewer's own claim instead,
 // so only the holder of the review can attach evidence to it, and only
@@ -41,7 +42,7 @@ import (
 //
 // # WHY IT IS NOT IN THE TOOL REGISTRY
 //
-// Same rule as `create-root` and `record-approval`: an agent-facing action
+// Same rule as `create-project`, `create-root` and `record-approval`: an agent-facing action
 // named "capture evidence" would let an implementer manufacture the record
 // its own work is judged by. It is reachable only through the CLI verb
 // `mpm assignment capture-review-evidence`, which the adapter drives.

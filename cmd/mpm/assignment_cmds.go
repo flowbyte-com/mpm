@@ -8,12 +8,13 @@
 // is no second copy of the state machine, the fence, the delegation
 // bounds or the review's independence check.
 //
-// # TWO OPERATOR-ONLY VERBS
+// # THREE OPERATOR-ONLY VERBS
 //
+//	`mpm assignment create-project`   — creates a project identity
 //	`mpm assignment create-root`      — creates the top-level work order
 //	`mpm assignment record-approval`  — records an externally verified approval
 //
-// Neither verb is an MCP action and neither is reachable through
+// None is an MCP action and none is reachable through
 // `mpm call`. They are absent from the registry entirely, so no agent
 // dispatch path can reach them: there is no action to dispatch TO.
 //
@@ -169,6 +170,8 @@ func handleAssignment(args []string) int {
 		return assignmentVerb(rest, assignmentVerbRecordReview)
 	case "handoff":
 		return assignmentVerb(rest, assignmentVerbHandoff)
+	case "create-project":
+		return assignmentVerb(rest, assignmentVerbCreateProject)
 	case "create-root":
 		return assignmentVerb(rest, assignmentVerbCreateRoot)
 	case "record-approval":
@@ -190,7 +193,7 @@ func handleAssignment(args []string) int {
 		usererror.Error("mpm assignment: unknown verb %q\n"+
 			"available verbs: inbox, show, history, tree, deliver, acknowledge, accept,\n"+
 			"  refuse, claim, renew, start, complete, delegate, cancel, note,\n"+
-			"  record-review, handoff, create-root, record-approval,\n"+
+			"  record-review, handoff, create-project, create-root, record-approval,\n"+
 			"  execute, execute-review, capture-review-evidence,\n"+
 			"  dispatch, dispatch-status", sub)
 		return 1
@@ -402,6 +405,16 @@ func assignmentParsePayload(raw string) (map[string]interface{}, error) {
 	return out, nil
 }
 
+// projectCreation is the create-project result.
+//
+// The project is embedded so the JSON shape is the project's own fields
+// plus `created` — a machine consumer reads the same row the service
+// returned, and the flag says whether this call wrote it.
+type projectCreation struct {
+	*assignment.Project
+	Created bool `json:"created"`
+}
+
 // ── the verb runner ───────────────────────────────────────────────────────
 
 // assignmentVerbFn is one verb.
@@ -443,6 +456,15 @@ func assignmentRender(out interface{}, asJSON bool) int {
 		return 0
 	}
 	switch v := out.(type) {
+	case *projectCreation:
+		state := "already exists"
+		if v.Created {
+			state = "created"
+		}
+		fmt.Printf("%s  %s\n", v.ID, state)
+		if v.CreatedBy != "" {
+			fmt.Printf("  created_by : %s\n", v.CreatedBy)
+		}
 	case *assignment.Assignment:
 		fmt.Printf("%s  %s\n", v.ID, v.State)
 		fmt.Printf("  title     : %s\n", v.Title)
@@ -638,6 +660,20 @@ func assignmentVerbHandoff(store *assignment.Store, f *assignmentFlags) (interfa
 	})
 }
 
+// assignmentVerbCreateProject is the OPERATOR's verb.
+//
+// It is here and not in the registry: no agent-facing action reaches it,
+// so no dispatch path can create a project either.
+func assignmentVerbCreateProject(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
+	project, created, err := store.CreateProject(
+		assignment.NewLocalOperatorAuthority(assignmentOperatorName(f)),
+		assignment.ProjectParams{ID: f.id})
+	if err != nil {
+		return nil, err
+	}
+	return &projectCreation{Project: project, Created: created}, nil
+}
+
 // assignmentVerbCreateRoot is the OPERATOR's verb.
 //
 // It is here and not in the registry: the agent-facing surface has no
@@ -768,6 +804,7 @@ EXECUTION (PR 3, explicit invocation only)
                     HOST captured
 
 OPERATOR ONLY
+  create-project    create a project identity (cpj- + 16 lowercase hex)
   create-root       create the top-level work order
   record-approval   record an externally verified approval
 

@@ -15,8 +15,9 @@
 // operator's files and run the operator's binaries. Every attribution
 // field this package writes — actor_address, actor_kind — records WHO
 // WROTE A ROW, not who that party was. Nothing here treats attribution as
-// authentication, and the two operator-only operations are kept out of the
-// agent-facing registry structurally rather than by a flag.
+// authentication, and the operator-only operations (project creation, root
+// creation and approval recording) are kept out of the agent-facing
+// registry structurally rather than by a flag.
 //
 // See docs/dev/continuity-001-assignment-api.md for the design of record.
 package assignment
@@ -440,7 +441,7 @@ const (
 
 // ── The operator authority ────────────────────────────────────────────────
 
-// OperatorAuthority is the explicit trusted-call boundary for the two
+// OperatorAuthority is the explicit trusted-call boundary for the
 // operator-only operations.
 //
 // The interface has an UNEXPORTED method, so no type outside this package
@@ -453,8 +454,8 @@ const (
 // operator's own account can run the operator's binaries, so an authority
 // value cannot distinguish "the operator asked for this" from "the agent
 // decided this". What it DOES do is make the operator path explicit in
-// the call, and — because the two operator-only operations are absent from
-// the tool registry — keep the agent-facing surface structurally unable to
+// the call, and — because the operator-only operations are absent from the
+// tool registry — keep the agent-facing surface structurally unable to
 // choose it.
 //
 // See docs/dev/continuity-001-assignment-api.md §2.

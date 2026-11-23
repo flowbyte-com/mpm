@@ -84,6 +84,7 @@ There is no environment variable that turns it on by accident, and
   "drain_timeout_seconds": 120,
   "drain_poll_interval_seconds": 5,
   "workspace_root": "/var/lib/mpm/workspaces",
+  "repository_path": "/srv/mpm-repo",
   "worker_agent": "mpm-worker",
   "reviewer_agent": "mpm-reviewer",
   "reviewer_model": "minimax-coding-plan/MiniMax-M3.1-Flash",
@@ -112,6 +113,34 @@ to observe the outcome and write it down.
 does not choose a workspace it was not told about, and the worktree is
 the assignment's own directory inside that root — so a retry finds the
 same tree.
+
+`repository_path` is the SOURCE repository the host creates each
+worktree from. It must be a non-bare Git checkout; it must not be the
+same as, contain, or sit inside `workspace_root`; it must not be under
+`/usr` or `/usr/local` (which the worker's namespace binds); and it is
+validated when the engine is built, **before** the first claim. Both
+paths are resolved, so a symlinked root that resolves equal to or inside
+the repository is refused before the claim too. The host creates the
+worktree
+with `git worktree add -b mpm/assignment/<id> <root>/<id> <base_sha>`,
+and it verifies an existing one before reuse: the path is a real
+directory, a direct child of the resolved root; `.git` is a file whose
+target resolves inside the repository's `.git/worktrees/` and whose
+metadata `gitdir` backlink points at this workspace; the common Git
+directory is the configured repository's; the branch is the assignment's;
+and HEAD is the base or a descendant of it. A directory that is not a
+linked worktree — a bare directory, a full clone, a symlink, a worktree
+of another repository, another branch, a moved worktree (even with the
+same assignment id), metadata outside `.git/worktrees/`, or a root equal
+to or containing the repository — is REFUSED, never adopted. The worktree's
+`.git` is a FILE pointing into the source repository's
+`.git/worktrees/`. The configuration refuses a repository under `/usr`
+or `/usr/local`; the operator must also keep the source checkout outside
+the dispatch sandbox tree (`$MPM/opencode/runs/<assignment>`), whose
+subdirectories are bound read-write. Given those placements, that path is
+not mounted in the worker's namespace, so the worker can read the
+pointer's text but cannot reach or modify the metadata. The worker edits
+the checked-out files; the HOST stages and commits.
 
 `review_repo_path` is the repository a reviewer examines. It must be a
 clean tree, because the review path pins an exact revision.
@@ -526,6 +555,13 @@ dispatcher.
   work the operator authorised, not on measured spend.
 - **PR 3's O2 stands**: the authorship guard's call site is untested,
   because the `opencode` package has no mock harness.
-- **The dispatcher's workspace is a directory, not a worktree.** It does
-  not create a git worktree; it creates the assignment's own directory
-  under the configured root and hands that path to PR 3's adapter.
+- **The dispatcher's workspace is a host-created Git worktree.** The
+  host creates it from the assignment's exact base SHA, on a branch
+  derived from the assignment ID, and verifies it before recovery reuse.
+  Recovery verifies an existing worktree and **never creates one**: an
+  outstanding attempt whose worktree is missing is reported as
+  `recovery_required`. The WORKER remains file-edit-only: it cannot run
+  `git`, a shell or a test command, and the `.git` pointer's target is
+  outside its namespace. Tests and commits are host-controlled; a failing
+  test can be handed back to the worker only as a recorded, bounded note,
+  never as a general execution capability.

@@ -91,6 +91,19 @@ const (
 // root is discovered or bound.
 var runtimeDirs = []string{"/usr", "/usr/local"}
 
+// RuntimeDirs returns the host directories the worker namespace binds
+// read-only.
+//
+// They are EXPORTED so a caller that must keep a repository out of the
+// worker's namespace can ask the containment itself instead of
+// duplicating the list. A second copy of this list would be a copy that
+// drifts.
+func RuntimeDirs() []string {
+	out := make([]string, len(runtimeDirs))
+	copy(out, runtimeDirs)
+	return out
+}
+
 // mergedSymlinks reconstruct the traditional top-level names on hosts where
 // /bin, /lib and friends are symlinks into /usr.
 var mergedSymlinks = map[string]string{

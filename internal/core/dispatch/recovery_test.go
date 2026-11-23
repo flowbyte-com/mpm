@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -210,6 +211,13 @@ func TestACrashAfterTheIntentIsInspectedAndThenRunsAgain(t *testing.T) {
 
 	cfg := testConfig(t)
 	engine, fake := clockEngine(t, store, clock, cfg)
+	// THE LAUNCH CREATED THE WORKTREE. Seed it before the simulated
+	// crash: recovery verifies an existing worktree and never creates
+	// one.
+	if _, err := engine.workspaceFor(child); err != nil {
+		t.Fatalf("record the worktree the launch created: %v", err)
+	}
+
 	fake.launchState = okState("mpm-worker", "succeeded")
 
 	// THE FIRST RUN: THE LEASE IS STILL LIVE.
@@ -253,20 +261,20 @@ func TestACrashAfterTheIntentIsInspectedAndThenRunsAgain(t *testing.T) {
 	}
 }
 
-// TestTheRecoveryPassBuildsTheWorkspaceBeforeItInspects proves the
-// inspection path asks the factory for a runtime it can actually build.
+// TestTheRecoveryPassRefusesAMissingWorktree proves the recovery pass
+// verifies the recorded worktree and never creates one.
 //
-// The REAL factory refuses a worker runtime with no authorised
-// workspace, because a runtime with no workspace is a runtime that could
-// run anywhere. So the recovery pass has to build the assignment's
-// workspace BEFORE it inspects — exactly as the dispatch path does.
+// An outstanding attempt implies a launch. A missing worktree is a fact
+// for a human, not a directory for recovery to conjure: creating one
+// while a lease or an older session may still be live would be a second
+// writer's workspace.
 //
 // The fake factory here refuses an empty workspace the way the real one
 // does. Without the fix, every inspection of an implementer's session
 // fails with "runtime unavailable", and the whole recovery pass turns
 // into a refusal: no blocker is ever detected, and no note ever reaches
 // the ledger.
-func TestTheRecoveryPassBuildsTheWorkspaceBeforeItInspects(t *testing.T) {
+func TestTheRecoveryPassRefusesAMissingWorktree(t *testing.T) {
 	store, clock, projectID := clockStore(t)
 	root := dispatchRoot(t, store, projectID)
 	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:rec:workspace")
@@ -278,9 +286,9 @@ func TestTheRecoveryPassBuildsTheWorkspaceBeforeItInspects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
+	// THE ATTEMPT SAYS A LAUNCH HAPPENED; THE WORKTREE IS GONE.
 	seedAttempt(t, store, child, claimed.ClaimEpoch, "ses_workspace", assignment.SessionRunning)
 
-	// THE STRICT FACTORY: the real one's refusal, reproduced.
 	var seen []string
 	strict := newFakeRuntime()
 	strict.states["ses_workspace"] = &oc.SessionState{ID: "ses_workspace", Outcome: ""}
@@ -301,23 +309,28 @@ func TestTheRecoveryPassBuildsTheWorkspaceBeforeItInspects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	// THE FACTORY WAS ASKED FOR A WORKSPACE, AND GOT ONE.
-	sawWorkspace := false
-	for _, w := range seen {
-		if w != "" {
-			sawWorkspace = true
-		}
+	// RECOVERY DID NOT CREATE A WORKSPACE. An outstanding attempt implies
+	// a launch, and a missing worktree is a fact for a human; creating
+	// one while a lease or an older session may still be live would be a
+	// second writer's workspace.
+	if len(seen) != 0 {
+		t.Errorf("the recovery pass provisioned a workspace for a missing worktree: %v", seen)
 	}
-	if !sawWorkspace {
-		t.Fatalf("the recovery pass never built a workspace: %v", seen)
+	// AND NOTHING WAS CREATED. The factory not being called is not the
+	// same fact as the path staying absent: a call that created the
+	// worktree and then returned an error would pass the check above.
+	if _, statErr := os.Lstat(filepath.Join(testConfigRootFromEngine(engine), child.ID)); !os.IsNotExist(statErr) {
+		t.Errorf("the recovery pass created the missing worktree (stat: %v)", statErr)
 	}
-	// AND THE BLOCKER WAS DETECTED — not turned into "runtime unavailable".
 	outcome, ok := outcomeFor(report, child.ID)
 	if !ok {
 		t.Fatalf("the report has no outcome: %+v", report.Outcomes)
 	}
-	if outcome.Reason != ReasonSessionStillRunning && outcome.Reason != ReasonRecoveryRequired {
-		t.Errorf("the outcome is %q, want the running session to block", outcome.Reason)
+	if outcome.Reason != ReasonRecoveryRequired {
+		t.Errorf("the outcome is %q, want %q", outcome.Reason, ReasonRecoveryRequired)
+	}
+	if !strings.Contains(outcome.Detail, "worktree") {
+		t.Errorf("the detail does not name the missing worktree: %s", outcome.Detail)
 	}
 }
 
@@ -344,6 +357,12 @@ func TestACrashDuringTheExecutionIsRefusedAndVisible(t *testing.T) {
 
 	cfg := testConfig(t)
 	engine, fake := clockEngine(t, store, clock, cfg)
+	// THE LAUNCH CREATED THE WORKTREE. Seed it so the test exercises
+	// the session/drain path it names, not the missing-worktree refusal.
+	if _, err := engine.workspaceFor(child); err != nil {
+		t.Fatalf("record the worktree the launch created: %v", err)
+	}
+
 	// The session exists and has NOT reported an outcome: it is working.
 	fake.states["ses_running"] = &oc.SessionState{
 		ID: "ses_running", Outcome: "", Agent: "mpm-worker",
@@ -365,6 +384,15 @@ func TestACrashDuringTheExecutionIsRefusedAndVisible(t *testing.T) {
 	}
 	if outcome.Reason != ReasonSessionStillRunning && outcome.Reason != ReasonRecoveryRequired {
 		t.Errorf("the outcome is %q, want the session to block", outcome.Reason)
+	}
+	// THE REASON IS THE SESSION, NOT A MISSING WORKTREE. Both outcomes
+	// share `recovery_required`; the detail is what separates them.
+	wantDetail := "still running"
+	if outcome.Reason == ReasonSessionStillRunning {
+		wantDetail = "has not reported an outcome"
+	}
+	if !strings.Contains(outcome.Detail, wantDetail) {
+		t.Errorf("the detail is %q, want the running session named", outcome.Detail)
 	}
 	// THE OPERATOR-VISIBLE RECORD.
 	events, err := store.History(child.ID)
@@ -405,6 +433,13 @@ func TestACrashAfterTheRuntimeEndedIsReconciled(t *testing.T) {
 
 	cfg := testConfig(t)
 	engine, fake := clockEngine(t, store, clock, cfg)
+	// THE LAUNCH CREATED THE WORKTREE. Seed it before the simulated
+	// crash: recovery verifies an existing worktree and never creates
+	// one.
+	if _, err := engine.workspaceFor(child); err != nil {
+		t.Fatalf("record the worktree the launch created: %v", err)
+	}
+
 	// The session FINISHED, and the adapter never saw it.
 	fake.states["ses_ended"] = &oc.SessionState{
 		ID: "ses_ended", Outcome: "succeeded", Agent: "mpm-worker",
@@ -463,6 +498,13 @@ func TestARecoveredFailureIsCounted(t *testing.T) {
 
 	cfg := testConfig(t)
 	engine, fake := clockEngine(t, store, clock, cfg)
+	// THE LAUNCH CREATED THE WORKTREE. Seed it before the simulated
+	// crash: recovery verifies an existing worktree and never creates
+	// one.
+	if _, err := engine.workspaceFor(child); err != nil {
+		t.Fatalf("record the worktree the launch created: %v", err)
+	}
+
 	// The session FAILED, and the adapter never saw it.
 	fake.states["ses_failed"] = &oc.SessionState{
 		ID: "ses_failed", Outcome: "failed", Agent: "mpm-worker",
@@ -534,6 +576,13 @@ func TestAnAssignmentWithTwoOutstandingAttemptsIsReportedOnce(t *testing.T) {
 
 	cfg := testConfig(t)
 	engine, fake := clockEngine(t, store, clock, cfg)
+	// THE LAUNCH CREATED THE WORKTREE. Seed it before the simulated
+	// crash: recovery verifies an existing worktree and never creates
+	// one.
+	if _, err := engine.workspaceFor(child); err != nil {
+		t.Fatalf("record the worktree the launch created: %v", err)
+	}
+
 	// The OLD session is still working; the NEW one reported an outcome.
 	fake.states["ses_older"] = &oc.SessionState{ID: "ses_older", Outcome: "", Agent: "mpm-worker"}
 	fake.states["ses_newer"] = &oc.SessionState{
@@ -703,6 +752,12 @@ func TestTheRecoveryPassNeverLaunches(t *testing.T) {
 	cfg.DrainTimeoutSeconds = 5
 	cfg.DrainPollIntervalSeconds = 1
 	engine, fake := clockEngine(t, store, clock, cfg)
+	// THE LAUNCH CREATED THE WORKTREE. Seed it so the test exercises
+	// the session/drain path it names, not the missing-worktree refusal.
+	if _, err := engine.workspaceFor(child); err != nil {
+		t.Fatalf("record the worktree the launch created: %v", err)
+	}
+
 	// The older session reports an outcome only AFTER the first
 	// inspection — which is what the drain waits for.
 	seen := 0
@@ -750,9 +805,13 @@ func TestTheRecoveryPassNeverLaunches(t *testing.T) {
 	if !ok {
 		t.Fatalf("the report has no outcome: %+v", report.Outcomes)
 	}
-	if outcome.Reason != ReasonFailed && outcome.Reason != ReasonSessionStillRunning &&
-		outcome.Reason != ReasonRecoveryRequired {
+	if outcome.Reason != ReasonFailed && outcome.Reason != ReasonSessionStillRunning {
 		t.Errorf("the outcome is %q, want the observed outcome", outcome.Reason)
+	}
+	// THE DRAIN RAN. The outer pass inspects once; a second inspection
+	// can only come from the drain.
+	if seen < 2 {
+		t.Errorf("the older session was inspected %d time(s); the drain did not run", seen)
 	}
 }
 
@@ -787,6 +846,12 @@ func TestACancelledRunWritesNoNoteInAnyBranch(t *testing.T) {
 			"branch that has none", cfg.DrainTimeoutSeconds)
 	}
 	engine, fake := clockEngine(t, store, clock, cfg)
+	// THE LAUNCH CREATED THE WORKTREE. Seed it before the simulated
+	// crash: recovery verifies an existing worktree and never creates
+	// one.
+	if _, err := engine.workspaceFor(child); err != nil {
+		t.Fatalf("record the worktree the launch created: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// The operator stops the run at the moment the session is inspected.
@@ -843,6 +908,12 @@ func TestARunningOlderEpochSessionBlocksTheWorkspace(t *testing.T) {
 
 	cfg := testConfig(t)
 	engine, fake := clockEngine(t, store, clock, cfg)
+	// THE LAUNCH CREATED THE WORKTREE. Seed it so the test exercises
+	// the session/drain path it names, not the missing-worktree refusal.
+	if _, err := engine.workspaceFor(child); err != nil {
+		t.Fatalf("record the worktree the launch created: %v", err)
+	}
+
 	// The OLD session is still working.
 	fake.states["ses_old"] = &oc.SessionState{ID: "ses_old", Outcome: "", Agent: "mpm-worker"}
 	fake.launchState = okState("mpm-worker", "succeeded")
@@ -860,6 +931,16 @@ func TestARunningOlderEpochSessionBlocksTheWorkspace(t *testing.T) {
 	for _, o := range report.Outcomes {
 		if o.AssignmentID == child.ID &&
 			(o.Reason == ReasonSessionStillRunning || o.Reason == ReasonRecoveryRequired) {
+			// THE REASON IS THE SESSION, NOT A MISSING WORKTREE. Both
+			// outcomes share `recovery_required`; the detail is what
+			// separates them, and the two reasons have different text.
+			wantDetail := "still running"
+			if o.Reason == ReasonSessionStillRunning {
+				wantDetail = "has not reported an outcome"
+			}
+			if !strings.Contains(o.Detail, wantDetail) {
+				t.Errorf("the outcome %q does not name the running session: %q", o.Reason, o.Detail)
+			}
 			sawBlock = true
 		}
 	}
@@ -900,6 +981,13 @@ func TestAnOlderEpochAttemptWhoseSessionIsGoneDoesNotBlock(t *testing.T) {
 
 	cfg := testConfig(t)
 	engine, fake := clockEngine(t, store, clock, cfg)
+	// THE LAUNCH CREATED THE WORKTREE. Seed it before the simulated
+	// crash: recovery verifies an existing worktree and never creates
+	// one.
+	if _, err := engine.workspaceFor(child); err != nil {
+		t.Fatalf("record the worktree the launch created: %v", err)
+	}
+
 	// The runtime has NO record of the old session: it is gone.
 	fake.launchState = okState("mpm-worker", "succeeded")
 
@@ -947,6 +1035,12 @@ func TestAnUnreachableRuntimeBlocksTheOlderEpochAttempt(t *testing.T) {
 
 	cfg := testConfig(t)
 	engine, fake := clockEngine(t, store, clock, cfg)
+	// THE LAUNCH CREATED THE WORKTREE. Seed it so the test exercises
+	// the session/drain path it names, not the missing-worktree refusal.
+	if _, err := engine.workspaceFor(child); err != nil {
+		t.Fatalf("record the worktree the launch created: %v", err)
+	}
+
 	// The runtime cannot be asked.
 	fake.inspectErr = errors.New("the runtime is unreachable")
 	fake.launchState = okState("mpm-worker", "succeeded")
@@ -962,9 +1056,7 @@ func TestAnUnreachableRuntimeBlocksTheOlderEpochAttempt(t *testing.T) {
 	sawBlock := false
 	for _, o := range report.Outcomes {
 		if o.AssignmentID == child.ID &&
-			(o.Reason == ReasonRuntimeUnavailable ||
-				o.Reason == ReasonSessionStillRunning ||
-				o.Reason == ReasonRecoveryRequired) {
+			(o.Reason == ReasonRuntimeUnavailable) {
 			sawBlock = true
 		}
 	}
@@ -1064,4 +1156,9 @@ func TestTheDispatcherModifiesNothingOutsideTheAssignmentState(t *testing.T) {
 	if len(entries) != 1 {
 		t.Errorf("the workspace root holds %d entries, want 1", len(entries))
 	}
+}
+
+// testConfigRootFromEngine is the configured workspace root of an engine.
+func testConfigRootFromEngine(e *Engine) string {
+	return e.cfg.WorkspaceRoot
 }

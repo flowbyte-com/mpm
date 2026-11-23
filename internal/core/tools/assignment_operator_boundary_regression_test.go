@@ -8,17 +8,18 @@
 //   - the AGENT's side: deliver, acknowledge, accept, refuse, claim,
 //     renew, start, complete, delegate, cancel, note, record-review,
 //     handoff — plus the reads;
-//   - the OPERATOR's side: creating the ROOT assignment, and recording
-//     an OPERATOR APPROVAL.
+//   - the OPERATOR's side: creating a PROJECT identity, creating the
+//     ROOT assignment, and recording an OPERATOR APPROVAL.
 //
 // # The operator's side is a genuine capability boundary WITHIN THE
 // DISPATCH SURFACE
 //
-// A root is the work order that everything else inherits its budgets
-// from, and an approval is the operator's statement that something was
-// authorised. An agent that could reach either through the agent-facing
-// surface could:
+// A project is the identity every root must name; a root is the work
+// order that everything else inherits its budgets from; and an approval
+// is the operator's statement that something was authorised. An agent
+// that could reach any of them through the agent-facing surface could:
 //
+//   - invent a project identity to write into,
 //   - mint its own budget (a root with max_tasks = 1000), and
 //   - approve its own work.
 //
@@ -35,8 +36,8 @@
 //
 // What the boundary DOES guarantee is structural and checkable:
 //
-//   - no action of any registry tool creates a root or records an
-//     approval, under any payload shape;
+//   - no action of any registry tool creates a project, creates a root
+//     or records an approval, under any payload shape;
 //   - the operator's verbs are a DIFFERENT entry point, so there is no
 //     action to dispatch to; and
 //   - the service's own defence is an interface with an UNEXPORTED
@@ -51,9 +52,9 @@
 // The shred precedent refuses permanent deletion at the execution point,
 // because the operator path had to keep working for the operator. Here
 // the operator path is a DIFFERENT entry point — the dedicated
-// `mpm assignment create-root` and `mpm assignment record-approval`
-// verbs — so the agent-facing surface can simply NOT HAVE the
-// capability.
+// `mpm assignment create-project`, `mpm assignment create-root` and
+// `mpm assignment record-approval` verbs — so the agent-facing surface
+// can simply NOT HAVE the capability.
 //
 // "Absent" is a stronger property than "refused": there is no action to
 // dispatch to, no schema to advertise, and no payload field that could
@@ -61,11 +62,11 @@
 //
 // # The contract these tests enforce
 //
-//   - NO registry action can create a root.
+//   - NO registry action can create a project or a root.
 //   - NO registry action can record an approval.
-//   - NO payload field unlocks either of them — not `confirm`, not
+//   - NO payload field unlocks any of them — not `confirm`, not
 //     `operator`, not `authority`, not `force`, not `approve`.
-//   - The advertised action vocabulary names neither.
+//   - The advertised action vocabulary names none.
 //   - The agent-facing surface still does the work it is supposed to
 //     do, so the boundary is not enforced by removing the capability.
 //   - The operator's own path still works, so the capability is
@@ -83,9 +84,12 @@ import (
 	"github.com/flowbyte-com/mpm-core/assignment"
 )
 
-// operatorOnlyAssignmentActions are the two operations the agent-facing
-// surface must not be able to reach, under ANY action name.
+// operatorOnlyAssignmentActions are the operator-only operations the
+// agent-facing surface must not be able to reach, under ANY action name.
 var operatorOnlyAssignmentActions = []string{
+	"create-project",
+	"create_project",
+	"createproject",
 	"create-root",
 	"create_root",
 	"createroot",
@@ -193,10 +197,17 @@ func TestAssignment_NoRegistryActionRecordsAnApproval(t *testing.T) {
 // for this" from "the agent decided this", so no payload field may
 // unlock the operator-only operations.
 func TestAssignment_NoPayloadFieldUnlocksTheOperatorActions(t *testing.T) {
+	// THE VALID VOCABULARY, NOT THE FORBIDDEN NAMES. The point is that no
+	// payload field turns a VALID agent action into an operator one.
+	enum := schemaEnum(t, "mpm_assignment")
+	if len(enum) == 0 {
+		t.Fatal("mpm_assignment has no advertised actions")
+	}
 	for _, tc := range operatorOnlyAssignmentPayloads {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			for _, action := range operatorOnlyAssignmentActions {
+			dm := newTestDMForTools(t)
+			for _, action := range enum {
 				params := map[string]interface{}{
 					"project_id":           "cpj-test",
 					"title":                "a root an agent made for itself",
@@ -212,16 +223,21 @@ func TestAssignment_NoPayloadFieldUnlocksTheOperatorActions(t *testing.T) {
 				for k, v := range tc.extra {
 					params[k] = v
 				}
-				_, err := handleMpmAssignment(newTestDMForTools(t), mpminternal.ActiveContext{},
+				// The call may be legal for the action (for example
+				// `inbox` with no matching work). What it must never do
+				// is write a project, a root or an approval.
+				_, _ = handleMpmAssignment(dm, mpminternal.ActiveContext{},
 					map[string]interface{}{
 						"action": action,
 						"params": params,
 					})
-				if err == nil {
-					t.Errorf("the assignment tool accepted %q with %v; "+
-						"no payload field may unlock an operator-only operation",
-						action, tc.extra)
-				}
+			}
+			projects := tableCount(t, dm, `SELECT COUNT(*) FROM projects`)
+			roots := tableCount(t, dm, `SELECT COUNT(*) FROM agent_tasks WHERE depth = 0`)
+			tasks := tableCount(t, dm, `SELECT COUNT(*) FROM agent_tasks`)
+			if projects != 0 || roots != 0 || tasks != 0 {
+				t.Errorf("the payload %v unlocked an operator write: projects=%d roots=%d tasks=%d",
+					tc.extra, projects, roots, tasks)
 			}
 		})
 	}
@@ -506,5 +522,54 @@ func TestAssignment_TheToolSchemaIsValidJSON(t *testing.T) {
 	var decoded map[string]interface{}
 	if err := json.Unmarshal(tool.Schema, &decoded); err != nil {
 		t.Fatalf("the mpm_assignment schema is not valid JSON: %v", err)
+	}
+}
+
+// tableCount is one table's row count.
+func tableCount(t *testing.T, dm *mpminternal.DatabaseManager, query string) int {
+	t.Helper()
+	var n int
+	if err := dm.SQLDB().QueryRow(query).Scan(&n); err != nil {
+		t.Fatalf("count (%s): %v", query, err)
+	}
+	return n
+}
+
+// TestAssignment_NoRegistryActionCreatesAProject proves the project
+// boundary by name: no action of any registry tool can create a project,
+// and the advertised vocabulary names none.
+func TestAssignment_NoRegistryActionCreatesAProject(t *testing.T) {
+	names := []string{"create-project", "create_project", "createproject"}
+	for _, tool := range Registry {
+		tool := tool
+		t.Run(tool.Name, func(t *testing.T) {
+			dm := newTestDMForTools(t)
+			before := tableCount(t, dm, `SELECT COUNT(*) FROM projects`)
+			for _, action := range names {
+				_, err := tool.Handler(dm, mpminternal.ActiveContext{},
+					map[string]interface{}{
+						"action": action,
+						"params": map[string]interface{}{"id": "cpj-0011223344556677"},
+					})
+				if err == nil {
+					t.Errorf("the %s tool accepted %q; a project is operator-created only",
+						tool.Name, action)
+				}
+			}
+			if after := tableCount(t, dm, `SELECT COUNT(*) FROM projects`); after != before {
+				t.Errorf("the %s tool wrote %d project row(s) while refusing", tool.Name, after-before)
+			}
+		})
+	}
+	enum := schemaEnum(t, "mpm_assignment")
+	if enum == nil {
+		t.Fatal("mpm_assignment has no action enum; cannot verify the advertised vocabulary")
+	}
+	for _, action := range enum {
+		for _, forbidden := range names {
+			if action == forbidden {
+				t.Errorf("the advertised vocabulary offers the operator-only action %q", action)
+			}
+		}
 	}
 }

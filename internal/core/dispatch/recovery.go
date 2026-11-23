@@ -298,15 +298,16 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 // things: ABSENT is safe, UNREACHABLE is ambiguous, and RUNNING is a
 // blocker.
 //
-// # THE WORKSPACE IS BUILT HERE, NOT BY THE CALLER
+// # THE WORKSPACE IS VERIFIED HERE, NOT CREATED
 //
 // The real factory REFUSES a worker runtime with no authorised
 // workspace, because a runtime with no workspace is a runtime that could
-// run anywhere. So the inspection path builds the assignment's workspace
-// exactly as the dispatch path does — the same directory, from the same
-// configured root. An inspection that handed the factory an empty
-// workspace would fail on every implementer, which would silently turn
-// the whole recovery pass into "the runtime is unavailable".
+// run anywhere. So the inspection path needs the assignment's worktree —
+// but recovery does not create it: an outstanding attempt implies a
+// launch, and a missing worktree is a fact for a human. Creating one
+// while a lease or an older session may still be live would be a second
+// writer's workspace. The provisioner verifies the existing one and
+// refuses when it is gone.
 func (e *Engine) inspect(ctx context.Context, a *assignment.Assignment,
 	sessionID string) (*oc.SessionState, string, string) {
 
@@ -323,9 +324,14 @@ func (e *Engine) inspect(ctx context.Context, a *assignment.Assignment,
 	workspace := ""
 	if a.Role != assignment.RoleReviewer {
 		var werr error
-		workspace, werr = e.workspaceFor(a)
+		workspace, werr = e.workspaceForExisting(a)
 		if werr != nil {
-			return nil, ReasonRuntimeUnavailable, werr.Error()
+			// THE WORKTREE IS PART OF THE RECORD. A recorded session
+			// whose worktree is missing cannot be inspected safely: the
+			// space may have been moved, deleted, or never created by
+			// the process that recorded the attempt. That is a blocker
+			// for a human, not a transient runtime failure.
+			return nil, ReasonRecoveryRequired, werr.Error()
 		}
 	}
 	worker, reviewer, err := e.factory(ctx, a, workspace)
@@ -377,9 +383,9 @@ func (e *Engine) reconcile(ctx context.Context, a *assignment.Assignment,
 	workspace := ""
 	if a.Role != assignment.RoleReviewer {
 		var werr error
-		workspace, werr = e.workspaceFor(a)
+		workspace, werr = e.workspaceForExisting(a)
 		if werr != nil {
-			outcome.Reason = ReasonRuntimeUnavailable
+			outcome.Reason = ReasonRecoveryRequired
 			outcome.Detail = werr.Error()
 			return outcome, false, nil
 		}
