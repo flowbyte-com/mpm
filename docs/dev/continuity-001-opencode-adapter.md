@@ -352,8 +352,11 @@ not treated as effective. An allow that survives is refused, including
 must itself survive, not merely appear before an overridden rule. Resource
 patterns are matched, not collapsed into action-wide permissions, and a broad
 allow is not accepted because a narrow later deny happened to match one
-example. Escapes, `?`, character classes and `**` are refused because their
-host semantics were not measured.
+example. An effective `ask` is requestable, not denied, so it is unsafe unless
+a later allow or deny fully covers it; the host's original `.env` asks are
+covered by the later `read * deny`. Unknown permission effects fail closed,
+and escapes, `?`, character classes and `**` are refused because their host
+semantics were not measured.
 
 **There is no fallback to a less restricted reviewer.** If the sandbox or the
 reviewer configuration is unavailable, the review refuses to start.

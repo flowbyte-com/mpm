@@ -284,6 +284,13 @@ func reviewerPermissionViolation(perms []SessionPerm) string {
 	// proved to provide a usable execution path. Treating "cannot prove"
 	// as "does not cover" would accept an unproven sandbox.
 	for _, p := range perms {
+		switch p.Effect {
+		case "allow", "deny", "ask":
+		default:
+			return fmt.Sprintf(
+				"%q's resolved rules carry an unknown permission effect %q",
+				ReviewerAgentName, p.Effect)
+		}
 		if permissionHasUnprovenSyntax(p.Action) || permissionHasUnprovenSyntax(p.Resource) {
 			return fmt.Sprintf(
 				"%q's resolved rules contain permission syntax this verifier cannot prove",
@@ -319,8 +326,12 @@ func reviewerPermissionViolation(perms []SessionPerm) string {
 		overridden := false
 		for j := i + 1; j < len(perms); j++ {
 			q := perms[j]
-			if q.Effect != "deny" ||
-				!permissionActionCovers(q.Action, p.Action) ||
+			// A later deny overrides the allow; a later ask turns it into a
+			// request. In both cases the allow is not effective.
+			if q.Effect != "deny" && q.Effect != "ask" {
+				continue
+			}
+			if !permissionActionCovers(q.Action, p.Action) ||
 				!permissionResourceCovers(q.Resource, p.Resource) {
 				continue
 			}
@@ -337,6 +348,33 @@ func reviewerPermissionViolation(perms []SessionPerm) string {
 		return fmt.Sprintf("%q allows %q beside `sandbox_exec`",
 			ReviewerAgentName, p.Action)
 	}
+
+	// AN EFFECTIVE ASK IS A REQUESTABLE ACTION, NOT A DENY. It is unsafe
+	// unless a later allow or deny fully covers it. The original host
+	// `.env` asks are covered by the later `read * deny`.
+	for i, p := range perms {
+		if p.Effect != "ask" {
+			continue
+		}
+		overridden := false
+		for j := i + 1; j < len(perms); j++ {
+			q := perms[j]
+			if q.Effect != "allow" && q.Effect != "deny" {
+				continue
+			}
+			if !permissionActionCovers(q.Action, p.Action) ||
+				!permissionResourceCovers(q.Resource, p.Resource) {
+				continue
+			}
+			overridden = true
+			break
+		}
+		if !overridden {
+			return fmt.Sprintf("%q leaves %q requestable by an effective `ask`",
+				ReviewerAgentName, p.Action)
+		}
+	}
+
 	if !hasSandbox {
 		return fmt.Sprintf("%q does not allow `sandbox_exec` effectively, so it has no "+
 			"confined execution path", ReviewerAgentName)

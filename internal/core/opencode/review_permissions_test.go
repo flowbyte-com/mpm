@@ -319,3 +319,60 @@ func TestReviewerPermissionPolicyDoesNotTreatDoubleStarAsWildcard(t *testing.T) 
 		t.Fatalf("a `**` resource deny was treated as universal: %q", violation)
 	}
 }
+
+func TestReviewerPermissionPolicyRejectsEffectiveAsk(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+		{Action: "read", Resource: "*", Effect: "ask"},
+	}
+	if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "ask") {
+		t.Fatalf("an effective read ask was accepted: %q", violation)
+	}
+}
+
+func TestReviewerPermissionPolicyAcceptsOverriddenEnvAsk(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "read", Resource: "*.env", Effect: "ask"},
+		{Action: "read", Resource: "*.env.*", Effect: "ask"},
+		{Action: "read", Resource: "*", Effect: "deny"},
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+	}
+	if violation := reviewerPermissionViolation(perms); violation != "" {
+		t.Fatalf("the overridden host .env asks were refused: %q", violation)
+	}
+}
+
+func TestReviewerPermissionPolicyRejectsSandboxAsk(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "ask"},
+	}
+	if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "ask") &&
+		!strings.Contains(violation, "sandbox_exec") {
+		t.Fatalf("a sandbox ask did not remove the effective allow: %q", violation)
+	}
+}
+
+func TestReviewerPermissionPolicyAcceptsEffectiveSandboxOnly(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+	}
+	if violation := reviewerPermissionViolation(perms); violation != "" {
+		t.Fatalf("an effective sandbox allow with no other surface was refused: %q", violation)
+	}
+}
+
+func TestReviewerPermissionPolicyRejectsUnknownEffect(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+		{Action: "read", Resource: "*", Effect: "mystery"},
+	}
+	if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "unknown permission effect") {
+		t.Fatalf("an unknown permission effect was not refused: %q", violation)
+	}
+}
