@@ -279,6 +279,18 @@ func (r *Runtime) verifyReviewer(ctx context.Context) error {
 // A broad allow is therefore never collapsed into an action-wide permission
 // because a narrower later rule denied one example.
 func reviewerPermissionViolation(perms []SessionPerm) string {
+	// UNMEASURED SYNTAX IS REFUSED OUTRIGHT. A later deny using it cannot
+	// be proved to cover anything, and a sandbox allow using it cannot be
+	// proved to provide a usable execution path. Treating "cannot prove"
+	// as "does not cover" would accept an unproven sandbox.
+	for _, p := range perms {
+		if permissionHasUnprovenSyntax(p.Action) || permissionHasUnprovenSyntax(p.Resource) {
+			return fmt.Sprintf(
+				"%q's resolved rules contain permission syntax this verifier cannot prove",
+				ReviewerAgentName)
+		}
+	}
+
 	// THE WILDCARD MUST END IN A DENY THAT COVERS EVERY RESOURCE.
 	//
 	// The host prepends a wildcard allow, so "no wildcard allow exists" is
@@ -422,6 +434,9 @@ func permissionResourceCovers(deny, allow string) bool {
 // not on a concatenation: two adjacent single-star patterns must not look
 // like a double star.
 func permissionHasUnprovenSyntax(pattern string) bool {
+	if pattern == "" {
+		return true
+	}
 	return strings.ContainsAny(pattern, "?[\\") || strings.Contains(pattern, "**")
 }
 

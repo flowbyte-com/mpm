@@ -27,8 +27,14 @@ func realReviewerRules(t *testing.T) []SessionPerm {
 	if a.ID != ReviewerAgentName {
 		t.Fatalf("the fixture is for %q, want %q", a.ID, ReviewerAgentName)
 	}
-	if len(a.Permissions) == 0 {
-		t.Fatal("the fixture has no permissions")
+	if len(a.Permissions) != 47 {
+		t.Fatalf("the fixture has %d permissions, want the measured 47", len(a.Permissions))
+	}
+	if p := a.Permissions[3]; p.Action != "read" || p.Resource != "*.env.example" || p.Effect != "allow" {
+		t.Fatalf("the fixture's .env.example allow moved: %+v", p)
+	}
+	if p := a.Permissions[23]; p.Action != "mpm_assignment" || p.Effect != "deny" {
+		t.Fatalf("the fixture's mpm_assignment deny moved: %+v", p)
 	}
 	return a.Permissions
 }
@@ -213,8 +219,8 @@ func TestReviewerSessionOverridesRemainRefused(t *testing.T) {
 
 // TestReviewerPermissionPolicyAcceptsTheLiveOpenCodeConfig is OPTIONAL in CI:
 // it needs a real opencode binary and the built MPM plugin. When both are
-// supplied it proves the actual isolated v2.3.2 configuration passes without
-// the test inventing a rule list.
+// supplied it proves the PERMISSION VERIFIER accepts the live resolved rules;
+// it does not authenticate a provider or run a model.
 func TestReviewerPermissionPolicyAcceptsTheLiveOpenCodeConfig(t *testing.T) {
 	bin := os.Getenv("MPM_OPENCODE_BIN")
 	plugin := os.Getenv("MPM_OPENCODE_PLUGIN")
@@ -244,30 +250,51 @@ func TestReviewerPermissionPolicyAcceptsTheLiveOpenCodeConfig(t *testing.T) {
 }
 
 func TestReviewerPermissionPolicyRejectsUnprovenPatternSyntax(t *testing.T) {
-	base := []SessionPerm{
-		{Action: "*", Resource: "*", Effect: "deny"},
-		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
-	}
+	// A LITERAL allow makes the old verifier's filepath.Match path accept
+	// these denies; the list-level guard must refuse the list first.
 	for _, tc := range []struct {
 		name string
 		deny string
 	}{
-		{"escape", `a\*`},
+		{"escape", `a\b`},
 		{"question", "a?"},
 		{"class", "a[bc]"},
 		{"doublestar", "a**"},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			perms := append(append([]SessionPerm{}, base...),
-				SessionPerm{Action: "read", Resource: "a*", Effect: "allow"},
-				SessionPerm{Action: "read", Resource: tc.deny, Effect: "deny"},
-			)
-			if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, `"read"`) {
-				t.Fatalf("unproven deny syntax %q was treated as covering the allow: %q",
-					tc.deny, violation)
+			perms := []SessionPerm{
+				{Action: "*", Resource: "*", Effect: "deny"},
+				{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+				{Action: "read", Resource: "ab", Effect: "allow"},
+				{Action: "read", Resource: tc.deny, Effect: "deny"},
+			}
+			if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "cannot prove") {
+				t.Fatalf("unproven deny syntax %q was not refused: %q", tc.deny, violation)
 			}
 		})
+	}
+}
+
+func TestReviewerPermissionPolicyRejectsUnprovenSandboxRules(t *testing.T) {
+	// An unproven sandbox allow must not count as an execution path.
+	allowResource := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "**", Effect: "allow"},
+	}
+	if violation := reviewerPermissionViolation(allowResource); !strings.Contains(violation, "cannot prove") {
+		t.Fatalf("an unproven sandbox allow resource was accepted: %q", violation)
+	}
+
+	// An unproven later deny could cover the sandbox; it must not be read
+	// as "does not cover" and thereby leave the sandbox effective.
+	laterDeny := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+		{Action: "sandbox_exec", Resource: "**", Effect: "deny"},
+	}
+	if violation := reviewerPermissionViolation(laterDeny); !strings.Contains(violation, "cannot prove") {
+		t.Fatalf("an unproven later sandbox deny was treated as non-covering: %q", violation)
 	}
 }
 
@@ -276,7 +303,7 @@ func TestReviewerPermissionPolicyDoesNotTreatDoubleStarAsWildcard(t *testing.T) 
 		{Action: "**", Resource: "*", Effect: "deny"},
 		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
 	}
-	if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "wildcard deny") {
+	if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "cannot prove") {
 		t.Fatalf("a `**` action was accepted as the wildcard deny: %q", violation)
 	}
 
@@ -288,7 +315,7 @@ func TestReviewerPermissionPolicyDoesNotTreatDoubleStarAsWildcard(t *testing.T) 
 		SessionPerm{Action: "read", Resource: "*", Effect: "allow"},
 		SessionPerm{Action: "read", Resource: "**", Effect: "deny"},
 	)
-	if violation := reviewerPermissionViolation(resource); !strings.Contains(violation, `"read"`) {
+	if violation := reviewerPermissionViolation(resource); !strings.Contains(violation, "cannot prove") {
 		t.Fatalf("a `**` resource deny was treated as universal: %q", violation)
 	}
 }
