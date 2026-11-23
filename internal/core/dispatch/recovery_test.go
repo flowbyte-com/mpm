@@ -387,7 +387,11 @@ func TestACrashDuringTheExecutionIsRefusedAndVisible(t *testing.T) {
 	}
 	// THE REASON IS THE SESSION, NOT A MISSING WORKTREE. Both outcomes
 	// share `recovery_required`; the detail is what separates them.
-	if !strings.Contains(outcome.Detail, "still running") {
+	wantDetail := "still running"
+	if outcome.Reason == ReasonSessionStillRunning {
+		wantDetail = "has not reported an outcome"
+	}
+	if !strings.Contains(outcome.Detail, wantDetail) {
 		t.Errorf("the detail is %q, want the running session named", outcome.Detail)
 	}
 	// THE OPERATOR-VISIBLE RECORD.
@@ -929,8 +933,12 @@ func TestARunningOlderEpochSessionBlocksTheWorkspace(t *testing.T) {
 			(o.Reason == ReasonSessionStillRunning || o.Reason == ReasonRecoveryRequired) {
 			// THE REASON IS THE SESSION, NOT A MISSING WORKTREE. Both
 			// outcomes share `recovery_required`; the detail is what
-			// separates them.
-			if !strings.Contains(o.Detail, "still running") {
+			// separates them, and the two reasons have different text.
+			wantDetail := "still running"
+			if o.Reason == ReasonSessionStillRunning {
+				wantDetail = "has not reported an outcome"
+			}
+			if !strings.Contains(o.Detail, wantDetail) {
 				t.Errorf("the outcome %q does not name the running session: %q", o.Reason, o.Detail)
 			}
 			sawBlock = true

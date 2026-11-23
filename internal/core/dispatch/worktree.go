@@ -220,10 +220,11 @@ func (p *WorktreeProvisioner) ValidateContainment() error {
 	if err != nil {
 		return err
 	}
-	// A ROOT THAT EXISTS AS A FILE IS NOT A ROOT. Ensure would fail on
-	// it after the claim, leaving a live lease and no attempt.
-	if info, statErr := os.Stat(root); statErr == nil && !info.IsDir() {
-		return fmt.Errorf("dispatch: the resolved workspace root %q is not a directory", root)
+	// A ROOT THAT EXISTS AS A FILE OR A DANGLING SYMLINK IS NOT A
+	// ROOT. Ensure would fail on either after the claim, leaving a live
+	// lease and no attempt.
+	if err := requireRootDirectory(root); err != nil {
+		return err
 	}
 	if sameOrWithin(repo, root) || sameOrWithin(root, repo) {
 		return fmt.Errorf(
@@ -231,6 +232,35 @@ func (p *WorktreeProvisioner) ValidateContainment() error {
 			root, repo)
 	}
 	return nil
+}
+
+// requireRootDirectory refuses an existing root entry that is not a
+// directory.
+//
+// It checks the DEEPEST EXISTING entry, not only the final path, because
+// a dangling symlink component is precisely the shape `os.Stat` alone
+// would miss: a live symlink would have been resolved away by
+// `resolveAllowMissing`, so any symlink still on the path is dangling,
+// and any non-directory entry cannot hold worktrees.
+func requireRootDirectory(path string) error {
+	for cur := path; ; {
+		info, err := os.Lstat(cur)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return fmt.Errorf(
+					"dispatch: the resolved workspace root %q is not a directory", path)
+			}
+			return nil
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("dispatch: inspect the workspace root %q: %w", path, err)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return nil
+		}
+		cur = parent
+	}
 }
 
 // ValidateRepository checks the configured repository without creating

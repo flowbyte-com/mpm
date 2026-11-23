@@ -647,6 +647,12 @@ func TestTheProvisionerRefusesMetadataOutsideTheWorktreeDirectory(t *testing.T) 
 	if gotCommon != wantCommon {
 		t.Fatalf("the fake metadata's common dir is %q, want %q", gotCommon, wantCommon)
 	}
+	if got := gitOut(t, workspace, "symbolic-ref", "--short", "HEAD"); got != WorktreeBranchPrefix+id {
+		t.Fatalf("the fake metadata's branch is %q, want %q", got, WorktreeBranchPrefix+id)
+	}
+	if got := gitOut(t, workspace, "rev-parse", "HEAD"); got != base {
+		t.Fatalf("the fake metadata's HEAD is %q, want the base %q", got, base)
+	}
 	_, err = p.Ensure(worktreeAssignment(id, base))
 	if err == nil {
 		t.Fatal("metadata outside .git/worktrees was adopted")
@@ -727,5 +733,29 @@ func TestANewEngineRefusesAResolvedRootEqualToTheRepository(t *testing.T) {
 		return newFakeRuntime(), nil, nil
 	}); err == nil {
 		t.Error("a symlinked workspace root resolving to the repository was accepted before the claim")
+	}
+}
+
+// TestANewEngineRefusesADanglingSymlinkRoot proves the pre-claim root
+// check refuses a root that is a symlink to a nonexistent target.
+//
+// os.Stat alone follows the link and reports "no such file", so the root
+// looks creatable. Ensure would then fail on it after the claim, leaving
+// a live lease and no attempt.
+func TestANewEngineRefusesADanglingSymlinkRoot(t *testing.T) {
+	repo, _ := newGitRepo(t)
+	link := filepath.Join(t.TempDir(), "dangling-root")
+	if err := os.Symlink(filepath.Join(t.TempDir(), "does-not-exist"), link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	store, _ := testStore(t)
+	cfg := testConfig(t)
+	cfg.WorkspaceRoot = link
+	cfg.RepositoryPath = repo
+	if _, err := NewEngine(store, cfg, func(context.Context, *assignment.Assignment, string) (
+		assignment.Runtime, assignment.ReviewRuntime, error) {
+		return newFakeRuntime(), nil, nil
+	}); err == nil {
+		t.Error("a dangling symlink workspace root was accepted before the claim")
 	}
 }
