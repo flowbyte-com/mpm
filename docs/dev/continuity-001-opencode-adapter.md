@@ -349,9 +349,10 @@ from the worker's `MPM_OPENCODE_SIDECAR_KEY`. The adapter maps the measured
 `minimax-coding-plan/MiniMax-M3.1-Flash` model to OpenCode's
 `MINIMAX_API_KEY` **in the isolated reviewer process only**. It has no
 fallback to an ambient provider key, the worker key or the operator's auth
-store, and a model outside the measured family `minimax-coding-plan/*` is
-refused rather than tried with another provider. The CN endpoint was not
-measured and is refused too.
+store, and a model other than the measured
+`minimax-coding-plan/MiniMax-M3.1-Flash` is refused rather than tried with
+another provider. The CN endpoint and other same-family models were not
+measured and are refused too.
 
 Both the CONFIGURED model and the SESSION's own reported model are checked.
 `Review` compares `session.model` with the configured model before returning,

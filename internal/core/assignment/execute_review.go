@@ -265,7 +265,11 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
 			AttemptID: attempt.ID, Epoch: p.Epoch, Error: boundedReason(err),
 		})
-		return nil, err
+		// THE TRANSACTION ERROR CAN BE STALE-CLAIM OR CONSTRAINT, but
+		// the reviewer has already run. Wrapping it as ambiguous is what
+		// keeps the dispatcher's report honest: the operator must
+		// reconcile, not retry under a "stale epoch" label.
+		return nil, fmt.Errorf("%w: %w", ErrReviewAmbiguous, err)
 	}
 
 	outcome := res.Outcome
@@ -301,12 +305,16 @@ func (s *Store) validateReviewable(rev *Assignment, p ExecuteReviewParams) error
 	if rev.ClaimEpoch == 0 {
 		return fmt.Errorf("%w: %s holds no claim", ErrConstraint, rev.ID)
 	}
-	if rev.LeaseExpiresAt == nil || *rev.LeaseExpiresAt-s.Now() < minLeaseSeconds {
-		return fmt.Errorf("%w: %s has no usable lease", ErrConstraint, rev.ID)
-	}
+	// THE STATE IS CHECKED BEFORE THE LEASE. A completed reviewer whose
+	// lease has since expired is still COMPLETED; reporting "no usable
+	// lease" would misclassify it as a malformed request instead of the
+	// operator gate it has reached.
 	if rev.State != StateInProgress {
 		return fmt.Errorf("%w: %s is %s; a review runs from in_progress",
 			ErrIllegalTransition, rev.ID, rev.State)
+	}
+	if rev.LeaseExpiresAt == nil || *rev.LeaseExpiresAt-s.Now() < minLeaseSeconds {
+		return fmt.Errorf("%w: %s has no usable lease", ErrConstraint, rev.ID)
 	}
 	// The target is fixed by the delegation that created the reviewer.
 	target, _ := rev.Payload[PayloadKeyReviewTarget].(string)

@@ -320,8 +320,12 @@ func TestExecuteReviewEvidenceAndVerdictRollBackTogether(t *testing.T) {
 	fake := &fakeReviewRuntime{result: reviewResultWith("VERDICT: APPROVED")}
 	if _, err := store.ExecuteReview(context.Background(), fake, ExecuteReviewParams{
 		ID: rev.id, Epoch: rev.epoch, Brief: "review it",
-	}); err == nil {
-		t.Fatal("the injected transition failure was ignored")
+	}); err == nil || !errors.Is(err, ErrReviewAmbiguous) {
+		t.Fatalf("the injected transition failure was not ambiguous: %v", err)
+	}
+	attempts, _ := store.AttemptsFor(rev.id)
+	if len(attempts) != 1 || attempts[0].LaunchState != SessionAmbiguous {
+		t.Fatalf("the failed transaction did not leave an ambiguous attempt: %+v", attempts)
 	}
 	reviewer, _ := store.Get(rev.id)
 	if reviewer.ReviewedSHA != "" || reviewer.FindingsSHA256 != "" {

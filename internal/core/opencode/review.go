@@ -218,10 +218,8 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 			ErrReviewIncomplete, ErrReviewerUnavailable, actualModel, cfg.Model)
 	}
 
-	res := reviewResultFromCapture(req.SessionID, pinned, findings, assistantFindings, state)
-
 	// THE REVISION IS THE PINNED ONE, not a fresh observation.
-	res.ReviewedRevision = pinned
+	res := reviewResultFromCapture(req.SessionID, pinned, findings, assistantFindings, state)
 
 	// THE CAPTURE IS WRITTEN BY THE HOST, beside the disposable config.
 	path := filepath.Join(cfg.Root, "findings", "review-"+req.SessionID+".json")
@@ -260,6 +258,7 @@ func reviewResultFromCapture(sessionID, pinned, findings, assistantFindings stri
 	digest := sha256.Sum256([]byte(findings))
 	return &ReviewResult{
 		SessionID:         sessionID,
+		ReviewedRevision:  pinned,
 		FindingsSHA256:    hex.EncodeToString(digest[:]),
 		Findings:          findings,
 		AssistantFindings: assistantFindings,

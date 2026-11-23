@@ -166,7 +166,7 @@ func TestReviewerProviderEnvMapsOnlyTheMeasuredFamily(t *testing.T) {
 		wantErr bool
 	}{
 		{"minimax-coding-plan/MiniMax-M3.1-Flash", "MINIMAX_API_KEY", false},
-		{"minimax-coding-plan/MiniMax-M2.7", "MINIMAX_API_KEY", false},
+		{"minimax-coding-plan/MiniMax-M2.7", "", true},
 		{"minimax-cn-coding-plan/MiniMax-M3.1-Flash", "", true},
 		{"deepseek/deepseek-chat", "", true},
 		{"", "", true},
@@ -195,6 +195,8 @@ func TestReviewRefusalReasonsSeparateIncompleteFromUnavailable(t *testing.T) {
 	}{
 		{"post-inference capture", fmt.Errorf("%w: capture", oc.ErrReviewIncomplete), ReasonRecoveryRequired},
 		{"ambiguous result", assignment.ErrReviewAmbiguous, ReasonRecoveryRequired},
+		{"ambiguous stale transaction", fmt.Errorf("%w: %w",
+			assignment.ErrReviewAmbiguous, assignment.ErrStaleClaim), ReasonRecoveryRequired},
 		{"missing verdict", assignment.ErrReviewVerdict, ReasonRecoveryRequired},
 		{"never started", oc.ErrReviewerUnavailable, ReasonReviewerUnavailable},
 	} {

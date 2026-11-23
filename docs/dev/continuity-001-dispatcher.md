@@ -167,10 +167,11 @@ For the measured model `minimax-coding-plan/MiniMax-M3.1-Flash` the
 dispatcher maps it to OpenCode's `MINIMAX_API_KEY` variable **inside the
 reviewer process only**. The plugin scrubs provider credentials from the
 `sandbox_exec` helper and bubblewrap clears the command environment, so
-the model-controlled command does not receive them. A model outside the
-measured family `minimax-coding-plan/*` is refused, not tried with another
-provider; the CN endpoint was not measured. The SESSION's own model is
-checked against the configured one before its result is accepted.
+the model-controlled command does not receive them. A model other than the
+measured `minimax-coding-plan/MiniMax-M3.1-Flash` is refused, not tried with
+another provider; the CN endpoint and other same-family models were not
+measured. The SESSION's own model is checked against the configured one
+before its result is accepted.
 
 **AN UNKNOWN KEY IS AN ERROR.** A silently ignored key is a typo the
 operator cannot see: they wrote `lease_second` and the dispatcher used

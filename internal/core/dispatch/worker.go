@@ -201,16 +201,19 @@ func classifyAdapterRefusal(err error) string {
 // classifyReviewRefusal maps a review refusal onto a reason code.
 func classifyReviewRefusal(err error) string {
 	switch {
+	// RECOVERY IS CHECKED FIRST. A post-inference failure can also wrap
+	// ErrStaleClaim (the reviewer's epoch moved during the model run) or
+	// ErrConstraint (the transaction failed). The attempt is already
+	// AMBIGUOUS, so reporting "stale epoch" or "refused" would invite a
+	// retry the ambiguity check will refuse.
+	case errors.Is(err, oc.ErrReviewIncomplete),
+		errors.Is(err, assignment.ErrReviewAmbiguous),
+		errors.Is(err, assignment.ErrReviewVerdict):
+		return ReasonRecoveryRequired
 	case errors.Is(err, assignment.ErrBudgetExhausted):
 		return ReasonBudgetExhausted
 	case errors.Is(err, assignment.ErrStaleClaim):
 		return ReasonStaleEpoch
-	case errors.Is(err, oc.ErrReviewIncomplete),
-		errors.Is(err, assignment.ErrReviewAmbiguous),
-		errors.Is(err, assignment.ErrReviewVerdict):
-		// A reviewer may already have run. Recovery is the operator's
-		// job; a second dispatch must not spend another review.
-		return ReasonRecoveryRequired
 	case errors.Is(err, oc.ErrReviewerUnavailable):
 		return ReasonReviewerUnavailable
 	case errors.Is(err, assignment.ErrRecordOnlyRefused):

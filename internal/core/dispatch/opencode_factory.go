@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/assignment"
@@ -397,16 +396,16 @@ func (f *OpenCodeFactory) reviewerRuntime(a *assignment.Assignment) (*oc.Runtime
 // `minimax-coding-plan/MiniMax-M3.1-Flash`, which OpenCode exposes when
 // `MINIMAX_API_KEY` is present.
 func ReviewerProviderEnv(model string) (string, error) {
-	// ONLY THE MEASURED FAMILY IS MAPPED. OpenCode v2.3.2's
-	// `minimax-coding-plan` provider is the one measured to appear with
-	// `MINIMAX_API_KEY`; the CN endpoint was not measured, so it is
+	// ONLY THE MEASURED MODEL IS MAPPED. OpenCode v2.3.2 was measured to
+	// expose `minimax-coding-plan/MiniMax-M3.1-Flash` with
+	// `MINIMAX_API_KEY`; the CN endpoint and every other model are
 	// refused rather than guessed at with a key that may not apply.
-	if strings.HasPrefix(model, "minimax-coding-plan/") {
+	if model == DefaultReviewModel {
 		return "MINIMAX_API_KEY", nil
 	}
 	return "", fmt.Errorf(
-		"reviewer model %q has no measured dedicated reviewer credential "+
-			"mapping; the supported provider family is minimax-coding-plan/*", model)
+		"reviewer model %q is not the measured reviewer model %q, so it has "+
+			"no dedicated reviewer credential mapping", model, DefaultReviewModel)
 }
 
 // upstreamModel is the provider model the sidecar translates to.

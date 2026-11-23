@@ -547,22 +547,41 @@ class ReviewerWrapperEnvironmentTest(unittest.TestCase):
     to it. These tests are deterministic: they do not need a namespace.
     """
 
+    CREDENTIALS = (
+        "MINIMAX_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "MPM_OPENCODE_REVIEWER_KEY",
+        "MPM_OPENCODE_SIDECAR_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    )
+
+    def test_the_scrub_list_names_every_provider_credential(self) -> None:
+        # Hardcoded on purpose: deriving the expectation from the same
+        # tuple would not fail if an entry were deleted from it.
+        for name in self.CREDENTIALS:
+            self.assertIn(name, sandbox.SCRUBBED_ENVIRONMENT)
+
     def test_the_passing_rule_drops_every_credential(self) -> None:
-        source = {
-            "PATH": "/usr/bin:/bin",
-            "HOME": "/home/operator",
-            "MINIMAX_API_KEY": "marker-minimax",
-            "DEEPSEEK_API_KEY": "marker-deepseek",
-            "MPM_OPENCODE_REVIEWER_KEY": "marker-reviewer",
-            "MPM_OPENCODE_SIDECAR_KEY": "marker-sidecar",
-            "OPENAI_API_KEY": "marker-openai",
-            "ANTHROPIC_API_KEY": "marker-anthropic",
-        }
+        source = {"PATH": "/usr/bin:/bin", "HOME": "/home/operator"}
+        for name in self.CREDENTIALS:
+            source[name] = "marker-" + name
         env = sandbox.sandbox_environment(source)
         self.assertEqual(env.get("PATH"), "/usr/bin:/bin")
         self.assertEqual(env.get("HOME"), "/home/operator")
-        for name in sandbox.SCRUBBED_ENVIRONMENT:
+        for name in self.CREDENTIALS:
             self.assertNotIn(name, env)
+
+    def test_scrub_credentials_removes_the_names_from_the_mapping(self) -> None:
+        # `sandbox_environment` filters independently, so a test that only
+        # calls `execute` would not notice `main` losing this call. This
+        # pins the wrapper's own mapping scrub.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for name in self.CREDENTIALS:
+                os.environ[name] = "marker-" + name
+            sandbox.scrub_credentials()
+            for name in self.CREDENTIALS:
+                self.assertNotIn(name, os.environ)
 
     def test_execute_gives_bubblewrap_the_scrubbed_environment(self) -> None:
         captured = {}
@@ -572,9 +591,11 @@ class ReviewerWrapperEnvironmentTest(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         tree = {"base": Path(tempfile.gettempdir())}
+        markers = {name: "marker-" + name for name in self.CREDENTIALS}
+        markers["PATH"] = "/usr/bin:/bin"
         with mock.patch.dict(
             os.environ,
-            {"MINIMAX_API_KEY": "marker-minimax", "PATH": "/usr/bin:/bin"},
+            markers,
             clear=False,
         ), mock.patch.object(
             sandbox.os.path, "exists", return_value=True
@@ -592,7 +613,8 @@ class ReviewerWrapperEnvironmentTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertIn("env", captured, "bubblewrap was spawned without an explicit env")
         self.assertEqual(captured["env"].get("PATH"), "/usr/bin:/bin")
-        self.assertNotIn("MINIMAX_API_KEY", captured["env"])
+        for name in self.CREDENTIALS:
+            self.assertNotIn(name, captured["env"])
 
 
 if __name__ == "__main__":

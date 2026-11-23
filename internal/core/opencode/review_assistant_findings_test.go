@@ -83,6 +83,9 @@ func TestReviewResultKeepsTranscriptAndAuthorshipApart(t *testing.T) {
 	if res.Model != "minimax-coding-plan/MiniMax-M3.1-Flash" {
 		t.Fatalf("the session model was lost: %q", res.Model)
 	}
+	if res.ReviewedRevision != "1111111111111111111111111111111111111111" {
+		t.Fatalf("the pinned revision was lost: %q", res.ReviewedRevision)
+	}
 	if res.FindingsSHA256 == "" {
 		t.Fatal("the digest was not computed")
 	}
