@@ -127,10 +127,13 @@ authorised base. A directory that is not a linked worktree — a bare
 directory, a full clone, a symlink, a worktree of another repository, a
 worktree on another branch — is REFUSED, never adopted. The worktree's
 `.git` is a FILE pointing into the source repository's
-`.git/worktrees/`; that path is not mounted in the worker's namespace,
-so the worker can read the pointer's text but cannot reach or modify the
-metadata. The worker edits the checked-out files; the HOST stages and
-commits.
+`.git/worktrees/`. The configuration refuses a repository under `/usr`
+or `/usr/local`; the operator must also keep the source checkout outside
+the dispatch sandbox tree (`$MPM/opencode/runs/<assignment>`), whose
+subdirectories are bound read-write. Given those placements, that path is
+not mounted in the worker's namespace, so the worker can read the
+pointer's text but cannot reach or modify the metadata. The worker edits
+the checked-out files; the HOST stages and commits.
 
 `review_repo_path` is the repository a reviewer examines. It must be a
 clean tree, because the review path pins an exact revision.

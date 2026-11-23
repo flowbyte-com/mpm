@@ -201,6 +201,33 @@ func (p *WorktreeProvisioner) resolve(a *assignment.Assignment) (root, repo, wor
 	return root, repo, filepath.Join(root, a.ID), nil
 }
 
+// ValidateContainment resolves the repository and the workspace root and
+// refuses a relationship the lexical configuration check cannot see.
+//
+// A symlinked root can resolve equal to, or inside, the repository while
+// the raw strings look unrelated. `Ensure` would catch it — but only
+// after the claim, where the failure leaves a live lease and no attempt.
+// NewEngine runs this before an engine exists.
+func (p *WorktreeProvisioner) ValidateContainment() error {
+	if strings.TrimSpace(p.Root) == "" || strings.TrimSpace(p.Repository) == "" {
+		return fmt.Errorf("dispatch: the workspace root and the repository must both be configured")
+	}
+	repo, err := filepath.EvalSymlinks(p.Repository)
+	if err != nil {
+		return fmt.Errorf("dispatch: resolve the source repository %q: %w", p.Repository, err)
+	}
+	root, err := resolveAllowMissing(p.Root)
+	if err != nil {
+		return err
+	}
+	if sameOrWithin(repo, root) || sameOrWithin(root, repo) {
+		return fmt.Errorf(
+			"dispatch: the resolved workspace root %q and the repository %q must not be the same or contain one another",
+			root, repo)
+	}
+	return nil
+}
+
 // ValidateRepository checks the configured repository without creating
 // anything.
 //

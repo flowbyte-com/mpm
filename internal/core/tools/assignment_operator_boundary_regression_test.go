@@ -8,17 +8,18 @@
 //   - the AGENT's side: deliver, acknowledge, accept, refuse, claim,
 //     renew, start, complete, delegate, cancel, note, record-review,
 //     handoff — plus the reads;
-//   - the OPERATOR's side: creating the ROOT assignment, and recording
-//     an OPERATOR APPROVAL.
+//   - the OPERATOR's side: creating a PROJECT identity, creating the
+//     ROOT assignment, and recording an OPERATOR APPROVAL.
 //
 // # The operator's side is a genuine capability boundary WITHIN THE
 // DISPATCH SURFACE
 //
-// A root is the work order that everything else inherits its budgets
-// from, and an approval is the operator's statement that something was
-// authorised. An agent that could reach either through the agent-facing
-// surface could:
+// A project is the identity every root must name; a root is the work
+// order that everything else inherits its budgets from; and an approval
+// is the operator's statement that something was authorised. An agent
+// that could reach any of them through the agent-facing surface could:
 //
+//   - invent a project identity to write into,
 //   - mint its own budget (a root with max_tasks = 1000), and
 //   - approve its own work.
 //
@@ -35,8 +36,8 @@
 //
 // What the boundary DOES guarantee is structural and checkable:
 //
-//   - no action of any registry tool creates a root or records an
-//     approval, under any payload shape;
+//   - no action of any registry tool creates a project, creates a root
+//     or records an approval, under any payload shape;
 //   - the operator's verbs are a DIFFERENT entry point, so there is no
 //     action to dispatch to; and
 //   - the service's own defence is an interface with an UNEXPORTED
@@ -51,9 +52,9 @@
 // The shred precedent refuses permanent deletion at the execution point,
 // because the operator path had to keep working for the operator. Here
 // the operator path is a DIFFERENT entry point — the dedicated
-// `mpm assignment create-root` and `mpm assignment record-approval`
-// verbs — so the agent-facing surface can simply NOT HAVE the
-// capability.
+// `mpm assignment create-project`, `mpm assignment create-root` and
+// `mpm assignment record-approval` verbs — so the agent-facing surface
+// can simply NOT HAVE the capability.
 //
 // "Absent" is a stronger property than "refused": there is no action to
 // dispatch to, no schema to advertise, and no payload field that could
@@ -61,11 +62,11 @@
 //
 // # The contract these tests enforce
 //
-//   - NO registry action can create a root.
+//   - NO registry action can create a project or a root.
 //   - NO registry action can record an approval.
-//   - NO payload field unlocks either of them — not `confirm`, not
+//   - NO payload field unlocks any of them — not `confirm`, not
 //     `operator`, not `authority`, not `force`, not `approve`.
-//   - The advertised action vocabulary names neither.
+//   - The advertised action vocabulary names none.
 //   - The agent-facing surface still does the work it is supposed to
 //     do, so the boundary is not enforced by removing the capability.
 //   - The operator's own path still works, so the capability is

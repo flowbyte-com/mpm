@@ -544,3 +544,131 @@ func TestTheProvisionerIgnoresAnAmbientGitDir(t *testing.T) {
 		t.Errorf("the worktree's metadata is %q, want it inside %q (the configured repository)", target, want)
 	}
 }
+
+// TestANewEngineRefusesAResolvedRootInsideTheRepository proves the
+// pre-claim check sees through a symlinked root.
+//
+// The lexical configuration check compares the strings, so a symlink that
+// resolves into the repository passes it. Ensure would catch it — after
+// the claim, leaving a live lease and no attempt.
+func TestANewEngineRefusesAResolvedRootInsideTheRepository(t *testing.T) {
+	repo, _ := newGitRepo(t)
+	sub := filepath.Join(repo, "worktrees")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(sub, link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	store, _ := testStore(t)
+	cfg := testConfig(t)
+	cfg.WorkspaceRoot = link
+	cfg.RepositoryPath = repo
+	if _, err := NewEngine(store, cfg, func(context.Context, *assignment.Assignment, string) (
+		assignment.Runtime, assignment.ReviewRuntime, error) {
+		return newFakeRuntime(), nil, nil
+	}); err == nil {
+		t.Error("a symlinked workspace root resolving inside the repository was accepted before the claim")
+	}
+}
+
+// TestANewEngineRefusesABareRepository proves the pre-claim repository
+// check covers the bare shape.
+func TestANewEngineRefusesABareRepository(t *testing.T) {
+	bare := filepath.Join(t.TempDir(), "bare.git")
+	cmd := exec.Command("git", "init", "-q", "--bare", bare)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("init --bare: %v: %s", err, out)
+	}
+	store, _ := testStore(t)
+	cfg := testConfig(t)
+	cfg.RepositoryPath = bare
+	if _, err := NewEngine(store, cfg, func(context.Context, *assignment.Assignment, string) (
+		assignment.Runtime, assignment.ReviewRuntime, error) {
+		return newFakeRuntime(), nil, nil
+	}); err == nil {
+		t.Error("a bare repository was accepted before the claim")
+	}
+}
+
+// TestTheProvisionerRefusesMetadataOutsideTheWorktreeDirectory isolates
+// the `within` rule.
+//
+// The fake metadata is a real moved metadata directory: it carries a
+// valid commondir, a backlink to this workspace, the assignment's branch
+// and the base HEAD. Every other rule passes; only the refusal to read
+// metadata outside `<repo>/.git/worktrees/` rejects it.
+func TestTheProvisionerRefusesMetadataOutsideTheWorktreeDirectory(t *testing.T) {
+	repo, base := newGitRepo(t)
+	p, _ := newProvisioner(t, repo, base)
+	id := "at-0000000000000014"
+	workspace, err := p.Ensure(worktreeAssignment(id, base))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	pointer := dotGitTarget(t, workspace)
+	fakeMeta := filepath.Join(p.Root, "fake-meta")
+	if err := os.Rename(pointer, fakeMeta); err != nil {
+		t.Fatalf("move the metadata: %v", err)
+	}
+	// The pointer now names the moved metadata; the backlink names this
+	// workspace; commondir is relative to the new location.
+	if err := os.WriteFile(filepath.Join(workspace, ".git"),
+		[]byte("gitdir: "+fakeMeta+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeMeta, "gitdir"),
+		[]byte(filepath.Join(workspace, ".git")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(fakeMeta, filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeMeta, "commondir"), []byte(rel+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The common dir really is the repository's, and the branch/HEAD
+	// really are the assignment's.
+	if got := gitOut(t, workspace, "rev-parse", "--git-common-dir"); !strings.HasSuffix(got, ".git") {
+		t.Fatalf("the fake metadata does not resolve the common dir: %q", got)
+	}
+	_, err = p.Ensure(worktreeAssignment(id, base))
+	if err == nil {
+		t.Fatal("metadata outside .git/worktrees was adopted")
+	}
+	if !strings.Contains(err.Error(), "outside the repository's worktree metadata") {
+		t.Errorf("refused, but not by the metadata rule: %v", err)
+	}
+}
+
+// TestTheProvisionerRefusesASameIDMove isolates the backlink rule.
+//
+// The moved workspace has the SAME assignment id, so the branch, the
+// common dir, the base and the metadata location all pass. Only the
+// backlink reveals that the metadata belongs to the old path.
+func TestTheProvisionerRefusesASameIDMove(t *testing.T) {
+	repo, base := newGitRepo(t)
+	first := &WorktreeProvisioner{Root: filepath.Join(t.TempDir(), "one"), Repository: repo}
+	id := "at-0000000000000015"
+	original, err := first.Ensure(worktreeAssignment(id, base))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	second := &WorktreeProvisioner{Root: filepath.Join(t.TempDir(), "two"), Repository: repo}
+	if err := os.MkdirAll(second.Root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(second.Root, id)
+	if err := os.Rename(original, moved); err != nil {
+		t.Fatalf("move the workspace: %v", err)
+	}
+	_, err = second.Ensure(worktreeAssignment(id, base))
+	if err == nil {
+		t.Fatal("a same-id moved workspace was adopted")
+	}
+	if !strings.Contains(err.Error(), "points back at") {
+		t.Errorf("refused, but not by the backlink rule: %v", err)
+	}
+}

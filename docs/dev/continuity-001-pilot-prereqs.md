@@ -51,10 +51,13 @@ work. The dispatcher now owns a genuine Git worktree:
 
 - `workspace_root` is the operator-configured root; `repository_path` is
   the source repository. The two must be absolute and must not be the same
-  or contain one another. The repository must also be outside the
-  directories the worker's namespace binds (`/usr`, `/usr/local`), which
-  the configuration refuses. The repository is validated when the engine
-  is built, before any claim.
+  or contain one another. Both are resolved, so a symlinked root that
+  resolves equal to or inside the repository is refused too. The
+  repository must also be outside `/usr` and `/usr/local`, which the
+  configuration refuses; the operator must keep it outside the MPM runtime
+  and sandbox trees, which are not known to the configuration. The
+  repository and the resolved containment are validated when the engine is
+  built, before any claim.
 - The host runs `git worktree add -b mpm/assignment/<id> <root>/<id>
   <base_sha>` for an implementation assignment. The base is the
   assignment's exact `BaseSHA`; a missing or malformed base, a base that
@@ -63,12 +66,14 @@ work. The dispatcher now owns a genuine Git worktree:
 - Recovery **reuses** the worktree only after verifying: the path is a
   real directory, not a symlink, and a direct child of the resolved root;
   `.git` is a regular file whose target resolves inside the repository's
-  `.git/worktrees/`; the worktree's common Git directory is the
-  configured repository's; the branch is the assignment's; and HEAD is
-  the base or a descendant of it (the host may have committed).
+  `.git/worktrees/`; the metadata's `gitdir` backlink points at this
+  workspace; the worktree's common Git directory is the configured
+  repository's; the branch is the assignment's; and HEAD is the base or a
+  descendant of it (the host may have committed).
 - A bare directory, a full clone, a symlinked path, another repository's
-  worktree, another branch, a tampered pointer or a base that is not an
-  ancestor is **refused**, never adopted.
+  worktree, another branch, a moved worktree (even with the same
+  assignment id), metadata outside `.git/worktrees/`, a tampered pointer
+  or a base that is not an ancestor is **refused**, never adopted.
 - The worktree's `.git` points outside the worker's namespace. For a
   repository outside the runtime dirs and the sandbox roots (which the
   configuration enforces for `/usr` and `/usr/local`), the worker can read
@@ -112,12 +117,12 @@ mutation-style controls remain PR 2's Python harness.
 | 1 | model-facing tools cannot create projects | `TestAssignment_NoRegistryActionCreatesAProject`, `TestAssignment_OperatorActionsAreNotAdvertised`, `TestAssignment_NoPayloadFieldUnlocksTheOperatorActions` |
 | 2 | duplicate creation is idempotent; conflicting creation refused | `TestCreateProjectIsIdempotent`, `TestCreateProjectRefusesAWithdrawnIdentity`, `TestConcurrentProjectCreationCreatesOneRow` (the CLI test is feature coverage, not a control) |
 | 3 | an unexpected existing workspace is not adopted | `TestTheProvisionerRefusesAnUnexpectedDirectory`, `TestTheProvisionerRefusesAnUnexpectedFile`, `TestTheProvisionerRefusesAFullClone` |
-| 4 | a worktree cannot escape its configured root | `TestTheProvisionerRefusesASymlinkedWorkspace`, `TestTheProvisionerRefusesAnAssignmentIDThatIsNotAPathShape`, `TestTheProvisionerRefusesAWorkspaceRootInsideTheRepository` (and the refusal leaves no directory behind), `TestTheProvisionerRefusesARootEqualToTheRepository` |
+| 4 | a worktree cannot escape its configured root | `TestTheProvisionerRefusesASymlinkedWorkspace`, `TestTheProvisionerRefusesAnAssignmentIDThatIsNotAPathShape`, `TestTheProvisionerRefusesAWorkspaceRootInsideTheRepository` (and the refusal leaves no directory behind), `TestTheProvisionerRefusesARootEqualToTheRepository`, `TestANewEngineRefusesAResolvedRootInsideTheRepository` |
 | 5 | a stale/second claim cannot take another assignment's workspace | `TestALiveLeaseDoesNotProvisionAWorkspace`, `TestTheProvisionerRefusesAnotherRepository`, `TestTheProvisionerRefusesTheWrongBranch` |
-| 6 | a worker cannot reach or modify the real Git metadata | `TestTheProvisionerCreatesAWorktreeAtTheBase` (the pointer target is outside the workspace), `TestTheProvisionerRefusesATamperedPointer`, `TestTheProvisionerRefusesAPointerToTheMainGitDirectory`, `TestTheProvisionerRefusesAMovedWorktree`, `TestTheProvisionerIgnoresAnAmbientGitDir`, `TestTheRepositoryMustNotBeInsideARuntimeDir`, `TestTheConfiguredPathsMustNotContainOneAnother`, and PR 3's containment argv pins (`TestContainmentArgvKeepsTheOrderingThatMakesLoopbackPossible`, `TestContainmentNeverCarriesACredentialInArgv`). Residual: the pointer's text names the host path; the target is not mounted. |
+| 6 | a worker cannot reach or modify the real Git metadata | `TestTheProvisionerCreatesAWorktreeAtTheBase` (the pointer target is outside the workspace), `TestTheProvisionerRefusesATamperedPointer`, `TestTheProvisionerRefusesAPointerToTheMainGitDirectory`, `TestTheProvisionerRefusesAMovedWorktree`, `TestTheProvisionerRefusesMetadataOutsideTheWorktreeDirectory`, `TestTheProvisionerRefusesASameIDMove`, `TestTheProvisionerIgnoresAnAmbientGitDir`, `TestTheRepositoryMustNotBeInsideARuntimeDir`, `TestTheConfiguredPathsMustNotContainOneAnother`, `TestANewEngineRefusesAResolvedRootInsideTheRepository`, and PR 3's containment argv pins (`TestContainmentArgvKeepsTheOrderingThatMakesLoopbackPossible`, `TestContainmentNeverCarriesACredentialInArgv`). Residual: the pointer's text names the host path; the target is not mounted. |
 | 7 | a worker cannot execute a shell or host-side test command | `TestWorkerDefinitionDeniesExecution` (the pinned definition), `TestWorkerDefinitionIsPinnedToTheTemplate` |
 | 8 | restart recovery preserves the worktree identity | `TestARecreatedDispatcherFindsTheSameWorktree`, `TestTheProvisionerReusesTheSameWorktree` |
-| 9 | a running previous session still blocks unsafe reuse | `TestACrashDuringTheExecutionIsRefusedAndVisible`, `TestTheRecoveryPassRefusesAMissingWorktree` |
+| 9 | a running previous session still blocks unsafe reuse | `TestACrashDuringTheExecutionIsRefusedAndVisible`, `TestARunningOlderEpochSessionBlocksTheWorkspace`, `TestAnUnreachableRuntimeBlocksTheOlderEpochAttempt`, `TestTheRecoveryPassRefusesAMissingWorktree` |
 | 10 | missing credentials cause no real inference | `TestTheRealFactoryRefusesAMissingCredential` (both-empty **and** fallback-only), `TestTheRealFactoryRefusesAWorkerWithNoWorkspace` |
 
 The PR 2 harness (`make test-continuity-controls`) remains at **14/14

@@ -441,7 +441,7 @@ const (
 
 // ── The operator authority ────────────────────────────────────────────────
 
-// OperatorAuthority is the explicit trusted-call boundary for the two
+// OperatorAuthority is the explicit trusted-call boundary for the
 // operator-only operations.
 //
 // The interface has an UNEXPORTED method, so no type outside this package

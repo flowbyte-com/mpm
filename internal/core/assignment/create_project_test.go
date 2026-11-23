@@ -200,9 +200,10 @@ func TestCreateProjectDoesNotTouchTheNameDomain(t *testing.T) {
 	}
 }
 
-// TestCreateProjectRefusesAnEmptyAuthorityActor is a guard on the
-// boundary value itself: the local authority always records a name, so
-// an empty created_by cannot come from this path.
+// TestCreateProjectRecordsAWriterAttribution is a guard on the boundary
+// value itself: the local authority substitutes a name for an empty
+// actor, so the attribution is never blank — and the substitution is a
+// LABEL, not a credential.
 func TestCreateProjectRecordsAWriterAttribution(t *testing.T) {
 	store, dm := newProjectStore(t)
 	id := projectID("f")

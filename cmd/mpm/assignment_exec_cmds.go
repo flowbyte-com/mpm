@@ -14,7 +14,8 @@
 // `capture-review-evidence` writes the reviewed revision and the findings
 // digest. An agent-facing action for that would let an implementer
 // manufacture the record its own work is judged by — the same rule that
-// keeps `create-root` and `record-approval` off the registry.
+// keeps `create-project`, `create-root` and `record-approval` off the
+// registry.
 package main
 
 import (
