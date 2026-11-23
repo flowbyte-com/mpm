@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/assignment"
+	oc "github.com/flowbyte-com/mpm-core/opencode"
 )
 
 // The WORKTREE PROVISIONER.
@@ -92,57 +93,147 @@ type WorktreeProvisioner struct {
 // twice, gets the same path: the workspace is keyed by the assignment id,
 // and a retry must not find a different tree.
 func (p *WorktreeProvisioner) Ensure(a *assignment.Assignment) (string, error) {
-	if a == nil {
-		return "", fmt.Errorf("dispatch: there is no assignment to provision a worktree for")
-	}
-	if a.Role == assignment.RoleReviewer {
-		return "", fmt.Errorf("dispatch: a reviewer has no worktree; it examines the configured review repository")
-	}
-	if !assignmentIDShape.MatchString(a.ID) {
-		return "", fmt.Errorf("dispatch: the assignment id %q is not the shape a worktree path is built from", a.ID)
-	}
-	if !baseSHAShape.MatchString(a.BaseSHA) {
-		return "", fmt.Errorf(
-			"dispatch: the assignment %s names no exact base revision (%q); a worktree is created from one",
-			a.ID, a.BaseSHA)
-	}
-	if strings.TrimSpace(p.Root) == "" {
-		return "", fmt.Errorf("dispatch: no workspace root is configured")
-	}
-	if strings.TrimSpace(p.Repository) == "" {
-		return "", fmt.Errorf("dispatch: no source repository is configured; a worktree needs one")
-	}
-	if !filepath.IsAbs(p.Root) || !filepath.IsAbs(p.Repository) {
-		return "", fmt.Errorf("dispatch: the workspace root and the repository must be absolute paths")
-	}
-
-	root, err := ensureDirectory(p.Root)
+	root, repo, workspace, err := p.resolve(a)
 	if err != nil {
 		return "", err
 	}
-	repo, err := filepath.EvalSymlinks(p.Repository)
-	if err != nil {
-		return "", fmt.Errorf("dispatch: resolve the source repository %q: %w", p.Repository, err)
-	}
-	if within(repo, root) || within(root, repo) {
-		return "", fmt.Errorf(
-			"dispatch: the workspace root %q and the repository %q must not contain one another",
-			root, repo)
-	}
-	if err := p.requireRepository(repo); err != nil {
-		return "", err
-	}
-
-	workspace := filepath.Join(root, a.ID)
 	info, statErr := os.Lstat(workspace)
 	switch {
 	case statErr == nil:
 		return p.verifyExisting(a, workspace, root, repo, info)
 	case os.IsNotExist(statErr):
+		// THE ROOT IS CREATED ONLY AFTER THE CONTAINMENT CHECKS. A
+		// symlinked root that resolves inside the repository must not
+		// leave a directory behind in the source tree on its way to a
+		// refusal.
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return "", fmt.Errorf("dispatch: create the workspace root %q: %w", root, err)
+		}
 		return p.create(a, workspace, root, repo)
 	default:
 		return "", fmt.Errorf("dispatch: inspect the workspace %q: %w", workspace, statErr)
 	}
+}
+
+// Reuse returns the verified worktree WITHOUT creating one.
+//
+// Recovery uses this. An outstanding attempt implies a launch, and a
+// launch implies the worktree existed; a missing worktree is therefore a
+// fact a human must explain, not an invitation to create a second
+// writer's workspace while a lease or an older session may still be
+// live.
+func (p *WorktreeProvisioner) Reuse(a *assignment.Assignment) (string, error) {
+	root, repo, workspace, err := p.resolve(a)
+	if err != nil {
+		return "", err
+	}
+	info, statErr := os.Lstat(workspace)
+	if os.IsNotExist(statErr) {
+		return "", fmt.Errorf(
+			"dispatch: the recorded worktree for %s is missing; refusing to create a second writer's workspace",
+			a.ID)
+	}
+	if statErr != nil {
+		return "", fmt.Errorf("dispatch: inspect the workspace %q: %w", workspace, statErr)
+	}
+	return p.verifyExisting(a, workspace, root, repo, info)
+}
+
+// resolve validates the assignment and configuration and returns the
+// resolved root, repository and workspace path.
+//
+// It does NOT create the root. The containment checks run on resolved
+// paths BEFORE anything is written, so a refused configuration cannot
+// leave a directory inside the source repository.
+func (p *WorktreeProvisioner) resolve(a *assignment.Assignment) (root, repo, workspace string, err error) {
+	if a == nil {
+		return "", "", "", fmt.Errorf("dispatch: there is no assignment to provision a worktree for")
+	}
+	if a.Role == assignment.RoleReviewer {
+		return "", "", "", fmt.Errorf("dispatch: a reviewer has no worktree; it examines the configured review repository")
+	}
+	if !assignmentIDShape.MatchString(a.ID) {
+		return "", "", "", fmt.Errorf("dispatch: the assignment id %q is not the shape a worktree path is built from", a.ID)
+	}
+	if !baseSHAShape.MatchString(a.BaseSHA) {
+		return "", "", "", fmt.Errorf(
+			"dispatch: the assignment %s names no exact base revision (%q); a worktree is created from one",
+			a.ID, a.BaseSHA)
+	}
+	if strings.TrimSpace(p.Root) == "" {
+		return "", "", "", fmt.Errorf("dispatch: no workspace root is configured")
+	}
+	if strings.TrimSpace(p.Repository) == "" {
+		return "", "", "", fmt.Errorf("dispatch: no source repository is configured; a worktree needs one")
+	}
+	if !filepath.IsAbs(p.Root) || !filepath.IsAbs(p.Repository) {
+		return "", "", "", fmt.Errorf("dispatch: the workspace root and the repository must be absolute paths")
+	}
+
+	repo, err = filepath.EvalSymlinks(p.Repository)
+	if err != nil {
+		return "", "", "", fmt.Errorf("dispatch: resolve the source repository %q: %w", p.Repository, err)
+	}
+	root, err = resolveAllowMissing(p.Root)
+	if err != nil {
+		return "", "", "", err
+	}
+	// EQUALITY IS CONTAINMENT TOO. A root that IS the repository would
+	// create the worktree inside the source checkout.
+	if sameOrWithin(repo, root) || sameOrWithin(root, repo) {
+		return "", "", "", fmt.Errorf(
+			"dispatch: the workspace root %q and the repository %q must not be the same or contain one another",
+			root, repo)
+	}
+	if err := p.requireRepository(repo); err != nil {
+		return "", "", "", err
+	}
+	// THE WORKER'S NAMESPACE BINDS /usr AND /usr/local READ-ONLY. A
+	// repository there would put its Git metadata inside the namespace.
+	for _, dir := range oc.RuntimeDirs() {
+		if sameOrWithin(dir, repo) {
+			return "", "", "", fmt.Errorf(
+				"dispatch: the source repository %q is inside %q, which the worker's namespace binds; "+
+					"the Git metadata would be reachable",
+				repo, dir)
+		}
+	}
+	return root, repo, filepath.Join(root, a.ID), nil
+}
+
+// ValidateRepository checks the configured repository without creating
+// anything.
+//
+// NewEngine runs this BEFORE an engine exists, so a broken repository is
+// refused before the first claim — not after it, where the failure would
+// leave a live lease and no attempt for the dispatch-attempt cap to
+// bound.
+func (p *WorktreeProvisioner) ValidateRepository() error {
+	if strings.TrimSpace(p.Repository) == "" {
+		return fmt.Errorf("dispatch: no source repository is configured")
+	}
+	if !filepath.IsAbs(p.Repository) {
+		return fmt.Errorf("dispatch: the source repository %q is not an absolute path", p.Repository)
+	}
+	repo, err := filepath.EvalSymlinks(p.Repository)
+	if err != nil {
+		return fmt.Errorf("dispatch: resolve the source repository %q: %w", p.Repository, err)
+	}
+	info, err := os.Stat(repo)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("dispatch: the source repository %q is not a directory", repo)
+	}
+	if err := p.requireRepository(repo); err != nil {
+		return err
+	}
+	for _, dir := range oc.RuntimeDirs() {
+		if sameOrWithin(dir, repo) {
+			return fmt.Errorf(
+				"dispatch: the source repository %q is inside %q, which the worker's namespace binds",
+				repo, dir)
+		}
+	}
+	return nil
 }
 
 // create builds the worktree when the path does not exist.
@@ -300,6 +391,20 @@ func (p *WorktreeProvisioner) verifyDotGit(workspace, repo string) error {
 			"dispatch: the workspace %q points its .git at %q, which is outside the repository's worktree metadata",
 			workspace, target)
 	}
+	// THE METADATA POINTS BACK AT THIS WORKTREE. Git records the
+	// worktree's own .git path in <metadata>/gitdir; a moved or copied
+	// worktree still points at the old location, and adopting it would
+	// share index and metadata with the tree it was copied from.
+	backlink, err := os.ReadFile(filepath.Join(target, "gitdir"))
+	if err != nil {
+		return fmt.Errorf("dispatch: the worktree metadata for %q has no backlink: %w", workspace, err)
+	}
+	want := filepath.Join(workspace, ".git")
+	if got := strings.TrimSpace(string(backlink)); filepath.Clean(got) != filepath.Clean(want) {
+		return fmt.Errorf(
+			"dispatch: the worktree metadata points back at %q, and this workspace's .git is %q; refusing to adopt a moved worktree",
+			got, want)
+	}
 	return nil
 }
 
@@ -383,24 +488,45 @@ func gitEnvironment() []string {
 	return out
 }
 
-// ensureDirectory creates the workspace root when it does not exist and
-// resolves it.
-func ensureDirectory(path string) (string, error) {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return "", fmt.Errorf("dispatch: create the workspace root %q: %w", path, err)
-	}
-	resolved, err := filepath.EvalSymlinks(path)
+// resolveAllowMissing resolves a path that may not exist yet, by
+// resolving the nearest existing ancestor and appending the rest.
+//
+// The containment checks must run BEFORE the root is created: a
+// symlinked root that resolves inside the repository must not leave a
+// directory behind on its way to a refusal.
+func resolveAllowMissing(path string) (string, error) {
+	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("dispatch: resolve the workspace root %q: %w", path, err)
+		return "", fmt.Errorf("dispatch: resolve %q: %w", path, err)
 	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", fmt.Errorf("dispatch: inspect the workspace root %q: %w", resolved, err)
+	missing := ""
+	cur := abs
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			if missing == "" {
+				return resolved, nil
+			}
+			return filepath.Join(resolved, missing), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("dispatch: resolve %q: %w", path, err)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", fmt.Errorf("dispatch: no existing ancestor for %q", path)
+		}
+		missing = filepath.Join(filepath.Base(cur), missing)
+		cur = parent
 	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("dispatch: the workspace root %q is not a directory", resolved)
+}
+
+// sameOrWithin reports whether child is parent or a strict descendant.
+func sameOrWithin(parent, child string) bool {
+	if filepath.Clean(parent) == filepath.Clean(child) {
+		return true
 	}
-	return resolved, nil
+	return within(parent, child)
 }
 
 // within reports whether child is a strict descendant of parent.

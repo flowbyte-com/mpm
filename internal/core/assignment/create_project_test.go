@@ -3,7 +3,6 @@ package assignment
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 
@@ -103,12 +102,15 @@ func TestCreateProjectValidatesItsIdentity(t *testing.T) {
 		"",
 		"pilot",
 		"cpj-",
-		"cpj-0123456789abcde",   // 15 hex
-		"cpj-0123456789abcdef0", // 17 hex
-		"cpj-0123456789ABCDEF",  // uppercase
-		"cpj-0123456789abcdeg",  // not hex
-		"cpj-0123456789abcde-",  // trailing separator
-		"cpj-0123 456789abcdef", // embedded space
+		"cpj-0123456789abcde",    // 15 hex
+		"cpj-0123456789abcdef0",  // 17 hex
+		"cpj-0123456789ABCDEF",   // uppercase
+		"cpj-0123456789abcdeg",   // not hex
+		"cpj-0123456789abcde-",   // trailing separator
+		"cpj-0123 456789abcdef",  // embedded space
+		" cpj-0123456789abcdef",  // leading space
+		"cpj-0123456789abcdef ",  // trailing space
+		"\tcpj-0123456789abcdef", // leading tab
 	}
 	for _, id := range cases {
 		if _, _, err := store.CreateProject(NewLocalOperatorAuthority("operator"), ProjectParams{ID: id}); err == nil {
@@ -187,19 +189,21 @@ func TestCreateProjectDoesNotTouchTheNameDomain(t *testing.T) {
 	if _, _, err := store.CreateProject(NewLocalOperatorAuthority("operator"), ProjectParams{ID: projectID("e")}); err != nil {
 		t.Fatalf("create the project: %v", err)
 	}
-	var n int
-	if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM project_names`).Scan(&n); err != nil {
-		t.Fatalf("count the names: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("the creation wrote %d project_names rows; it must not touch the name domain", n)
+	for _, table := range []string{"project_names", "continuity_threads", "continuity_checkpoints"} {
+		var n int
+		if err := dm.SQLDB().QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if n != 0 {
+			t.Errorf("the creation wrote %d %s rows; it must touch the projects row only", n, table)
+		}
 	}
 }
 
 // TestCreateProjectRefusesAnEmptyAuthorityActor is a guard on the
 // boundary value itself: the local authority always records a name, so
 // an empty created_by cannot come from this path.
-func TestCreateProjectRefusesAnEmptyAuthorityActor(t *testing.T) {
+func TestCreateProjectRecordsAWriterAttribution(t *testing.T) {
 	store, dm := newProjectStore(t)
 	id := projectID("f")
 	if _, _, err := store.CreateProject(NewLocalOperatorAuthority(""), ProjectParams{ID: id}); err != nil {
@@ -209,7 +213,10 @@ func TestCreateProjectRefusesAnEmptyAuthorityActor(t *testing.T) {
 	if err := dm.SQLDB().QueryRow(`SELECT created_by FROM projects WHERE id = ?`, id).Scan(&createdBy); err != nil {
 		t.Fatalf("read created_by: %v", err)
 	}
-	if strings.TrimSpace(createdBy) == "" {
-		t.Error("the project was created with no writer attribution")
+	// NewLocalOperatorAuthority substitutes "operator" for an empty
+	// actor. It is a LABEL, not a credential; the test pins the
+	// substitution so the attribution is never blank.
+	if createdBy != "operator" {
+		t.Errorf("the project's created_by is %q, want the authority's substitution", createdBy)
 	}
 }

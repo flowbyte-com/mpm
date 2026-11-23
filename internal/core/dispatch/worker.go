@@ -136,6 +136,20 @@ func (e *Engine) workspaceFor(a *assignment.Assignment) (string, error) {
 	return e.provisioner.Ensure(a)
 }
 
+// workspaceForExisting is the recovery path's workspace: it verifies one
+// that already exists and NEVER creates one.
+//
+// An outstanding attempt implies a launch, and a launch implies the
+// worktree existed before the session started. A missing worktree is a
+// fact a human must explain; creating one while a lease or an older
+// session may still be live would be a second writer's workspace.
+func (e *Engine) workspaceForExisting(a *assignment.Assignment) (string, error) {
+	if e.provisioner == nil {
+		return "", fmt.Errorf("dispatch: no workspace provisioner is configured")
+	}
+	return e.provisioner.Reuse(a)
+}
+
 // classifyAdapterRefusal maps an adapter refusal onto a reason code.
 func classifyAdapterRefusal(err error) string {
 	switch {

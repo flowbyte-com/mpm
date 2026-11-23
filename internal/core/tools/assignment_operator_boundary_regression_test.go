@@ -83,8 +83,8 @@ import (
 	"github.com/flowbyte-com/mpm-core/assignment"
 )
 
-// operatorOnlyAssignmentActions are the two operations the agent-facing
-// surface must not be able to reach, under ANY action name.
+// operatorOnlyAssignmentActions are the operator-only operations the
+// agent-facing surface must not be able to reach, under ANY action name.
 var operatorOnlyAssignmentActions = []string{
 	"create-project",
 	"create_project",
@@ -196,10 +196,17 @@ func TestAssignment_NoRegistryActionRecordsAnApproval(t *testing.T) {
 // for this" from "the agent decided this", so no payload field may
 // unlock the operator-only operations.
 func TestAssignment_NoPayloadFieldUnlocksTheOperatorActions(t *testing.T) {
+	// THE VALID VOCABULARY, NOT THE FORBIDDEN NAMES. The point is that no
+	// payload field turns a VALID agent action into an operator one.
+	enum := schemaEnum(t, "mpm_assignment")
+	if len(enum) == 0 {
+		t.Fatal("mpm_assignment has no advertised actions")
+	}
 	for _, tc := range operatorOnlyAssignmentPayloads {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			for _, action := range operatorOnlyAssignmentActions {
+			dm := newTestDMForTools(t)
+			for _, action := range enum {
 				params := map[string]interface{}{
 					"project_id":           "cpj-test",
 					"title":                "a root an agent made for itself",
@@ -215,16 +222,21 @@ func TestAssignment_NoPayloadFieldUnlocksTheOperatorActions(t *testing.T) {
 				for k, v := range tc.extra {
 					params[k] = v
 				}
-				_, err := handleMpmAssignment(newTestDMForTools(t), mpminternal.ActiveContext{},
+				// The call may be legal for the action (for example
+				// `inbox` with no matching work). What it must never do
+				// is write a project, a root or an approval.
+				_, _ = handleMpmAssignment(dm, mpminternal.ActiveContext{},
 					map[string]interface{}{
 						"action": action,
 						"params": params,
 					})
-				if err == nil {
-					t.Errorf("the assignment tool accepted %q with %v; "+
-						"no payload field may unlock an operator-only operation",
-						action, tc.extra)
-				}
+			}
+			projects := tableCount(t, dm, `SELECT COUNT(*) FROM projects`)
+			roots := tableCount(t, dm, `SELECT COUNT(*) FROM agent_tasks WHERE depth = 0`)
+			tasks := tableCount(t, dm, `SELECT COUNT(*) FROM agent_tasks`)
+			if projects != 0 || roots != 0 || tasks != 0 {
+				t.Errorf("the payload %v unlocked an operator write: projects=%d roots=%d tasks=%d",
+					tc.extra, projects, roots, tasks)
 			}
 		})
 	}
@@ -512,6 +524,16 @@ func TestAssignment_TheToolSchemaIsValidJSON(t *testing.T) {
 	}
 }
 
+// tableCount is one table's row count.
+func tableCount(t *testing.T, dm *mpminternal.DatabaseManager, query string) int {
+	t.Helper()
+	var n int
+	if err := dm.SQLDB().QueryRow(query).Scan(&n); err != nil {
+		t.Fatalf("count (%s): %v", query, err)
+	}
+	return n
+}
+
 // TestAssignment_NoRegistryActionCreatesAProject proves the project
 // boundary by name: no action of any registry tool can create a project,
 // and the advertised vocabulary names none.
@@ -520,8 +542,10 @@ func TestAssignment_NoRegistryActionCreatesAProject(t *testing.T) {
 	for _, tool := range Registry {
 		tool := tool
 		t.Run(tool.Name, func(t *testing.T) {
+			dm := newTestDMForTools(t)
+			before := tableCount(t, dm, `SELECT COUNT(*) FROM projects`)
 			for _, action := range names {
-				_, err := tool.Handler(newTestDMForTools(t), mpminternal.ActiveContext{},
+				_, err := tool.Handler(dm, mpminternal.ActiveContext{},
 					map[string]interface{}{
 						"action": action,
 						"params": map[string]interface{}{"id": "cpj-0011223344556677"},
@@ -530,6 +554,9 @@ func TestAssignment_NoRegistryActionCreatesAProject(t *testing.T) {
 					t.Errorf("the %s tool accepted %q; a project is operator-created only",
 						tool.Name, action)
 				}
+			}
+			if after := tableCount(t, dm, `SELECT COUNT(*) FROM projects`); after != before {
+				t.Errorf("the %s tool wrote %d project row(s) while refusing", tool.Name, after-before)
 			}
 		})
 	}

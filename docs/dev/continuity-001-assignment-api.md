@@ -151,6 +151,7 @@ implied.
 
 | operation | transition | who |
 |---|---|---|
+| `CreateProject` | — (a new project row) | operator only |
 | `CreateRoot` | — (a new root) | operator only |
 | `Delegate` | — (a new child) | agent, bounded by the root |
 | `Deliver` | `enqueued → delivered` | runtime |

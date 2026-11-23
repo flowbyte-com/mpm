@@ -31,9 +31,6 @@ const (
 	// EnvOpenCodePlugin is where the MPM OpenCode plugin lives. The
 	// REVIEWER's `sandbox_exec` comes from it.
 	EnvOpenCodePlugin = "MPM_OPENCODE_PLUGIN"
-	// EnvFallbackProviderKey is the fallback credential source: the
-	// operator's own provider key. It stays in this process.
-	EnvFallbackProviderKey = "DEEPSEEK_API_KEY"
 )
 
 // The default models.
@@ -155,15 +152,19 @@ func NewOpenCodeFactory(cfg Config) (*OpenCodeFactory, error) {
 		return nil, fmt.Errorf("resolve the MPM binary: %w", err)
 	}
 
+	// THE SIDECAR KEY IS THE ONLY CREDENTIAL SOURCE.
+	//
+	// There is deliberately no fallback to the operator's general
+	// provider key. A fallback would let a dispatcher run on a
+	// credential the operator did not rotate for this boundary, and the
+	// Gate 1 check could not tell the two apart. The sidecar is the
+	// explicit boundary; the key it holds is named here.
 	key := os.Getenv(EnvSidecarKey)
 	if key == "" {
-		key = os.Getenv(EnvFallbackProviderKey)
-	}
-	if key == "" {
 		return nil, fmt.Errorf(
-			"no sidecar credential: set %s (or %s). The worker cannot be given a "+
+			"no sidecar credential: set %s. The worker cannot be given a "+
 				"provider key, so inference runs through the sidecar, and the sidecar "+
-				"needs one.", EnvSidecarKey, EnvFallbackProviderKey)
+				"needs one.", EnvSidecarKey)
 	}
 
 	upstream := os.Getenv(EnvSidecarUpstream)

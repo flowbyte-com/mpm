@@ -50,8 +50,11 @@ file-edit-only worker against nothing and not enough to do engineering
 work. The dispatcher now owns a genuine Git worktree:
 
 - `workspace_root` is the operator-configured root; `repository_path` is
-  the source repository. The two must not contain one another, and both
-  must be absolute.
+  the source repository. The two must be absolute and must not be the same
+  or contain one another. The repository must also be outside the
+  directories the worker's namespace binds (`/usr`, `/usr/local`), which
+  the configuration refuses. The repository is validated when the engine
+  is built, before any claim.
 - The host runs `git worktree add -b mpm/assignment/<id> <root>/<id>
   <base_sha>` for an implementation assignment. The base is the
   assignment's exact `BaseSHA`; a missing or malformed base, a base that
@@ -66,13 +69,19 @@ work. The dispatcher now owns a genuine Git worktree:
 - A bare directory, a full clone, a symlinked path, another repository's
   worktree, another branch, a tampered pointer or a base that is not an
   ancestor is **refused**, never adopted.
-- The worktree's `.git` points outside the worker's namespace. The worker
-  can read the checked-out files; it cannot reach or modify the host's
-  Git metadata. The worker does not run `git`; the host stages and
-  commits.
-- The claim is taken **before** provisioning. A live lease or a stale
-  epoch refuses before any workspace exists, so a second or stale writer
-  cannot create, adopt or stage into another assignment's worktree.
+- The worktree's `.git` points outside the worker's namespace. For a
+  repository outside the runtime dirs and the sandbox roots (which the
+  configuration enforces for `/usr` and `/usr/local`), the worker can read
+  the checked-out files but cannot reach or modify the host's Git
+  metadata. The pointer's text names the host path; the target is not
+  mounted. The worker does not run `git`; the host stages and commits.
+- On the **dispatch** path, the claim is taken before provisioning; a
+  live lease or a stale epoch refuses before any workspace exists.
+- On the **recovery** path, the worktree is never created: recovery
+  verifies the recorded worktree and refuses when it is missing. An
+  outstanding attempt implies a launch, and a missing worktree is a fact
+  for a human; creating one while a lease or an older session may still be
+  live would be a second writer's workspace.
 
 Scope: `internal/core/dispatch/worktree.go`, the `repository_path`
 configuration field, and the dispatcher wiring. Tests use real temporary
@@ -94,24 +103,27 @@ shell was added.
 ## 4. The ten required negative controls
 
 Each one is a test that takes the adversarial shape and requires the safe
-answer. Mutation-style controls are marked; the rest are adversarial
-acceptance tests whose failure would be a positive result for the attack.
+answer. The negative controls are the adversarial tests; where a test is
+feature regression coverage rather than an attack, this note says so. The
+mutation-style controls remain PR 2's Python harness.
 
 | # | control | test |
 |---|---|---|
 | 1 | model-facing tools cannot create projects | `TestAssignment_NoRegistryActionCreatesAProject`, `TestAssignment_OperatorActionsAreNotAdvertised`, `TestAssignment_NoPayloadFieldUnlocksTheOperatorActions` |
-| 2 | duplicate creation is idempotent; conflicting creation refused | `TestCreateProjectIsIdempotent`, `TestCreateProjectRefusesAWithdrawnIdentity`, `TestConcurrentProjectCreationCreatesOneRow`, `TestAssignmentCLITheOperatorCanCreateAProject` |
+| 2 | duplicate creation is idempotent; conflicting creation refused | `TestCreateProjectIsIdempotent`, `TestCreateProjectRefusesAWithdrawnIdentity`, `TestConcurrentProjectCreationCreatesOneRow` (the CLI test is feature coverage, not a control) |
 | 3 | an unexpected existing workspace is not adopted | `TestTheProvisionerRefusesAnUnexpectedDirectory`, `TestTheProvisionerRefusesAnUnexpectedFile`, `TestTheProvisionerRefusesAFullClone` |
-| 4 | a worktree cannot escape its configured root | `TestTheProvisionerRefusesASymlinkedWorkspace`, `TestTheProvisionerRefusesAnAssignmentIDThatIsNotAPathShape`, `TestTheProvisionerRefusesAWorkspaceRootInsideTheRepository` |
+| 4 | a worktree cannot escape its configured root | `TestTheProvisionerRefusesASymlinkedWorkspace`, `TestTheProvisionerRefusesAnAssignmentIDThatIsNotAPathShape`, `TestTheProvisionerRefusesAWorkspaceRootInsideTheRepository` (and the refusal leaves no directory behind), `TestTheProvisionerRefusesARootEqualToTheRepository` |
 | 5 | a stale/second claim cannot take another assignment's workspace | `TestALiveLeaseDoesNotProvisionAWorkspace`, `TestTheProvisionerRefusesAnotherRepository`, `TestTheProvisionerRefusesTheWrongBranch` |
-| 6 | a worker cannot reach or modify the real Git metadata | `TestTheProvisionerCreatesAWorktreeAtTheBase` (the pointer target is outside the workspace), `TestTheProvisionerRefusesATamperedPointer`, `TestTheProvisionerIgnoresAnAmbientGitDir`, and PR 3's containment argv pins (`TestContainmentArgvKeepsTheOrderingThatMakesLoopbackPossible`, `TestContainmentNeverCarriesACredentialInArgv`) |
+| 6 | a worker cannot reach or modify the real Git metadata | `TestTheProvisionerCreatesAWorktreeAtTheBase` (the pointer target is outside the workspace), `TestTheProvisionerRefusesATamperedPointer`, `TestTheProvisionerRefusesAPointerToTheMainGitDirectory`, `TestTheProvisionerRefusesAMovedWorktree`, `TestTheProvisionerIgnoresAnAmbientGitDir`, `TestTheRepositoryMustNotBeInsideARuntimeDir`, `TestTheConfiguredPathsMustNotContainOneAnother`, and PR 3's containment argv pins (`TestContainmentArgvKeepsTheOrderingThatMakesLoopbackPossible`, `TestContainmentNeverCarriesACredentialInArgv`). Residual: the pointer's text names the host path; the target is not mounted. |
 | 7 | a worker cannot execute a shell or host-side test command | `TestWorkerDefinitionDeniesExecution` (the pinned definition), `TestWorkerDefinitionIsPinnedToTheTemplate` |
 | 8 | restart recovery preserves the worktree identity | `TestARecreatedDispatcherFindsTheSameWorktree`, `TestTheProvisionerReusesTheSameWorktree` |
-| 9 | a running previous session still blocks unsafe reuse | `TestACrashDuringTheExecutionIsRefusedAndVisible`, `TestTheRecoveryPassBuildsTheWorkspaceBeforeItInspects` |
-| 10 | missing credentials cause no real inference | `TestTheRealFactoryRefusesAMissingCredential`, `TestTheRealFactoryRefusesAWorkerWithNoWorkspace` |
+| 9 | a running previous session still blocks unsafe reuse | `TestACrashDuringTheExecutionIsRefusedAndVisible`, `TestTheRecoveryPassRefusesAMissingWorktree` |
+| 10 | missing credentials cause no real inference | `TestTheRealFactoryRefusesAMissingCredential` (both-empty **and** fallback-only), `TestTheRealFactoryRefusesAWorkerWithNoWorkspace` |
 
 The PR 2 harness (`make test-continuity-controls`) remains at **14/14
-load-bearing**, and PR 4/PR 5's suites are unchanged.
+load-bearing**. PR 5's evidence suites are unchanged; PR 4's dispatcher
+suites were updated to give their fixtures a real source repository and a
+base revision, and new worktree tests were added.
 
 ---
 
@@ -131,8 +143,10 @@ here only as an intention. Publication remains an operator authorisation.
 
 - **Credential (Gate 1.1).** The operator confirms rotation and supplies a
   new key through the protected environment (`MPM_OPENCODE_SIDECAR_KEY`,
-  and optionally the upstream/model variables). This note does not infer
-  rotation from the fallback key, and no live inference was attempted.
+  and optionally the upstream/model variables). The factory now requires
+  that explicit key: there is **no fallback** to the general provider key,
+  so a dispatcher cannot run on a credential the operator prepared for a
+  different boundary. No live inference was attempted.
 - **Gate 1 re-run.** After this prerequisite merges, Gate 1 must be re-run
   against the new `main`; the other blockers (project creation, worktree,
   evidence target) are addressed by this change or remain operator

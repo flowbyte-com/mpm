@@ -115,8 +115,11 @@ the assignment's own directory inside that root — so a retry finds the
 same tree.
 
 `repository_path` is the SOURCE repository the host creates each
-worktree from. It must be a non-bare Git checkout and it must not
-contain, or sit inside, `workspace_root`. The host creates the worktree
+worktree from. It must be a non-bare Git checkout; it must not be the
+same as, contain, or sit inside `workspace_root`; it must not be under
+`/usr` or `/usr/local` (which the worker's namespace binds); and it is
+validated when the engine is built, **before** the first claim. The host
+creates the worktree
 with `git worktree add -b mpm/assignment/<id> <root>/<id> <base_sha>`,
 and it verifies an existing one before reuse: the same common Git
 directory, the assignment's branch, and a HEAD that contains the
@@ -545,8 +548,10 @@ dispatcher.
 - **The dispatcher's workspace is a host-created Git worktree.** The
   host creates it from the assignment's exact base SHA, on a branch
   derived from the assignment ID, and verifies it before recovery reuse.
-  The WORKER remains file-edit-only: it cannot run `git`, a shell or a
-  test command, and the `.git` pointer's target is outside its namespace.
-  Tests and commits are host-controlled; a failing test can be handed
-  back to the worker only as a recorded, bounded note, never as a
-  general execution capability.
+  Recovery verifies an existing worktree and **never creates one**: an
+  outstanding attempt whose worktree is missing is reported as
+  `recovery_required`. The WORKER remains file-edit-only: it cannot run
+  `git`, a shell or a test command, and the `.git` pointer's target is
+  outside its namespace. Tests and commits are host-controlled; a failing
+  test can be handed back to the worker only as a recorded, bounded note,
+  never as a general execution capability.

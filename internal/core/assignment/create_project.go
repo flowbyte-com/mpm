@@ -98,7 +98,11 @@ func (s *Store) CreateProject(auth OperatorAuthority, p ProjectParams) (*Project
 	}
 	actor := auth.Actor()
 
-	id := strings.TrimSpace(p.ID)
+	// THE IDENTITY IS EXACT. No trimming: a caller that typed padding
+	// asked for a different string, and silently accepting the trimmed
+	// form would make the identity the service records differ from the
+	// one the caller sent.
+	id := p.ID
 	if err := requireText("project_id", id); err != nil {
 		return nil, false, err
 	}

@@ -330,9 +330,66 @@ func TestTheProvisionerRefusesAReviewer(t *testing.T) {
 
 func TestTheProvisionerRefusesAWorkspaceRootInsideTheRepository(t *testing.T) {
 	repo, base := newGitRepo(t)
-	p := &WorktreeProvisioner{Root: filepath.Join(repo, "workspaces"), Repository: repo}
+	root := filepath.Join(repo, "workspaces")
+	p := &WorktreeProvisioner{Root: root, Repository: repo}
 	if _, err := p.Ensure(worktreeAssignment("at-000000000000000d", base)); err == nil {
 		t.Error("a workspace root inside the source repository was accepted")
+	}
+	// AND THE REFUSAL LEFT NOTHING BEHIND: the containment checks run
+	// before the root is created.
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Errorf("the refused configuration created the root %q (stat: %v)", root, err)
+	}
+}
+
+func TestTheProvisionerRefusesARootEqualToTheRepository(t *testing.T) {
+	repo, base := newGitRepo(t)
+	p := &WorktreeProvisioner{Root: repo, Repository: repo}
+	if _, err := p.Ensure(worktreeAssignment("at-0000000000000010", base)); err == nil {
+		t.Error("a workspace root equal to the source repository was accepted")
+	}
+	// No worktree inside the source checkout.
+	if _, err := os.Stat(filepath.Join(repo, "at-0000000000000010")); !os.IsNotExist(err) {
+		t.Errorf("the refusal created a worktree inside the source repository (stat: %v)", err)
+	}
+}
+
+func TestTheProvisionerRefusesAMovedWorktree(t *testing.T) {
+	repo, base := newGitRepo(t)
+	p, _ := newProvisioner(t, repo, base)
+	first := worktreeAssignment("at-0000000000000011", base)
+	workspace, err := p.Ensure(first)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// The worktree is MOVED. Its .git pointer is still valid, but the
+	// metadata's backlink still names the old workspace.
+	moved := filepath.Join(p.Root, "at-0000000000000012")
+	if err := os.Rename(workspace, moved); err != nil {
+		t.Fatalf("move the worktree: %v", err)
+	}
+	second := worktreeAssignment("at-0000000000000012", base)
+	if _, err := p.Ensure(second); err == nil {
+		t.Error("a moved worktree was adopted")
+	}
+}
+
+func TestTheProvisionerRefusesAPointerToTheMainGitDirectory(t *testing.T) {
+	repo, base := newGitRepo(t)
+	p, _ := newProvisioner(t, repo, base)
+	id := "at-0000000000000013"
+	workspace, err := p.Ensure(worktreeAssignment(id, base))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// A pointer to the MAIN .git exists (so EvalSymlinks succeeds) but
+	// is not inside .git/worktrees/.
+	pointer := "gitdir: " + filepath.Join(repo, ".git") + "\n"
+	if err := os.WriteFile(filepath.Join(workspace, ".git"), []byte(pointer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Ensure(worktreeAssignment(id, base)); err == nil {
+		t.Error("a pointer to the main .git directory was adopted")
 	}
 }
 

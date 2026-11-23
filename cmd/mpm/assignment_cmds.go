@@ -8,12 +8,13 @@
 // is no second copy of the state machine, the fence, the delegation
 // bounds or the review's independence check.
 //
-// # TWO OPERATOR-ONLY VERBS
+// # THREE OPERATOR-ONLY VERBS
 //
+//	`mpm assignment create-project`   — creates a project identity
 //	`mpm assignment create-root`      — creates the top-level work order
 //	`mpm assignment record-approval`  — records an externally verified approval
 //
-// Neither verb is an MCP action and neither is reachable through
+// None is an MCP action and none is reachable through
 // `mpm call`. They are absent from the registry entirely, so no agent
 // dispatch path can reach them: there is no action to dispatch TO.
 //

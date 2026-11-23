@@ -231,7 +231,11 @@ type Engine struct {
 // fake when the test is not about Git. The PRODUCTION default is the real
 // Git provisioner in worktree.go, and NewEngine never leaves it nil.
 type WorkspaceProvisioner interface {
+	// Ensure creates the assignment's worktree when it does not exist.
 	Ensure(a *assignment.Assignment) (string, error)
+	// Reuse verifies and returns an EXISTING worktree. It never creates
+	// one; recovery uses it.
+	Reuse(a *assignment.Assignment) (string, error)
 }
 
 // NewEngine builds a dispatcher.
@@ -248,6 +252,16 @@ func NewEngine(store *assignment.Store, cfg Config, factory RuntimeFactory) (*En
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+	// THE REPOSITORY IS CHECKED BEFORE AN ENGINE EXISTS. A bad
+	// repository discovered after the first claim would leave a live
+	// lease and no attempt, so the dispatch-attempt cap could never
+	// bound the retry.
+	if cfg.Enabled {
+		provisioner := &WorktreeProvisioner{Root: cfg.WorkspaceRoot, Repository: cfg.RepositoryPath}
+		if err := provisioner.ValidateRepository(); err != nil {
+			return nil, err
+		}
 	}
 	return &Engine{
 		store:   store,
