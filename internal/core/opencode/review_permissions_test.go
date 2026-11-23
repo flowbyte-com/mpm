@@ -242,3 +242,53 @@ func TestReviewerPermissionPolicyAcceptsTheLiveOpenCodeConfig(t *testing.T) {
 		t.Fatalf("the actual isolated reviewer configuration was refused: %v", err)
 	}
 }
+
+func TestReviewerPermissionPolicyRejectsUnprovenPatternSyntax(t *testing.T) {
+	base := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+	}
+	for _, tc := range []struct {
+		name string
+		deny string
+	}{
+		{"escape", `a\*`},
+		{"question", "a?"},
+		{"class", "a[bc]"},
+		{"doublestar", "a**"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			perms := append(append([]SessionPerm{}, base...),
+				SessionPerm{Action: "read", Resource: "a*", Effect: "allow"},
+				SessionPerm{Action: "read", Resource: tc.deny, Effect: "deny"},
+			)
+			if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, `"read"`) {
+				t.Fatalf("unproven deny syntax %q was treated as covering the allow: %q",
+					tc.deny, violation)
+			}
+		})
+	}
+}
+
+func TestReviewerPermissionPolicyDoesNotTreatDoubleStarAsWildcard(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "**", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+	}
+	if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "wildcard deny") {
+		t.Fatalf("a `**` action was accepted as the wildcard deny: %q", violation)
+	}
+
+	base := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+	}
+	resource := append(append([]SessionPerm{}, base...),
+		SessionPerm{Action: "read", Resource: "*", Effect: "allow"},
+		SessionPerm{Action: "read", Resource: "**", Effect: "deny"},
+	)
+	if violation := reviewerPermissionViolation(resource); !strings.Contains(violation, `"read"`) {
+		t.Fatalf("a `**` resource deny was treated as universal: %q", violation)
+	}
+}

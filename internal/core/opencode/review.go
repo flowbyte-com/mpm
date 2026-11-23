@@ -287,7 +287,7 @@ func reviewerPermissionViolation(perms []SessionPerm) string {
 	// deny narrowed to `secret*` leaves the rest open.
 	lastWildcard := -1
 	for i, p := range perms {
-		if p.Action == "*" || p.Action == "**" {
+		if p.Action == "*" {
 			lastWildcard = i
 		}
 	}
@@ -339,10 +339,15 @@ func reviewerPermissionViolation(perms []SessionPerm) string {
 // `opencode_foo`). When the allow is itself a glob, only equality or a
 // universal deny proves coverage.
 func permissionActionCovers(deny, allow string) bool {
-	if deny == "*" || deny == "**" || deny == allow {
+	if deny == "*" || deny == allow {
 		return true
 	}
-	if !strings.ContainsAny(allow, "*?[") {
+	// Escapes, single-character classes and `**` have no measured host
+	// semantics in the resolved list. Refuse them rather than guess.
+	if permissionHasUnprovenSyntax(deny) || permissionHasUnprovenSyntax(allow) {
+		return false
+	}
+	if !strings.ContainsAny(allow, "*?[\\") {
 		return permissionActionMatches(deny, allow)
 	}
 	return false
@@ -355,12 +360,19 @@ func permissionActionCovers(deny, allow string) bool {
 // a universal deny, an exact match, a literal allow matched by a deny glob,
 // a one-star deny whose literal prefix/suffix contain the allow's, and a
 // `*middle*` deny whose literal is wholly inside one of the allow's literal
-// parts. Everything else is refused, not assumed safe.
+// parts. The span the deny's star must consume is required to be slash-free.
+// Everything else — including escapes, `?`, character classes and `**` — is
+// refused, not assumed safe.
 func permissionResourceCovers(deny, allow string) bool {
-	if deny == "*" || deny == "**" || deny == allow {
+	if deny == "*" || deny == allow {
 		return true
 	}
-	if !strings.ContainsAny(allow, "*?[") {
+	// Escapes, single-character classes and `**` have no measured host
+	// semantics in the resolved list. Refuse them rather than guess.
+	if permissionHasUnprovenSyntax(deny) || permissionHasUnprovenSyntax(allow) {
+		return false
+	}
+	if !strings.ContainsAny(allow, "*?[\\") {
 		// The allow names one concrete resource; a deny glob that matches
 		// it covers it.
 		return permissionResourceMatches(deny, allow)
@@ -405,11 +417,19 @@ func permissionResourceCovers(deny, allow string) bool {
 	return false
 }
 
+// permissionHasUnprovenSyntax reports whether a pattern uses syntax whose
+// host semantics were not measured. `**` is checked on the pattern itself,
+// not on a concatenation: two adjacent single-star patterns must not look
+// like a double star.
+func permissionHasUnprovenSyntax(pattern string) bool {
+	return strings.ContainsAny(pattern, "?[\\") || strings.Contains(pattern, "**")
+}
+
 // permissionSplitOneStar splits a pattern containing exactly one `*` into its
 // literal prefix and suffix. A literal pattern (no star) is not a one-star
 // pattern; callers handle that case before calling.
 func permissionSplitOneStar(pattern string) (prefix, suffix string, ok bool) {
-	if strings.Count(pattern, "*") != 1 || strings.ContainsAny(pattern, "?[") {
+	if strings.Count(pattern, "*") != 1 || strings.ContainsAny(pattern, "?[\\") {
 		return "", "", false
 	}
 	i := strings.IndexByte(pattern, '*')
@@ -420,7 +440,7 @@ func permissionSplitOneStar(pattern string) (prefix, suffix string, ok bool) {
 // concrete action name. The host's `opencode_*` family is a real glob, not a
 // literal name.
 func permissionActionMatches(pattern, action string) bool {
-	if pattern == "*" || pattern == "**" || pattern == action {
+	if pattern == "*" || pattern == action {
 		return true
 	}
 	if !strings.ContainsAny(pattern, "*?[") {
@@ -433,11 +453,14 @@ func permissionActionMatches(pattern, action string) bool {
 // permissionResourceMatches reports whether a resource pattern applies to a
 // concrete resource.
 //
-// A bare `*`/`**` is the host's catch-all and matches every resource. Other
+// A bare `*` is the host's catch-all and matches every resource. Other
 // patterns use filepath.Match semantics, so `*.env` does not silently become
-// an action-wide permission. It also does not swallow path separators.
+// an action-wide permission. It also does not swallow path separators. A
+// `**` is not treated as universal here; the coverage proof refuses it unless
+// the patterns are exactly equal, because its host semantics were not
+// measured.
 func permissionResourceMatches(pattern, resource string) bool {
-	if pattern == "*" || pattern == "**" || pattern == resource {
+	if pattern == "*" || pattern == resource {
 		return true
 	}
 	if !strings.ContainsAny(pattern, "*?[") {
@@ -450,7 +473,7 @@ func permissionResourceMatches(pattern, resource string) bool {
 // permissionResourceIsUniversal reports whether a wildcard deny covers every
 // resource. Only the host's bare catch-alls do; `secret*` does not.
 func permissionResourceIsUniversal(pattern string) bool {
-	return pattern == "*" || pattern == "**"
+	return pattern == "*"
 }
 
 // reviewerSessionOverrideViolation refuses a session-level permission grant.
