@@ -376,3 +376,72 @@ func TestReviewerPermissionPolicyRejectsUnknownEffect(t *testing.T) {
 		t.Fatalf("an unknown permission effect was not refused: %q", violation)
 	}
 }
+
+func TestReviewerPermissionPolicyRejectsUnprovenMultiStar(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		allow   string
+		askDeny string
+	}{
+		{"three-star", "a*b", "*a*b*"},
+		{"two-star-no-start", "a*b", "a*b*"},
+		{"two-star-no-end", "a*b", "*a*b"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			perms := []SessionPerm{
+				{Action: "*", Resource: "*", Effect: "deny"},
+				{Action: "sandbox_exec", Resource: tc.allow, Effect: "allow"},
+				{Action: "sandbox_exec", Resource: tc.askDeny, Effect: "ask"},
+				{Action: "sandbox_exec", Resource: tc.askDeny, Effect: "deny"},
+			}
+			if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "cannot prove") {
+				t.Fatalf("multi-star shape %q was accepted: %q", tc.askDeny, violation)
+			}
+		})
+	}
+}
+
+func TestReviewerPermissionPolicyAcceptsAskOverriddenByAllow(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "ask"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+	}
+	if violation := reviewerPermissionViolation(perms); violation != "" {
+		t.Fatalf("an ask overridden by a later allow was refused: %q", violation)
+	}
+}
+
+func TestReviewerPermissionPolicyRejectsOverriddenUnknownEffect(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+		{Action: "read", Resource: "*", Effect: "mystery"},
+		{Action: "read", Resource: "*", Effect: "deny"},
+	}
+	if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "unknown permission effect") {
+		t.Fatalf("an overridden unknown effect was not refused: %q", violation)
+	}
+}
+
+func TestReviewerPermissionPolicyRejectsEmptyPattern(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+		{Action: "read", Resource: "", Effect: "deny"},
+	}
+	if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "cannot prove") {
+		t.Fatalf("an empty pattern was accepted: %q", violation)
+	}
+}
+
+func TestPermissionAllowOverriddenByAsk(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "sandbox_exec", Resource: "*", Effect: "allow"},
+		{Action: "sandbox_exec", Resource: "*", Effect: "ask"},
+	}
+	if !permissionAllowOverridden(perms, 0) {
+		t.Fatal("a later ask did not override the earlier allow")
+	}
+}

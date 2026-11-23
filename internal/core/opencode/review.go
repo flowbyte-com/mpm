@@ -291,7 +291,8 @@ func reviewerPermissionViolation(perms []SessionPerm) string {
 				"%q's resolved rules carry an unknown permission effect %q",
 				ReviewerAgentName, p.Effect)
 		}
-		if permissionHasUnprovenSyntax(p.Action) || permissionHasUnprovenSyntax(p.Resource) {
+		if permissionHasUnprovenSyntax(p.Action, false) ||
+			permissionHasUnprovenSyntax(p.Resource, true) {
 			return fmt.Sprintf(
 				"%q's resolved rules contain permission syntax this verifier cannot prove",
 				ReviewerAgentName)
@@ -323,22 +324,7 @@ func reviewerPermissionViolation(perms []SessionPerm) string {
 		if p.Effect != "allow" || p.Action == "*" {
 			continue
 		}
-		overridden := false
-		for j := i + 1; j < len(perms); j++ {
-			q := perms[j]
-			// A later deny overrides the allow; a later ask turns it into a
-			// request. In both cases the allow is not effective.
-			if q.Effect != "deny" && q.Effect != "ask" {
-				continue
-			}
-			if !permissionActionCovers(q.Action, p.Action) ||
-				!permissionResourceCovers(q.Resource, p.Resource) {
-				continue
-			}
-			overridden = true
-			break
-		}
-		if overridden {
+		if permissionAllowOverridden(perms, i) {
 			continue
 		}
 		if p.Action == "sandbox_exec" {
@@ -382,6 +368,25 @@ func reviewerPermissionViolation(perms []SessionPerm) string {
 	return ""
 }
 
+// permissionAllowOverridden reports whether a later rule makes an allow
+// ineffective. A later deny denies it; a later ask turns it into a request.
+// Either way the allow is not effective.
+func permissionAllowOverridden(perms []SessionPerm, allowIndex int) bool {
+	p := perms[allowIndex]
+	for j := allowIndex + 1; j < len(perms); j++ {
+		q := perms[j]
+		if q.Effect != "deny" && q.Effect != "ask" {
+			continue
+		}
+		if !permissionActionCovers(q.Action, p.Action) ||
+			!permissionResourceCovers(q.Resource, p.Resource) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // permissionActionCovers reports whether a deny rule's action pattern covers
 // the whole of an allow rule's action pattern.
 //
@@ -394,7 +399,7 @@ func permissionActionCovers(deny, allow string) bool {
 	}
 	// Escapes, single-character classes and `**` have no measured host
 	// semantics in the resolved list. Refuse them rather than guess.
-	if permissionHasUnprovenSyntax(deny) || permissionHasUnprovenSyntax(allow) {
+	if permissionHasUnprovenSyntax(deny, false) || permissionHasUnprovenSyntax(allow, false) {
 		return false
 	}
 	if !strings.ContainsAny(allow, "*?[\\") {
@@ -419,7 +424,7 @@ func permissionResourceCovers(deny, allow string) bool {
 	}
 	// Escapes, single-character classes and `**` have no measured host
 	// semantics in the resolved list. Refuse them rather than guess.
-	if permissionHasUnprovenSyntax(deny) || permissionHasUnprovenSyntax(allow) {
+	if permissionHasUnprovenSyntax(deny, true) || permissionHasUnprovenSyntax(allow, true) {
 		return false
 	}
 	if !strings.ContainsAny(allow, "*?[\\") {
@@ -471,11 +476,27 @@ func permissionResourceCovers(deny, allow string) bool {
 // host semantics were not measured. `**` is checked on the pattern itself,
 // not on a concatenation: two adjacent single-star patterns must not look
 // like a double star.
-func permissionHasUnprovenSyntax(pattern string) bool {
+//
+// A resource pattern may use one star, or the measured `*middle*` form (the
+// host's `*.env.*`). Any other multi-star resource shape is refused because
+// the coverage proof cannot bound it; action patterns get at most one star.
+func permissionHasUnprovenSyntax(pattern string, resource bool) bool {
 	if pattern == "" {
 		return true
 	}
-	return strings.ContainsAny(pattern, "?[\\") || strings.Contains(pattern, "**")
+	if strings.ContainsAny(pattern, "?[\\") || strings.Contains(pattern, "**") {
+		return true
+	}
+	stars := strings.Count(pattern, "*")
+	if stars <= 1 {
+		return false
+	}
+	if !resource || stars != 2 ||
+		!strings.HasPrefix(pattern, "*") || !strings.HasSuffix(pattern, "*") {
+		return true
+	}
+	middle := strings.TrimSuffix(strings.TrimPrefix(pattern, "*"), "*")
+	return middle == ""
 }
 
 // permissionSplitOneStar splits a pattern containing exactly one `*` into its
