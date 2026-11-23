@@ -576,3 +576,72 @@ func cliAdvance(t *testing.T, store *assignment.Store, a *assignment.Assignment,
 		return store.Complete(assignment.FencedParams{ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: actor})
 	})
 }
+
+// TestAssignmentCLITheOperatorCanCreateAProject proves the operator's own
+// front door creates a project, end to end through the router, and that
+// the project can then hold a root.
+func TestAssignmentCLITheOperatorCanCreateAProject(t *testing.T) {
+	assignmentCLIFixture(t)
+	id := "cpj-0011223344556677"
+
+	code, out := runCLI(t, "assignment", "create-project", "--id", id, "--json")
+	if code != 0 {
+		t.Fatalf("the operator's create-project exited %d: %s", code, out)
+	}
+	var created struct {
+		ID      string `json:"id"`
+		Created bool   `json:"created"`
+	}
+	if err := json.Unmarshal([]byte(out), &created); err != nil {
+		t.Fatalf("the create-project output is not JSON: %v\n%s", err, out)
+	}
+	if created.ID != id {
+		t.Errorf("the created project's id is %q, want %q", created.ID, id)
+	}
+	if !created.Created {
+		t.Error("the first create-project reported created=false")
+	}
+
+	// THE REPEAT IS IDEMPOTENT.
+	code, out = runCLI(t, "assignment", "create-project", "--id", id, "--json")
+	if code != 0 {
+		t.Fatalf("the repeated create-project exited %d: %s", code, out)
+	}
+	if err := json.Unmarshal([]byte(out), &created); err != nil {
+		t.Fatalf("the repeated output is not JSON: %v\n%s", err, out)
+	}
+	if created.Created {
+		t.Error("the repeated create-project reported created=true")
+	}
+
+	// AND THE PROJECT IS USABLE: a root can be created inside it.
+	code, out = runCLI(t, "assignment", "create-root",
+		"--project-id", id,
+		"--title", "a root in the new project",
+		"--objective", "the objective",
+		"--recipient", "alpha",
+		"--idempotency-key", "idem:cli:root:new-project",
+		"--permitted-operation", "read",
+		"--eligible-recipient", "alpha",
+		"--max-depth", "1",
+		"--max-tasks", "2",
+		"--max-concurrency", "1",
+		"--max-resource-units", "10",
+		"--json",
+	)
+	if code != 0 {
+		t.Fatalf("create-root in the new project exited %d: %s", code, out)
+	}
+}
+
+// TestAssignmentCLICreateProjectRefusesANonIdentity proves the operator's
+// verb validates the project model's shape.
+func TestAssignmentCLICreateProjectRefusesANonIdentity(t *testing.T) {
+	assignmentCLIFixture(t)
+	for _, id := range []string{"", "pilot", "cpj-XYZ"} {
+		code, out := runCLI(t, "assignment", "create-project", "--id", id, "--json")
+		if code == 0 {
+			t.Errorf("the invalid project id %q was accepted: %s", id, out)
+		}
+	}
+}

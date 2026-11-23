@@ -86,6 +86,9 @@ import (
 // operatorOnlyAssignmentActions are the two operations the agent-facing
 // surface must not be able to reach, under ANY action name.
 var operatorOnlyAssignmentActions = []string{
+	"create-project",
+	"create_project",
+	"createproject",
 	"create-root",
 	"create_root",
 	"createroot",
@@ -506,5 +509,39 @@ func TestAssignment_TheToolSchemaIsValidJSON(t *testing.T) {
 	var decoded map[string]interface{}
 	if err := json.Unmarshal(tool.Schema, &decoded); err != nil {
 		t.Fatalf("the mpm_assignment schema is not valid JSON: %v", err)
+	}
+}
+
+// TestAssignment_NoRegistryActionCreatesAProject proves the project
+// boundary by name: no action of any registry tool can create a project,
+// and the advertised vocabulary names none.
+func TestAssignment_NoRegistryActionCreatesAProject(t *testing.T) {
+	names := []string{"create-project", "create_project", "createproject"}
+	for _, tool := range Registry {
+		tool := tool
+		t.Run(tool.Name, func(t *testing.T) {
+			for _, action := range names {
+				_, err := tool.Handler(newTestDMForTools(t), mpminternal.ActiveContext{},
+					map[string]interface{}{
+						"action": action,
+						"params": map[string]interface{}{"id": "cpj-0011223344556677"},
+					})
+				if err == nil {
+					t.Errorf("the %s tool accepted %q; a project is operator-created only",
+						tool.Name, action)
+				}
+			}
+		})
+	}
+	enum := schemaEnum(t, "mpm_assignment")
+	if enum == nil {
+		t.Fatal("mpm_assignment has no action enum; cannot verify the advertised vocabulary")
+	}
+	for _, action := range enum {
+		for _, forbidden := range names {
+			if action == forbidden {
+				t.Errorf("the advertised vocabulary offers the operator-only action %q", action)
+			}
+		}
 	}
 }

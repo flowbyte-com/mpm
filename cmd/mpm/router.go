@@ -92,7 +92,7 @@ func NewRouter() *CommandRouter {
 		"handoff":    {Name: "handoff", Description: "Manage handoffs (write|read|list|shred)"},
 		"lesson":     {Name: "lesson", Description: "Manage lessons", MinArgs: 1},
 		"memory":     {Name: "memory", Description: "Manage memories", MinArgs: 1},
-		"assignment": {Name: "assignment", Description: "Manage assignments (inbox|show|history|deliver|claim|delegate|record-review|handoff|create-root|record-approval)", MinArgs: 1, Help: printAssignmentHelp},
+		"assignment": {Name: "assignment", Description: "Manage assignments (inbox|show|history|deliver|claim|delegate|record-review|handoff|create-project|create-root|record-approval)", MinArgs: 1, Help: printAssignmentHelp},
 
 		// Ingest / cascade / migrate
 		"ingest":  {Name: "ingest", Description: "Import from external SQLite"},

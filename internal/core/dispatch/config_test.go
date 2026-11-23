@@ -110,6 +110,7 @@ func TestTheDocumentedConfigurationIsUsable(t *testing.T) {
   "drain_timeout_seconds": 120,
   "drain_poll_interval_seconds": 5,
   "workspace_root": "/var/lib/mpm/workspaces",
+  "repository_path": "/srv/mpm-repo",
   "worker_agent": "mpm-worker",
   "reviewer_agent": "mpm-reviewer",
   "review_repo_path": "/srv/repo",
@@ -148,6 +149,7 @@ func TestTheLeaseMustCoverTheRuntimeWindow(t *testing.T) {
 	cfg.LeaseMarginSeconds = 300
 	cfg.CandidateLimit = 10
 	cfg.WorkspaceRoot = "/tmp/workspaces"
+	cfg.RepositoryPath = "/srv/mpm-repo"
 	cfg.ReviewRepoPath = "/srv/repo"
 
 	err := cfg.Validate()
@@ -180,6 +182,7 @@ func TestTheReviewerMayNotBeTheWorker(t *testing.T) {
 	cfg.LeaseMarginSeconds = 300
 	cfg.CandidateLimit = 10
 	cfg.WorkspaceRoot = "/tmp/workspaces"
+	cfg.RepositoryPath = "/srv/mpm-repo"
 	cfg.ReviewRepoPath = "/srv/repo"
 	cfg.WorkerAgent = "mpm-worker"
 	cfg.ReviewerAgent = "mpm-worker"
@@ -211,6 +214,7 @@ func TestAnUnpinnedWorkerAgentIsRefused(t *testing.T) {
 	cfg.LeaseMarginSeconds = 300
 	cfg.CandidateLimit = 10
 	cfg.WorkspaceRoot = "/tmp/workspaces"
+	cfg.RepositoryPath = "/srv/mpm-repo"
 	cfg.ReviewRepoPath = "/srv/repo"
 	cfg.WorkerAgent = "some-other-agent"
 
@@ -239,6 +243,7 @@ func TestARelativePathIsRefused(t *testing.T) {
 	cfg.LeaseMarginSeconds = 300
 	cfg.CandidateLimit = 10
 	cfg.WorkspaceRoot = "relative/workspaces"
+	cfg.RepositoryPath = "/srv/mpm-repo"
 	cfg.ReviewRepoPath = "/srv/repo"
 
 	err := cfg.Validate()
@@ -250,6 +255,7 @@ func TestARelativePathIsRefused(t *testing.T) {
 	}
 
 	cfg.WorkspaceRoot = "/srv/workspaces"
+	cfg.RepositoryPath = "/srv/mpm-repo"
 	cfg.ReviewRepoPath = "relative/repo"
 	err = cfg.Validate()
 	if err == nil {

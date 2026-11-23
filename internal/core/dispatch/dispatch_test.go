@@ -197,6 +197,7 @@ func dispatchRoot(t *testing.T, store *assignment.Store, projectID string) *assi
 func dispatchRootWith(t *testing.T, store *assignment.Store, projectID string,
 	maxTasks, maxConcurrency int64) *assignment.Assignment {
 	t.Helper()
+	_, base := testRepository(t)
 	a, _, err := store.CreateRoot(assignment.NewLocalOperatorAuthority("operator"),
 		assignment.CreateRootParams{
 			ProjectID:           projectID,
@@ -210,6 +211,7 @@ func dispatchRootWith(t *testing.T, store *assignment.Store, projectID string,
 			MaxTasks:            maxTasks,
 			MaxConcurrency:      maxConcurrency,
 			MaxResourceUnits:    100,
+			BaseSHA:             base,
 		})
 	if err != nil {
 		t.Fatalf("create the root: %v", err)
@@ -228,6 +230,7 @@ func dispatchChild(t *testing.T, store *assignment.Store, parent *assignment.Ass
 		Recipient:      recipient,
 		Role:           role,
 		IdempotencyKey: key,
+		BaseSHA:        parent.BaseSHA,
 	})
 	if err != nil {
 		t.Fatalf("delegate: %v", err)
@@ -257,6 +260,8 @@ func testConfig(t *testing.T) Config {
 	cfg.RetryBackoffSeconds = 0
 	cfg.CandidateLimit = 20
 	cfg.WorkspaceRoot = filepath.Join(t.TempDir(), "workspaces")
+	repo, _ := testRepository(t)
+	cfg.RepositoryPath = repo
 	cfg.ReviewRepoPath = t.TempDir()
 	cfg.Model = "mpm-sidecar/test"
 	return cfg

@@ -2995,7 +2995,7 @@ The service takes an **injected clock**, so the lease semantics are observed rat
 
 #### The authority boundary, and what it is not
 
-Two operations are the **operator's**: creating the root assignment, and recording an operator approval. Neither is an action of `mpm_assignment`, neither appears in its schema, and neither is reachable through `mpm call`. They are **absent**, not refused: there is nothing to dispatch to. The operator reaches them through two dedicated CLI verbs, `mpm assignment create-root` and `mpm assignment record-approval`.
+Three operations are the **operator's**: creating a project identity, creating the root assignment, and recording an operator approval. None is an action of `mpm_assignment`, none appears in its schema, and none is reachable through `mpm call`. They are **absent**, not refused: there is nothing to dispatch to. The operator reaches them through three dedicated CLI verbs, `mpm assignment create-project`, `mpm assignment create-root` and `mpm assignment record-approval`. A project is `cpj-` and 16 lowercase hexadecimal characters; creation is idempotent for a live identity and refuses a withdrawn one.
 
 That is stronger than a refusal at call time, and it is stronger than a confirmation flag. A boolean the caller sets cannot distinguish "the operator asked for this" from "the caller decided this" — and a flag that *did* distinguish them would be a secret available to any agent running under the same account, which is no secret at all.
 
@@ -3099,13 +3099,19 @@ The dispatcher finds work MPM already knows about, proves the operator's root au
 
 #### The switch is a file, and a missing file means off
 
-Autonomous dispatch is off unless an operator writes a configuration file — `~/.mpm/dispatch.json` by default, or wherever `--dispatch-config` points. A **missing** file means off, and the disabled dispatcher reads no row, builds no runtime and starts no session. A file that is **present and enabled** must be **complete**: a configuration that names no lease, no runtime window or no workspace is refused rather than completed with invented values. A file that is **present and broken** is refused too, and the refusal names the file: a broken configuration is not a reason to guess, and it is not a reason to dispatch.
+Autonomous dispatch is off unless an operator writes a configuration file — `~/.mpm/dispatch.json` by default, or wherever `--dispatch-config` points. A **missing** file means off, and the disabled dispatcher reads no row, builds no runtime and starts no session. A file that is **present and enabled** must be **complete**: a configuration that names no lease, no runtime window, no workspace or no source repository is refused rather than completed with invented values. A file that is **present and broken** is refused too, and the refusal names the file: a broken configuration is not a reason to guess, and it is not a reason to dispatch.
 
 An **unknown key** is refused as well. A silently ignored key is a typo the operator cannot see: they wrote `lease_second` and the dispatcher used the default, and the difference between the two is the difference between a lease that covers the runtime window and one that does not. So is **content after the object**, because a configuration whose meaning depends on where the reader stopped is not a configuration.
 
 The paths the configuration names must be **absolute**: the sandbox roots are built from them and the containment resolves them against the filesystem, so a relative path would make the containment's own guarantee depend on the working directory. That is checked before anything is claimed, not discovered at the factory afterwards.
 
 There is no environment variable that turns it on by accident, and "installed" is not "enabled".
+
+#### The worktree is host-created, and the worker never owns Git
+
+`workspace_root` names where one worktree per assignment lives, and `repository_path` names the source repository. The host creates a genuine Git worktree at the assignment's exact `base_sha`, on a branch derived from the assignment id, and verifies it before recovery reuse. A pre-existing path is adopted only if it is a **linked worktree of that repository**, on that branch, whose history contains the base; a bare directory, a full clone, a symlinked path, another repository's worktree or another branch is **refused**. The two configured paths must not contain one another.
+
+The worker remains **file-edit-only**. The worktree's `.git` is a pointer file whose target is the source repository's metadata, outside the worker's namespace: the worker can read the checked-out files and cannot reach or modify the Git metadata. The **host** stages and commits; tests run outside the namespace under operator or CI control, and a failing test reaches the worker only as a recorded, bounded note — never as a general shell.
 
 #### Two verbs, and they are the operator's alone
 
@@ -4301,7 +4307,7 @@ scheduler can keep invoking the binary directly.
 Top-level commands registered in `cmd/mpm/router.go`. Subcommand surfaces (e.g. `mpm kb memory list`, `mpm ops gc`) are dispatched via `handlers_*.go` and documented manually in the subsections above. Regenerate this block with `go run ./cmd/gen-cli`.
 
 - **`add`** — Persist knowledge (prefix content with '-- ' if it starts with '-')
-- **`assignment`** — Manage assignments (inbox|show|history|deliver|claim|delegate|record-review|handoff|create-root|record-approval)
+- **`assignment`** — Manage assignments (inbox|show|history|deliver|claim|delegate|record-review|handoff|create-project|create-root|record-approval)
 - **`backup`** — Export database to SQL dump (optional path arg)
 - **`blob`** — Blob storage management (gc)
 - **`call`** — Universal tool boundary (JSON): mpm call <tool> [--payload <json>] [--payload-file <path>] | (stdin)
