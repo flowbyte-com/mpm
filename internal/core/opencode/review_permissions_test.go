@@ -155,6 +155,25 @@ func TestReviewerPermissionPolicyDoesNotCollapseResources(t *testing.T) {
 	if violation := reviewerPermissionViolation(broader); violation != "" {
 		t.Fatalf("a broader resource glob did not override the allow: %q", violation)
 	}
+
+	// A star does not cross a path separator, so `dir/*` does not cover
+	// `dir/sub/*`.
+	slash := append(append([]SessionPerm{}, base...),
+		SessionPerm{Action: "read", Resource: "dir/sub/*", Effect: "allow"},
+		SessionPerm{Action: "read", Resource: "dir/*", Effect: "deny"},
+	)
+	if violation := reviewerPermissionViolation(slash); !strings.Contains(violation, `"read"`) {
+		t.Fatalf("a non-crossing star was treated as covering a nested path: %q", violation)
+	}
+
+	// The same rule on the `*middle*` shape.
+	nested := append(append([]SessionPerm{}, base...),
+		SessionPerm{Action: "read", Resource: "dir/*.env.example", Effect: "allow"},
+		SessionPerm{Action: "read", Resource: "*.env.*", Effect: "deny"},
+	)
+	if violation := reviewerPermissionViolation(nested); !strings.Contains(violation, `"read"`) {
+		t.Fatalf("a nested resource was treated as covered by a non-crossing glob: %q", violation)
+	}
 }
 
 func TestReviewerPermissionPolicyMatchesActionGlobs(t *testing.T) {

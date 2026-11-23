@@ -371,19 +371,36 @@ func permissionResourceCovers(deny, allow string) bool {
 	}
 	// A one-star deny `prefix*suffix` covers `allowPrefix*allowSuffix`
 	// when the deny's prefix is a prefix of the allow's and the deny's
-	// suffix is a suffix of the allow's.
+	// suffix is a suffix of the allow's. The deny's `*` cannot cross a
+	// path separator, so the covered middle must be slash-free.
 	if denyPrefix, denySuffix, denySingle := permissionSplitOneStar(deny); denySingle {
-		return strings.HasPrefix(allowPrefix, denyPrefix) &&
-			strings.HasSuffix(allowSuffix, denySuffix)
+		if !strings.HasPrefix(allowPrefix, denyPrefix) ||
+			!strings.HasSuffix(allowSuffix, denySuffix) {
+			return false
+		}
+		middle := allowPrefix[len(denyPrefix):] +
+			allowSuffix[:len(allowSuffix)-len(denySuffix)]
+		return !strings.Contains(middle, "/")
 	}
 	// A `*middle*` deny covers a one-star allow when the middle literal
-	// lies wholly inside the allow's prefix or suffix. (If it straddled
-	// the star, an allow string could omit it.)
+	// lies wholly inside the allow's prefix or suffix, and the literal
+	// parts the two stars must span contain no path separator.
 	if strings.HasPrefix(deny, "*") && strings.HasSuffix(deny, "*") &&
 		strings.Count(deny, "*") == 2 {
 		middle := strings.TrimSuffix(strings.TrimPrefix(deny, "*"), "*")
-		return middle != "" &&
-			(strings.Contains(allowPrefix, middle) || strings.Contains(allowSuffix, middle))
+		if middle == "" {
+			return false
+		}
+		var outside string
+		switch {
+		case strings.Contains(allowPrefix, middle):
+			outside = strings.Replace(allowPrefix, middle, "", 1) + allowSuffix
+		case strings.Contains(allowSuffix, middle):
+			outside = allowPrefix + strings.Replace(allowSuffix, middle, "", 1)
+		default:
+			return false
+		}
+		return !strings.Contains(outside, "/")
 	}
 	return false
 }
