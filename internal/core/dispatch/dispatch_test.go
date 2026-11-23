@@ -110,13 +110,14 @@ func (f *fakeRuntime) Review(_ context.Context, req oc.ReviewRequest) (*oc.Revie
 		return nil, errors.New("the reviewer produced no state")
 	}
 	return &oc.ReviewResult{
-		SessionID:        req.SessionID,
-		ReviewedRevision: strings.Repeat("1", 40),
-		FindingsSHA256:   strings.Repeat("e", 64),
-		Outcome:          "succeeded",
-		Agent:            "mpm-reviewer",
-		Findings:         "the findings",
-		EvidencePath:     "/evidence/review.json",
+		SessionID:         req.SessionID,
+		ReviewedRevision:  strings.Repeat("1", 40),
+		FindingsSHA256:    strings.Repeat("e", 64),
+		Outcome:           "succeeded",
+		Agent:             "mpm-reviewer",
+		Findings:          "the findings",
+		AssistantFindings: "the findings\nVERDICT: APPROVED",
+		EvidencePath:      "/evidence/review.json",
 	}, nil
 }
 
@@ -619,6 +620,7 @@ func TestAReviewerCannotGainWorkerPrivileges(t *testing.T) {
 		Recipient:      "charlie",
 		Role:           assignment.RoleReviewer,
 		IdempotencyKey: "idem:dispatch:rev:reviewer",
+		HeadSHA:        strings.Repeat("1", 40),
 		Payload:        map[string]interface{}{assignment.PayloadKeyReviewTarget: subject.ID},
 	})
 	if err != nil {
@@ -655,15 +657,24 @@ func TestAReviewerCannotGainWorkerPrivileges(t *testing.T) {
 	if outcome.FindingsSHA256 == "" || outcome.ReviewedRevision == "" {
 		t.Errorf("the review recorded no evidence: %+v", outcome)
 	}
-	// THE VERDICT IS NOT THE DISPATCHER'S TO RECORD.
+	// THE HOST TRANSCRIBES THE REVIEWER'S OWN TERMINAL VERDICT. It is
+	// not an operator approval, and the subject moves only because the
+	// captured assistant text said APPROVED.
 	got, err := store.Get(reviewer.ID)
 	if err != nil {
 		t.Fatalf("read the reviewer: %v", err)
 	}
-	if got.State == assignment.StateReviewPassed {
-		t.Error("the dispatcher recorded the reviewer's verdict")
+	if got.State != assignment.StateReviewPassed {
+		t.Errorf("the reviewer is %q, want review_passed after transcription", got.State)
 	}
-	if got.ApprovedAt != nil {
+	subjectRow, err := store.Get(subject.ID)
+	if err != nil {
+		t.Fatalf("read the subject: %v", err)
+	}
+	if subjectRow.State != assignment.StateReviewPassed {
+		t.Errorf("the subject is %q, want review_passed", subjectRow.State)
+	}
+	if got.ApprovedAt != nil || subjectRow.ApprovedAt != nil {
 		t.Error("the dispatcher recorded an operator approval")
 	}
 }

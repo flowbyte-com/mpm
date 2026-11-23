@@ -55,7 +55,7 @@ import (
 // Neither carries a provider credential: inference goes through the
 // sidecar, so the runtime authenticates to a socket, not to a provider.
 func IsolatedEnv(cfg Config) []string {
-	return []string{
+	env := []string{
 		"HOME=" + filepath.Join(cfg.Root, "home"),
 		"PATH=" + sandboxPath,
 		"XDG_CONFIG_HOME=" + filepath.Join(cfg.Root, "ocfg"),
@@ -65,6 +65,14 @@ func IsolatedEnv(cfg Config) []string {
 		"LANG=C.UTF-8",
 		"TERM=dumb",
 	}
+	// A REVIEWER's provider credential is the one exception. It is passed
+	// to the OpenCode PROCESS only; `sandbox_exec` scrubs it from the
+	// child environment and bubblewrap clears the command environment.
+	// The worker's sidecar credential never reaches this function.
+	if cfg.ProviderKey != "" && cfg.ProviderKeyEnv != "" {
+		env = append(env, cfg.ProviderKeyEnv+"="+cfg.ProviderKey)
+	}
+	return env
 }
 
 // Config is one OpenCode integration's fixed configuration.
@@ -91,6 +99,13 @@ type Config struct {
 	// Sidecar is the sidecar configuration. Its APIKey is the only
 	// credential in the process, and it never leaves it.
 	Sidecar SidecarConfig
+	// ProviderKey and ProviderKeyEnv are the REVIEWER's dedicated
+	// provider credential. They are set only for the reviewer runtime;
+	// IsolatedEnv passes the pair to the OpenCode process. The
+	// `sandbox_exec` plugin scrubs the variable before spawning its
+	// helper, and bubblewrap clears the command environment.
+	ProviderKey    string
+	ProviderKeyEnv string
 	// Timeout bounds one whole launch.
 	Timeout time.Duration
 }

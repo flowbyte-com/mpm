@@ -912,3 +912,43 @@ func TestToolActivityCannotSatisfyTheAuthorshipGate(t *testing.T) {
 		t.Errorf("an unparseable payload counted as authored text: %q", got)
 	}
 }
+
+// TestContainmentMountsProcAfterUnshare pins the ordering that keeps the
+// HOST's /proc out of the sandbox.
+//
+// The first version mounted --proc before the unshare flags. That exposed the
+// caller's /proc under the sandbox path, so a command could read
+// /proc/1/environ. The unshare flags must come first.
+func TestContainmentMountsProcAfterUnshare(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := BuildTree(Spec{Root: root, Workspace: workspace}); err != nil {
+		t.Fatal(err)
+	}
+	spec := Spec{
+		Root:          root,
+		Workspace:     workspace,
+		OpenCodeBin:   "/bin/true",
+		SidecarSocket: filepath.Join(root, "sidecar.sock"),
+		Env:           map[string]string{"PATH": "/usr/bin:/bin"},
+		Command:       []string{"/bin/true"},
+	}
+	argv, err := spec.Argv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The inner bwrap argv is inside the shell script; the outer argv is
+	// the unshare launcher. Inspect the rendered script for the order.
+	script := argv[len(argv)-1]
+	proc := strings.Index(script, "--proc")
+	pid := strings.Index(script, "--unshare-pid")
+	if proc < 0 || pid < 0 {
+		t.Fatalf("the containment argv names no /proc or pid namespace: %s", script)
+	}
+	if proc < pid {
+		t.Fatalf("--proc is mounted before --unshare-pid; host /proc would be exposed")
+	}
+}

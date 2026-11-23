@@ -952,6 +952,19 @@ def bwrap_args(tree: dict, fds: dict | None = None) -> list:
         # The reviewer's own tree: read-write, by descriptor.
         for name in TREE:
             args += ["--bind-fd", str(fds[name]), f"{PREFIX}/{name}"]
+    # THE PID NAMESPACE MUST EXIST BEFORE /proc IS MOUNTED. The first
+    # version mounted /proc and only then asked bubblewrap to unshare the
+    # PID namespace; the mount therefore exposed the HOST's /proc, and a
+    # command could read the caller's environment through
+    # /proc/1/environ. The unshare flags are emitted first.
+    args += [
+        "--unshare-all",
+        "--unshare-user",
+        "--disable-userns",
+        "--assert-userns-disabled",
+        "--die-with-parent",
+        "--new-session",
+    ]
     # The kernel's pseudo-filesystems and a PRIVATE /tmp.
     args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
     # The environment: disposable HOME, TMPDIR and MPM_WORKSPACE.
@@ -978,19 +991,9 @@ def bwrap_args(tree: dict, fds: dict | None = None) -> list:
         "--setenv", "TERM", "dumb",
         "--setenv", "LANG", "C.UTF-8",
     ]
-    # No network, no new privileges, no shared namespaces, and no
-    # NESTED user namespace: `--disable-userns` refuses `unshare(CLONE
-    # _NEWUSER)` inside the sandbox, and `--assert-userns-disabled`
-    # makes the sandbox REFUSE TO START if that refusal cannot be
-    # enforced.  A sandbox that cannot enforce it does not start.
-    args += [
-        "--unshare-all",
-        "--unshare-user",
-        "--disable-userns",
-        "--assert-userns-disabled",
-        "--die-with-parent",
-        "--new-session",
-    ]
+    # A sandbox that cannot enforce the disabled nested user namespace
+    # does not start. The unshare flags were emitted before the /proc
+    # mount above.
     return args
 
 
@@ -1183,7 +1186,27 @@ def _write_envelope(envelope: dict) -> None:
         pass
 
 
+# Credentials that belong to the INFERENCE process, never to the sandboxed
+# command or to bubblewrap's own init process. `--clearenv` clears the
+# COMMAND's environment, not bubblewrap's init process (/proc/1), so the
+# wrapper scrubs its own environment before it spawns bwrap.
+SCRUBBED_ENVIRONMENT = (
+    "MINIMAX_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MPM_OPENCODE_REVIEWER_KEY",
+    "MPM_OPENCODE_SIDECAR_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+)
+
+
+def scrub_credentials() -> None:
+    for name in SCRUBBED_ENVIRONMENT:
+        os.environ.pop(name, None)
+
+
 def main(argv: list | None = None) -> int:
+    scrub_credentials()
     parser = argparse.ArgumentParser(
         description="an OS-confined sandbox for a review subagent"
     )

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/assignment"
@@ -31,6 +32,11 @@ const (
 	// EnvOpenCodePlugin is where the MPM OpenCode plugin lives. The
 	// REVIEWER's `sandbox_exec` comes from it.
 	EnvOpenCodePlugin = "MPM_OPENCODE_PLUGIN"
+	// EnvReviewerKey is the REVIEWER's dedicated provider credential.
+	// It is separate from the worker's sidecar key and is read only by
+	// the reviewer runtime. There is no fallback to any ambient provider
+	// key.
+	EnvReviewerKey = "MPM_OPENCODE_REVIEWER_KEY"
 )
 
 // The default models.
@@ -71,15 +77,16 @@ const (
 // finishes: a sidecar is a listening socket with a credential in its
 // environment, and it must not outlive the work it was opened for.
 type OpenCodeFactory struct {
-	cfg      Config
-	mpmDir   string
-	opencode string
-	mpmBin   string
-	model    string
-	key      string
-	upstream string
-	plugin   string
-	sidecars []*oc.Sidecar
+	cfg         Config
+	mpmDir      string
+	opencode    string
+	mpmBin      string
+	model       string
+	key         string
+	reviewerKey string
+	upstream    string
+	plugin      string
+	sidecars    []*oc.Sidecar
 	// runtimes holds the runtime built for each assignment, for the life
 	// of the pass.
 	//
@@ -182,17 +189,18 @@ func NewOpenCodeFactory(cfg Config) (*OpenCodeFactory, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &OpenCodeFactory{
-		cfg:      cfg,
-		mpmDir:   mpmDir,
-		opencode: resolved,
-		mpmBin:   mpmBin,
-		model:    model,
-		key:      key,
-		upstream: upstream,
-		plugin:   resolvePluginPath(mpmDir),
-		runtimes: map[string]*oc.Runtime{},
-		ctx:      ctx,
-		cancel:   cancel,
+		cfg:         cfg,
+		mpmDir:      mpmDir,
+		opencode:    resolved,
+		mpmBin:      mpmBin,
+		model:       model,
+		key:         key,
+		reviewerKey: os.Getenv(EnvReviewerKey),
+		upstream:    upstream,
+		plugin:      resolvePluginPath(mpmDir),
+		runtimes:    map[string]*oc.Runtime{},
+		ctx:         ctx,
+		cancel:      cancel,
 	}, nil
 }
 
@@ -353,16 +361,52 @@ func (f *OpenCodeFactory) reviewerRuntime(a *assignment.Assignment) (*oc.Runtime
 	if model == "" {
 		model = DefaultReviewModel
 	}
+	// THE REVIEWER CREDENTIAL IS ITS OWN, AND IT IS EXPLICIT. No fallback
+	// to MINIMAX_API_KEY, DEEPSEEK_API_KEY, the sidecar key, or the
+	// operator's OpenCode auth store.
+	if f.reviewerKey == "" {
+		return nil, fmt.Errorf(
+			"no reviewer credential: set %s. The reviewer has its own provider "+
+				"boundary and does not use the worker's sidecar credential.",
+			EnvReviewerKey)
+	}
+	providerEnv, err := ReviewerProviderEnv(model)
+	if err != nil {
+		return nil, err
+	}
 	return oc.NewRuntime(oc.Config{
-		Root:          root,
-		OpenCodeBin:   f.opencode,
-		MPMBin:        "",
-		Model:         model,
-		RepoPath:      f.cfg.ReviewRepoPath,
-		PluginPath:    f.plugin,
-		AllowedAgents: []string{DefaultReviewerAgent},
-		Timeout:       time.Duration(f.cfg.RuntimeTimeoutSeconds) * time.Second,
+		Root:           root,
+		OpenCodeBin:    f.opencode,
+		MPMBin:         "",
+		Model:          model,
+		RepoPath:       f.cfg.ReviewRepoPath,
+		PluginPath:     f.plugin,
+		AllowedAgents:  []string{DefaultReviewerAgent},
+		Timeout:        time.Duration(f.cfg.RuntimeTimeoutSeconds) * time.Second,
+		ProviderKey:    f.reviewerKey,
+		ProviderKeyEnv: providerEnv,
 	})
+}
+
+// reviewerProviderEnv maps the reviewer model to the ONE provider
+// environment variable OpenCode v2.3.2 uses for it.
+//
+// The mapping is deliberately closed: a model from another provider is
+// refused rather than tried with a key that belongs to a different
+// boundary. The pilot's measured model is
+// `minimax-coding-plan/MiniMax-M3.1-Flash`, which OpenCode exposes when
+// `MINIMAX_API_KEY` is present.
+func ReviewerProviderEnv(model string) (string, error) {
+	switch {
+	case strings.HasPrefix(model, "minimax-coding-plan/"),
+		strings.HasPrefix(model, "minimax-cn-coding-plan/"):
+		return "MINIMAX_API_KEY", nil
+	default:
+		return "", fmt.Errorf(
+			"reviewer model %q has no dedicated reviewer credential mapping; "+
+				"supported provider families are minimax-coding-plan/* and "+
+				"minimax-cn-coding-plan/*", model)
+	}
 }
 
 // upstreamModel is the provider model the sidecar translates to.

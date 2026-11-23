@@ -277,15 +277,30 @@ func assignmentVerbExecuteReview(store *assignment.Store, f *assignmentFlags) (i
 	if model == "" {
 		model = defaultReviewModel
 	}
+	// THE REVIEWER'S OWN CREDENTIAL. It is separate from the worker's
+	// sidecar key and has no fallback to an ambient provider key.
+	reviewerKey := os.Getenv(dispatch.EnvReviewerKey)
+	if reviewerKey == "" {
+		return nil, fmt.Errorf(
+			"no reviewer credential: set %s. The reviewer has its own provider "+
+				"boundary and does not use the worker's sidecar credential.",
+			dispatch.EnvReviewerKey)
+	}
+	providerEnv, err := dispatch.ReviewerProviderEnv(model)
+	if err != nil {
+		return nil, err
+	}
 
 	rt, err := oc.NewRuntime(oc.Config{
-		Root:          root,
-		OpenCodeBin:   opencodeBin,
-		MPMBin:        "",
-		Model:         model,
-		RepoPath:      f.workspace,
-		PluginPath:    pluginPath,
-		AllowedAgents: []string{reviewerAgentDefinition},
+		Root:           root,
+		OpenCodeBin:    opencodeBin,
+		MPMBin:         "",
+		Model:          model,
+		RepoPath:       f.workspace,
+		PluginPath:     pluginPath,
+		AllowedAgents:  []string{reviewerAgentDefinition},
+		ProviderKey:    reviewerKey,
+		ProviderKeyEnv: providerEnv,
 	})
 	if err != nil {
 		return nil, err

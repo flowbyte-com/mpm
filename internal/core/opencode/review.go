@@ -103,6 +103,10 @@ type ReviewResult struct {
 	EvidencePath string
 	// Findings is the bounded text the reviewer produced.
 	Findings string
+	// AssistantFindings is the reviewer's OWN TEXT, with the user
+	// prompt, tool activity and diagnostics removed. It is the only
+	// source from which the host may transcribe a verdict.
+	AssistantFindings string
 	// Outcome is the runtime's own report.
 	Outcome string
 	// Agent and Model are what the session actually used.
@@ -179,7 +183,7 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 	// contains nothing but the submitted prompt echo, an empty assistant
 	// turn, tool activity or a diagnostic envelope has produced NO REVIEW —
 	// counting it would let a prompt be mistaken for a verdict.
-	findings, state, err := r.captureMessages(ctx, req.SessionID)
+	findings, assistantFindings, state, err := r.captureMessages(ctx, req.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -193,13 +197,14 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 
 	digest := sha256.Sum256([]byte(findings))
 	res := &ReviewResult{
-		SessionID:      req.SessionID,
-		FindingsSHA256: hex.EncodeToString(digest[:]),
-		Findings:       findings,
-		Outcome:        state.Outcome,
-		Agent:          state.Agent,
-		Model:          state.Model.ProviderID + "/" + state.Model.ID,
-		Permissions:    state.Permissions,
+		SessionID:         req.SessionID,
+		FindingsSHA256:    hex.EncodeToString(digest[:]),
+		Findings:          findings,
+		AssistantFindings: assistantFindings,
+		Outcome:           state.Outcome,
+		Agent:             state.Agent,
+		Model:             state.Model.ProviderID + "/" + state.Model.ID,
+		Permissions:       state.Permissions,
 	}
 
 	// THE REVISION IS THE PINNED ONE, not a fresh observation.
@@ -208,13 +213,14 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 	// THE CAPTURE IS WRITTEN BY THE HOST, beside the disposable config.
 	path := filepath.Join(cfg.Root, "findings", "review-"+req.SessionID+".json")
 	payload := map[string]any{
-		"session_id":        res.SessionID,
-		"reviewed_revision": res.ReviewedRevision,
-		"findings_sha256":   res.FindingsSHA256,
-		"outcome":           res.Outcome,
-		"agent":             res.Agent,
-		"model":             res.Model,
-		"findings":          res.Findings,
+		"session_id":         res.SessionID,
+		"reviewed_revision":  res.ReviewedRevision,
+		"findings_sha256":    res.FindingsSHA256,
+		"outcome":            res.Outcome,
+		"agent":              res.Agent,
+		"model":              res.Model,
+		"findings":           res.Findings,
+		"assistant_findings": res.AssistantFindings,
 	}
 	body, _ := json.MarshalIndent(payload, "", "  ")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -608,17 +614,17 @@ func (r *Runtime) writeReviewConfig() error {
 //
 // The errors and the tool results are included: a review that refused to run
 // is not a review that found nothing.
-func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string, *SessionState, error) {
+func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string, string, *SessionState, error) {
 	out, err := r.runIsolated(ctx, r.cfg.OpenCodeBin, "--standalone", "api",
 		"session.message.list", "--param", "sessionID="+sessionID)
 	if err != nil {
-		return "", nil, fmt.Errorf("opencode: read the reviewer's messages: %w", err)
+		return "", "", nil, fmt.Errorf("opencode: read the reviewer's messages: %w", err)
 	}
 	var env struct {
 		Data []reviewMessage `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(out), &env); err != nil {
-		return "", nil, fmt.Errorf("opencode: parse the reviewer's messages: %w", err)
+		return "", "", nil, fmt.Errorf("opencode: parse the reviewer's messages: %w", err)
 	}
 
 	// THE COMPLETION GUARD, applied where the stream is read. The
@@ -627,13 +633,26 @@ func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string
 	// review.
 	transcript, err := captureReviewFindings(env.Data)
 	if err != nil {
-		return transcript, nil, err
+		return transcript, assistantAuthoredFindings(env.Data), nil, err
 	}
 	state, err := r.Inspect(ctx, sessionID)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
-	return transcript, state, nil
+	return transcript, assistantAuthoredFindings(env.Data), state, nil
+}
+
+// assistantAuthoredFindings is the reviewer's own prose, with prompts, tool
+// activity and diagnostics removed. A verdict may be transcribed only from
+// this text.
+func assistantAuthoredFindings(msgs []reviewMessage) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		if m.Type == "assistant" {
+			b.WriteString(assistantAuthoredText(m.Content))
+		}
+	}
+	return b.String()
 }
 
 // reviewMessage is the shape findingsFromMessages consumes.

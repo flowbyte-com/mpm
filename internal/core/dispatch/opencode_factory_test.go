@@ -62,11 +62,12 @@ func stubOpenCode(t *testing.T) string {
 func TestTheRealFactoryGivesEachRoleItsOwnSurface(t *testing.T) {
 	t.Setenv("MPM_OPENCODE_BIN", stubOpenCode(t))
 	t.Setenv("MPM_OPENCODE_SIDECAR_KEY", "disposable-not-a-credential")
+	t.Setenv("MPM_OPENCODE_REVIEWER_KEY", "disposable-reviewer-credential")
 	t.Setenv("MPM_WORKSPACE", t.TempDir())
 
 	cfg := testConfig(t)
 	cfg.Model = "mpm-sidecar/permitted-model"
-	cfg.ReviewerModel = "provider/reviewer-model"
+	cfg.ReviewerModel = "minimax-coding-plan/MiniMax-M3.1-Flash"
 
 	factory, err := NewOpenCodeFactory(cfg)
 	if err != nil {

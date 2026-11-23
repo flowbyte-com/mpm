@@ -297,7 +297,11 @@ the reviewer's disposable tree is bound read-write at `/sandbox`, and
 and the operator's account database are not readable), `/tmp` is a
 private tmpfs, the network is unshared, the environment is cleared
 before the disposable variables are set, every capability is dropped and
-a nested user namespace is refused.
+a nested user namespace is refused. The wrapper also scrubs the
+reviewer's dedicated provider credential (`MPM_OPENCODE_REVIEWER_KEY`,
+presented to OpenCode as `MINIMAX_API_KEY` for the measured MiniMax
+model) from its own process before it starts bubblewrap; `--clearenv`
+covers the command and the plugin wrapper scrub covers the helper.
 
 The host controls the sandbox's base, the repository copy and the
 protected set. The model supplies the command and nothing else: it

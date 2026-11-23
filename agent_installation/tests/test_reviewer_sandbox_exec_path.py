@@ -144,7 +144,13 @@ class SandboxInvocation:
         )
         return {"code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
-    def run(self, argv: list, cwd: str | None = "repo", timeout_ms: int = 120_000) -> dict:
+    def run(
+        self,
+        argv: list,
+        cwd: str | None = "repo",
+        timeout_ms: int = 120_000,
+        env: dict[str, str] | None = None,
+    ) -> dict:
         command = self._command("exec")
         payload = json.dumps(
             {"argv": argv, "cwd": cwd, "timeout_ms": timeout_ms}
@@ -161,6 +167,7 @@ class SandboxInvocation:
                 stderr=subprocess.PIPE,
                 pass_fds=(envelope_read,),
                 text=True,
+                env=env,
                 preexec_fn=lambda: os.dup2(envelope_read, 3),
             )
         except BaseException:
@@ -387,6 +394,42 @@ class ReviewerExecutionPathTest(unittest.TestCase):
         self.assertEqual(result["code"], 0, result["stderr"])
         self.assertIn("go version", result["stdout"])
 
+    def test_the_sandbox_command_cannot_read_a_provider_credential(self) -> None:
+        """The command cannot see the reviewer's provider credential.
+
+        The credential is inherited by the host-side wrapper when the
+        OpenCode process starts it, so the wrapper's env is a real threat
+        surface. The wrapper scrubs it, and bwrap clears the command env.
+        This probe checks the command's own environment and /proc.
+        """
+        name = "MINIMAX_API_KEY"
+        marker = "MARKER-NOT-A-REAL-CREDENTIAL"
+        previous = os.environ.get(name)
+        os.environ[name] = marker
+        try:
+            result = self.invocation.run(
+                [
+                    "/bin/sh",
+                    "-c",
+                    "env; echo ---; cat /proc/1/environ; echo ---; "
+                    "cat /proc/self/environ; echo ---; ls /proc",
+                ],
+                cwd="tmp",
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "HOME": str(self.root / "test-home"),
+                    name: marker,
+                },
+            )
+        finally:
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
+        combined = result["stdout"] + result["stderr"] + json.dumps(result["envelope"])
+        self.assertNotIn(marker, combined)
+        self.assertNotIn(name, combined)
+
 
 class DisposableCopyMetadataTest(unittest.TestCase):
     """The disposable copy does not carry the operator's PATHS.
@@ -598,6 +641,8 @@ class PluginInvocationAgreementTest(unittest.TestCase):
         self.assertNotIn("execSync(", self.source)
         self.assertNotIn("exec(", self.source)
         self.assertNotIn("child_process.exec", self.source)
+
+
 
 
 if __name__ == "__main__":

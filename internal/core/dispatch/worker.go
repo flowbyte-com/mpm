@@ -75,12 +75,29 @@ func (e *Engine) dispatchReview(ctx context.Context, claimed *assignment.Assignm
 		return outcome, nil
 	}
 
+	// THE EXACT REVISION IS PART OF THE AUTHORISATION. Without it the
+	// review runtime would accept whatever the review checkout happens
+	// to contain and the verdict would bind to that HEAD.
+	expected := claimed.HeadSHA
+	if expected == "" {
+		if targetID, _ := claimed.Payload[assignment.PayloadKeyReviewTarget].(string); targetID != "" {
+			if subject, err := e.store.Get(targetID); err == nil {
+				expected = subject.HeadSHA
+			}
+		}
+	}
+	if expected == "" {
+		outcome.Reason = ReasonReviewerUnavailable
+		outcome.Detail = "the review names no exact revision to check; set the reviewer's head SHA"
+		return outcome, nil
+	}
 	res, err := e.store.ExecuteReview(ctx, reviewer, assignment.ExecuteReviewParams{
-		ID:    claimed.ID,
-		Epoch: claimed.ClaimEpoch,
-		Actor: assignment.Actor{Address: claimed.Recipient, Kind: "agent"},
-		Brief: e.briefFor(claimed),
-		Title: "review of " + claimed.ID,
+		ID:               claimed.ID,
+		Epoch:            claimed.ClaimEpoch,
+		Actor:            assignment.Actor{Address: claimed.Recipient, Kind: "agent"},
+		Brief:            e.briefFor(claimed),
+		Title:            "review of " + claimed.ID,
+		ExpectedRevision: expected,
 	})
 	if err != nil {
 		outcome.Reason = classifyReviewRefusal(err)
@@ -109,7 +126,8 @@ func (e *Engine) briefFor(a *assignment.Assignment) string {
 	subject, _ := a.Payload[assignment.PayloadKeyReviewTarget].(string)
 	brief := fmt.Sprintf(
 		"Review the work of assignment %s independently. Report what is wrong with it, "+
-			"with file and line references. Say plainly whether it is acceptable.", subject)
+			"with file and line references. End with exactly one final line: "+
+			"`VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`.", subject)
 	if len(brief) > maxBriefBytes {
 		brief = brief[:maxBriefBytes]
 	}
@@ -161,6 +179,8 @@ func classifyAdapterRefusal(err error) string {
 		return ReasonLeaseHeld
 	case errors.Is(err, oc.ErrReviewerUnavailable):
 		return ReasonReviewerUnavailable
+	case errors.Is(err, assignment.ErrReviewVerdict):
+		return ReasonRecoveryRequired
 	case errors.Is(err, assignment.ErrIllegalTransition):
 		return ReasonOperatorGatePending
 	case errors.Is(err, assignment.ErrRecordOnlyRefused):
@@ -184,6 +204,8 @@ func classifyReviewRefusal(err error) string {
 		return ReasonStaleEpoch
 	case errors.Is(err, oc.ErrReviewerUnavailable):
 		return ReasonReviewerUnavailable
+	case errors.Is(err, assignment.ErrReviewVerdict):
+		return ReasonRecoveryRequired
 	case errors.Is(err, assignment.ErrRecordOnlyRefused):
 		// The adapter could not record an observed outcome, and the
 		// caller asked for no launch. The attempt stays OUTSTANDING and

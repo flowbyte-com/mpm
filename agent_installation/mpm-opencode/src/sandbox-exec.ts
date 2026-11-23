@@ -62,6 +62,34 @@ export const SANDBOX_TREES = ["repo", "home", "tmp", "workspace", "findings"];
 /** The command exit code that means "the sandbox refused". */
 const SANDBOX_FAILURE = 125;
 
+/**
+ * The environment for a HOST-side sandbox helper.
+ *
+ * The reviewer's OpenCode process holds its provider credential in the
+ * environment. The plugin's own helper and every child it starts must not
+ * receive it: `sandbox_exec` is the model-controlled execution path, and
+ * the credential belongs to the inference process, not to the command.
+ *
+ * The bwrap command is also built with `--clearenv`, so this is defence in
+ * depth around the wrapper as well as the namespace.
+ */
+export function sandboxProcessEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...source };
+  for (const name of [
+    "MINIMAX_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MPM_OPENCODE_REVIEWER_KEY",
+    "MPM_OPENCODE_SIDECAR_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+  ]) {
+    delete env[name];
+  }
+  return env;
+}
+
 export interface SandboxEnvelope {
   ok: boolean;
   stage?: string;
@@ -152,6 +180,7 @@ function spawnSyncText(command: string, args: string[]): string {
       encoding: "utf-8",
       timeout: 30_000,
       stdio: ["ignore", "pipe", "ignore"],
+      env: sandboxProcessEnv(),
     });
   } catch {
     return "";
@@ -175,6 +204,7 @@ async function runScript(
   return new Promise((resolvePromise) => {
     const child = spawn(python, full, {
       stdio: ["pipe", "pipe", "pipe", "pipe"],
+      env: sandboxProcessEnv(),
     });
     let stdout = "";
     let stderr = "";

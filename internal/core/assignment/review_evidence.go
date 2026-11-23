@@ -79,88 +79,140 @@ type ReviewEvidenceParams struct {
 // verdict can no longer attach evidence, so the verdict it published
 // cannot be back-filled with a different revision afterwards.
 func (s *Store) CaptureReviewEvidence(p ReviewEvidenceParams) (*Assignment, error) {
-	if !shaPattern.MatchString(p.ReviewedSHA) {
-		return nil, fmt.Errorf("%w: the reviewed revision must be a full object id, got %q",
-			ErrConstraint, p.ReviewedSHA)
+	if err := validateReviewEvidenceParams(p); err != nil {
+		return nil, err
 	}
-	if !sha256Pattern.MatchString(p.FindingsSHA256) {
-		return nil, fmt.Errorf("%w: the findings digest must be a SHA-256, got %q",
-			ErrConstraint, p.FindingsSHA256)
-	}
-	if strings.TrimSpace(p.EvidenceRef) == "" {
-		return nil, fmt.Errorf("%w: captured evidence must name where it is", ErrConstraint)
-	}
-	if strings.Contains(p.EvidenceRef, "\n") {
-		return nil, fmt.Errorf("%w: the evidence pointer must be one line", ErrConstraint)
-	}
-
 	var out *Assignment
 	err := s.db.WithTx(func(node internal.DBNode) error {
-		rev, err := getAssignmentTx(node, p.ReviewerID)
-		if err != nil {
-			return err
-		}
-		if rev.Role != RoleReviewer {
-			return fmt.Errorf("%w: %s is a %s and has no review to evidence",
-				ErrConstraint, rev.ID, rev.Role)
-		}
-		if p.Epoch != rev.ClaimEpoch {
-			return fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, rev.ID, rev.ClaimEpoch)
-		}
-		if rev.State != StateInProgress {
-			return fmt.Errorf("%w: %s is %s; evidence is captured while the review is live",
-				ErrIllegalTransition, rev.ID, rev.State)
-		}
-
-		now := s.Now()
-		res, err := node.ExecTracked(`
-			UPDATE agent_tasks
-			   SET reviewed_sha = ?, findings_sha256 = ?, evidence_ref = ?, updated_at = ?
-			 WHERE id = ? AND claim_epoch = ? AND role = 'reviewer' AND state = ?
-			   AND reviewed_sha IS NULL AND findings_sha256 IS NULL`,
-			5, p.ReviewedSHA, p.FindingsSHA256, p.EvidenceRef, now,
-			p.ReviewerID, p.Epoch, StateInProgress)
-		if err != nil {
-			return storageRefusal(err)
-		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("assignment: read the affected rows: %w", err)
-		}
-		if affected != 1 {
-			// THREE DIFFERENT CAUSES, and the caller needs to know which.
-			// A review that already carries evidence is not stale — it is
-			// already recorded, and a second capture would REPLACE the
-			// record of what was examined with a claim about something
-			// else.
-			if rev.ReviewedSHA != "" || rev.FindingsSHA256 != "" {
-				return fmt.Errorf("%w: %s already carries captured evidence (%s); "+
-					"the record of what was examined is write-once",
-					ErrConstraint, rev.ID, rev.ReviewedSHA)
-			}
-			return fmt.Errorf("%w: %s moved while the evidence was being captured",
-				ErrStaleClaim, p.ReviewerID)
-		}
-
-		// WRITE-PATH READ-BACK, and one more rule the WHERE clause
-		// cannot state: the ROW must now carry exactly what was
-		// presented.
-		got, err := getAssignmentTx(node, p.ReviewerID)
-		if err != nil {
-			return err
-		}
-		if got == nil {
-			return fmt.Errorf("%w: %s disappeared while its evidence was captured",
-				ErrNotFound, p.ReviewerID)
-		}
-		if got.ReviewedSHA != p.ReviewedSHA || got.FindingsSHA256 != p.FindingsSHA256 {
-			return fmt.Errorf("assignment: the captured evidence did not persist on %s", p.ReviewerID)
-		}
-		out = got
-		return nil
+		var err error
+		out, err = s.captureReviewEvidenceTx(node, p)
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// captureReviewEvidenceAndVerdict records the host-captured evidence and
+// the transcribed reviewer verdict in ONE transaction.
+//
+// The two facts must not land separately. A crash after the evidence and
+// before the verdict would leave a captured review that cannot be re-run
+// (the capture is write-once) and no verdict; a crash after the verdict
+// and before the evidence would publish a decision with nothing behind
+// it. Sharing the transaction closes both windows.
+func (s *Store) captureReviewEvidenceAndVerdict(p ReviewEvidenceParams, verdict, note string) (*Assignment, error) {
+	if err := validateReviewEvidenceParams(p); err != nil {
+		return nil, err
+	}
+	if err := validateReviewVerdict(verdict); err != nil {
+		return nil, err
+	}
+	var out *Assignment
+	err := s.db.WithTx(func(node internal.DBNode) error {
+		if _, err := s.captureReviewEvidenceTx(node, p); err != nil {
+			return err
+		}
+		var err error
+		out, err = s.recordReviewResultTx(node, ReviewResultParams{
+			ReviewerID: p.ReviewerID,
+			Verdict:    verdict,
+			Epoch:      p.Epoch,
+			Actor:      p.Actor,
+			Note:       note,
+		})
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// captureReviewEvidenceTx is the in-transaction half of the evidence
+// capture. It is shared with the atomic evidence+verdict write.
+func (s *Store) captureReviewEvidenceTx(node internal.DBNode, p ReviewEvidenceParams) (*Assignment, error) {
+	var out *Assignment
+	rev, err := getAssignmentTx(node, p.ReviewerID)
+	if err != nil {
+		return nil, err
+	}
+	if rev.Role != RoleReviewer {
+		return nil, fmt.Errorf("%w: %s is a %s and has no review to evidence",
+			ErrConstraint, rev.ID, rev.Role)
+	}
+	if p.Epoch != rev.ClaimEpoch {
+		return nil, fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, rev.ID, rev.ClaimEpoch)
+	}
+	if rev.State != StateInProgress {
+		return nil, fmt.Errorf("%w: %s is %s; evidence is captured while the review is live",
+			ErrIllegalTransition, rev.ID, rev.State)
+	}
+
+	now := s.Now()
+	res, err := node.ExecTracked(`
+		UPDATE agent_tasks
+		   SET reviewed_sha = ?, findings_sha256 = ?, evidence_ref = ?, updated_at = ?
+		 WHERE id = ? AND claim_epoch = ? AND role = 'reviewer' AND state = ?
+		   AND reviewed_sha IS NULL AND findings_sha256 IS NULL`,
+		5, p.ReviewedSHA, p.FindingsSHA256, p.EvidenceRef, now,
+		p.ReviewerID, p.Epoch, StateInProgress)
+	if err != nil {
+		return nil, storageRefusal(err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("assignment: read the affected rows: %w", err)
+	}
+	if affected != 1 {
+		// THREE DIFFERENT CAUSES, and the caller needs to know which.
+		// A review that already carries evidence is not stale — it is
+		// already recorded, and a second capture would REPLACE the
+		// record of what was examined with a claim about something
+		// else.
+		if rev.ReviewedSHA != "" || rev.FindingsSHA256 != "" {
+			return nil, fmt.Errorf("%w: %s already carries captured evidence (%s); "+
+				"the record of what was examined is write-once",
+				ErrConstraint, rev.ID, rev.ReviewedSHA)
+		}
+		return nil, fmt.Errorf("%w: %s moved while the evidence was being captured",
+			ErrStaleClaim, p.ReviewerID)
+	}
+
+	// WRITE-PATH READ-BACK, and one more rule the WHERE clause cannot
+	// state: the ROW must now carry exactly what was presented.
+	got, err := getAssignmentTx(node, p.ReviewerID)
+	if err != nil {
+		return nil, err
+	}
+	if got == nil {
+		return nil, fmt.Errorf("%w: %s disappeared while its evidence was captured",
+			ErrNotFound, p.ReviewerID)
+	}
+	if got.ReviewedSHA != p.ReviewedSHA || got.FindingsSHA256 != p.FindingsSHA256 {
+		return nil, fmt.Errorf("assignment: the captured evidence did not persist on %s", p.ReviewerID)
+	}
+	out = got
+	return out, nil
+}
+
+// validateReviewEvidenceParams checks the inputs that do not require a
+// transaction.
+func validateReviewEvidenceParams(p ReviewEvidenceParams) error {
+	if !shaPattern.MatchString(p.ReviewedSHA) {
+		return fmt.Errorf("%w: the reviewed revision must be a full object id, got %q",
+			ErrConstraint, p.ReviewedSHA)
+	}
+	if !sha256Pattern.MatchString(p.FindingsSHA256) {
+		return fmt.Errorf("%w: the findings digest must be a SHA-256, got %q",
+			ErrConstraint, p.FindingsSHA256)
+	}
+	if strings.TrimSpace(p.EvidenceRef) == "" {
+		return fmt.Errorf("%w: captured evidence must name where it is", ErrConstraint)
+	}
+	if strings.Contains(p.EvidenceRef, "\n") {
+		return fmt.Errorf("%w: the evidence pointer must be one line", ErrConstraint)
+	}
+	return nil
 }

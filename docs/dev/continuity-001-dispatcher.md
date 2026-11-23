@@ -158,10 +158,17 @@ configuration is the same decision, made before anything is claimed.
 `model` is the WORKER's model and `reviewer_model` is the REVIEWER's,
 and they are different on purpose. The worker's model is the sidecar's
 local id, which only means anything inside the worker's namespace with
-the sidecar's socket. The reviewer's sandbox has no provider and no
-sidecar, so it names a real provider/model — and naming the worker's id
-there would ask the reviewer for a model its own configuration does not
-define.
+the sidecar's socket. The reviewer names a real provider/model and
+authenticates through `MPM_OPENCODE_REVIEWER_KEY`, a DEDICATED credential
+separate from the worker's sidecar key. The key is read from the launch
+environment only; there is no fallback to `MINIMAX_API_KEY`,
+`DEEPSEEK_API_KEY`, the sidecar key or the operator's OpenCode auth store.
+For the measured model `minimax-coding-plan/MiniMax-M3.1-Flash` the
+dispatcher maps it to OpenCode's `MINIMAX_API_KEY` variable **inside the
+reviewer process only**. The plugin scrubs provider credentials from the
+`sandbox_exec` helper and bubblewrap clears the command environment, so
+the model-controlled command does not receive them. A model outside the
+measured MiniMax families is refused, not tried with another provider.
 
 **AN UNKNOWN KEY IS AN ERROR.** A silently ignored key is a typo the
 operator cannot see: they wrote `lease_second` and the dispatcher used
@@ -418,8 +425,10 @@ context, and the implementer never gets to record a review's outcome.
 
 The reviewer's boundary gained `Inspect`, because an interface that
 could not be inspected could only ever be reported, never recovered. Its
-MODEL is its own too: the worker's model is the sidecar's local id, and
-the reviewer's sandbox has no provider and no sidecar.
+MODEL is its own too: the worker's model is the sidecar's local id; the
+reviewer names the measured MiniMax model and carries only the dedicated
+`MPM_OPENCODE_REVIEWER_KEY` credential in its own process environment.
+It has no sidecar and never receives the worker's sidecar key.
 
 The reviewer's sandbox TREE exists. The runtime's read-only commands run
 with their working directory at `<root>/home`, and the review path reads
@@ -427,13 +436,23 @@ the reviewer's session through exactly that command — so without the
 tree, every inspection fails with `chdir …: no such file or directory`
 and a review can only ever be reported, never recovered.
 
+The dispatcher passes the review's expected revision into the review
+runtime. The runtime checks the controlled review checkout's HEAD against
+it before running, and the verdict transaction checks the captured
+revision again. The transcript carries the full audited exchange; the
+verdict is parsed ONLY from `AssistantFindings` (assistant-authored text),
+must be the final non-empty line, and must be one of `VERDICT: APPROVED` or
+`VERDICT: CHANGES REQUESTED`. User prompts, tool output and diagnostics are
+not verdict sources. Evidence capture and the fenced verdict write share one
+transaction, so a crash cannot persist one without the other.
+
 Four facts stay apart, and the report never collapses them:
 
 | Fact | Whose it is |
 |---|---|
 | the runtime's outcome | the runtime's |
 | the review's evidence (revision, findings digest) | the HOST's capture |
-| the review's verdict | the reviewer's own fenced transition |
+| the review's verdict | the reviewer's own terminal text, transcribed by the HOST under the reviewer's fence |
 | the approval | the OPERATOR's |
 
 ## 10. The report

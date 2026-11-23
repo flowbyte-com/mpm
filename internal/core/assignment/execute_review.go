@@ -24,12 +24,16 @@ import (
 //  2. asks the runtime to run the reviewer, which itself refuses unless the
 //     reviewer definition and the `sandbox_exec` plugin are both available;
 //  3. takes the reviewed revision and the findings digest FROM THE RESULT —
-//     never from a parameter — and records them through the fenced evidence
-//     capture.
+//     never from a parameter;
+//  4. extracts the reviewer's own terminal verdict from the ASSISTANT-AUTHORED
+//     text only; and
+//  5. records the evidence and the reviewer's fenced verdict in ONE
+//     transaction.
 //
-// It records EVIDENCE. It does NOT record a verdict: a verdict is the
-// reviewer's own fenced transition, and keeping the two apart is what stops a
-// completed review from being manufactured by the party whose work is judged.
+// The host transcribes the verdict; it does not decide it. Prompts, tool
+// output and diagnostics are not sources, and a missing or ambiguous terminal
+// line leaves the attempt ambiguous for an operator rather than approving the
+// work.
 
 // ExecuteReviewParams selects one reviewer assignment.
 type ExecuteReviewParams struct {
@@ -63,6 +67,9 @@ type ExecuteReviewResult struct {
 	RuntimeOutcome string `json:"runtime_outcome"`
 	// Findings is the bounded captured text.
 	Findings string `json:"findings"`
+	// Verdict is the assignment verdict transcribed from the reviewer's
+	// assistant-authored terminal line.
+	Verdict string `json:"verdict"`
 }
 
 // ReviewRuntime is the reviewer boundary.
@@ -106,7 +113,7 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		return nil, fmt.Errorf(
 			"%w: %s already carries captured evidence (%s); a completed review "+
 				"is not re-run — the rework is a NEW assignment delegated from the "+
-				"subject", ErrConstraint, rev.ID, rev.ReviewedSHA)
+				"subject", ErrReviewVerdict, rev.ID, rev.ReviewedSHA)
 	}
 
 	// PRIOR REVIEW ATTEMPTS ARE RECONCILED BEFORE A NEW ONE STARTS.
@@ -161,6 +168,14 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 	}
 
 	// WHAT THE REVIEWER ACTUALLY WAS, before its output is believed.
+	if res.SessionID != sessionID {
+		_, _ = s.MarkAttemptFailed(SessionStateParams{
+			AttemptID: attempt.ID, Epoch: p.Epoch,
+			Error: "the review returned a different native session id",
+		})
+		return nil, fmt.Errorf("%w: the review returned session %q, want %q",
+			ErrConstraint, res.SessionID, sessionID)
+	}
 	if res.Agent != "mpm-reviewer" {
 		_, _ = s.MarkAttemptFailed(SessionStateParams{
 			AttemptID: attempt.ID, Epoch: p.Epoch,
@@ -168,6 +183,16 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		})
 		return nil, fmt.Errorf("%w: the review ran as agent %q, not mpm-reviewer",
 			ErrConstraint, res.Agent)
+	}
+	// A SESSION-LEVEL GRANT IS A WIDENING. The real runtime refuses it
+	// before returning; this check covers a runtime that did not.
+	if len(res.Permissions) > 0 {
+		_, _ = s.MarkAttemptFailed(SessionStateParams{
+			AttemptID: attempt.ID, Epoch: p.Epoch,
+			Error: "the review session carried a permission override",
+		})
+		return nil, fmt.Errorf("%w: the review session carried a permission override",
+			ErrConstraint)
 	}
 	if res.Outcome != "succeeded" {
 		_, _ = s.MarkAttemptFailed(SessionStateParams{
@@ -193,17 +218,43 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		})
 		return nil, fmt.Errorf("%w: the review produced no captured evidence", ErrConstraint)
 	}
+	// THE REVISION IS BOUND BEFORE THE VERDICT. The runtime checks the
+	// checkout HEAD against ExpectedRevision; this check also covers a
+	// fake or a runtime that did not perform that comparison.
+	if p.ExpectedRevision != "" && res.ReviewedRevision != p.ExpectedRevision {
+		_, _ = s.MarkAttemptFailed(SessionStateParams{
+			AttemptID: attempt.ID, Epoch: p.Epoch,
+			Error: "the review captured a different revision than requested",
+		})
+		return nil, fmt.Errorf(
+			"%w: the review captured %s, want the authorised revision %s",
+			ErrReviewVerdict, res.ReviewedRevision, p.ExpectedRevision)
+	}
 
-	updated, err := s.CaptureReviewEvidence(ReviewEvidenceParams{
+	// THE VERDICT COMES FROM THE ASSISTANT'S OWN TEXT, NOT THE FLATTENED
+	// TRANSCRIPT. A prompt, a tool line or a diagnostic is not a source.
+	verdict, verdictErr := ExtractReviewVerdict(res.AssistantFindings)
+	if verdictErr != nil {
+		_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
+			AttemptID: attempt.ID, Epoch: p.Epoch,
+			Error: boundedReason(verdictErr),
+		})
+		return nil, verdictErr
+	}
+
+	// EVIDENCE AND VERDICT LAND IN ONE TRANSACTION. The capture is
+	// write-once; a crash between the two would leave captured evidence
+	// that can never be re-run and no verdict.
+	updated, err := s.captureReviewEvidenceAndVerdict(ReviewEvidenceParams{
 		ReviewerID:     rev.ID,
 		Epoch:          p.Epoch,
 		ReviewedSHA:    res.ReviewedRevision,
 		FindingsSHA256: res.FindingsSHA256,
 		EvidenceRef:    res.EvidencePath,
 		Actor:          p.Actor,
-	})
+	}, verdict, "host transcribed the reviewer's terminal verdict: "+verdict)
 	if err != nil {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
+		_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
 			AttemptID: attempt.ID, Epoch: p.Epoch, Error: boundedReason(err),
 		})
 		return nil, err
@@ -227,6 +278,7 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		EvidenceRef:      res.EvidencePath,
 		RuntimeOutcome:   outcome,
 		Findings:         res.Findings,
+		Verdict:          verdict,
 	}, nil
 }
 
@@ -297,7 +349,7 @@ func (s *Store) reconcileReviewAttempts(taskID string, epoch int64) error {
 	case SessionAmbiguous:
 		return fmt.Errorf("%w: a previous review attempt (%s) is AMBIGUOUS — whether it "+
 			"produced findings cannot be determined, so a second reviewer could "+
-			"double the evidence", ErrConstraint, last.ID)
+			"double the evidence", ErrReviewVerdict, last.ID)
 	default:
 		return fmt.Errorf("%w: a previous review attempt (%s) is in an unknown state %q",
 			ErrConstraint, last.ID, last.LaunchState)
