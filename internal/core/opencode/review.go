@@ -291,8 +291,8 @@ func reviewerPermissionViolation(perms []SessionPerm) string {
 				"%q's resolved rules carry an unknown permission effect %q",
 				ReviewerAgentName, p.Effect)
 		}
-		if permissionHasUnprovenSyntax(p.Action, false) ||
-			permissionHasUnprovenSyntax(p.Resource, true) {
+		if permissionHasUnprovenSyntax(p.Action, false, p.Effect == "allow") ||
+			permissionHasUnprovenSyntax(p.Resource, true, p.Effect == "allow") {
 			return fmt.Sprintf(
 				"%q's resolved rules contain permission syntax this verifier cannot prove",
 				ReviewerAgentName)
@@ -399,7 +399,8 @@ func permissionActionCovers(deny, allow string) bool {
 	}
 	// Escapes, single-character classes and `**` have no measured host
 	// semantics in the resolved list. Refuse them rather than guess.
-	if permissionHasUnprovenSyntax(deny, false) || permissionHasUnprovenSyntax(allow, false) {
+	if permissionHasUnprovenSyntax(deny, false, false) ||
+		permissionHasUnprovenSyntax(allow, false, true) {
 		return false
 	}
 	if !strings.ContainsAny(allow, "*?[\\") {
@@ -424,7 +425,8 @@ func permissionResourceCovers(deny, allow string) bool {
 	}
 	// Escapes, single-character classes and `**` have no measured host
 	// semantics in the resolved list. Refuse them rather than guess.
-	if permissionHasUnprovenSyntax(deny, true) || permissionHasUnprovenSyntax(allow, true) {
+	if permissionHasUnprovenSyntax(deny, true, false) ||
+		permissionHasUnprovenSyntax(allow, true, true) {
 		return false
 	}
 	if !strings.ContainsAny(allow, "*?[\\") {
@@ -477,10 +479,12 @@ func permissionResourceCovers(deny, allow string) bool {
 // not on a concatenation: two adjacent single-star patterns must not look
 // like a double star.
 //
-// A resource pattern may use one star, or the measured `*middle*` form (the
-// host's `*.env.*`). Any other multi-star resource shape is refused because
-// the coverage proof cannot bound it; action patterns get at most one star.
-func permissionHasUnprovenSyntax(pattern string, resource bool) bool {
+// A resource pattern may use one star, or the measured two-star `*middle*`
+// form used by the host's `.env.*` ASK and by a deny that covers a narrower
+// allow. A two-star resource ALLOW is refused: the coverage proof cannot
+// bound an allow's two-star shape, and an allow is exactly where a later
+// deny could be missed. Action patterns get at most one star.
+func permissionHasUnprovenSyntax(pattern string, resource, allowEffect bool) bool {
 	if pattern == "" {
 		return true
 	}
@@ -496,7 +500,12 @@ func permissionHasUnprovenSyntax(pattern string, resource bool) bool {
 		return true
 	}
 	middle := strings.TrimSuffix(strings.TrimPrefix(pattern, "*"), "*")
-	return middle == ""
+	if middle == "" {
+		return true
+	}
+	// The measured `.env.*` shape is an ask/deny. A two-star allow is
+	// refused rather than treated as effective without a coverage proof.
+	return allowEffect
 }
 
 // permissionSplitOneStar splits a pattern containing exactly one `*` into its

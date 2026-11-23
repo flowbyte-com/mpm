@@ -445,3 +445,24 @@ func TestPermissionAllowOverriddenByAsk(t *testing.T) {
 		t.Fatal("a later ask did not override the earlier allow")
 	}
 }
+
+func TestReviewerPermissionPolicyRejectsTwoStarAllow(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_exec", Resource: "*ab*", Effect: "allow"},
+		{Action: "sandbox_exec", Resource: "*a*", Effect: "deny"},
+	}
+	if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "cannot prove") {
+		t.Fatalf("a two-star sandbox allow was accepted: %q", violation)
+	}
+}
+
+func TestReviewerPermissionPolicyRejectsTwoStarAction(t *testing.T) {
+	perms := []SessionPerm{
+		{Action: "*", Resource: "*", Effect: "deny"},
+		{Action: "sandbox_*_*", Resource: "*", Effect: "allow"},
+	}
+	if violation := reviewerPermissionViolation(perms); !strings.Contains(violation, "cannot prove") {
+		t.Fatalf("a two-star action was accepted: %q", violation)
+	}
+}

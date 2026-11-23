@@ -355,9 +355,11 @@ allow is not accepted because a narrow later deny happened to match one
 example. An effective `ask` is requestable, not denied, so it is unsafe unless
 a later allow or deny fully covers it; the host's original `.env` asks are
 covered by the later `read * deny`. Unknown permission effects fail closed,
-and escapes, `?`, character classes, `**`, empty patterns, and multi-star
-resource shapes other than the measured `*middle*` form are refused because
-their host semantics were not measured.
+and escapes, `?`, character classes, `**`, empty patterns, multi-star action
+patterns, and two-star resource allows are refused because their host
+semantics were not measured. The measured two-star `*middle*` resource form is
+accepted for an ask or a deny; the host's `.env.*` asks pass, and a two-star
+deny can cover a narrower one-star allow.
 
 **There is no fallback to a less restricted reviewer.** If the sandbox or the
 reviewer configuration is unavailable, the review refuses to start.
