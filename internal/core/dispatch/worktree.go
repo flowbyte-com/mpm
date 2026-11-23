@@ -220,6 +220,11 @@ func (p *WorktreeProvisioner) ValidateContainment() error {
 	if err != nil {
 		return err
 	}
+	// A ROOT THAT EXISTS AS A FILE IS NOT A ROOT. Ensure would fail on
+	// it after the claim, leaving a live lease and no attempt.
+	if info, statErr := os.Stat(root); statErr == nil && !info.IsDir() {
+		return fmt.Errorf("dispatch: the resolved workspace root %q is not a directory", root)
+	}
 	if sameOrWithin(repo, root) || sameOrWithin(root, repo) {
 		return fmt.Errorf(
 			"dispatch: the resolved workspace root %q and the repository %q must not be the same or contain one another",

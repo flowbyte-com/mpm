@@ -630,9 +630,22 @@ func TestTheProvisionerRefusesMetadataOutsideTheWorktreeDirectory(t *testing.T) 
 		t.Fatal(err)
 	}
 	// The common dir really is the repository's, and the branch/HEAD
-	// really are the assignment's.
-	if got := gitOut(t, workspace, "rev-parse", "--git-common-dir"); !strings.HasSuffix(got, ".git") {
-		t.Fatalf("the fake metadata does not resolve the common dir: %q", got)
+	// really are the assignment's. This is what makes "every other rule
+	// passes" a measured fact rather than a comment.
+	common := gitOut(t, workspace, "rev-parse", "--git-common-dir")
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(workspace, common)
+	}
+	gotCommon, err := filepath.EvalSymlinks(common)
+	if err != nil {
+		t.Fatalf("resolve the common dir %q: %v", common, err)
+	}
+	wantCommon, err := filepath.EvalSymlinks(filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatalf("resolve the repository's git dir: %v", err)
+	}
+	if gotCommon != wantCommon {
+		t.Fatalf("the fake metadata's common dir is %q, want %q", gotCommon, wantCommon)
 	}
 	_, err = p.Ensure(worktreeAssignment(id, base))
 	if err == nil {
@@ -670,5 +683,49 @@ func TestTheProvisionerRefusesASameIDMove(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "points back at") {
 		t.Errorf("refused, but not by the backlink rule: %v", err)
+	}
+}
+
+// TestANewEngineRefusesAWorkspaceRootThatIsAFile proves the pre-claim
+// check refuses an existing root that is not a directory.
+//
+// Ensure would fail on it after the claim, leaving a live lease and no
+// attempt, so MaxDispatchAttempts could never bound the retry.
+func TestANewEngineRefusesAWorkspaceRootThatIsAFile(t *testing.T) {
+	repo, _ := newGitRepo(t)
+	file := filepath.Join(t.TempDir(), "root-file")
+	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := testStore(t)
+	cfg := testConfig(t)
+	cfg.WorkspaceRoot = file
+	cfg.RepositoryPath = repo
+	if _, err := NewEngine(store, cfg, func(context.Context, *assignment.Assignment, string) (
+		assignment.Runtime, assignment.ReviewRuntime, error) {
+		return newFakeRuntime(), nil, nil
+	}); err == nil {
+		t.Error("a workspace root that is a regular file was accepted before the claim")
+	}
+}
+
+// TestANewEngineRefusesAResolvedRootEqualToTheRepository proves the
+// pre-claim check sees a symlinked root that resolves exactly to the
+// repository.
+func TestANewEngineRefusesAResolvedRootEqualToTheRepository(t *testing.T) {
+	repo, _ := newGitRepo(t)
+	link := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	store, _ := testStore(t)
+	cfg := testConfig(t)
+	cfg.WorkspaceRoot = link
+	cfg.RepositoryPath = repo
+	if _, err := NewEngine(store, cfg, func(context.Context, *assignment.Assignment, string) (
+		assignment.Runtime, assignment.ReviewRuntime, error) {
+		return newFakeRuntime(), nil, nil
+	}); err == nil {
+		t.Error("a symlinked workspace root resolving to the repository was accepted before the claim")
 	}
 }

@@ -55,9 +55,9 @@ work. The dispatcher now owns a genuine Git worktree:
   resolves equal to or inside the repository is refused too. The
   repository must also be outside `/usr` and `/usr/local`, which the
   configuration refuses; the operator must keep it outside the MPM runtime
-  and sandbox trees, which are not known to the configuration. The
-  repository and the resolved containment are validated when the engine is
-  built, before any claim.
+  and sandbox trees, which are not known to the configuration. An
+  existing root must be a directory. The repository and the resolved
+  containment are validated when the engine is built, before any claim.
 - The host runs `git worktree add -b mpm/assignment/<id> <root>/<id>
   <base_sha>` for an implementation assignment. The base is the
   assignment's exact `BaseSHA`; a missing or malformed base, a base that
@@ -117,7 +117,7 @@ mutation-style controls remain PR 2's Python harness.
 | 1 | model-facing tools cannot create projects | `TestAssignment_NoRegistryActionCreatesAProject`, `TestAssignment_OperatorActionsAreNotAdvertised`, `TestAssignment_NoPayloadFieldUnlocksTheOperatorActions` |
 | 2 | duplicate creation is idempotent; conflicting creation refused | `TestCreateProjectIsIdempotent`, `TestCreateProjectRefusesAWithdrawnIdentity`, `TestConcurrentProjectCreationCreatesOneRow` (the CLI test is feature coverage, not a control) |
 | 3 | an unexpected existing workspace is not adopted | `TestTheProvisionerRefusesAnUnexpectedDirectory`, `TestTheProvisionerRefusesAnUnexpectedFile`, `TestTheProvisionerRefusesAFullClone` |
-| 4 | a worktree cannot escape its configured root | `TestTheProvisionerRefusesASymlinkedWorkspace`, `TestTheProvisionerRefusesAnAssignmentIDThatIsNotAPathShape`, `TestTheProvisionerRefusesAWorkspaceRootInsideTheRepository` (and the refusal leaves no directory behind), `TestTheProvisionerRefusesARootEqualToTheRepository`, `TestANewEngineRefusesAResolvedRootInsideTheRepository` |
+| 4 | a worktree cannot escape its configured root | `TestTheProvisionerRefusesASymlinkedWorkspace`, `TestTheProvisionerRefusesAnAssignmentIDThatIsNotAPathShape`, `TestTheProvisionerRefusesAWorkspaceRootInsideTheRepository` (and the refusal leaves no directory behind), `TestTheProvisionerRefusesARootEqualToTheRepository`, `TestANewEngineRefusesAResolvedRootInsideTheRepository`, `TestANewEngineRefusesAResolvedRootEqualToTheRepository`, `TestANewEngineRefusesAWorkspaceRootThatIsAFile` |
 | 5 | a stale/second claim cannot take another assignment's workspace | `TestALiveLeaseDoesNotProvisionAWorkspace`, `TestTheProvisionerRefusesAnotherRepository`, `TestTheProvisionerRefusesTheWrongBranch` |
 | 6 | a worker cannot reach or modify the real Git metadata | `TestTheProvisionerCreatesAWorktreeAtTheBase` (the pointer target is outside the workspace), `TestTheProvisionerRefusesATamperedPointer`, `TestTheProvisionerRefusesAPointerToTheMainGitDirectory`, `TestTheProvisionerRefusesAMovedWorktree`, `TestTheProvisionerRefusesMetadataOutsideTheWorktreeDirectory`, `TestTheProvisionerRefusesASameIDMove`, `TestTheProvisionerIgnoresAnAmbientGitDir`, `TestTheRepositoryMustNotBeInsideARuntimeDir`, `TestTheConfiguredPathsMustNotContainOneAnother`, `TestANewEngineRefusesAResolvedRootInsideTheRepository`, and PR 3's containment argv pins (`TestContainmentArgvKeepsTheOrderingThatMakesLoopbackPossible`, `TestContainmentNeverCarriesACredentialInArgv`). Residual: the pointer's text names the host path; the target is not mounted. |
 | 7 | a worker cannot execute a shell or host-side test command | `TestWorkerDefinitionDeniesExecution` (the pinned definition), `TestWorkerDefinitionIsPinnedToTheTemplate` |

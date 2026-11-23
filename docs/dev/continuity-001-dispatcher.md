@@ -118,14 +118,21 @@ same tree.
 worktree from. It must be a non-bare Git checkout; it must not be the
 same as, contain, or sit inside `workspace_root`; it must not be under
 `/usr` or `/usr/local` (which the worker's namespace binds); and it is
-validated when the engine is built, **before** the first claim. The host
-creates the worktree
+validated when the engine is built, **before** the first claim. Both
+paths are resolved, so a symlinked root that resolves equal to or inside
+the repository is refused before the claim too. The host creates the
+worktree
 with `git worktree add -b mpm/assignment/<id> <root>/<id> <base_sha>`,
-and it verifies an existing one before reuse: the same common Git
-directory, the assignment's branch, and a HEAD that contains the
-authorised base. A directory that is not a linked worktree — a bare
-directory, a full clone, a symlink, a worktree of another repository, a
-worktree on another branch — is REFUSED, never adopted. The worktree's
+and it verifies an existing one before reuse: the path is a real
+directory, a direct child of the resolved root; `.git` is a file whose
+target resolves inside the repository's `.git/worktrees/` and whose
+metadata `gitdir` backlink points at this workspace; the common Git
+directory is the configured repository's; the branch is the assignment's;
+and HEAD is the base or a descendant of it. A directory that is not a
+linked worktree — a bare directory, a full clone, a symlink, a worktree
+of another repository, another branch, a moved worktree (even with the
+same assignment id), metadata outside `.git/worktrees/`, or a root equal
+to or containing the repository — is REFUSED, never adopted. The worktree's
 `.git` is a FILE pointing into the source repository's
 `.git/worktrees/`. The configuration refuses a repository under `/usr`
 or `/usr/local`; the operator must also keep the source checkout outside

@@ -804,9 +804,10 @@ func TestTheRecoveryPassNeverLaunches(t *testing.T) {
 	if outcome.Reason != ReasonFailed && outcome.Reason != ReasonSessionStillRunning {
 		t.Errorf("the outcome is %q, want the observed outcome", outcome.Reason)
 	}
-	// THE DRAIN RAN: the older session was inspected more than once.
+	// THE DRAIN RAN. The outer pass inspects once; a second inspection
+	// can only come from the drain.
 	if seen < 2 {
-		t.Errorf("the drain inspected the older session %d time(s); it did not wait for the outcome", seen)
+		t.Errorf("the older session was inspected %d time(s); the drain did not run", seen)
 	}
 }
 
@@ -926,6 +927,12 @@ func TestARunningOlderEpochSessionBlocksTheWorkspace(t *testing.T) {
 	for _, o := range report.Outcomes {
 		if o.AssignmentID == child.ID &&
 			(o.Reason == ReasonSessionStillRunning || o.Reason == ReasonRecoveryRequired) {
+			// THE REASON IS THE SESSION, NOT A MISSING WORKTREE. Both
+			// outcomes share `recovery_required`; the detail is what
+			// separates them.
+			if !strings.Contains(o.Detail, "still running") {
+				t.Errorf("the outcome %q does not name the running session: %q", o.Reason, o.Detail)
+			}
 			sawBlock = true
 		}
 	}
