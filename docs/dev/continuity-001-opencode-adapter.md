@@ -177,6 +177,29 @@ intent ──► launched ──► running ──► completed
                                                      state directly)
 ```
 
+### An ambiguous attempt is a hard barrier
+
+`ambiguous` is terminal for the ATTEMPT and blocking for the TASK. The
+adapter refuses a new launch for any non-record-only `Execute` while an
+ambiguous attempt exists anywhere in the task's history — not merely the
+most recent one, and regardless of an expired lease, a newer claim epoch
+or an absent native session. The durable attempt is never relabelled
+`failed`, `cancelled` or `completed`; only an explicit operator
+reconciliation outside the adapter may clear it. The dispatcher checks the
+same history before it claims and reports `recovery_required`.
+
+### Launch failure diagnostics
+
+A launch without trustworthy native session state remains **ambiguous**.
+`Runtime.Launch` returns a `LaunchError` carrying a safe classification:
+command start vs exit, the exit code, the session-inspection class, whether
+a state was observed, whether inference remains unknown, and the bounded
+output's byte count and SHA-256. It never carries raw stdout or stderr;
+those may contain prompt text or a secret. The adapter records that
+structured reason instead of replacing it with `the runtime produced no
+session state`, and raw output is never written to the assignment
+database, dispatcher report, prompt or public diagnostic.
+
 `intent → completed` is legal because the adapter's launch is **blocking**: it
 cannot observe the intermediate states, and pretending otherwise would be a
 record of events that were never seen.

@@ -248,7 +248,7 @@ func (s *Store) Execute(ctx context.Context, rt Runtime, p ExecuteParams) (*Exec
 			Attempt:     att,
 			LaunchState: att.LaunchState,
 			Reconciled:  true,
-			Evidence:    evidenceFromAttempt(att, nil, decision.reason),
+			Evidence:    evidenceFromAttempt(att, nil, nil, decision.reason),
 		}, nil
 	case reconcileRecordOnly:
 		return s.recordObserved(task, decision.attempt, decision.state, p)
@@ -387,6 +387,30 @@ func (s *Store) reconcile(task *Assignment, p ExecuteParams, rt Runtime) (reconc
 	if len(attempts) == 0 {
 		return reconcileDecision{kind: reconcileNew}, nil
 	}
+
+	// THE HARD BARRIER, BEFORE ANY EPOCH OR SESSION LOGIC.
+	//
+	// An ambiguous attempt is an execution whose effects could not be
+	// determined. A newer claim epoch, an expired lease and an absent
+	// native session are not evidence that it did no work: the session
+	// may have run and the runtime may have lost it. So ANY ambiguous
+	// attempt in the history — not only the most recent one — refuses a
+	// new launch. A later failed or completed attempt cannot hide it.
+	//
+	// RECORD-ONLY IS NOT A LAUNCH. It lets the recovery path record a
+	// terminal outcome for a LAUNCHED/RUNNING attempt. The ambiguous case
+	// below still refuses to relabel an ambiguous attempt: that requires
+	// an operator reconciliation outside this adapter.
+	if !p.RecordOnly {
+		for _, a := range attempts {
+			if a.LaunchState == SessionAmbiguous {
+				return reconcileDecision{}, fmt.Errorf(
+					"%w: %s has an unresolved ambiguous attempt %s at epoch %d; "+
+						"operator recovery is required before another launch",
+					ErrAmbiguousAttempt, task.ID, a.ID, a.ClaimEpoch)
+			}
+		}
+	}
 	last := attempts[len(attempts)-1]
 
 	// THE ATTEMPT BELONGS TO ITS CLAIM. After a claim or a renew the
@@ -499,15 +523,31 @@ func (s *Store) reconcile(task *Assignment, p ExecuteParams, rt Runtime) (reconc
 			reason:    "an attempt is still running",
 		}, nil
 
-	case SessionCompleted, SessionFailed, SessionAmbiguous:
-		// A TERMINAL attempt. The work has been recorded; a retry is a NEW
-		// attempt with its own number, so the record shows two.
+	case SessionCompleted, SessionFailed:
+		// A DEFINITIVELY TERMINAL attempt. The work has been recorded; a
+		// retry is a NEW attempt with its own number, so the record shows
+		// two. Only FAILED is retryable here: an ambiguous attempt was
+		// refused above, and must never become a retry merely because a
+		// caller chose a different epoch.
 		//
 		// This must NOT re-record: the runtime keeps a finished session in
 		// its list forever, so `recordOnly` here would turn every retry
 		// after a failure into a silent no-op that re-reports the old
 		// result. (The first remediation did exactly that.)
 		return reconcileDecision{kind: reconcileNew}, nil
+
+	case SessionAmbiguous:
+		// DEFENCE IN DEPTH. The barrier above catches every non-record-only
+		// caller. A record-only caller is refused as well: the attempt's
+		// durable state is terminal-ambiguous, and the state machine does
+		// not permit it to become completed or failed. Only an operator
+		// reconciliation outside this adapter may resolve it.
+		return reconcileDecision{
+			kind:      reconcileRefuseConcurrent,
+			attemptID: last.ID,
+			reason: "an ambiguous attempt cannot be treated as a retry; " +
+				"operator recovery is required",
+		}, nil
 
 	default:
 		// A terminal attempt. A retry is a NEW attempt, with its own
@@ -594,7 +634,7 @@ func (s *Store) launchAndRecord(
 		return &ExecuteResult{
 			Assignment: task, Attempt: att, LaunchState: att.LaunchState,
 			Reconciled: reconciled,
-			Evidence:   evidenceFromAttempt(att, nil, reason),
+			Evidence:   evidenceFromAttempt(att, res, launchErr, reason),
 		}, nil
 	}
 
@@ -642,7 +682,7 @@ func (s *Store) recordState(
 		return &ExecuteResult{
 			Assignment: task, Attempt: att, LaunchState: att.LaunchState,
 			RuntimeOutcome: state.Outcome, Reconciled: reconciled,
-			Evidence: evidenceFromAttempt(att, res, refusal),
+			Evidence: evidenceFromAttempt(att, res, nil, refusal),
 		}, nil
 	}
 
@@ -678,7 +718,7 @@ func (s *Store) recordState(
 				RuntimeSucceeded: true,
 				CompletionError:  boundedReason(cerr),
 				Reconciled:       reconciled,
-				Evidence:         evidenceFromAttempt(att, res, "the runtime succeeded but the assignment did not complete: "+boundedReason(cerr)),
+				Evidence:         evidenceFromAttempt(att, res, nil, "the runtime succeeded but the assignment did not complete: "+boundedReason(cerr)),
 			}, fmt.Errorf("%w: the runtime session succeeded but the assignment did not complete: %w",
 				ErrStaleClaim, cerr)
 		}
@@ -710,7 +750,7 @@ func (s *Store) recordState(
 		RuntimeOutcome:   att.RuntimeOutcome,
 		RuntimeSucceeded: state.Outcome == "succeeded",
 		Reconciled:       reconciled,
-		Evidence:         evidenceFromAttempt(att, res, ""),
+		Evidence:         evidenceFromAttempt(att, res, nil, ""),
 	}, nil
 }
 
@@ -796,7 +836,7 @@ func buildPrompt(task *Assignment, refs []string) string {
 
 // evidenceFromAttempt builds the bounded record. It never copies the
 // runtime's output; it records its digest and size.
-func evidenceFromAttempt(att *SessionAttempt, res *oc.LaunchResult, reason string) ExecutionEvidence {
+func evidenceFromAttempt(att *SessionAttempt, res *oc.LaunchResult, launchErr error, reason string) ExecutionEvidence {
 	ev := ExecutionEvidence{
 		SessionID: att.NativeSessionID,
 		Reason:    reason,
@@ -804,13 +844,30 @@ func evidenceFromAttempt(att *SessionAttempt, res *oc.LaunchResult, reason strin
 	if res != nil {
 		ev.ExitCode = res.ExitCode
 		ev.OutputBytes = len(res.Output)
-		sum := sha256.Sum256([]byte(res.Output))
-		ev.OutputSHA256 = hex.EncodeToString(sum[:])
+		// AN EMPTY CAPTURE HAS NO DIGEST. The existing contract
+		// distinguishes "no output was captured" from "the digest of an
+		// empty string"; keep that distinction rather than inventing a
+		// digest for silence.
+		if len(res.Output) > 0 {
+			sum := sha256.Sum256([]byte(res.Output))
+			ev.OutputSHA256 = hex.EncodeToString(sum[:])
+		}
 		if res.State != nil {
 			ev.RuntimeDirectory = res.State.Location.Directory
 			ev.RuntimeAgent = res.State.Agent
 			ev.RuntimeModel = res.State.Model.ProviderID + "/" + res.State.Model.ID
 		}
+		return ev
+	}
+	// THE RESULT MAY BE ABSENT. A runtime that returns no result at all can
+	// still have produced a typed LaunchError carrying the known safe
+	// fields. Preserve them rather than reporting false zeros. No raw
+	// output exists on this path; only the count and digest are copied.
+	var le *oc.LaunchError
+	if errors.As(launchErr, &le) {
+		ev.ExitCode = le.ExitCode
+		ev.OutputBytes = le.OutputBytes
+		ev.OutputSHA256 = le.OutputSHA256
 	}
 	return ev
 }

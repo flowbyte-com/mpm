@@ -317,19 +317,31 @@ different record:
 | during the execution | a session that may be working | a BLOCKER: no second writer, an operator-visible note |
 | after the runtime ended | an outcome nobody recorded | reconciled through the existing fenced path, when the attempt is at the assignment's current epoch |
 
-The inspection is what decides, not the epoch arithmetic. A session the
-runtime has never heard of was never created, so re-running the objective
-cannot duplicate work; a session that exists and has not reported an
-outcome may still be working, and that blocks; a runtime that cannot be
-asked at all blocks too, because nobody can then say whether the session
-is still running.
+The inspection is what decides, not the epoch arithmetic — with one
+exception. A session recorded by a LAUNCHED attempt that the runtime has
+never heard of was never created, so re-running the objective cannot
+duplicate work; a session that exists and has not reported an outcome may
+still be working, and that blocks; a runtime that cannot be asked at all
+blocks too, because nobody can then say whether the session is still
+running.
+
+**An AMBIGUOUS attempt is never safe because its session is absent.** It
+is a hard barrier: an expired lease, a newer claim epoch and an unknown
+native session do not prove that it did no work. The dispatcher checks the
+durable attempt history BEFORE taking a claim and reports
+`recovery_required`; the assignment adapter refuses a new launch for any
+non-record-only execution, even when a later failed or completed attempt
+would otherwise hide the earlier ambiguity. Only an explicit operator
+reconciliation may clear it.
 
 ### What is never done
 
 - A live lease is never reclaimed.
 - An outcome is never INVENTED. A runtime that cannot be asked is
-  AMBIGUOUS, and an ambiguous attempt stays ambiguous until a human or a
-  later observation resolves it.
+  AMBIGUOUS, and an ambiguous attempt stays ambiguous until an operator
+  explicitly reconciles it — a later observation alone does not clear it.
+  It is also a hard launch barrier: no lease expiry, new epoch or absent
+  session makes it retryable.
 - A session is never "stopped". There is no verified host operation that
   safely ends an OpenCode session, and `session.abort` is not one MPM
   may depend on. A session that may still be working is a BLOCKER, and

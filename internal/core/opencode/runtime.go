@@ -38,6 +38,7 @@ package opencode
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -162,6 +163,111 @@ type LaunchResult struct {
 	Output     string
 	State      *SessionState
 	InferredOK bool
+}
+
+// LaunchFailureClass is the COMMAND half of a launch failure. It is a
+// classification, not a copy of the command's error.
+type LaunchFailureClass string
+
+const (
+	// LaunchStartFailed says the command could not be started at all.
+	LaunchStartFailed LaunchFailureClass = "command_start_failed"
+	// LaunchExitFailure says the command started and exited unsuccessfully.
+	LaunchExitFailure LaunchFailureClass = "command_exit_failure"
+)
+
+// InspectFailureClass is the SESSION half of a launch failure.
+type InspectFailureClass string
+
+const (
+	// InspectNotFound says the runtime does not know the session.
+	InspectNotFound InspectFailureClass = "session_not_found"
+	// InspectUnavailable says the runtime could not be asked.
+	InspectUnavailable InspectFailureClass = "inspection_failed"
+)
+
+// LaunchError preserves the SAFE, structured diagnostics of a launch whose
+// native session state could not be read.
+//
+// IT DELIBERATELY CARRIES NO RAW OUTPUT. stdout and stderr may contain the
+// prompt, model output or a credential a misconfigured runtime printed. The
+// bytes and their SHA-256 are retained as evidence; the text is not. A
+// caller can say WHERE the launch failed without reproducing WHAT it printed.
+//
+// StateObserved is false unless the runtime actually returned a state.
+// InferenceUnknown is true whenever no trustworthy terminal state was
+// observed: a failed command does NOT prove the provider was never called.
+type LaunchError struct {
+	RunFailure       LaunchFailureClass
+	ExitCode         int
+	InspectFailure   InspectFailureClass
+	StateObserved    bool
+	InferenceUnknown bool
+	OutputBytes      int
+	OutputSHA256     string
+}
+
+// Error is the bounded, credential-free explanation recorded by the adapter.
+func (e *LaunchError) Error() string {
+	parts := make([]string, 0, 4)
+	switch e.RunFailure {
+	case LaunchStartFailed:
+		parts = append(parts, "the command could not start")
+	case LaunchExitFailure:
+		parts = append(parts, fmt.Sprintf("the command exited unsuccessfully (exit %d)", e.ExitCode))
+	}
+	switch e.InspectFailure {
+	case InspectNotFound:
+		parts = append(parts, "the native session was not found")
+	case InspectUnavailable:
+		parts = append(parts, "the native session could not be inspected")
+	}
+	if !e.StateObserved {
+		parts = append(parts, "no session state was observed; inference is unknown")
+	} else if e.InferenceUnknown {
+		parts = append(parts, "the session state has no terminal outcome; inference is unknown")
+	}
+	if e.OutputBytes > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"bounded output %d bytes sha256:%s", e.OutputBytes, e.OutputSHA256))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "the launch produced no usable session state")
+	}
+	return "opencode: launch incomplete: " + strings.Join(parts, "; ")
+}
+
+// newLaunchError classifies a launch failure without retaining raw output.
+func newLaunchError(runErr error, started bool, exitCode int,
+	inspectErr error, res *LaunchResult) *LaunchError {
+
+	le := &LaunchError{ExitCode: exitCode}
+	if res != nil {
+		le.StateObserved = res.State != nil
+		le.InferenceUnknown = res.State == nil || res.State.Outcome == ""
+		if res.Output != "" {
+			sum := sha256.Sum256([]byte(res.Output))
+			le.OutputBytes = len(res.Output)
+			le.OutputSHA256 = fmt.Sprintf("%x", sum)
+		}
+	} else {
+		le.InferenceUnknown = true
+	}
+	if runErr != nil {
+		if !started {
+			le.RunFailure = LaunchStartFailed
+		} else {
+			le.RunFailure = LaunchExitFailure
+		}
+	}
+	if inspectErr != nil {
+		if errors.Is(inspectErr, ErrSessionNotFound) {
+			le.InspectFailure = InspectNotFound
+		} else {
+			le.InspectFailure = InspectUnavailable
+		}
+	}
+	return le
 }
 
 // ErrSessionNotFound says the runtime has NEVER HEARD of a session.
@@ -363,13 +469,14 @@ func (r *Runtime) Launch(ctx context.Context, req LaunchRequest) (*LaunchResult,
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	runErr := cmd.Run()
+	started := cmd.ProcessState != nil
 	out := buf.Bytes()
 
 	res := &LaunchResult{
 		SessionID: req.SessionID,
 		Output:    string(out),
 	}
-	if cmd.ProcessState != nil {
+	if started {
 		res.ExitCode = cmd.ProcessState.ExitCode()
 	}
 	if runErr != nil {
@@ -381,17 +488,24 @@ func (r *Runtime) Launch(ctx context.Context, req LaunchRequest) (*LaunchResult,
 	state, inspectErr := r.Inspect(ctx, req.SessionID)
 	if inspectErr != nil {
 		res.InferredOK = false
-		if runErr == nil {
-			return res, fmt.Errorf("opencode: the run finished but its state could not be read: %w", inspectErr)
-		}
-		return res, nil
+		// THE FAILURE IS NOT DISCARDED. The command may have failed, the
+		// inspection may have failed, or both — and the raw output may
+		// contain anything. Preserve the CLASSIFICATION, exit code and
+		// bounded-output digest, never the text.
+		return res, newLaunchError(runErr, started, res.ExitCode, inspectErr, res)
+	}
+	if state == nil {
+		res.InferredOK = false
+		return res, newLaunchError(runErr, started, res.ExitCode,
+			errors.New("the runtime returned no state"), res)
 	}
 	res.State = state
 	res.InferredOK = state.Outcome == "succeeded"
 
-	if runErr != nil && res.ExitCode != 0 {
-		return res, nil
-	}
+	// A COMMAND FAILURE WITH A RECORDED TERMINAL STATE IS NOT A LAUNCH
+	// FAILURE: the runtime's own report is authoritative, and the adapter
+	// records what it said. It is also not a success unless the state says
+	// so.
 	return res, nil
 }
 
