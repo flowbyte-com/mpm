@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,6 +40,30 @@ exit 1
 	sock := filepath.Join(root, "sidecar.sock")
 	if err := os.WriteFile(sock, nil, 0o600); err != nil {
 		t.Fatal(err)
+	}
+	// The containment needs bubblewrap and an unprivileged user
+	// namespace. The release-gate runner may not provide them; the unit
+	// and adapter tests remain the load-bearing diagnostics coverage
+	// there. Skip rather than misreport a command exit from a failed
+	// namespace.
+	probe := Spec{
+		Root: root, Workspace: workspace, OpenCodeBin: "/bin/true",
+		SidecarSocket: sock, Command: []string{"/bin/true"},
+		Env: map[string]string{
+			"HOME": PrefixHome, "TMPDIR": PrefixTmp, "PATH": sandboxPath,
+			"XDG_CONFIG_HOME": PrefixOCfg, "XDG_DATA_HOME": PrefixOData,
+			"XDG_CACHE_HOME": PrefixOCache, "XDG_STATE_HOME": PrefixOState,
+			"LANG": "C.UTF-8", "TERM": "dumb",
+		},
+	}
+	argv, err := probe.Argv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeCmd := exec.Command(argv[0], argv[1:]...)
+	probeCmd.Env = []string{"PATH=" + sandboxPath, "HOME=" + filepath.Join(root, "home")}
+	if out, err := probeCmd.CombinedOutput(); err != nil {
+		t.Skipf("containment unavailable in this runner: %v: %s", err, out)
 	}
 	rt, err := NewRuntime(Config{
 		Root: root, OpenCodeBin: bin, RepoPath: workspace,
