@@ -387,6 +387,30 @@ func (s *Store) reconcile(task *Assignment, p ExecuteParams, rt Runtime) (reconc
 	if len(attempts) == 0 {
 		return reconcileDecision{kind: reconcileNew}, nil
 	}
+
+	// THE HARD BARRIER, BEFORE ANY EPOCH OR SESSION LOGIC.
+	//
+	// An ambiguous attempt is an execution whose effects could not be
+	// determined. A newer claim epoch, an expired lease and an absent
+	// native session are not evidence that it did no work: the session
+	// may have run and the runtime may have lost it. So ANY ambiguous
+	// attempt in the history — not only the most recent one — refuses a
+	// new launch. A later failed or completed attempt cannot hide it.
+	//
+	// RECORD-ONLY IS NOT A LAUNCH. It lets the recovery path record a
+	// terminal outcome for a LAUNCHED/RUNNING attempt. The ambiguous case
+	// below still refuses to relabel an ambiguous attempt: that requires
+	// an operator reconciliation outside this adapter.
+	if !p.RecordOnly {
+		for _, a := range attempts {
+			if a.LaunchState == SessionAmbiguous {
+				return reconcileDecision{}, fmt.Errorf(
+					"%w: %s has an unresolved ambiguous attempt %s at epoch %d; "+
+						"operator recovery is required before another launch",
+					ErrAmbiguousAttempt, task.ID, a.ID, a.ClaimEpoch)
+			}
+		}
+	}
 	last := attempts[len(attempts)-1]
 
 	// THE ATTEMPT BELONGS TO ITS CLAIM. After a claim or a renew the
@@ -499,15 +523,31 @@ func (s *Store) reconcile(task *Assignment, p ExecuteParams, rt Runtime) (reconc
 			reason:    "an attempt is still running",
 		}, nil
 
-	case SessionCompleted, SessionFailed, SessionAmbiguous:
-		// A TERMINAL attempt. The work has been recorded; a retry is a NEW
-		// attempt with its own number, so the record shows two.
+	case SessionCompleted, SessionFailed:
+		// A DEFINITIVELY TERMINAL attempt. The work has been recorded; a
+		// retry is a NEW attempt with its own number, so the record shows
+		// two. Only FAILED is retryable here: an ambiguous attempt was
+		// refused above, and must never become a retry merely because a
+		// caller chose a different epoch.
 		//
 		// This must NOT re-record: the runtime keeps a finished session in
 		// its list forever, so `recordOnly` here would turn every retry
 		// after a failure into a silent no-op that re-reports the old
 		// result. (The first remediation did exactly that.)
 		return reconcileDecision{kind: reconcileNew}, nil
+
+	case SessionAmbiguous:
+		// DEFENCE IN DEPTH. The barrier above catches every non-record-only
+		// caller. A record-only caller is refused as well: the attempt's
+		// durable state is terminal-ambiguous, and the state machine does
+		// not permit it to become completed or failed. Only an operator
+		// reconciliation outside this adapter may resolve it.
+		return reconcileDecision{
+			kind:      reconcileRefuseConcurrent,
+			attemptID: last.ID,
+			reason: "an ambiguous attempt cannot be treated as a retry; " +
+				"operator recovery is required",
+		}, nil
 
 	default:
 		// A terminal attempt. A retry is a NEW attempt, with its own

@@ -171,6 +171,24 @@ func (e *Engine) recoverAssignment(ctx context.Context, g assignmentGroup) (
 			Epoch:           o.Attempt.ClaimEpoch,
 		}
 
+		// AN AMBIGUOUS ATTEMPT IS A HARD RECOVERY BARRIER, BEFORE ANY
+		// INSPECTION. The session may have run and been lost. A missing
+		// session is NOT evidence that it was harmless, and an expired
+		// lease is not retry authorisation. No claim, note, epoch or
+		// state change is made on this path; the durable attempt record
+		// stays exactly as it is.
+		if o.Attempt.LaunchState == assignment.SessionAmbiguous {
+			outcome.Reason = ReasonRecoveryRequired
+			outcome.Detail = fmt.Sprintf(
+				"attempt %s is ambiguous and its effects cannot be determined; "+
+					"operator recovery is required before another claim",
+				o.Attempt.ID)
+			if blocker == nil {
+				blocker = &outcome
+			}
+			continue
+		}
+
 		// WHAT DOES THE RUNTIME SAY? FIRST, because it is evidence.
 		state, reason, detail := e.inspect(ctx, g.assignment, o.Attempt.NativeSessionID)
 		if reason != "" {

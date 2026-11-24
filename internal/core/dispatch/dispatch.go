@@ -500,6 +500,31 @@ func (e *Engine) dispatchOne(ctx context.Context, a *assignment.Assignment) (Out
 		Role:         a.Role,
 	}
 
+	// AN AMBIGUOUS ATTEMPT IS A HARD PRE-CLAIM BARRIER.
+	//
+	// The recovery pass normally reports this, but the claim below is the
+	// mutation that advances the epoch. Check the durable history here,
+	// before it, so a gap in discovery cannot turn an unresolved attempt
+	// into a new claim — or a new launch. No epoch, lease or state is
+	// touched on this path.
+	attempts, aerr := e.store.AttemptsFor(a.ID)
+	if aerr != nil {
+		outcome.Reason = ReasonRefused
+		outcome.Detail = aerr.Error()
+		return outcome, nil
+	}
+	for _, att := range attempts {
+		if att.LaunchState == assignment.SessionAmbiguous {
+			outcome.Reason = ReasonRecoveryRequired
+			outcome.Detail = fmt.Sprintf(
+				"attempt %s is ambiguous; operator recovery is required before another claim",
+				att.ID)
+			outcome.AttemptID = att.ID
+			outcome.NativeSessionID = att.NativeSessionID
+			return outcome, nil
+		}
+	}
+
 	// THE TREE'S AUTHORISATION IS CHECKED BEFORE THE CLAIM.
 	//
 	// The budgets are NOT checked here: they are the SERVICE's business,

@@ -42,7 +42,10 @@ type fakeRuntime struct {
 	sessions map[string]*oc.SessionState
 	// launchState is what Launch reports.
 	launchState *oc.SessionState
-	launchErr   error
+	// result is a full LaunchResult override, used by the diagnostic
+	// tests to return a result together with an error.
+	result    *oc.LaunchResult
+	launchErr error
 	// launches counts real Launch calls, so "no duplicate" is observable.
 	launches int
 	// inspectErr forces Inspect to fail.
@@ -60,6 +63,16 @@ func (f *fakeRuntime) VerifyAgent(_ context.Context, name string) error {
 
 func (f *fakeRuntime) Launch(_ context.Context, req oc.LaunchRequest) (*oc.LaunchResult, error) {
 	f.launches++
+	if f.result != nil {
+		r := *f.result
+		r.SessionID = req.SessionID
+		if r.State != nil {
+			s := *r.State
+			s.ID = req.SessionID
+			r.State = &s
+		}
+		return &r, f.launchErr
+	}
 	if f.launchErr != nil {
 		return nil, f.launchErr
 	}

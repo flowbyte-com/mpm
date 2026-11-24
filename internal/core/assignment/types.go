@@ -121,6 +121,16 @@ var (
 	// depth beyond the root's budget, a missing field.
 	ErrConstraint = errors.New("assignment: refused by the assignment rules")
 
+	// ErrAmbiguousAttempt is the HARD EXECUTION BARRIER.
+	//
+	// An ambiguous attempt records that the adapter could not determine
+	// whether the runtime did the work. Its session may have run. A new
+	// claim epoch, an expired lease or an absent native session does not
+	// prove that it did not, so a new launch could duplicate inference.
+	// Only an explicit operator reconciliation outside this adapter may
+	// resolve it.
+	ErrAmbiguousAttempt = errors.New("assignment: an unresolved ambiguous attempt blocks another launch")
+
 	// ErrRecordOnlyRefused is returned when a RECORD-ONLY caller asked
 	// the adapter to record an observed outcome and the adapter could
 	// not: the attempt is terminal, or its session was never created.

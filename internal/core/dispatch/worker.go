@@ -174,6 +174,10 @@ func (e *Engine) workspaceForExisting(a *assignment.Assignment) (string, error) 
 // classifyAdapterRefusal maps an adapter refusal onto a reason code.
 func classifyAdapterRefusal(err error) string {
 	switch {
+	case errors.Is(err, assignment.ErrAmbiguousAttempt):
+		// An unresolved ambiguity is never a retry and never a plain
+		// refusal: the operator has to reconcile it.
+		return ReasonRecoveryRequired
 	case errors.Is(err, assignment.ErrBudgetExhausted):
 		return ReasonBudgetExhausted
 	case errors.Is(err, assignment.ErrStaleClaim):
