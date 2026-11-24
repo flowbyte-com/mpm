@@ -248,7 +248,7 @@ func (s *Store) Execute(ctx context.Context, rt Runtime, p ExecuteParams) (*Exec
 			Attempt:     att,
 			LaunchState: att.LaunchState,
 			Reconciled:  true,
-			Evidence:    evidenceFromAttempt(att, nil, decision.reason),
+			Evidence:    evidenceFromAttempt(att, nil, nil, decision.reason),
 		}, nil
 	case reconcileRecordOnly:
 		return s.recordObserved(task, decision.attempt, decision.state, p)
@@ -634,7 +634,7 @@ func (s *Store) launchAndRecord(
 		return &ExecuteResult{
 			Assignment: task, Attempt: att, LaunchState: att.LaunchState,
 			Reconciled: reconciled,
-			Evidence:   evidenceFromAttempt(att, nil, reason),
+			Evidence:   evidenceFromAttempt(att, res, launchErr, reason),
 		}, nil
 	}
 
@@ -682,7 +682,7 @@ func (s *Store) recordState(
 		return &ExecuteResult{
 			Assignment: task, Attempt: att, LaunchState: att.LaunchState,
 			RuntimeOutcome: state.Outcome, Reconciled: reconciled,
-			Evidence: evidenceFromAttempt(att, res, refusal),
+			Evidence: evidenceFromAttempt(att, res, nil, refusal),
 		}, nil
 	}
 
@@ -718,7 +718,7 @@ func (s *Store) recordState(
 				RuntimeSucceeded: true,
 				CompletionError:  boundedReason(cerr),
 				Reconciled:       reconciled,
-				Evidence:         evidenceFromAttempt(att, res, "the runtime succeeded but the assignment did not complete: "+boundedReason(cerr)),
+				Evidence:         evidenceFromAttempt(att, res, nil, "the runtime succeeded but the assignment did not complete: "+boundedReason(cerr)),
 			}, fmt.Errorf("%w: the runtime session succeeded but the assignment did not complete: %w",
 				ErrStaleClaim, cerr)
 		}
@@ -750,7 +750,7 @@ func (s *Store) recordState(
 		RuntimeOutcome:   att.RuntimeOutcome,
 		RuntimeSucceeded: state.Outcome == "succeeded",
 		Reconciled:       reconciled,
-		Evidence:         evidenceFromAttempt(att, res, ""),
+		Evidence:         evidenceFromAttempt(att, res, nil, ""),
 	}, nil
 }
 
@@ -836,7 +836,7 @@ func buildPrompt(task *Assignment, refs []string) string {
 
 // evidenceFromAttempt builds the bounded record. It never copies the
 // runtime's output; it records its digest and size.
-func evidenceFromAttempt(att *SessionAttempt, res *oc.LaunchResult, reason string) ExecutionEvidence {
+func evidenceFromAttempt(att *SessionAttempt, res *oc.LaunchResult, launchErr error, reason string) ExecutionEvidence {
 	ev := ExecutionEvidence{
 		SessionID: att.NativeSessionID,
 		Reason:    reason,
@@ -844,13 +844,30 @@ func evidenceFromAttempt(att *SessionAttempt, res *oc.LaunchResult, reason strin
 	if res != nil {
 		ev.ExitCode = res.ExitCode
 		ev.OutputBytes = len(res.Output)
-		sum := sha256.Sum256([]byte(res.Output))
-		ev.OutputSHA256 = hex.EncodeToString(sum[:])
+		// AN EMPTY CAPTURE HAS NO DIGEST. The existing contract
+		// distinguishes "no output was captured" from "the digest of an
+		// empty string"; keep that distinction rather than inventing a
+		// digest for silence.
+		if len(res.Output) > 0 {
+			sum := sha256.Sum256([]byte(res.Output))
+			ev.OutputSHA256 = hex.EncodeToString(sum[:])
+		}
 		if res.State != nil {
 			ev.RuntimeDirectory = res.State.Location.Directory
 			ev.RuntimeAgent = res.State.Agent
 			ev.RuntimeModel = res.State.Model.ProviderID + "/" + res.State.Model.ID
 		}
+		return ev
+	}
+	// THE RESULT MAY BE ABSENT. A runtime that returns no result at all can
+	// still have produced a typed LaunchError carrying the known safe
+	// fields. Preserve them rather than reporting false zeros. No raw
+	// output exists on this path; only the count and digest are copied.
+	var le *oc.LaunchError
+	if errors.As(launchErr, &le) {
+		ev.ExitCode = le.ExitCode
+		ev.OutputBytes = le.OutputBytes
+		ev.OutputSHA256 = le.OutputSHA256
 	}
 	return ev
 }
