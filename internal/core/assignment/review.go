@@ -37,152 +37,169 @@ import (
 //     judges — the one documented exception to "one event per
 //     transition", and it is a note rather than a transition.
 func (s *Store) RecordReviewResult(p ReviewResultParams) (*Assignment, error) {
-	switch p.Verdict {
-	case VerdictPassed, VerdictChangesRequested:
-	default:
-		return nil, fmt.Errorf("%w: the verdict must be %q or %q",
-			ErrConstraint, VerdictPassed, VerdictChangesRequested)
+	if err := validateReviewVerdict(p.Verdict); err != nil {
+		return nil, err
 	}
-
 	var out *Assignment
 	err := s.db.WithTx(func(node internal.DBNode) error {
-		reviewer, err := getAssignmentTx(node, p.ReviewerID)
-		if err != nil {
-			return err
-		}
-		if reviewer.Role != RoleReviewer {
-			return fmt.Errorf("%w: %s is a %s and does not review",
-				ErrConstraint, reviewer.ID, reviewer.Role)
-		}
-		if p.Epoch != reviewer.ClaimEpoch {
-			return fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, reviewer.ID, reviewer.ClaimEpoch)
-		}
-		if reviewer.ClaimEpoch == 0 {
-			return fmt.Errorf("%w: %s holds no claim", ErrConstraint, reviewer.ID)
-		}
-		if reviewer.State != StateInProgress {
-			return fmt.Errorf("%w: %s is %s and is not reviewing",
-				ErrIllegalTransition, reviewer.ID, reviewer.State)
-		}
-
-		targetID, _ := reviewer.Payload[PayloadKeyReviewTarget].(string)
-		if targetID == "" {
-			return fmt.Errorf(
-				"%w: %s names no review target — its payload carries no %q",
-				ErrConstraint, reviewer.ID, PayloadKeyReviewTarget)
-		}
-		subject, err := getAssignmentTx(node, targetID)
-		if err != nil {
-			return err
-		}
-		if subject.ID == reviewer.ID {
-			return fmt.Errorf("%w: %s reviews itself", ErrConstraint, reviewer.ID)
-		}
-		if subject.Role != RoleImplementer {
-			return fmt.Errorf("%w: %s is a %s and is not reviewable",
-				ErrConstraint, subject.ID, subject.Role)
-		}
-		if subject.ProjectID != reviewer.ProjectID || subject.RootID != reviewer.RootID {
-			return fmt.Errorf("%w: %s is not in the reviewer's tree", ErrConstraint, subject.ID)
-		}
-		ancestor, err := isAncestorOf(node, reviewer, subject.ID)
-		if err != nil {
-			return err
-		}
-		if ancestor {
-			return fmt.Errorf(
-				"%w: %s delegated %s, so it does not review its own work",
-				ErrConstraint, reviewer.ParentID, reviewer.ID)
-		}
-
-		now := s.Now()
-
-		if p.Verdict == VerdictPassed {
-			if subject.State != StateCompleted {
-				return fmt.Errorf("%w: %s is %s and has not completed the work",
-					ErrIllegalTransition, subject.ID, subject.State)
-			}
-			// The SUBJECT moves first: the verdict is the subject's
-			// transition, and the reviewer's own state change
-			// records that the review is over.
-			if err := s.transitionTx(node, transitionSpec{
-				id:             subject.ID,
-				presentedEpoch: subject.ClaimEpoch,
-				// The subject is not written on the reviewer's
-				// authority: it is written because the review
-				// passed. Its epoch is its own, read in this
-				// transaction, so the clause says "the subject did
-				// not change under me".
-				toState:   StateReviewPassed,
-				eventType: EventReviewPassed,
-				actor:     p.Actor,
-				note:      p.Note,
-				eventPayload: map[string]interface{}{
-					"reviewer_id": reviewer.ID,
-					"verdict":     VerdictPassed,
-				},
-			}, now); err != nil {
-				return err
-			}
-		} else {
-			// The subject does NOT move, so the verdict would
-			// otherwise leave no trace on the work it judges. The
-			// note is that trace.
-			//
-			// THE REWORK IS A NEW ASSIGNMENT. The subject stays
-			// 'completed' because the state machine has no path
-			// back from 'completed' — PR 1 drew it as a forward
-			// path, and PR 2 does not widen it. The rework is a
-			// CHILD delegated from the subject, which is fresh and
-			// walks the path from the beginning. That is the
-			// honest shape of "the review asked for changes":
-			// the work that was asked for is a new unit of work,
-			// and the old one is left standing as the record of
-			// what was tried.
-			if err := s.injectFault("review-note"); err != nil {
-				return err
-			}
-			if _, err := appendEvent(node, subject.ID, EventNote, "", "", p.Actor, nil,
-				p.Note,
-				map[string]interface{}{
-					"reviewer_id": reviewer.ID,
-					"verdict":     VerdictChangesRequested,
-					"state":       subject.State,
-				}, now); err != nil {
-				return err
-			}
-		}
-
-		toState := StateCompleted
-		if p.Verdict == VerdictPassed {
-			toState = StateReviewPassed
-		}
-		if err := s.transitionTx(node, transitionSpec{
-			id:             reviewer.ID,
-			presentedEpoch: p.Epoch,
-			toState:        toState,
-			eventType:      eventTypeForState(toState),
-			actor:          p.Actor,
-			note:           p.Note,
-			eventPayload: map[string]interface{}{
-				"subject_id": subject.ID,
-				"verdict":    p.Verdict,
-			},
-		}, now); err != nil {
-			return err
-		}
-
-		row, err := getAssignmentTx(node, reviewer.ID)
-		if err != nil {
-			return err
-		}
-		out = row
-		return nil
+		var err error
+		out, err = s.recordReviewResultTx(node, p)
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// recordReviewResultTx is the in-transaction half of the reviewer verdict.
+// It is shared with the atomic evidence+verdict write.
+func (s *Store) recordReviewResultTx(node internal.DBNode, p ReviewResultParams) (*Assignment, error) {
+	var out *Assignment
+
+	reviewer, err := getAssignmentTx(node, p.ReviewerID)
+	if err != nil {
+		return nil, err
+	}
+	if reviewer.Role != RoleReviewer {
+		return nil, fmt.Errorf("%w: %s is a %s and does not review",
+			ErrConstraint, reviewer.ID, reviewer.Role)
+	}
+	if p.Epoch != reviewer.ClaimEpoch {
+		return nil, fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, reviewer.ID, reviewer.ClaimEpoch)
+	}
+	if reviewer.ClaimEpoch == 0 {
+		return nil, fmt.Errorf("%w: %s holds no claim", ErrConstraint, reviewer.ID)
+	}
+	if reviewer.State != StateInProgress {
+		return nil, fmt.Errorf("%w: %s is %s and is not reviewing",
+			ErrIllegalTransition, reviewer.ID, reviewer.State)
+	}
+
+	targetID, _ := reviewer.Payload[PayloadKeyReviewTarget].(string)
+	if targetID == "" {
+		return nil, fmt.Errorf(
+			"%w: %s names no review target — its payload carries no %q",
+			ErrConstraint, reviewer.ID, PayloadKeyReviewTarget)
+	}
+	subject, err := getAssignmentTx(node, targetID)
+	if err != nil {
+		return nil, err
+	}
+	if subject.ID == reviewer.ID {
+		return nil, fmt.Errorf("%w: %s reviews itself", ErrConstraint, reviewer.ID)
+	}
+	if subject.Role != RoleImplementer {
+		return nil, fmt.Errorf("%w: %s is a %s and is not reviewable",
+			ErrConstraint, subject.ID, subject.Role)
+	}
+	if subject.ProjectID != reviewer.ProjectID || subject.RootID != reviewer.RootID {
+		return nil, fmt.Errorf("%w: %s is not in the reviewer's tree", ErrConstraint, subject.ID)
+	}
+	ancestor, err := isAncestorOf(node, reviewer, subject.ID)
+	if err != nil {
+		return nil, err
+	}
+	if ancestor {
+		return nil, fmt.Errorf(
+			"%w: %s delegated %s, so it does not review its own work",
+			ErrConstraint, reviewer.ParentID, reviewer.ID)
+	}
+
+	now := s.Now()
+
+	if p.Verdict == VerdictPassed {
+		if subject.State != StateCompleted {
+			return nil, fmt.Errorf("%w: %s is %s and has not completed the work",
+				ErrIllegalTransition, subject.ID, subject.State)
+		}
+		// The SUBJECT moves first: the verdict is the subject's
+		// transition, and the reviewer's own state change
+		// records that the review is over.
+		if err := s.transitionTx(node, transitionSpec{
+			id:             subject.ID,
+			presentedEpoch: subject.ClaimEpoch,
+			// The subject is not written on the reviewer's
+			// authority: it is written because the review
+			// passed. Its epoch is its own, read in this
+			// transaction, so the clause says "the subject did
+			// not change under me".
+			toState:   StateReviewPassed,
+			eventType: EventReviewPassed,
+			actor:     p.Actor,
+			note:      p.Note,
+			eventPayload: map[string]interface{}{
+				"reviewer_id": reviewer.ID,
+				"verdict":     VerdictPassed,
+			},
+		}, now); err != nil {
+			return nil, err
+		}
+	} else {
+		// The subject does NOT move, so the verdict would
+		// otherwise leave no trace on the work it judges. The
+		// note is that trace.
+		//
+		// THE REWORK IS A NEW ASSIGNMENT. The subject stays
+		// 'completed' because the state machine has no path
+		// back from 'completed' — PR 1 drew it as a forward
+		// path, and PR 2 does not widen it. The rework is a
+		// CHILD delegated from the subject, which is fresh and
+		// walks the path from the beginning. That is the
+		// honest shape of "the review asked for changes":
+		// the work that was asked for is a new unit of work,
+		// and the old one is left standing as the record of
+		// what was tried.
+		if err := s.injectFault("review-note"); err != nil {
+			return nil, err
+		}
+		if _, err := appendEvent(node, subject.ID, EventNote, "", "", p.Actor, nil,
+			p.Note,
+			map[string]interface{}{
+				"reviewer_id": reviewer.ID,
+				"verdict":     VerdictChangesRequested,
+				"state":       subject.State,
+			}, now); err != nil {
+			return nil, err
+		}
+	}
+
+	toState := StateCompleted
+	if p.Verdict == VerdictPassed {
+		toState = StateReviewPassed
+	}
+	if err := s.transitionTx(node, transitionSpec{
+		id:             reviewer.ID,
+		presentedEpoch: p.Epoch,
+		toState:        toState,
+		eventType:      eventTypeForState(toState),
+		actor:          p.Actor,
+		note:           p.Note,
+		eventPayload: map[string]interface{}{
+			"subject_id": subject.ID,
+			"verdict":    p.Verdict,
+		},
+	}, now); err != nil {
+		return nil, err
+	}
+
+	row, err := getAssignmentTx(node, reviewer.ID)
+	if err != nil {
+		return nil, err
+	}
+	out = row
+	return out, nil
+}
+
+// validateReviewVerdict checks the verdict vocabulary.
+func validateReviewVerdict(verdict string) error {
+	switch verdict {
+	case VerdictPassed, VerdictChangesRequested:
+		return nil
+	default:
+		return fmt.Errorf("%w: the verdict must be %q or %q",
+			ErrConstraint, VerdictPassed, VerdictChangesRequested)
+	}
 }
 
 // transitionTx is the in-transaction half of the transition helper.

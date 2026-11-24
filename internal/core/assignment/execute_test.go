@@ -104,21 +104,35 @@ func okState(workspace, model, agent string) *oc.SessionState {
 // lease, returning its id and epoch.
 func claimedAssignment(t *testing.T, store *Store, projectID, recipient string) (string, int64) {
 	t.Helper()
-	a, _, err := store.CreateRoot(NewLocalOperatorAuthority("test"), CreateRootParams{
+	root, _, err := store.CreateRoot(NewLocalOperatorAuthority("test"), CreateRootParams{
 		ProjectID:           projectID,
 		Title:               "adapter test",
 		Objective:           "exercise the adapter",
 		Recipient:           recipient,
-		IdempotencyKey:      "idem:" + recipient,
-		PermittedOperations: []string{"deliver", "accept", "claim", "start", "complete"},
+		IdempotencyKey:      "idem:root:" + recipient,
+		PermittedOperations: []string{"deliver", "acknowledge", "accept", "claim", "start", "complete", "delegate"},
 		EligibleRecipients:  []string{recipient, "charlie"},
-		MaxDepth:            1,
+		MaxDepth:            2,
 		MaxTasks:            4,
 		MaxConcurrency:      2,
 		MaxResourceUnits:    10,
 	})
 	if err != nil {
 		t.Fatalf("create the root: %v", err)
+	}
+	// The implementer is a CHILD of the container root, so an independent
+	// reviewer can be its SIBLING. A root implementer has no sibling.
+	a, _, err := store.Delegate(DelegateParams{
+		ParentID:       root.ID,
+		Title:          "adapter test work",
+		Objective:      "exercise the adapter",
+		Recipient:      recipient,
+		Role:           RoleImplementer,
+		IdempotencyKey: "idem:child:" + recipient,
+		Actor:          Actor{Address: "operator", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("delegate the implementer: %v", err)
 	}
 	actor := Actor{Address: recipient, Kind: "agent"}
 	mustDo(t, func() (*Assignment, error) {
@@ -795,14 +809,49 @@ type reviewFixtureResult struct {
 // progress and claimed.
 func reviewFixture(t *testing.T, store *Store, subjectID, recipient string) reviewFixtureResult {
 	t.Helper()
+	// THE REVIEWER IS A SIBLING OF THE SUBJECT, not its child. A reviewer
+	// delegated BY the work it reviews is refused by the service's
+	// independence rule; the fixture must create the shape the live
+	// delegation creates.
+	subject, err := store.Get(subjectID)
+	if err != nil {
+		t.Fatalf("read the subject: %v", err)
+	}
+	// A verdict can only move a COMPLETED subject. The adapter tests
+	// usually leave the implementer accepted; finish it here.
+	if subject.State == StateAccepted {
+		actor := Actor{Address: subject.Recipient, Kind: "agent"}
+		if _, err := store.Start(FencedParams{
+			ID: subject.ID, Epoch: subject.ClaimEpoch, Actor: actor,
+		}); err != nil {
+			t.Fatalf("start the subject: %v", err)
+		}
+		if _, err := store.Complete(FencedParams{
+			ID: subject.ID, Epoch: subject.ClaimEpoch, Actor: actor,
+		}); err != nil {
+			t.Fatalf("complete the subject: %v", err)
+		}
+		subject, err = store.Get(subjectID)
+		if err != nil {
+			t.Fatalf("re-read the subject: %v", err)
+		}
+	}
+	if subject.State != StateCompleted {
+		t.Fatalf("the review subject is %q, want completed", subject.State)
+	}
+	parentID := subject.ParentID
+	if parentID == "" {
+		parentID = subject.RootID
+	}
 	rev, _, err := store.Delegate(DelegateParams{
-		ParentID:       subjectID,
+		ParentID:       parentID,
 		Title:          "independent review",
 		Objective:      "review the work",
 		Recipient:      recipient,
 		Role:           RoleReviewer,
 		IdempotencyKey: "idem:reviewer",
 		Actor:          Actor{Address: "alpha", Kind: "agent"},
+		HeadSHA:        strings.Repeat("1", 40),
 		Payload:        map[string]interface{}{PayloadKeyReviewTarget: subjectID},
 	})
 	if err != nil {
@@ -989,9 +1038,14 @@ func TestExecuteReviewRecordsOnlyHostDerivedEvidence(t *testing.T) {
 	if got.ReviewedSHA != hostRev || got.FindingsSHA256 != strings.Repeat("e", 64) {
 		t.Errorf("the row carries %q/%q", got.ReviewedSHA, got.FindingsSHA256)
 	}
-	// The verdict is untouched: evidence is not a verdict.
-	if got.State == StateReviewPassed {
-		t.Error("capturing evidence recorded a review verdict")
+	// The verdict is transcribed as CHANGES REQUESTED by the fake's
+	// default assistant text; the reviewer completes, the subject stays
+	// completed.
+	if got.State != StateCompleted {
+		t.Errorf("the reviewer is %q, want completed for changes_requested", got.State)
+	}
+	if res.Verdict != VerdictChangesRequested {
+		t.Errorf("the transcribed verdict is %q", res.Verdict)
 	}
 }
 
@@ -1019,9 +1073,11 @@ func TestExecuteReviewRefusesWhenTheReviewerCannotRun(t *testing.T) {
 }
 
 type fakeReviewRuntime struct {
-	result *oc.ReviewResult
-	err    error
-	calls  int32
+	result             *oc.ReviewResult
+	err                error
+	calls              int32
+	sessionIDOverride  string
+	permissionOverride []oc.SessionPerm
 }
 
 func (f *fakeReviewRuntime) Calls() int { return int(atomic.LoadInt32(&f.calls)) }
@@ -1033,6 +1089,15 @@ func (f *fakeReviewRuntime) Review(_ context.Context, req oc.ReviewRequest) (*oc
 	}
 	r := *f.result
 	r.SessionID = req.SessionID
+	if f.sessionIDOverride != "" {
+		r.SessionID = f.sessionIDOverride
+	}
+	if len(f.permissionOverride) > 0 {
+		r.Permissions = f.permissionOverride
+	}
+	if strings.TrimSpace(r.AssistantFindings) == "" {
+		r.AssistantFindings = "the review findings\nVERDICT: CHANGES REQUESTED"
+	}
 	return &r, nil
 }
 
@@ -1229,7 +1294,9 @@ func TestExecuteReviewRefusesARepeatBeforeInvokingOpenCode(t *testing.T) {
 	if second.Calls() != 0 {
 		t.Errorf("the runtime was invoked %d times for a refused review", second.Calls())
 	}
-	if !strings.Contains(err.Error(), "already carries captured evidence") {
+	if !strings.Contains(err.Error(), "already carries captured evidence") &&
+		!strings.Contains(err.Error(), "completed") &&
+		!strings.Contains(err.Error(), "review_passed") {
 		t.Errorf("refused, but not as a completed review: %v", err)
 	}
 }
@@ -1415,7 +1482,9 @@ func TestExecuteReviewRefusesASecondReviewerAfterTheEvidenceIsCaptured(t *testin
 		t.Errorf("caller B invoked the reviewer %d times; the refusal must "+
 			"happen BEFORE the session is launched", bRuntime.Calls())
 	}
-	if !strings.Contains(bErr.Error(), "captured evidence") {
+	if !strings.Contains(bErr.Error(), "captured evidence") &&
+		!strings.Contains(bErr.Error(), "completed") &&
+		!strings.Contains(bErr.Error(), "review_passed") {
 		t.Errorf("refused, but not as a completed review: %v", bErr)
 	}
 
@@ -1538,7 +1607,9 @@ func TestExecuteReviewRefusesWhenTheEvidenceCheckIsInsideTheTransaction(t *testi
 			"inside the transaction, so the restart re-reads and refuses",
 			bRuntime.Calls())
 	}
-	if !strings.Contains(bErr.Error(), "captured evidence") {
+	if !strings.Contains(bErr.Error(), "captured evidence") &&
+		!strings.Contains(bErr.Error(), "completed") &&
+		!strings.Contains(bErr.Error(), "review_passed") {
 		t.Errorf("refused, but not as a completed review: %v", bErr)
 	}
 }

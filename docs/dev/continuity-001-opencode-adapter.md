@@ -31,7 +31,7 @@ budgets, the GitHub evidence publisher, deployment, or any operator merge.
 | the mapping | one row per execution attempt, written **before** the launch | `internal/core/migration_agent_task_sessions.go` |
 | the adapter | validates, reconciles, launches, records | `internal/core/assignment/execute.go` |
 | the runtime | the only code that talks to OpenCode | `internal/core/opencode/` |
-| the sidecar | the only process holding a provider credential | `internal/core/opencode/sidecar.go` |
+| the sidecar | the worker's provider credential holder; the reviewer has its own isolated process credential | `internal/core/opencode/sidecar.go` |
 
 ---
 
@@ -286,8 +286,10 @@ coding environment, and the documentation does not claim it is.**
 
 ## 6. The inference sidecar
 
-The one process holding a provider credential, and it lives **outside** the
-worker's namespace.
+The worker's provider-credential holder, and it lives **outside** the
+worker's namespace. The reviewer does not use this sidecar: its dedicated
+credential is read only by the isolated reviewer process, and the
+`sandbox_exec` helper scrubs it.
 
 ```
 worker runtime ──HTTP──► relay (in namespace, no credential)
@@ -342,6 +344,32 @@ Unchanged in spirit and **not weakened**:
   check runs after the reviewer process, so the grant was effective during
   that run; the namespace, not the permission declaration, is the boundary.
 
+The reviewer's provider credential is `MPM_OPENCODE_REVIEWER_KEY`, separate
+from the worker's `MPM_OPENCODE_SIDECAR_KEY`. The adapter maps the measured
+`minimax-coding-plan/MiniMax-M3.1-Flash` model to OpenCode's
+`MINIMAX_API_KEY` **in the isolated reviewer process only**. It has no
+fallback to an ambient provider key, the worker key or the operator's auth
+store, and a model other than the measured
+`minimax-coding-plan/MiniMax-M3.1-Flash` is refused rather than tried with
+another provider. The CN endpoint and other same-family models were not
+measured and are refused too.
+
+Both the CONFIGURED model and the SESSION's own reported model are checked.
+`Review` compares `session.model` with the configured model before returning,
+and `ExecuteReview` checks the result against the model the dispatcher or the
+explicit verb authorised. A runtime that silently fell back to another
+provider does not produce an acceptable verdict.
+
+The plugin's `sandboxProcessEnv` removes provider credentials before it
+spawns its helper; `reviewer_bwrap.py` removes them from the environment it
+passes to bubblewrap; bubblewrap's `--clearenv` then clears the command's
+environment. The wrapper's own `/proc/<pid>/environ` can retain the
+pre-scrub bytes until the process exits — `os.environ.pop` updates the
+mapping, it does not erase the kernel's exec-time record — but that process
+is on the HOST, outside the sandbox's PID namespace, so the command cannot
+reach it. The scrub is an environment-passing boundary, not a process-memory
+eraser.
+
 The verifier reads the **ordered** resolved list and applies the host's
 last-match-wins rule to both actions and resources. It is a conservative
 coverage proof, not a full host-matcher implementation: it refuses a shape it
@@ -376,9 +404,15 @@ write**:
 * it is **absent from the tool registry** — reachable only through
   `mpm assignment capture-review-evidence`, which the adapter drives.
 
-It records evidence, not a verdict. A verdict remains the reviewer's own fenced
-transition, so **an implementer that can record evidence still cannot record a
-review**, and a completed review is still not operator approval.
+It records evidence, and the host then transcribes the reviewer's own
+terminal verdict from the assistant-authored text into the same fenced
+transaction. The transaction covers the EVIDENCE COLUMNS and the verdict;
+the on-disk transcript file is written first and retained for diagnosis even
+when no verdict is recorded, so it is an artifact, not a second atomic fact. The verdict is not an independent host decision: the text must
+be the reviewer's final line, exactly `VERDICT: APPROVED` or
+`VERDICT: CHANGES REQUESTED`; prompts, tool output and diagnostics are not
+sources. The subject moves only through the existing reviewer transition,
+and a completed review is still not operator approval.
 
 ### What counts as findings
 

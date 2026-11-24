@@ -912,3 +912,46 @@ func TestToolActivityCannotSatisfyTheAuthorshipGate(t *testing.T) {
 		t.Errorf("an unparseable payload counted as authored text: %q", got)
 	}
 }
+
+// TestContainmentMountsProcAfterUnshare pins the EMITTED ORDER as a
+// readability/defence-in-depth invariant.
+//
+// It is NOT the security fix. Bubblewrap 0.11.1 batches namespace options
+// into one clone before any mount, so this order alone does not change what
+// /proc is; the protection is Runtime.Run's explicit exec.Cmd.Env. The test
+// remains because a future reviewer reading the argv should not have to
+// re-derive why the unshare flags precede the mount, and because the order
+// is what the documentation describes.
+func TestContainmentMountsProcAfterUnshare(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := BuildTree(Spec{Root: root, Workspace: workspace}); err != nil {
+		t.Fatal(err)
+	}
+	spec := Spec{
+		Root:          root,
+		Workspace:     workspace,
+		OpenCodeBin:   "/bin/true",
+		SidecarSocket: filepath.Join(root, "sidecar.sock"),
+		Env:           map[string]string{"PATH": "/usr/bin:/bin"},
+		Command:       []string{"/bin/true"},
+	}
+	argv, err := spec.Argv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The inner bwrap argv is inside the shell script; the outer argv is
+	// the unshare launcher. Inspect the rendered script for the order.
+	script := argv[len(argv)-1]
+	proc := strings.Index(script, "--proc")
+	pid := strings.Index(script, "--unshare-pid")
+	if proc < 0 || pid < 0 {
+		t.Fatalf("the containment argv names no /proc or pid namespace: %s", script)
+	}
+	if proc < pid {
+		t.Fatalf("--proc is mounted before --unshare-pid; host /proc would be exposed")
+	}
+}

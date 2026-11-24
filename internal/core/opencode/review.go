@@ -51,6 +51,18 @@ import (
 // fall back to, so a review that cannot start says so.
 var ErrReviewerUnavailable = errors.New("opencode: the reviewer's configuration is unavailable")
 
+// ErrReviewIncomplete says the reviewer process STARTED, but its result could
+// not be captured faithfully: the message stream failed to read, the session
+// state was missing, a session-level permission grant was present, the
+// session's model was not the configured one, or the evidence file could not
+// be written.
+//
+// It is NOT a pre-launch refusal. The model may already have run and produced
+// billable output, so the assignment attempt must be treated as AMBIGUOUS:
+// retrying could duplicate inference. Callers distinguish it from
+// ErrReviewerUnavailable, which means nothing ran.
+var ErrReviewIncomplete = errors.New("opencode: the reviewer started but its result is incomplete")
+
 // ReviewerAgentName is the installed reviewer definition.
 const ReviewerAgentName = "mpm-reviewer"
 
@@ -103,6 +115,10 @@ type ReviewResult struct {
 	EvidencePath string
 	// Findings is the bounded text the reviewer produced.
 	Findings string
+	// AssistantFindings is the reviewer's OWN TEXT, with the user
+	// prompt, tool activity and diagnostics removed. It is the only
+	// source from which the host may transcribe a verdict.
+	AssistantFindings string
 	// Outcome is the runtime's own report.
 	Outcome string
 	// Agent and Model are what the session actually used.
@@ -179,52 +195,78 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 	// contains nothing but the submitted prompt echo, an empty assistant
 	// turn, tool activity or a diagnostic envelope has produced NO REVIEW —
 	// counting it would let a prompt be mistaken for a verdict.
-	findings, state, err := r.captureMessages(ctx, req.SessionID)
+	findings, assistantFindings, state, err := r.captureMessages(ctx, req.SessionID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrReviewIncomplete, err)
 	}
 	if state == nil {
-		return nil, fmt.Errorf("%w: the reviewer produced no session state (%v)",
-			ErrReviewerUnavailable, runErr)
+		return nil, fmt.Errorf("%w: %w: the reviewer produced no session state (%v)",
+			ErrReviewIncomplete, ErrReviewerUnavailable, runErr)
 	}
 	if violation := reviewerSessionOverrideViolation(state.Permissions); violation != "" {
-		return nil, fmt.Errorf("%w: %s", ErrReviewerUnavailable, violation)
+		return nil, fmt.Errorf("%w: %w: %s",
+			ErrReviewIncomplete, ErrReviewerUnavailable, violation)
 	}
 
-	digest := sha256.Sum256([]byte(findings))
-	res := &ReviewResult{
-		SessionID:      req.SessionID,
-		FindingsSHA256: hex.EncodeToString(digest[:]),
-		Findings:       findings,
-		Outcome:        state.Outcome,
-		Agent:          state.Agent,
-		Model:          state.Model.ProviderID + "/" + state.Model.ID,
-		Permissions:    state.Permissions,
+	// THE SESSION'S OWN MODEL IS CHECKED. The configured model only says
+	// what was ASKED for; the session state says what ran. A runtime that
+	// fell back to another provider (or another model) did not run the
+	// review the operator authorised.
+	actualModel := state.Model.ProviderID + "/" + state.Model.ID
+	if cfg.Model != "" && actualModel != cfg.Model {
+		return nil, fmt.Errorf("%w: %w: the reviewer session ran model %q, want %q",
+			ErrReviewIncomplete, ErrReviewerUnavailable, actualModel, cfg.Model)
 	}
 
 	// THE REVISION IS THE PINNED ONE, not a fresh observation.
-	res.ReviewedRevision = pinned
+	res := reviewResultFromCapture(req.SessionID, pinned, findings, assistantFindings, state)
 
 	// THE CAPTURE IS WRITTEN BY THE HOST, beside the disposable config.
 	path := filepath.Join(cfg.Root, "findings", "review-"+req.SessionID+".json")
 	payload := map[string]any{
-		"session_id":        res.SessionID,
-		"reviewed_revision": res.ReviewedRevision,
-		"findings_sha256":   res.FindingsSHA256,
-		"outcome":           res.Outcome,
-		"agent":             res.Agent,
-		"model":             res.Model,
-		"findings":          res.Findings,
+		"session_id":         res.SessionID,
+		"reviewed_revision":  res.ReviewedRevision,
+		"findings_sha256":    res.FindingsSHA256,
+		"outcome":            res.Outcome,
+		"agent":              res.Agent,
+		"model":              res.Model,
+		"findings":           res.Findings,
+		"assistant_findings": res.AssistantFindings,
 	}
 	body, _ := json.MarshalIndent(payload, "", "  ")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, fmt.Errorf("opencode: create the evidence directory: %w", err)
+		return nil, fmt.Errorf("%w: create the evidence directory: %w",
+			ErrReviewIncomplete, err)
 	}
 	if err := os.WriteFile(path, body, 0o600); err != nil {
-		return nil, fmt.Errorf("opencode: write the review evidence: %w", err)
+		return nil, fmt.Errorf("%w: write the review evidence: %w",
+			ErrReviewIncomplete, err)
 	}
 	res.EvidencePath = path
 	return res, nil
+}
+
+// reviewResultFromCapture assembles the host-observed result.
+//
+// It exists as a named function so the PRODUCTION wiring can be tested: the
+// transcript and the assistant-authored text are different values, and a
+// review that put the transcript in `AssistantFindings` would let a prompt or
+// tool line be transcribed as a verdict. A fake runtime cannot catch that
+// swap because it supplies both fields itself.
+func reviewResultFromCapture(sessionID, pinned, findings, assistantFindings string,
+	state *SessionState) *ReviewResult {
+	digest := sha256.Sum256([]byte(findings))
+	return &ReviewResult{
+		SessionID:         sessionID,
+		ReviewedRevision:  pinned,
+		FindingsSHA256:    hex.EncodeToString(digest[:]),
+		Findings:          findings,
+		AssistantFindings: assistantFindings,
+		Outcome:           state.Outcome,
+		Agent:             state.Agent,
+		Model:             state.Model.ProviderID + "/" + state.Model.ID,
+		Permissions:       state.Permissions,
+	}
 }
 
 // verifyReviewer proves the definition exists and is default-deny with
@@ -608,17 +650,17 @@ func (r *Runtime) writeReviewConfig() error {
 //
 // The errors and the tool results are included: a review that refused to run
 // is not a review that found nothing.
-func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string, *SessionState, error) {
+func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string, string, *SessionState, error) {
 	out, err := r.runIsolated(ctx, r.cfg.OpenCodeBin, "--standalone", "api",
 		"session.message.list", "--param", "sessionID="+sessionID)
 	if err != nil {
-		return "", nil, fmt.Errorf("opencode: read the reviewer's messages: %w", err)
+		return "", "", nil, fmt.Errorf("opencode: read the reviewer's messages: %w", err)
 	}
 	var env struct {
 		Data []reviewMessage `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(out), &env); err != nil {
-		return "", nil, fmt.Errorf("opencode: parse the reviewer's messages: %w", err)
+		return "", "", nil, fmt.Errorf("opencode: parse the reviewer's messages: %w", err)
 	}
 
 	// THE COMPLETION GUARD, applied where the stream is read. The
@@ -627,13 +669,32 @@ func (r *Runtime) captureMessages(ctx context.Context, sessionID string) (string
 	// review.
 	transcript, err := captureReviewFindings(env.Data)
 	if err != nil {
-		return transcript, nil, err
+		return transcript, assistantAuthoredFindings(env.Data), nil, err
 	}
 	state, err := r.Inspect(ctx, sessionID)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
-	return transcript, state, nil
+	return transcript, assistantAuthoredFindings(env.Data), state, nil
+}
+
+// assistantAuthoredFindings is the reviewer's own prose, with prompts, tool
+// activity and diagnostics removed. A verdict may be transcribed only from
+// this text.
+func assistantAuthoredFindings(msgs []reviewMessage) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		if m.Type != "assistant" {
+			continue
+		}
+		// Keep message boundaries: a verdict in the next assistant turn
+		// must start on its own line, not be concatenated onto prose.
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(assistantAuthoredText(m.Content))
+	}
+	return b.String()
 }
 
 // reviewMessage is the shape findingsFromMessages consumes.
@@ -743,6 +804,9 @@ func assistantAuthoredText(raw json.RawMessage) string {
 	for _, p := range parts {
 		if p.Type != "text" {
 			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
 		}
 		b.WriteString(p.Text)
 	}

@@ -75,12 +75,32 @@ func (e *Engine) dispatchReview(ctx context.Context, claimed *assignment.Assignm
 		return outcome, nil
 	}
 
+	// THE EXACT REVISION IS PART OF THE AUTHORISATION. Without it the
+	// review runtime would accept whatever the review checkout happens
+	// to contain and the verdict would bind to that HEAD.
+	expected := claimed.HeadSHA
+	if expected == "" {
+		if targetID, _ := claimed.Payload[assignment.PayloadKeyReviewTarget].(string); targetID != "" {
+			if subject, err := e.store.Get(targetID); err == nil {
+				expected = subject.HeadSHA
+			}
+		}
+	}
+	if expected == "" {
+		outcome.Reason = ReasonReviewerUnavailable
+		outcome.Detail = "the review names no exact revision to check; set the reviewer's head SHA"
+		return outcome, nil
+	}
 	res, err := e.store.ExecuteReview(ctx, reviewer, assignment.ExecuteReviewParams{
-		ID:    claimed.ID,
-		Epoch: claimed.ClaimEpoch,
-		Actor: assignment.Actor{Address: claimed.Recipient, Kind: "agent"},
-		Brief: e.briefFor(claimed),
-		Title: "review of " + claimed.ID,
+		ID:               claimed.ID,
+		Epoch:            claimed.ClaimEpoch,
+		Actor:            assignment.Actor{Address: claimed.Recipient, Kind: "agent"},
+		Brief:            e.briefFor(claimed),
+		Title:            "review of " + claimed.ID,
+		ExpectedRevision: expected,
+		// The model the factory configured is the model the review was
+		// authorised to use. A result from another one is refused.
+		ExpectedModel: e.cfg.ReviewerModel,
 	})
 	if err != nil {
 		outcome.Reason = classifyReviewRefusal(err)
@@ -109,7 +129,8 @@ func (e *Engine) briefFor(a *assignment.Assignment) string {
 	subject, _ := a.Payload[assignment.PayloadKeyReviewTarget].(string)
 	brief := fmt.Sprintf(
 		"Review the work of assignment %s independently. Report what is wrong with it, "+
-			"with file and line references. Say plainly whether it is acceptable.", subject)
+			"with file and line references. End with exactly one final line, without "+
+			"backticks: VERDICT: APPROVED or VERDICT: CHANGES REQUESTED.", subject)
 	if len(brief) > maxBriefBytes {
 		brief = brief[:maxBriefBytes]
 	}
@@ -161,6 +182,8 @@ func classifyAdapterRefusal(err error) string {
 		return ReasonLeaseHeld
 	case errors.Is(err, oc.ErrReviewerUnavailable):
 		return ReasonReviewerUnavailable
+	case errors.Is(err, assignment.ErrReviewVerdict):
+		return ReasonRecoveryRequired
 	case errors.Is(err, assignment.ErrIllegalTransition):
 		return ReasonOperatorGatePending
 	case errors.Is(err, assignment.ErrRecordOnlyRefused):
@@ -178,6 +201,15 @@ func classifyAdapterRefusal(err error) string {
 // classifyReviewRefusal maps a review refusal onto a reason code.
 func classifyReviewRefusal(err error) string {
 	switch {
+	// RECOVERY IS CHECKED FIRST. A post-inference failure can also wrap
+	// ErrStaleClaim (the reviewer's epoch moved during the model run) or
+	// ErrConstraint (the transaction failed). The attempt is already
+	// AMBIGUOUS, so reporting "stale epoch" or "refused" would invite a
+	// retry the ambiguity check will refuse.
+	case errors.Is(err, oc.ErrReviewIncomplete),
+		errors.Is(err, assignment.ErrReviewAmbiguous),
+		errors.Is(err, assignment.ErrReviewVerdict):
+		return ReasonRecoveryRequired
 	case errors.Is(err, assignment.ErrBudgetExhausted):
 		return ReasonBudgetExhausted
 	case errors.Is(err, assignment.ErrStaleClaim):

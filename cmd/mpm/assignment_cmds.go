@@ -798,7 +798,7 @@ THE WORK
 EXECUTION (PR 3, explicit invocation only)
   execute           run an assignment in a contained OpenCode session
   execute-review    run an assignment's REVIEWER in its isolated sandbox
-                    and capture the findings
+                    and capture the findings (requires --reviewed-sha)
   capture-review-evidence
                     record the reviewed revision and the findings digest a
                     HOST captured

@@ -275,6 +275,21 @@ func (spec Spec) Argv() ([]string, error) {
 		"--bind", filepath.Join(spec.Root, "ocache"), PrefixOCache,
 		"--bind", filepath.Join(spec.Root, "ostate"), PrefixOState,
 		"--bind", filepath.Join(spec.Root, "findings"), PrefixFind,
+		// THE UNSHARE FLAGS ARE EMITTED BEFORE /proc FOR READABILITY AND
+		// DEFENCE IN DEPTH — NOT BECAUSE THE ORDER ALONE IS THE
+		// PROTECTION.
+		//
+		// Bubblewrap 0.11.1 batches namespace options into ONE clone
+		// before any mount, so reversing the two groups does not change
+		// what /proc is. The measured leak — bubblewrap's init
+		// (/proc/1/environ) carrying the caller's environment — was
+		// closed by giving bubblewrap's own process an explicit, short
+		// environment (see Runtime.Run's exec.Cmd.Env), not by the
+		// ordering.
+		"--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+		"--unshare-user",
+		"--disable-userns", "--assert-userns-disabled",
+		"--die-with-parent", "--new-session",
 		"--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
 		// The environment. `--clearenv` first, then exactly the values
 		// the caller supplied — and the caller is the adapter, which
@@ -288,20 +303,11 @@ func (spec Spec) Argv() ([]string, error) {
 		inner = append(inner, "--setenv", k, spec.Env[k])
 	}
 	inner = append(inner,
-		// No nested user namespace: --disable-userns refuses
-		// unshare(CLONE_NEWUSER) inside the sandbox and
-		// --assert-userns-disabled makes bubblewrap REFUSE TO START if
-		// it cannot enforce that. A sandbox that cannot enforce it does
-		// not start.
-		// The INNER user namespace. It is required by
-		// --disable-userns (bubblewrap refuses the combination
-		// otherwise), and it is safe because the network namespace was
-		// already created by the OUTER unshare — so this nesting does
-		// not disturb the netns ownership that makes loopback usable.
-		"--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
-		"--unshare-user",
-		"--disable-userns", "--assert-userns-disabled",
-		"--die-with-parent", "--new-session",
+		// The unshare flags are emitted before /proc above (see the note
+		// there: this is defence in depth, not the security fix). The
+		// INNER user namespace is required by --disable-userns, and it is
+		// safe because the network namespace was already created by the
+		// OUTER unshare.
 		"--chdir", PrefixWorker,
 		"--",
 	)

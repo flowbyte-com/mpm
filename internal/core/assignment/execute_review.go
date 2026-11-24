@@ -2,6 +2,7 @@ package assignment
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -24,12 +25,16 @@ import (
 //  2. asks the runtime to run the reviewer, which itself refuses unless the
 //     reviewer definition and the `sandbox_exec` plugin are both available;
 //  3. takes the reviewed revision and the findings digest FROM THE RESULT —
-//     never from a parameter — and records them through the fenced evidence
-//     capture.
+//     never from a parameter;
+//  4. extracts the reviewer's own terminal verdict from the ASSISTANT-AUTHORED
+//     text only; and
+//  5. records the evidence and the reviewer's fenced verdict in ONE
+//     transaction.
 //
-// It records EVIDENCE. It does NOT record a verdict: a verdict is the
-// reviewer's own fenced transition, and keeping the two apart is what stops a
-// completed review from being manufactured by the party whose work is judged.
+// The host transcribes the verdict; it does not decide it. Prompts, tool
+// output and diagnostics are not sources, and a missing or ambiguous terminal
+// line leaves the attempt ambiguous for an operator rather than approving the
+// work.
 
 // ExecuteReviewParams selects one reviewer assignment.
 type ExecuteReviewParams struct {
@@ -46,6 +51,11 @@ type ExecuteReviewParams struct {
 	// ExpectedRevision is what the operator believes is under review. The
 	// host checks it against what it observes; a mismatch is a refusal.
 	ExpectedRevision string
+	// ExpectedModel is the reviewer model the operator authorised. The
+	// host checks the SESSION's own model against it; empty means the
+	// caller did not name one and the runtime's own check is the only
+	// binding.
+	ExpectedModel string
 }
 
 // ExecuteReviewResult is what one review produced.
@@ -63,6 +73,9 @@ type ExecuteReviewResult struct {
 	RuntimeOutcome string `json:"runtime_outcome"`
 	// Findings is the bounded captured text.
 	Findings string `json:"findings"`
+	// Verdict is the assignment verdict transcribed from the reviewer's
+	// assistant-authored terminal line.
+	Verdict string `json:"verdict"`
 }
 
 // ReviewRuntime is the reviewer boundary.
@@ -106,7 +119,7 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		return nil, fmt.Errorf(
 			"%w: %s already carries captured evidence (%s); a completed review "+
 				"is not re-run — the rework is a NEW assignment delegated from the "+
-				"subject", ErrConstraint, rev.ID, rev.ReviewedSHA)
+				"subject", ErrReviewVerdict, rev.ID, rev.ReviewedSHA)
 	}
 
 	// PRIOR REVIEW ATTEMPTS ARE RECONCILED BEFORE A NEW ONE STARTS.
@@ -153,60 +166,110 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		ExpectedRevision: p.ExpectedRevision,
 	})
 	if err != nil {
-		// A review that could not run is a REFUSAL, recorded truthfully.
+		// A REVIEW THAT COULD NOT START is a retryable refusal: no
+		// reviewer session ran, so a later attempt cannot duplicate
+		// inference.
+		//
+		// A REVIEW THAT STARTED BUT COULD NOT BE CAPTURED is different.
+		// The model may have run and produced billable output, so the
+		// attempt is AMBIGUOUS and a second run would duplicate it.
+		// OpenCode marks that class with ErrReviewIncomplete.
+		if errors.Is(err, oc.ErrReviewIncomplete) {
+			_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
+				AttemptID: attempt.ID, Epoch: p.Epoch, Error: boundedReason(err),
+			})
+			return nil, fmt.Errorf("%w: %w", ErrReviewAmbiguous, err)
+		}
 		_, _ = s.MarkAttemptFailed(SessionStateParams{
 			AttemptID: attempt.ID, Epoch: p.Epoch, Error: boundedReason(err),
 		})
 		return nil, err
 	}
 
-	// WHAT THE REVIEWER ACTUALLY WAS, before its output is believed.
-	if res.Agent != "mpm-reviewer" {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch,
-			Error: "the review ran as agent " + res.Agent,
+	// EVERY REFUSAL AFTER A RESULT IS RECOVERY-REQUIRED, not a retry.
+	// The session may already have consumed a paid review, so marking the
+	// attempt FAILED would let a later pass launch a second one.
+	refuse := func(outcome, detail string) error {
+		_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
+			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: outcome, Error: detail,
 		})
-		return nil, fmt.Errorf("%w: the review ran as agent %q, not mpm-reviewer",
-			ErrConstraint, res.Agent)
+		return fmt.Errorf("%w: %s", ErrReviewAmbiguous, detail)
+	}
+
+	// WHAT THE REVIEWER ACTUALLY WAS, before its output is believed.
+	if res.SessionID != sessionID {
+		return nil, refuse(res.Outcome, fmt.Sprintf(
+			"the review returned session %q, want %q", res.SessionID, sessionID))
+	}
+	if res.Agent != "mpm-reviewer" {
+		return nil, refuse(res.Outcome, fmt.Sprintf(
+			"the review ran as agent %q, not mpm-reviewer", res.Agent))
+	}
+	// THE SESSION'S MODEL IS CHECKED, not only the configured one. A
+	// runtime that reports another provider or model did not run the
+	// review the operator authorised; the verdict it produced cannot be
+	// bound to the measured credential boundary.
+	if p.ExpectedModel != "" && res.Model != p.ExpectedModel {
+		return nil, refuse(res.Outcome, fmt.Sprintf(
+			"the review ran model %q, want %q", res.Model, p.ExpectedModel))
+	}
+	// A SESSION-LEVEL GRANT IS A WIDENING. The real runtime refuses it
+	// before returning; this check covers a runtime that did not.
+	if len(res.Permissions) > 0 {
+		return nil, refuse(res.Outcome, "the review session carried a permission override")
 	}
 	if res.Outcome != "succeeded" {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: res.Outcome,
-			Error: "the reviewer did not report a successful terminal outcome",
-		})
-		return nil, fmt.Errorf("%w: the reviewer's terminal outcome is %q, not %q",
-			ErrConstraint, res.Outcome, "succeeded")
+		return nil, refuse(res.Outcome, fmt.Sprintf(
+			"the reviewer's terminal outcome is %q, not %q", res.Outcome, "succeeded"))
 	}
 	if strings.TrimSpace(res.Findings) == "" {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch, Outcome: res.Outcome,
-			Error: "the reviewer produced no findings",
-		})
-		return nil, fmt.Errorf("%w: the reviewer produced no findings", ErrConstraint)
+		return nil, refuse(res.Outcome, "the reviewer produced no findings")
 	}
 
 	// THE EVIDENCE IS DERIVED, NOT SUPPLIED.
 	if res.FindingsSHA256 == "" || res.ReviewedRevision == "" {
-		_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
-			AttemptID: attempt.ID, Epoch: p.Epoch,
-			Error: "the review produced no capture",
-		})
-		return nil, fmt.Errorf("%w: the review produced no captured evidence", ErrConstraint)
+		return nil, refuse(res.Outcome, "the review produced no captured evidence")
+	}
+	// THE REVISION IS BOUND BEFORE THE VERDICT. The runtime checks the
+	// checkout HEAD against ExpectedRevision; this check also covers a
+	// fake or a runtime that did not perform that comparison.
+	if p.ExpectedRevision != "" && res.ReviewedRevision != p.ExpectedRevision {
+		return nil, refuse(res.Outcome, fmt.Sprintf(
+			"the review captured %s, want the authorised revision %s",
+			res.ReviewedRevision, p.ExpectedRevision))
 	}
 
-	updated, err := s.CaptureReviewEvidence(ReviewEvidenceParams{
+	// THE VERDICT COMES FROM THE ASSISTANT'S OWN TEXT, NOT THE FLATTENED
+	// TRANSCRIPT. A prompt, a tool line or a diagnostic is not a source.
+	verdict, verdictErr := ExtractReviewVerdict(res.AssistantFindings)
+	if verdictErr != nil {
+		_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
+			AttemptID: attempt.ID, Epoch: p.Epoch,
+			Error: boundedReason(verdictErr),
+		})
+		return nil, verdictErr
+	}
+
+	// EVIDENCE AND VERDICT LAND IN ONE TRANSACTION. The capture is
+	// write-once; a crash between the two would leave captured evidence
+	// that can never be re-run and no verdict.
+	updated, err := s.captureReviewEvidenceAndVerdict(ReviewEvidenceParams{
 		ReviewerID:     rev.ID,
 		Epoch:          p.Epoch,
 		ReviewedSHA:    res.ReviewedRevision,
 		FindingsSHA256: res.FindingsSHA256,
 		EvidenceRef:    res.EvidencePath,
 		Actor:          p.Actor,
-	})
+	}, verdict, "host transcribed the reviewer's terminal verdict: "+verdict)
 	if err != nil {
-		_, _ = s.MarkAttemptFailed(SessionStateParams{
+		_, _ = s.MarkAttemptAmbiguous(SessionStateParams{
 			AttemptID: attempt.ID, Epoch: p.Epoch, Error: boundedReason(err),
 		})
-		return nil, err
+		// THE TRANSACTION ERROR CAN BE STALE-CLAIM OR CONSTRAINT, but
+		// the reviewer has already run. Wrapping it as ambiguous is what
+		// keeps the dispatcher's report honest: the operator must
+		// reconcile, not retry under a "stale epoch" label.
+		return nil, fmt.Errorf("%w: %w", ErrReviewAmbiguous, err)
 	}
 
 	outcome := res.Outcome
@@ -227,6 +290,7 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		EvidenceRef:      res.EvidencePath,
 		RuntimeOutcome:   outcome,
 		Findings:         res.Findings,
+		Verdict:          verdict,
 	}, nil
 }
 
@@ -241,12 +305,16 @@ func (s *Store) validateReviewable(rev *Assignment, p ExecuteReviewParams) error
 	if rev.ClaimEpoch == 0 {
 		return fmt.Errorf("%w: %s holds no claim", ErrConstraint, rev.ID)
 	}
-	if rev.LeaseExpiresAt == nil || *rev.LeaseExpiresAt-s.Now() < minLeaseSeconds {
-		return fmt.Errorf("%w: %s has no usable lease", ErrConstraint, rev.ID)
-	}
+	// THE STATE IS CHECKED BEFORE THE LEASE. A completed reviewer whose
+	// lease has since expired is still COMPLETED; reporting "no usable
+	// lease" would misclassify it as a malformed request instead of the
+	// operator gate it has reached.
 	if rev.State != StateInProgress {
 		return fmt.Errorf("%w: %s is %s; a review runs from in_progress",
 			ErrIllegalTransition, rev.ID, rev.State)
+	}
+	if rev.LeaseExpiresAt == nil || *rev.LeaseExpiresAt-s.Now() < minLeaseSeconds {
+		return fmt.Errorf("%w: %s has no usable lease", ErrConstraint, rev.ID)
 	}
 	// The target is fixed by the delegation that created the reviewer.
 	target, _ := rev.Payload[PayloadKeyReviewTarget].(string)
@@ -297,7 +365,7 @@ func (s *Store) reconcileReviewAttempts(taskID string, epoch int64) error {
 	case SessionAmbiguous:
 		return fmt.Errorf("%w: a previous review attempt (%s) is AMBIGUOUS — whether it "+
 			"produced findings cannot be determined, so a second reviewer could "+
-			"double the evidence", ErrConstraint, last.ID)
+			"double the evidence", ErrReviewVerdict, last.ID)
 	default:
 		return fmt.Errorf("%w: a previous review attempt (%s) is in an unknown state %q",
 			ErrConstraint, last.ID, last.LaunchState)

@@ -338,10 +338,10 @@ def control_fence_in_review():
     """
     replace_text(
         "internal/core/assignment/review.go",
-        """		if p.Epoch != reviewer.ClaimEpoch {
-			return fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, reviewer.ID, reviewer.ClaimEpoch)
-		}""",
-        """		// THE GO HALF OF THE FENCE REMOVED BY THE CONTROL.""",
+        """	if p.Epoch != reviewer.ClaimEpoch {
+		return nil, fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, reviewer.ID, reviewer.ClaimEpoch)
+	}""",
+        """	// THE GO HALF OF THE FENCE REMOVED BY THE CONTROL.""",
         "the fence's Go check on the review path",
     )
     replace_text(
@@ -462,16 +462,16 @@ def control_reviewer_independence():
     """The reviewer must not judge work it delegated."""
     replace_text(
         "internal/core/assignment/review.go",
-        """		ancestor, err := isAncestorOf(node, reviewer, subject.ID)
-		if err != nil {
-			return err
-		}
-		if ancestor {
-			return fmt.Errorf(
-				"%w: %s delegated %s, so it does not review its own work",
-				ErrConstraint, reviewer.ParentID, reviewer.ID)
-		}""",
-        """		// THE INDEPENDENCE CHECK REMOVED BY THE CONTROL.""",
+        """	ancestor, err := isAncestorOf(node, reviewer, subject.ID)
+	if err != nil {
+		return nil, err
+	}
+	if ancestor {
+		return nil, fmt.Errorf(
+			"%w: %s delegated %s, so it does not review its own work",
+			ErrConstraint, reviewer.ParentID, reviewer.ID)
+	}""",
+        """	// THE INDEPENDENCE CHECK REMOVED BY THE CONTROL.""",
         "the reviewer's independence",
     )
 

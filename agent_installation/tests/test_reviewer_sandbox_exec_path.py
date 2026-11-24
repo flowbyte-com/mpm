@@ -144,7 +144,13 @@ class SandboxInvocation:
         )
         return {"code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
-    def run(self, argv: list, cwd: str | None = "repo", timeout_ms: int = 120_000) -> dict:
+    def run(
+        self,
+        argv: list,
+        cwd: str | None = "repo",
+        timeout_ms: int = 120_000,
+        env: dict[str, str] | None = None,
+    ) -> dict:
         command = self._command("exec")
         payload = json.dumps(
             {"argv": argv, "cwd": cwd, "timeout_ms": timeout_ms}
@@ -161,6 +167,7 @@ class SandboxInvocation:
                 stderr=subprocess.PIPE,
                 pass_fds=(envelope_read,),
                 text=True,
+                env=env,
                 preexec_fn=lambda: os.dup2(envelope_read, 3),
             )
         except BaseException:
@@ -387,6 +394,49 @@ class ReviewerExecutionPathTest(unittest.TestCase):
         self.assertEqual(result["code"], 0, result["stderr"])
         self.assertIn("go version", result["stdout"])
 
+    def test_the_sandbox_command_cannot_read_a_provider_credential(self) -> None:
+        """The command cannot see the reviewer's provider credential.
+
+        The credential is inherited by the host-side wrapper when the
+        OpenCode process starts it, so the wrapper's env is a real threat
+        surface. The wrapper removes it from the environment it passes to
+        bubblewrap, and bwrap clears the command env.
+
+        The probe reads the command's environment, /proc/1, /proc/self AND
+        every numeric PID visible in /proc. If the host's /proc were mounted
+        (or the PID namespace were lost), one of those reads would expose the
+        wrapper's process; the marker assertion below would then fail.
+        """
+        name = "MINIMAX_API_KEY"
+        marker = "MARKER-NOT-A-REAL-CREDENTIAL"
+        previous = os.environ.get(name)
+        os.environ[name] = marker
+        try:
+            result = self.invocation.run(
+                [
+                    "/bin/sh",
+                    "-c",
+                    "env; echo ---; cat /proc/1/environ; echo ---; "
+                    "cat /proc/self/environ; echo ---; ls /proc; echo ---; "
+                    "for p in /proc/[0-9]*; do echo \"PID $p\"; "
+                    "cat \"$p/environ\" 2>/dev/null; done",
+                ],
+                cwd="tmp",
+                env={
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "HOME": str(self.root / "test-home"),
+                    name: marker,
+                },
+            )
+        finally:
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
+        combined = result["stdout"] + result["stderr"] + json.dumps(result["envelope"])
+        self.assertNotIn(marker, combined)
+        self.assertNotIn(name, combined)
+
 
 class DisposableCopyMetadataTest(unittest.TestCase):
     """The disposable copy does not carry the operator's PATHS.
@@ -598,6 +648,8 @@ class PluginInvocationAgreementTest(unittest.TestCase):
         self.assertNotIn("execSync(", self.source)
         self.assertNotIn("exec(", self.source)
         self.assertNotIn("child_process.exec", self.source)
+
+
 
 
 if __name__ == "__main__":

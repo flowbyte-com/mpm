@@ -27,6 +27,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent / "mpm-opencode" / "scripts" / "reviewer_bwrap.py"
@@ -534,6 +536,85 @@ class ReviewerHomeBindTest(unittest.TestCase):
             output,
             f"the discovery did not answer: {output}",
         )
+
+
+class ReviewerWrapperEnvironmentTest(unittest.TestCase):
+    """The wrapper passes a SCRUBBED environment to bubblewrap.
+
+    `--clearenv` clears the COMMAND's environment. Bubblewrap's own init
+    (`/proc/1` inside the namespace) inherits whatever the wrapper's child
+    process receives, so the wrapper must not pass the inference credential
+    to it. These tests are deterministic: they do not need a namespace.
+    """
+
+    CREDENTIALS = (
+        "MINIMAX_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "MPM_OPENCODE_REVIEWER_KEY",
+        "MPM_OPENCODE_SIDECAR_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    )
+
+    def test_the_scrub_list_names_every_provider_credential(self) -> None:
+        # Hardcoded on purpose: deriving the expectation from the same
+        # tuple would not fail if an entry were deleted from it.
+        for name in self.CREDENTIALS:
+            self.assertIn(name, sandbox.SCRUBBED_ENVIRONMENT)
+
+    def test_the_passing_rule_drops_every_credential(self) -> None:
+        source = {"PATH": "/usr/bin:/bin", "HOME": "/home/operator"}
+        for name in self.CREDENTIALS:
+            source[name] = "marker-" + name
+        env = sandbox.sandbox_environment(source)
+        self.assertEqual(env.get("PATH"), "/usr/bin:/bin")
+        self.assertEqual(env.get("HOME"), "/home/operator")
+        for name in self.CREDENTIALS:
+            self.assertNotIn(name, env)
+
+    def test_scrub_credentials_removes_the_names_from_the_mapping(self) -> None:
+        # `sandbox_environment` filters independently, so a test that only
+        # calls `execute` would not notice `main` losing this call. This
+        # pins the wrapper's own mapping scrub.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for name in self.CREDENTIALS:
+                os.environ[name] = "marker-" + name
+            sandbox.scrub_credentials()
+            for name in self.CREDENTIALS:
+                self.assertNotIn(name, os.environ)
+
+    def test_execute_gives_bubblewrap_the_scrubbed_environment(self) -> None:
+        captured = {}
+
+        def fake_run(args, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        tree = {"base": Path(tempfile.gettempdir())}
+        markers = {name: "marker-" + name for name in self.CREDENTIALS}
+        markers["PATH"] = "/usr/bin:/bin"
+        with mock.patch.dict(
+            os.environ,
+            markers,
+            clear=False,
+        ), mock.patch.object(
+            sandbox.os.path, "exists", return_value=True
+        ), mock.patch.object(
+            sandbox, "open_tree", return_value={}
+        ), mock.patch.object(
+            sandbox, "close_tree"
+        ), mock.patch.object(
+            sandbox, "namespace_argv", return_value=["/usr/bin/bwrap", "--", "/bin/true"]
+        ), mock.patch.object(
+            sandbox.subprocess, "run", side_effect=fake_run
+        ):
+            result = sandbox.execute(tree, ["/bin/true"])
+
+        self.assertTrue(result["ok"], result)
+        self.assertIn("env", captured, "bubblewrap was spawned without an explicit env")
+        self.assertEqual(captured["env"].get("PATH"), "/usr/bin:/bin")
+        for name in self.CREDENTIALS:
+            self.assertNotIn(name, captured["env"])
 
 
 if __name__ == "__main__":

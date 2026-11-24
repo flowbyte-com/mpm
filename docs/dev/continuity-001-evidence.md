@@ -40,7 +40,7 @@ The single most important property of the contract is what it keeps apart.
 |---|---|---|
 | a runtime reported success | the adapter's own report of an attempt | task completion |
 | captured findings | bytes the HOST captured over what a reviewer produced | a review verdict |
-| a review verdict | the reviewer's own fenced transition | operator approval |
+| a review verdict | the reviewer's terminal text, transcribed by the host under the reviewer's fence | operator approval |
 | an operator approval | a recorded decision: an action, a revision, an evidence pointer | a merge |
 
 PR 1's schema anticipated this: `agent_tasks` carries `reviewed_sha`,
