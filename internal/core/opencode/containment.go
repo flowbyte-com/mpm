@@ -58,9 +58,11 @@ package opencode
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -324,10 +326,46 @@ func (spec Spec) Argv() ([]string, error) {
 	// have. A fixed sleep would be a race; probing the port is a fact.
 	innerScript := ""
 	if len(spec.RelayCommand) > 0 {
+		probeTarget, err := relayProbeTarget(RelayAddr)
+		if err != nil {
+			return nil, err
+		}
 		innerScript += shellQuote(spec.RelayCommand) + " &\n"
-		innerScript += "i=0; while [ $i -lt 200 ]; do " +
-			"(exec 3<>/dev/tcp/" + RelayAddr + ") 2>/dev/null && break; " +
+		// TWO THINGS MAKE THIS A GATE RATHER THAN A DELAY, AND BOTH WERE
+		// WRONG BEFORE:
+		//
+		//  1. bash's /dev/tcp takes `host/port`. The HTTP address of the
+		//     relay is `host:port`, and that form is not an address to
+		//     bash — it is a PATH, so `exec 3<>/dev/tcp/host:port` fails
+		//     with ENOENT and the connect never happens. The separator is
+		//     therefore converted, and the address is validated, before it
+		//     reaches the shell.
+		//
+		//  2. the loop was followed directly by `exec <command>`, so a
+		//     probe that never succeeded still ran the target. `ready` is
+		//     tracked explicitly and exhaustion is a failure.
+		//
+		// Each attempt is bounded by `timeout`: a relay that is listening
+		// but not accepting can leave a loopback connect waiting in the
+		// kernel's retransmit backoff, which would otherwise outlive the
+		// 200-iteration budget. `timeout` ships with coreutils, like the
+		// `ip` and `bash` this launcher already requires.
+		// The budget is bounded TWO ways, because either alone is
+		// escapable: 200 attempts, and ten seconds of wall clock. A
+		// per-attempt cap stops one wedged connect from hanging the
+		// launcher; the wall-clock cap stops a relay that is slow to
+		// refuse from stretching 200 attempts past the nominal budget.
+		innerScript += "ready=0; i=0; SECONDS=0; " +
+			"while [ \"$i\" -lt 200 ] && [ \"$SECONDS\" -lt 10 ]; do " +
+			"if timeout 0.25 bash -c 'exec 3<>/dev/tcp/" + probeTarget + "' 2>/dev/null; then " +
+			"ready=1; break; fi; " +
 			"i=$((i+1)); sleep 0.05; done\n"
+		// 70 is a reserved, documented exit status: the adapter records it
+		// as the command's exit code in its structured evidence, and the
+		// target never runs. No credential or raw launcher stderr is added
+		// to the persistent record.
+		innerScript += "if [ \"$ready\" -ne 1 ]; then " +
+			"echo \"mpm: the relay did not become ready at " + RelayAddr + "\" >&2; exit 70; fi\n"
 	}
 	innerScript += "exec " + shellQuote(spec.Command) + "\n"
 	// `/usr/bin/bash`, not `/bin/bash`: /usr is ALWAYS bound, whereas /bin
@@ -377,6 +415,42 @@ func shellQuote(argv []string) string {
 		parts = append(parts, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
 	}
 	return strings.Join(parts, " ")
+}
+
+// relayProbeTarget converts the relay's HTTP address (host:port) into the
+// `host/port` form bash's /dev/tcp pseudo-device requires.
+//
+// It is deliberately strict. The value is concatenated into a single-quoted
+// shell word, so anything that could change the meaning of that word is
+// rejected rather than escaped: the host must be a plain name or IPv4
+// literal, and the port must be a decimal number in range. An address the
+// probe cannot represent is a LAUNCH ERROR — not a probe that fails quietly
+// for the rest of the run, which is the failure mode this whole block exists
+// to remove.
+func relayProbeTarget(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("opencode: the relay address %q is not host:port: %w", addr, err)
+	}
+	if host == "" {
+		return "", fmt.Errorf("opencode: the relay address %q names no host", addr)
+	}
+	// IPv6 literals are not usable in bash's /dev/tcp here, and the relay
+	// listens on IPv4 loopback by construction (RelayAddr). A character
+	// whitelist also makes shell metacharacters, quotes and whitespace
+	// unrepresentable rather than merely escaped.
+	for _, r := range host {
+		ok := r == '.' || r == '-' || r == '_' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if !ok {
+			return "", fmt.Errorf("opencode: the relay host %q is not a supported probe target", host)
+		}
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("opencode: the relay port %q is not a valid port", port)
+	}
+	return host + "/" + strconv.Itoa(n), nil
 }
 
 // mergedPath returns the first of the candidates that exists on the HOST.
