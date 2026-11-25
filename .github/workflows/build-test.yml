@@ -199,6 +199,29 @@ jobs:
         # a selected test started asserting on FTS5 behaviour.
         run: cd internal/core && go test -short -count=1 -tags fts5 ./... -run "TestSynthesis|TestReliability|TestLifecycle|TestHybrid|TestGetRecentUserTopics|TestDBSafety"
 
+      # THE CONTAINMENT LAUNCHER HAD NO CI COVERAGE AT ALL.
+      #
+      # `internal/core` is its own Go module, so the root `go test ./...`
+      # sweeps never reach internal/core/opencode — the package that builds
+      # and runs the worker's bubblewrap containment. The relay readiness
+      # probe therefore shipped untested, and a broken probe that still ran
+      # the target was invisible to every green run.
+      #
+      # The command-construction tests are portable: they need no
+      # namespaces and they fail on the address form alone.
+      - name: Runtime readiness — command construction (no containment)
+        run: cd internal/core && go test -tags fts5 -count=1 -timeout 5m -v -run 'TestRelayProbeTarget|TestContainmentReadinessProbeUsesHostPortForm' ./opencode
+
+      # The integration tests run the REAL launcher through REAL bubblewrap.
+      # -v is deliberate: when a runner genuinely cannot create unprivileged
+      # namespaces the tests skip, and the skip must be visible in the log
+      # rather than indistinguishable from a pass.
+      - name: Runtime containment — real bubblewrap launcher
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          cd internal/core && go test -tags fts5 -count=1 -timeout 15m -v -run 'TestLauncher' ./opencode
+
       # Managed-block parity gate (Python; closes a pre-existing CI gap).
       #
       # Full discover over agent_installation/tests/ — 123 cases

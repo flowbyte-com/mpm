@@ -67,6 +67,10 @@ exit 1
 	}
 	rt, err := NewRuntime(Config{
 		Root: root, OpenCodeBin: bin, RepoPath: workspace,
+		// THE RELAY IS REQUIRED. The containment gates the target on the
+		// relay becoming ready, so a launch with no relay binary used to
+		// reach the target only because the readiness loop never gated it.
+		MPMBin:        relayBinary(t),
 		Model:         "mpm-sidecar/permitted-model",
 		AllowedAgents: []string{"mpm-worker"},
 		Sidecar:       SidecarConfig{SocketPath: sock},
