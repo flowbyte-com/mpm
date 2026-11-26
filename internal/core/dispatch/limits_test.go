@@ -89,9 +89,13 @@ func TestASpentConcurrencyBudgetIsReportedAsABudget(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Concurrency = 2
 	engine, fake := testEngine(t, store, cfg)
-	// The launch produces NO STATE, so the attempt is ambiguous and the
-	// assignment stays in progress: its claim is still live.
-	fake.launchState = nil
+	// The launch fails definitively: no ambiguity, but the assignment
+	// stays in progress holding its claim, so the second dispatch is
+	// refused by the budget, not by the ambiguity barrier. (An
+	// ambiguous first launch would refuse the second claim under TR11
+	// instead — that barrier has its own tests — so the budget path
+	// needs a clean launch.)
+	fake.launchState = okState("mpm-worker", "failed")
 
 	report, err := engine.RunOnce(context.Background())
 	if err != nil {

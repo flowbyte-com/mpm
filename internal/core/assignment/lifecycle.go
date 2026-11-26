@@ -178,7 +178,17 @@ func buildSetClause(cols map[string]interface{}) (string, []interface{}) {
 // acknowledged is re-deliverable, not lost — which is why the delivery is
 // a transition with its own ledger entry rather than a side effect of the
 // row having been read.
+//
+// T19: an ambiguous or superseded task is not routable. The guard names
+// the refusal before the write.
 func (s *Store) Deliver(p FencedParams) (*Assignment, error) {
+	task, err := s.Get(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.execBlockedHistorical(task); err != nil {
+		return nil, err
+	}
 	return s.transition(transitionSpec{
 		id:             p.ID,
 		presentedEpoch: p.Epoch,
@@ -194,7 +204,16 @@ func (s *Store) Deliver(p FencedParams) (*Assignment, error) {
 //
 // "I have it" is not "I will do it": acknowledgement and acceptance are
 // distinct states, and the distinction is the point.
+//
+// T19: an ambiguous or superseded task is not routable.
 func (s *Store) Acknowledge(p FencedParams) (*Assignment, error) {
+	task, err := s.Get(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.execBlockedHistorical(task); err != nil {
+		return nil, err
+	}
 	return s.transition(transitionSpec{
 		id:             p.ID,
 		presentedEpoch: p.Epoch,
@@ -206,7 +225,16 @@ func (s *Store) Acknowledge(p FencedParams) (*Assignment, error) {
 }
 
 // Accept records the recipient's commitment: `acknowledged → accepted`.
+//
+// T19: an ambiguous or superseded task is not routable.
 func (s *Store) Accept(p FencedParams) (*Assignment, error) {
+	task, err := s.Get(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.execBlockedHistorical(task); err != nil {
+		return nil, err
+	}
 	return s.transition(transitionSpec{
 		id:             p.ID,
 		presentedEpoch: p.Epoch,
@@ -228,7 +256,16 @@ func (s *Store) Accept(p FencedParams) (*Assignment, error) {
 // legal from any live state: the schema's withdrawal rule is
 // universal, and a narrower rule here would leave a recipient unable
 // to decline work they have not yet acknowledged.
+//
+// TR14 applies: ambiguous or superseded work cannot be withdrawn.
 func (s *Store) Refuse(p FencedParams) (*Assignment, error) {
+	task, err := s.Get(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.execBlockedHistorical(task); err != nil {
+		return nil, err
+	}
 	return s.transition(transitionSpec{
 		id:             p.ID,
 		presentedEpoch: p.Epoch,
@@ -244,7 +281,18 @@ func (s *Store) Refuse(p FencedParams) (*Assignment, error) {
 //
 // It REQUIRES a claim: an assignment cannot be in progress without a
 // lease, because there would be nothing to expire it.
+//
+// TR12: starting work in an ambiguous tree is a launch decision. The
+// trigger refuses it unless the tree authorises this task; this names
+// that refusal before the write.
 func (s *Store) Start(p FencedParams) (*Assignment, error) {
+	task, err := s.Get(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.execBlocked(task); err != nil {
+		return nil, err
+	}
 	return s.transition(transitionSpec{
 		id:             p.ID,
 		presentedEpoch: p.Epoch,
@@ -260,7 +308,19 @@ func (s *Store) Start(p FencedParams) (*Assignment, error) {
 //
 // Completion is NOT approval and NOT a review verdict: it is the
 // implementer's claim that the work is finished.
+//
+// TR13 refuses completions on ambiguous or superseded work; TR14's
+// withdrawal rule is separate. This names that refusal before the write;
+// the trigger remains the backstop, and the current-epoch
+// completed+succeeded attempt it also requires is enforced there.
 func (s *Store) Complete(p FencedParams) (*Assignment, error) {
+	task, err := s.Get(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.execBlockedHistorical(task); err != nil {
+		return nil, err
+	}
 	now := s.Now()
 	return s.transition(transitionSpec{
 		id:             p.ID,
@@ -278,7 +338,17 @@ func (s *Store) Complete(p FencedParams) (*Assignment, error) {
 // The cancellation is universal: legal from every state except itself,
 // for every role. It is the implementer's withdrawal of the work, not a
 // state-machine special case.
+//
+// TR14 refuses withdrawal of ambiguous or superseded work: cancelling
+// what the recovery status must report would hide the blockage.
 func (s *Store) Cancel(p CancelParams) (*Assignment, error) {
+	task, err := s.Get(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.execBlockedHistorical(task); err != nil {
+		return nil, err
+	}
 	return s.transition(transitionSpec{
 		id:             p.ID,
 		presentedEpoch: p.Epoch,
@@ -332,8 +402,17 @@ func (s *Store) Note(p NoteParams) (*Assignment, error) {
 //
 // The gate is a HAND-OFF, not a claim: the work is finished and the
 // operator holds the decision.
+//
+// TR15: the handoff moves only from a passed review on live work.
 func (s *Store) HandoffToOperator(p HandoffParams) (*Assignment, error) {
 	if err := requireText("awaiting_action", p.AwaitingAction); err != nil {
+		return nil, err
+	}
+	task, err := s.Get(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.execBlockedHistorical(task); err != nil {
 		return nil, err
 	}
 	return s.transition(transitionSpec{
@@ -398,6 +477,11 @@ func (s *Store) RecordApproval(auth OperatorAuthority, p ApprovalParams) (*Assig
 	err := s.db.WithTx(func(node internal.DBNode) error {
 		current, err := getAssignmentTx(node, p.ID)
 		if err != nil {
+			return err
+		}
+		// TR17: the approval cannot land on ambiguous or historical
+		// work. The trigger is the backstop; this names it first.
+		if err := s.execBlockedHistorical(current); err != nil {
 			return err
 		}
 		if current.State != StateAwaitingOperator {

@@ -50,9 +50,21 @@ func (s *Store) Claim(p ClaimParams) (*Assignment, error) {
 			return fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, p.ID, current.ClaimEpoch)
 		}
 		switch current.State {
-		case StateAwaitingOperator, StateOperatorApproved, StateCancelled:
+		case StateAwaitingOperator, StateOperatorApproved, StateCancelled,
+			StateCompleted, StateReviewPassed:
 			return fmt.Errorf("%w: %s is %s and holds no claim",
 				ErrConstraint, p.ID, current.State)
+		}
+
+		// TR11: an ambiguous tree admits only authorised execution.
+		// A claim advances the epoch and extends admission, so a
+		// reclaim on live work in an ambiguous tree is refused rather
+		// than admitted. The trigger is the backstop; this names the
+		// refusal before the write. Previously admitted work may still
+		// complete on its recorded evidence; it may not renew, reclaim
+		// or open a new epoch while ExecAuth is false.
+		if err := s.execBlocked(current); err != nil {
+			return err
 		}
 
 		now := s.Now()
@@ -196,6 +208,20 @@ func (s *Store) Renew(p RenewParams) (*Assignment, error) {
 		}
 		if current.Owner != p.Owner {
 			return fmt.Errorf("%w: %s is leased to %s", ErrLeaseHeld, p.ID, current.Owner)
+		}
+		// Renewal extends admission: only live work (accepted or
+		// in_progress) may renew, and only when the tree authorises
+		// it (TR11). Terminal tasks hold no claim, and an ambiguous
+		// tree admits no new epoch — previously admitted work may
+		// complete on its evidence, never renew through a block.
+		switch current.State {
+		case StateAccepted, StateInProgress:
+		default:
+			return fmt.Errorf("%w: %s is %s and holds no renewable claim",
+				ErrConstraint, p.ID, current.State)
+		}
+		if err := s.execBlocked(current); err != nil {
+			return err
 		}
 
 		now := s.Now()

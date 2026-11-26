@@ -47,11 +47,20 @@ func (s *Store) DispatchCandidates(q DispatchQuery) ([]*Assignment, error) {
 	if q.Limit <= 0 {
 		return nil, fmt.Errorf("%w: a dispatch query must bound its rows", ErrConstraint)
 	}
+	// T53: superseded work is frozen and never dispatches. The original
+	// (and anything below it, or a stale reviewer's slot) is excluded
+	// here, so the dispatcher never considers work recovery froze.
+	// Ambiguous-but-live tasks remain listed: Execute refuses them with
+	// recovery_required, which is the dispatcher's own policy input.
+	//
+	// The historical test lives in Go (isHistorical), not in a second
+	// copy of the trigger predicate: one implementation, no drift. The
+	// rows arrive in dispatch order and are truncated after filtering,
+	// so the caller still gets at most Limit live candidates in order.
 	rows, err := s.db.SQLDB().Query(
-		`SELECT `+assignmentColumns+` FROM agent_tasks
-		  WHERE state IN `+dispatchableStates+`
-		  ORDER BY created_at ASC, id ASC
-		  LIMIT ?`, q.Limit)
+		`SELECT ` + assignmentColumns + ` FROM agent_tasks
+		  WHERE state IN ` + dispatchableStates + `
+		  ORDER BY created_at ASC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("assignment: read the dispatch candidates: %w", err)
 	}
@@ -62,7 +71,17 @@ func (s *Store) DispatchCandidates(q DispatchQuery) ([]*Assignment, error) {
 		if err != nil {
 			return nil, fmt.Errorf("assignment: read the dispatch candidates: %w", err)
 		}
+		historical, err := s.isHistorical(a)
+		if err != nil {
+			return nil, err
+		}
+		if historical {
+			continue
+		}
 		out = append(out, a)
+		if len(out) >= q.Limit {
+			break
+		}
 	}
 	return out, rows.Err()
 }

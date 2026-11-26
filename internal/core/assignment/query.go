@@ -157,3 +157,106 @@ func (s *Store) History(id string) ([]Event, error) {
 	}
 	return out, nil
 }
+
+// ── read views: stored state plus derived execution state ────────────────
+
+// AssignmentView is one assignment with its execution-aware state. The
+// derived value shares the implementation with every enforcement point
+// (TreeStatus, dispatch status, claim/start/attempt guards): there is
+// one ExecAuth/Historical reading, not a second opinion.
+type AssignmentView struct {
+	*Assignment
+	EffectiveState string `json:"effective_state"`
+}
+
+// TreeView is one delegation tree with its derived completion picture
+// and the immutable lineage rows that authorise its recovery.
+type TreeView struct {
+	RootID      string           `json:"root_id"`
+	Tree        string           `json:"tree_status"`
+	Recovery    string           `json:"recovery_status"`
+	Lineages    []*Supersession  `json:"lineages,omitempty"`
+	Assignments []AssignmentView `json:"assignments"`
+}
+
+// View reads one assignment with its execution-aware state.
+func (s *Store) View(id string) (*AssignmentView, error) {
+	a, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	state, err := s.EffectiveState(id)
+	if err != nil {
+		return nil, err
+	}
+	return &AssignmentView{Assignment: a, EffectiveState: state}, nil
+}
+
+// Tree reads one delegation tree with its derived completion picture and
+// the immutable lineage rows that authorise its recovery. The tasks are
+// listed in the same order as ListByRoot.
+func (s *Store) Tree(rootID string) (*TreeView, error) {
+	tasks, err := s.ListByRoot(rootID)
+	if err != nil {
+		return nil, err
+	}
+	status, err := s.TreeStatus(rootID)
+	if err != nil {
+		return nil, err
+	}
+	view := &TreeView{
+		RootID:   status.RootID,
+		Tree:     status.Tree,
+		Recovery: status.Recovery,
+		Lineages: status.Lineages,
+	}
+	for _, t := range tasks {
+		state, err := s.EffectiveState(t.ID)
+		if err != nil {
+			return nil, err
+		}
+		view.Assignments = append(view.Assignments, AssignmentView{Assignment: t, EffectiveState: state})
+	}
+	return view, nil
+}
+
+// Lineage reads one supersession by id. Lineages are write-once and
+// never deleted; the read exists so the operator can follow a
+// TreeStatus reference to its exact authorisation.
+func (s *Store) Lineage(id string) (*Supersession, error) {
+	if err := requireText("id", id); err != nil {
+		return nil, err
+	}
+	return s.lineageByID(id)
+}
+
+// lineageByID reads one lineage row by id on committed state.
+func (s *Store) lineageByID(id string) (*Supersession, error) {
+	row := s.db.SQLDB().QueryRow(`SELECT `+supersessionColumns+` FROM agent_task_supersessions WHERE id = ?`, id)
+	l, err := scanSupersession(row.Scan)
+	if err != nil {
+		if strings.Contains(err.Error(), "no rows") {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return l, nil
+}
+
+// LineageByAttempt reads the lineage naming one ambiguous attempt.
+func (s *Store) LineageByAttempt(supersededID, attemptID string) (*Supersession, error) {
+	if err := requireText("superseded_id", supersededID); err != nil {
+		return nil, err
+	}
+	if err := requireText("attempt_id", attemptID); err != nil {
+		return nil, err
+	}
+	l, err := s.findSupersessionTx(supersededID, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	if l == nil {
+		return nil, ErrNotFound
+	}
+	return l, nil
+}

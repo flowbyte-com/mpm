@@ -1081,7 +1081,7 @@ harness's *printed* count against the same figure.
 
 **THE MATRICES ARE THIRTY-EIGHT AND FOUR ENTRIES** (§5.19).
 
-**THE FOUR SUITES HOLD SEVENTY-FIVE TEST FUNCTIONS**, and that figure is
+**THE FOUR SUITES HOLD SEVENTY-SEVEN TEST FUNCTIONS**, and that figure is
 computed from the tree rather than copied into it: the Go pin counts the
 test functions in the four suites and requires the count to be the
 published one, so a suite that lost a test cannot leave the number
@@ -1470,7 +1470,7 @@ in a scratch copy so the operator's workflow is never touched. The
 pristine tree passes in both.
 
 **THE COUNTS MOVE WITH THE FIXES.** The four suites now hold
-**seventy-five** test functions (the §5.14 figure, computed from the tree),
+**seventy-seven** test functions (the §5.14 figure, computed from the tree),
 the harness publishes **sixteen** controls, its self-test runs
 **eighty-two** checks, and the two matrices are **thirty-eight** and
 **four** entries.
@@ -1657,7 +1657,7 @@ baseline of **36 tests** with **0 skipped**, **14/14** load-bearing
 controls failing exactly what they declared, **2** defence in depth,
 exit 0. The self-test is still **eighty-two** checks, the matrices are
 still **thirty-eight** and **four**, and the four suites now hold
-**seventy-five** test functions — the three new pins are the difference.
+**seventy-six** test functions — the three new pins are the difference.
 
 **THE CLASS SO FAR.** Seventeen rounds, and the findings have one
 shape: **a claim the harness carries that nothing checked**. The first

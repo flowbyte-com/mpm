@@ -606,6 +606,20 @@ func TestAReviewerCannotGainWorkerPrivileges(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start the subject: %v", err)
 	}
+	// TR13: completion needs a current-epoch completed+succeeded
+	// attempt; the fixture proves one rather than completing bare.
+	subAtt, err := store.BeginAttempt(assignment.BeginAttemptParams{
+		TaskID: subject.ID, Epoch: claimed.ClaimEpoch, Runtime: assignment.RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses_dispatch_rev_subject",
+		CorrelationRef: "corr-dispatch-rev", WorkspaceID: "ws", WorkspacePath: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("begin the subject attempt: %v", err)
+	}
+	if _, err := store.MarkAttemptCompleted(assignment.SessionStateParams{
+		AttemptID: subAtt.ID, Epoch: claimed.ClaimEpoch, Outcome: "succeeded"}); err != nil {
+		t.Fatalf("complete the subject attempt: %v", err)
+	}
 	if _, err := store.Complete(assignment.FencedParams{
 		ID: subject.ID, Epoch: claimed.ClaimEpoch, Actor: subjectActor,
 	}); err != nil {
@@ -787,4 +801,102 @@ func mustAttempts(t *testing.T, store *assignment.Store, id string) []*assignmen
 		t.Fatalf("read the attempts of %s: %v", id, err)
 	}
 	return out
+}
+
+// TestAnEarlyReviewIsRefusedBeforeTheRuntimeRunsIsT5 proves the
+// dispatch-time half of the no-early-review rule: a reviewer whose
+// subject has not completed is refused in dependency checking, before
+// any claim, launch or inference — the reviewer's session is never
+// opened for work that cannot be judged yet.
+func TestAnEarlyReviewIsRefusedBeforeTheRuntimeRunsIsT5(t *testing.T) {
+	store, projectID := testStore(t)
+	root := dispatchRoot(t, store, projectID)
+	subject := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:dispatch:early:subj")
+	// dispatchChild already walked the subject to accepted: it has NOT
+	// completed its work, which is exactly the early-review shape.
+	reviewer, _, err := store.Delegate(assignment.DelegateParams{
+		ParentID:       root.ID,
+		Title:          "the early review",
+		Objective:      "review unfinished work",
+		Recipient:      "charlie",
+		Role:           assignment.RoleReviewer,
+		IdempotencyKey: "idem:dispatch:early:reviewer",
+		HeadSHA:        strings.Repeat("1", 40),
+		Payload:        map[string]interface{}{assignment.PayloadKeyReviewTarget: subject.ID},
+	})
+	if err != nil {
+		t.Fatalf("delegate the reviewer: %v", err)
+	}
+	reviewerActor := assignment.Actor{Address: "charlie", Kind: "agent"}
+	for _, step := range []func(assignment.FencedParams) (*assignment.Assignment, error){
+		store.Deliver, store.Acknowledge, store.Accept,
+	} {
+		if _, err := step(assignment.FencedParams{ID: reviewer.ID, Actor: reviewerActor}); err != nil {
+			t.Fatalf("advance the reviewer: %v", err)
+		}
+	}
+	engine, fake := testEngine(t, store, testConfig(t))
+	// Room for both candidates: the refusal must come from the
+	// dependency (unfinished subject), not from the concurrency cap.
+	engine.cfg.Concurrency = 2
+	fake.launchState = okState("mpm-reviewer", "succeeded")
+	report, err := engine.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if fake.Reviews() != 0 {
+		t.Fatalf("the refused review ran %d time(s); no inference may precede the subject's completion", fake.Reviews())
+	}
+	outcome, ok := outcomeFor(report, reviewer.ID)
+	if !ok {
+		t.Fatalf("the report has no outcome for the reviewer: %+v", report.Outcomes)
+	}
+	if outcome.Reason != ReasonRefused {
+		t.Errorf("an early review was %q, want %q: %+v", outcome.Reason, ReasonRefused, outcome)
+	}
+}
+
+// TestStatusCarriesEffectiveStateAndTrees proves the status shares one
+// reading with the tree verb and every guard: each item carries the
+// execution-aware state, and each tree involved carries its derived
+// tree/recovery picture.
+func TestStatusCarriesEffectiveStateAndTrees(t *testing.T) {
+	store, projectID := testStore(t)
+	root := dispatchRoot(t, store, projectID)
+	pending := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:dispatch:status:eff")
+	cfg := testConfig(t)
+	status, err := Status(store, cfg)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	found := false
+	for _, item := range status.Pending {
+		if item.AssignmentID != pending.ID {
+			continue
+		}
+		found = true
+		if item.EffectiveState == "" {
+			t.Fatalf("the pending item carries no effective state: %+v", item)
+		}
+		es, err := store.EffectiveState(pending.ID)
+		if err != nil {
+			t.Fatalf("effective state: %v", err)
+		}
+		if item.EffectiveState != es {
+			t.Fatalf("status says %q, the store says %q", item.EffectiveState, es)
+		}
+	}
+	if !found {
+		t.Fatalf("the pending assignment is not in the status: %+v", status.Pending)
+	}
+	if len(status.Trees) != 1 || status.Trees[0].RootID != root.ID {
+		t.Fatalf("the status carries %+v trees, want the one tree %s", status.Trees, root.ID)
+	}
+	ts, err := store.TreeStatus(root.ID)
+	if err != nil {
+		t.Fatalf("tree status: %v", err)
+	}
+	if status.Trees[0].Tree != ts.Tree || status.Trees[0].Recovery != ts.Recovery {
+		t.Fatalf("status trees say %+v, the tree verb says %+v", status.Trees[0], ts)
+	}
 }

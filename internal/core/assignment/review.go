@@ -61,6 +61,11 @@ func (s *Store) recordReviewResultTx(node internal.DBNode, p ReviewResultParams)
 	if err != nil {
 		return nil, err
 	}
+	// TR16/TR17: verdicts stay on live work. The triggers are the
+	// backstop; this names the refusal before the write.
+	if err := s.execBlockedHistorical(reviewer); err != nil {
+		return nil, err
+	}
 	if reviewer.Role != RoleReviewer {
 		return nil, fmt.Errorf("%w: %s is a %s and does not review",
 			ErrConstraint, reviewer.ID, reviewer.Role)
@@ -105,14 +110,32 @@ func (s *Store) recordReviewResultTx(node internal.DBNode, p ReviewResultParams)
 			"%w: %s delegated %s, so it does not review its own work",
 			ErrConstraint, reviewer.ParentID, reviewer.ID)
 	}
+	// T17: a verdict on a superseded (or ambiguous) subject is refused.
+	// The trigger backstop (TR16 on the subject's own review_passed
+	// write) stays; this names the refusal before any write, for both
+	// the passed and the changes-requested paths.
+	if herr := s.execBlockedHistorical(subject); herr != nil {
+		return nil, herr
+	}
+	// The passed verdict moves the subject: it must have finished. This
+	// refusal precedes the evidence check so an unfinished subject
+	// reports its state, not its missing evidence.
+	if p.Verdict == VerdictPassed && subject.State != StateCompleted {
+		return nil, fmt.Errorf("%w: %s is %s and has not completed the work",
+			ErrIllegalTransition, subject.ID, subject.State)
+	}
+	// T84: a verdict needs host-captured evidence. The trigger (TR18)
+	// stays as the backstop; this names the refusal before any write
+	// with the same rule, after every other refusal, so a verdict
+	// without evidence is never a different error in disguise.
+	if reviewer.ReviewedSHA == "" || reviewer.FindingsSHA256 == "" {
+		return nil, fmt.Errorf("%w: %s carries no captured evidence; a verdict needs the host-captured revision and findings digest",
+			ErrConstraint, reviewer.ID)
+	}
 
 	now := s.Now()
 
 	if p.Verdict == VerdictPassed {
-		if subject.State != StateCompleted {
-			return nil, fmt.Errorf("%w: %s is %s and has not completed the work",
-				ErrIllegalTransition, subject.ID, subject.State)
-		}
 		// The SUBJECT moves first: the verdict is the subject's
 		// transition, and the reviewer's own state change
 		// records that the review is over.

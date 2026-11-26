@@ -173,16 +173,19 @@ func init() {
 			// PR 4 adds the dispatcher's configuration path: the
 			// operator's explicit switch. A MISSING file means the
 			// dispatcher is off.
-			"action", "actor", "actor-kind", "agent", "awaiting-action", "base-sha",
+			"action", "actor", "actor-kind", "agent", "attempt", "awaiting-action", "base-sha",
 			"dispatch-config",
 			"eligible-recipient", "epoch", "evidence", "evidence-ref",
 			"findings-sha256", "head-sha", "id", "idempotency-key",
-			"brief", "issue-ref", "json", "lease-seconds", "limit", "max-concurrency",
+			"brief", "issue-ref", "json", "justification", "lease-seconds", "limit", "max-concurrency",
 			"max-depth", "max-resource-units", "max-tasks", "model", "note",
 			"objective", "owner", "parent-id", "payload",
 			"permitted-operation",
-			"pr-ref", "project-id", "recipient", "reference", "resource-units",
-			"reviewed-sha", "revision", "role", "root-id", "source", "state",
+			"pr-ref", "project-id", "recipient", "reference",
+			"replacement-objective", "replacement-recipient", "replacement-title", "replacement-units",
+			"require-quiescence", "resource-units",
+			"reviewed-sha", "reviewer-objective", "reviewer-recipient", "reviewer-title", "reviewer-units",
+			"revision", "role", "root-id", "source", "state",
 			"title", "verdict", "workspace", "workspace-id",
 		},
 		"hint":            {"json", "max"},

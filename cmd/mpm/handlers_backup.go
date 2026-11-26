@@ -268,7 +268,16 @@ func handleRestoreDB(args []string) int {
 		return respond("", fmt.Sprintf("Restore rejected (unsafe dump): %v\n", err), 1)
 	}
 
-	// STEP 2.5 (H-4 concurrency guard): acquire an exclusive flock on
+	// STEP 2.5 (Continuity 001 §4.6 pipeline): classify the backup,
+	// verify every managed trigger against the trusted canonical text,
+	// parse and resequence rows, and run the pre-destructive semantic
+	// and temporal validation. All of this happens BEFORE the lock and
+	// the rename: a refused dump leaves the live database untouched.
+	restorePlan, err := mpminternal.PlanRestore(statements)
+	if err != nil {
+		return respond("", fmt.Sprintf("Restore refused: %v\n", err), 1)
+	}
+	// STEP 3 (H-4 concurrency guard): acquire an exclusive flock on
 	// `<dbPath>.lock` for the duration of the destructive window. The
 	// empirical §4 reproducer (internal/core/restore_db_concurrency_repro_test.go)
 	// proved that a concurrent writer with an open FD can either
@@ -368,61 +377,40 @@ func handleRestoreDB(args []string) int {
 	}
 	defer tx.Rollback() // safe no-op after Commit; covers panic / early returns
 
-	// SECURITY (H-3 side-effect): execute statements one at a time. The
-	// validator already approved each statement against the allow-list; per-
-	// statement execution ensures: (a) a NULL byte or partial write in the
-	// dump yields a precise error rather than undefined behaviour from a
-	// monolithic Exec; (b) the failure point is observable in the error
-	// message; (c) defence-in-depth — even if a future bypass gets past
-	// Validate, per-statement execution makes the failure atomic and the
-	// transaction rolls back cleanly.
+	// Continuity 001 §4.6 pipeline: schema (tables/indexes/views and
+	// non-managed triggers, dump order) → non-deferred canonical
+	// managed triggers → resequenced rows (projects first, then managed
+	// tables in dependency order) → deferred canonical managed
+	// triggers → additive migrations → final verification → commit.
 	//
-	// Skip BEGIN/COMMIT/ROLLBACK/END statements — they would conflict with
-	// the outer Go transaction (database/sql refuses nested transactions).
-	// The validator already approved these as safe transaction-control
-	// statements; the outer Go tx serves the same atomicity guarantee.
-	//
-	// Skip INSERT INTO sqlite_schema / sqlite_master as well. The
-	// `sqlite3 .dump` tool emits these to re-populate the system catalog
-	// for every object, but mattn/go-sqlite3 (the driver used here)
-	// returns `table sqlite_master may not be modified` if we try to
-	// execute them. The catalog rows are redundant: the `CREATE TABLE`
-	// and `CREATE VIRTUAL TABLE` statements earlier in the dump already
-	// register every object with the schema. Dropping these rows is
-	// semantically a no-op for restore purposes. The validator still
-	// ALLOWS them (it's not a security boundary — the catalog rows
-	// only describe objects the validator already approved) — the skip
-	// is purely a driver-compat shim.
-	for i, stmt := range statements {
-		upper := strings.ToUpper(strings.TrimSpace(stmt))
-		first := strings.Fields(upper)
-		if len(first) > 0 {
-			switch first[0] {
-			case "BEGIN", "COMMIT", "ROLLBACK", "END":
-				continue
-			}
-			// INSERT INTO sqlite_schema / sqlite_master — driver-compat skip.
-			if first[0] == "INSERT" && len(first) >= 3 && first[1] == "INTO" {
-				// The token may be glued to a column list (no whitespace
-				// between `sqlite_schema` and `(`) — extract the bare name.
-				tbl := first[2]
-				if i := strings.IndexAny(tbl, "("); i >= 0 {
-					tbl = tbl[:i]
-				}
-				tbl = strings.ToLower(tbl)
-				if tbl == "sqlite_schema" || tbl == "sqlite_master" ||
-					tbl == "sqlite_temp_schema" || tbl == "sqlite_temp_master" {
-					continue
-				}
-			}
-		}
-		if _, err := tx.Exec(stmt); err != nil {
-			// Explicit Rollback so the linter sees the cleanup path
-			// (the deferred Rollback above is the safety net for panic
-			// paths; this one covers the expected error returns).
-			tx.Rollback()
-			return restoreFromBackup(dbPath, preDeleteCopy, fmt.Sprintf("statement %d", i+1), err)
-		}
+	// Managed TRIGGER CREATEs never execute from dump text: they were
+	// verified against the trusted canonical inventory pre-window and
+	// are installed from canonical text here. Deferred guards land
+	// after the rows they govern. Every phase rolls back to
+	// .pre-restore on failure.
+	if err := restorePlan.ExecuteSchema(tx); err != nil {
+		tx.Rollback()
+		return restoreFromBackup(dbPath, preDeleteCopy, "schema", err)
+	}
+	if err := restorePlan.ExecuteImmediateTriggers(tx); err != nil {
+		tx.Rollback()
+		return restoreFromBackup(dbPath, preDeleteCopy, "triggers", err)
+	}
+	if err := restorePlan.ExecuteRows(tx); err != nil {
+		tx.Rollback()
+		return restoreFromBackup(dbPath, preDeleteCopy, "rows", err)
+	}
+	if err := restorePlan.ExecuteDeferredTriggers(tx); err != nil {
+		tx.Rollback()
+		return restoreFromBackup(dbPath, preDeleteCopy, "deferred triggers", err)
+	}
+	if err := restorePlan.RunAdditiveMigrations(tx); err != nil {
+		tx.Rollback()
+		return restoreFromBackup(dbPath, preDeleteCopy, "migrations", err)
+	}
+	if err := restorePlan.VerifyFinal(tx); err != nil {
+		tx.Rollback()
+		return restoreFromBackup(dbPath, preDeleteCopy, "verification", err)
 	}
 
 	if err := tx.Commit(); err != nil {

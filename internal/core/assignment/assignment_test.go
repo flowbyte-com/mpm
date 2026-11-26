@@ -160,9 +160,11 @@ func mustAdvance(t *testing.T, store *Store, a *Assignment, to string) *Assignme
 	case StateCompleted:
 		mustAdvance(t, store, a, StateInProgress)
 		cur := mustGet(t, store, a.ID)
-		return mustDo(t, func() (*Assignment, error) {
-			return store.Complete(FencedParams{ID: a.ID, Epoch: cur.ClaimEpoch, Actor: actor})
-		})
+		// A2/TR13: completion requires a current-epoch completed and
+		// succeeded attempt, so the fixture proves one rather than
+		// completing a bare row.
+		completeWithEvidence(t, store, cur.ID, cur.ClaimEpoch)
+		return mustGet(t, store, cur.ID)
 	}
 	t.Fatalf("no fixture path to %q", to)
 	return nil
@@ -1031,6 +1033,22 @@ func TestAPIEveryTransitionWritesExactlyOneEvent(t *testing.T) {
 		return store.Start(FencedParams{ID: claimed.ID, Epoch: claimed.ClaimEpoch,
 			Actor: agentActor("alpha")})
 	})
+	// TR13: completion needs a current-epoch completed+succeeded
+	// attempt. The attempt setup writes no ledger events, so the
+	// completion below still writes exactly one.
+	att, err := store.BeginAttempt(BeginAttemptParams{
+		TaskID: started.ID, Epoch: started.ClaimEpoch, Runtime: RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses_one_event_" + started.ID,
+		CorrelationRef: "corr-one-event", WorkspaceID: "ws", WorkspacePath: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("begin the completion attempt: %v", err)
+	}
+	if _, err := store.MarkAttemptCompleted(SessionStateParams{
+		AttemptID: att.ID, Epoch: started.ClaimEpoch, Outcome: "succeeded",
+	}); err != nil {
+		t.Fatalf("complete the completion attempt: %v", err)
+	}
 	oneEvent(t, started, EventCompleted, func() (*Assignment, error) {
 		return store.Complete(FencedParams{ID: started.ID, Epoch: started.ClaimEpoch,
 			Actor: agentActor("alpha")})
@@ -1079,6 +1097,8 @@ func TestAPIEveryTransitionWritesExactlyOneEvent(t *testing.T) {
 	// taken around it on one assignment would be a count of the other.
 	beforeSubject := len(eventTypes(t, store, subject.ID))
 	beforeReviewer := len(eventTypes(t, store, reviewing.ID))
+	// TR18: a verdict needs host-captured evidence first.
+	mustCaptureEvidence(t, store, reviewing.ID, reviewing.ClaimEpoch)
 	mustDo(t, func() (*Assignment, error) {
 		return store.RecordReviewResult(ReviewResultParams{
 			ReviewerID: reviewing.ID,
@@ -1527,6 +1547,8 @@ func TestAPITheApprovalMustNameTheGateAction(t *testing.T) {
 
 	// The review passes, and the SUBJECT moves to review_passed.
 	reviewing := mustStartReviewer(t, store, reviewer)
+	// TR18: a verdict needs host-captured evidence first.
+	mustCaptureEvidence(t, store, reviewing.ID, reviewing.ClaimEpoch)
 	mustDo(t, func() (*Assignment, error) {
 		return store.RecordReviewResult(ReviewResultParams{
 			ReviewerID: reviewing.ID,
@@ -1601,6 +1623,8 @@ func TestAPIAnApprovalPresentingAStaleEpochIsRefused(t *testing.T) {
 
 	// The subject passes its review and reaches the operator's gate.
 	reviewing := mustStartReviewer(t, store, reviewer)
+	// TR18: a verdict needs host-captured evidence first.
+	mustCaptureEvidence(t, store, reviewing.ID, reviewing.ClaimEpoch)
 	mustDo(t, func() (*Assignment, error) {
 		return store.RecordReviewResult(ReviewResultParams{
 			ReviewerID: reviewing.ID,
@@ -1716,6 +1740,23 @@ func mustStartReviewer(t *testing.T, store *Store, reviewer *Assignment) *Assign
 	})
 }
 
+// mustCaptureEvidence attaches host-captured review evidence to a
+// reviewer, which TR18 requires before any verdict lands. The values are
+// fixed test vectors, not real findings: 40-hex revision, 64-hex digest,
+// and a pointer to where the host stored them.
+func mustCaptureEvidence(t *testing.T, store *Store, reviewerID string, epoch int64) {
+	t.Helper()
+	if _, err := store.CaptureReviewEvidence(ReviewEvidenceParams{
+		ReviewerID: reviewerID, Epoch: epoch,
+		ReviewedSHA:    strings.Repeat("1", 40),
+		FindingsSHA256: strings.Repeat("e", 64),
+		EvidenceRef:    "evidence/test.json",
+		Actor:          agentActor("charlie"),
+	}); err != nil {
+		t.Fatalf("capture the review evidence: %v", err)
+	}
+}
+
 // mustReviewSubject builds the reviewable shape: a root, an implementer
 // child that finished its work, and a reviewer that is a SIBLING of the
 // subject.
@@ -1747,6 +1788,8 @@ func TestAPIReviewVerdictMovesTheSubject(t *testing.T) {
 	_, subject, reviewer := mustReviewSubject(t, store, projectID)
 	reviewing := mustStartReviewer(t, store, reviewer)
 
+	// TR18: a verdict needs host-captured evidence first.
+	mustCaptureEvidence(t, store, reviewing.ID, reviewing.ClaimEpoch)
 	reviewed := mustDo(t, func() (*Assignment, error) {
 		return store.RecordReviewResult(ReviewResultParams{
 			ReviewerID: reviewing.ID,
@@ -1814,6 +1857,8 @@ func TestAPIReviewersTargetIsFixedByItsDelegation(t *testing.T) {
 
 	// The verdict moves the subject the payload names — and NOT the
 	// other one, which is equally finished and equally in the tree.
+	// TR18: a verdict needs host-captured evidence first.
+	mustCaptureEvidence(t, store, reviewing.ID, reviewing.ClaimEpoch)
 	mustDo(t, func() (*Assignment, error) {
 		return store.RecordReviewResult(ReviewResultParams{
 			ReviewerID: reviewing.ID,
@@ -1842,6 +1887,8 @@ func TestAPIChangesRequestedLeavesTheSubjectAndRecordsANote(t *testing.T) {
 	_, subject, reviewer := mustReviewSubject(t, store, projectID)
 	reviewing := mustStartReviewer(t, store, reviewer)
 
+	// TR18: a verdict needs host-captured evidence first.
+	mustCaptureEvidence(t, store, reviewing.ID, reviewing.ClaimEpoch)
 	reviewed := mustDo(t, func() (*Assignment, error) {
 		return store.RecordReviewResult(ReviewResultParams{
 			ReviewerID: reviewing.ID,

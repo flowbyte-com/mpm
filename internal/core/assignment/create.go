@@ -50,6 +50,13 @@ func (s *Store) CreateRoot(auth OperatorAuthority, p CreateRootParams) (*Assignm
 	if len(p.IdempotencyKey) > 128 {
 		return nil, false, fmt.Errorf("%w: the idempotency key is longer than 128 bytes", ErrConstraint)
 	}
+	// The supersede: namespace belongs to recovery lineages (A3/TR9).
+	// An agent-supplied squatting key is refused before any lookup, so
+	// it can neither collide with nor impersonate a lineage row.
+	if strings.HasPrefix(p.IdempotencyKey, "supersede:") {
+		return nil, false, fmt.Errorf("%w: idempotency keys starting with %q belong to recovery lineages",
+			ErrReservedKeyCollision, "supersede:")
+	}
 	if len(p.PermittedOperations) == 0 {
 		return nil, false, fmt.Errorf("%w: a root must name at least one permitted operation", ErrConstraint)
 	}
@@ -230,6 +237,13 @@ func (s *Store) Delegate(p DelegateParams) (*Assignment, bool, error) {
 	}
 	if len(p.IdempotencyKey) > 128 {
 		return nil, false, fmt.Errorf("%w: the idempotency key is longer than 128 bytes", ErrConstraint)
+	}
+	// The supersede: namespace belongs to recovery lineages (A3/TR9).
+	// An agent-supplied squatting key is refused before any lookup, so
+	// it can neither collide with nor impersonate a lineage row.
+	if strings.HasPrefix(p.IdempotencyKey, "supersede:") {
+		return nil, false, fmt.Errorf("%w: idempotency keys starting with %q belong to recovery lineages",
+			ErrReservedKeyCollision, "supersede:")
 	}
 	if p.ResourceUnits < 0 {
 		return nil, false, fmt.Errorf("%w: resource_units must not be negative", ErrConstraint)

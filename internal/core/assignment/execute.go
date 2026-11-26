@@ -273,6 +273,13 @@ func (s *Store) validateExecutable(task *Assignment, p ExecuteParams) error {
 		return fmt.Errorf("%w: %s is a %s; its execution belongs to the review path",
 			ErrConstraint, task.ID, task.Role)
 	}
+	// The execution barrier: an ambiguous tree admits only scoped, named
+	// execution, and superseded work is frozen. The reconcile path
+	// re-checks ambiguity; this names the refusal before any session
+	// exists so no runtime launches.
+	if err := s.execBlocked(task); err != nil {
+		return err
+	}
 	if task.ClaimEpoch != p.Epoch {
 		return fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, task.ID, task.ClaimEpoch)
 	}

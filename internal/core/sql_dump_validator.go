@@ -158,6 +158,7 @@ var CanonicalMPMSchema = []string{
 	// propagates them into the cross-workspace `shared` schema.
 	"agent_task_events",
 	"agent_task_sessions",
+	"agent_task_supersessions",
 	"agent_tasks",
 	"admission_log",
 	"artifact_provenance",
@@ -872,7 +873,7 @@ func findTriggerBodyEnd(content string, start int) int {
 		if inSingleQuote || inDoubleQuote {
 			continue
 		}
-		if c == 'E' && i+3 <= len(content) && content[i:i+3] == "END" {
+		if (c == 'E' || c == 'e') && i+3 <= len(content) && strings.EqualFold(content[i:i+3], "END") {
 			// Confirm word boundary on the trailing side.
 			after := i + 3
 			if after < len(content) {

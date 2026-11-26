@@ -33,6 +33,11 @@ type StatusItem struct {
 	Title string `json:"title"`
 	// State is the assignment's state.
 	State string `json:"state"`
+	// EffectiveState is the execution-aware state: stored state plus the
+	// lineage reading (superseded, recovery_required, authorised,
+	// blocked). It shares the implementation with TreeStatus and every
+	// claim/start/attempt guard: one reading, not a second opinion.
+	EffectiveState string `json:"effective_state,omitempty"`
 	// Owner is the lease holder, when there is one.
 	Owner string `json:"owner,omitempty"`
 	// Epoch is the current claim epoch.
@@ -61,6 +66,10 @@ type StatusReport struct {
 	Recoverable []StatusItem `json:"recoverable"`
 	// Budgets is the budget picture of every tree involved.
 	Budgets []assignment.BudgetStatus `json:"budgets"`
+	// Trees is the derived completion picture of every tree involved:
+	// the same TreeStatus the tree verb reads, so the status and the
+	// tree agree about what is finished and what needs recovery.
+	Trees []assignment.TreeStatus `json:"trees,omitempty"`
 	// GeneratedAt is the moment the status was taken, in unix seconds.
 	GeneratedAt int64 `json:"generated_at"`
 }
@@ -153,7 +162,26 @@ func Status(store *assignment.Store, cfg Config) (*StatusReport, error) {
 			return nil, err
 		}
 		out.Budgets = append(out.Budgets, b)
+		ts, err := store.TreeStatus(rootID)
+		if err != nil {
+			return nil, err
+		}
+		out.Trees = append(out.Trees, *ts)
 	}
+	// Every item carries the execution-aware reading, from the same
+	// EffectiveState every guard uses. The state column stays the
+	// stored state; the effective column says what it MEANS.
+	annotate := func(items []StatusItem) []StatusItem {
+		for i := range items {
+			if es, err := store.EffectiveState(items[i].AssignmentID); err == nil {
+				items[i].EffectiveState = es
+			}
+		}
+		return items
+	}
+	out.Pending = annotate(out.Pending)
+	out.Blocked = annotate(out.Blocked)
+	out.Recoverable = annotate(out.Recoverable)
 	return out, nil
 }
 

@@ -138,6 +138,11 @@ func (s *Store) captureReviewEvidenceTx(node internal.DBNode, p ReviewEvidencePa
 	if err != nil {
 		return nil, err
 	}
+	// Evidence belongs on live work: a superseded reviewer, or one
+	// carrying its own ambiguity, cannot attach a record of examination.
+	if err := s.execBlockedHistorical(rev); err != nil {
+		return nil, err
+	}
 	if rev.Role != RoleReviewer {
 		return nil, fmt.Errorf("%w: %s is a %s and has no review to evidence",
 			ErrConstraint, rev.ID, rev.Role)

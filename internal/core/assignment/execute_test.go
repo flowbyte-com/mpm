@@ -115,6 +115,35 @@ func okState(workspace, model, agent string) *oc.SessionState {
 
 // claimedAssignment prepares a root assignment in `accepted` with a live
 // lease, returning its id and epoch.
+// completeWithEvidence finishes an assignment the way the runtime would:
+// open a real attempt, record a succeeded completion on it, then complete.
+//
+// TR13 refuses an implementer completion without a current-epoch attempt
+// completed with a succeeded outcome. Fixtures must produce that evidence
+// rather than completing bare rows; production safeguards are not weakened
+// to preserve test shortcuts.
+func completeWithEvidence(t *testing.T, store *Store, id string, epoch int64) {
+	t.Helper()
+	att, err := store.BeginAttempt(BeginAttemptParams{
+		TaskID: id, Epoch: epoch, Runtime: RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses_fixture_" + id,
+		CorrelationRef: "corr-fixture", WorkspaceID: "ws", WorkspacePath: "/tmp/ws-fixture",
+	})
+	if err != nil {
+		t.Fatalf("begin the fixture attempt: %v", err)
+	}
+	if _, err := store.MarkAttemptCompleted(SessionStateParams{
+		AttemptID: att.ID, Epoch: epoch, Outcome: "succeeded",
+	}); err != nil {
+		t.Fatalf("complete the fixture attempt: %v", err)
+	}
+	if _, err := store.Complete(FencedParams{
+		ID: id, Epoch: epoch, Actor: Actor{Address: "alpha", Kind: "agent"},
+	}); err != nil {
+		t.Fatalf("complete the fixture assignment: %v", err)
+	}
+}
+
 func claimedAssignment(t *testing.T, store *Store, projectID, recipient string) (string, int64) {
 	t.Helper()
 	root, _, err := store.CreateRoot(NewLocalOperatorAuthority("test"), CreateRootParams{
@@ -831,7 +860,8 @@ func reviewFixture(t *testing.T, store *Store, subjectID, recipient string) revi
 		t.Fatalf("read the subject: %v", err)
 	}
 	// A verdict can only move a COMPLETED subject. The adapter tests
-	// usually leave the implementer accepted; finish it here.
+	// usually leave the implementer accepted; finish it here with a real
+	// completed+succeeded attempt, which is what TR13 requires.
 	if subject.State == StateAccepted {
 		actor := Actor{Address: subject.Recipient, Kind: "agent"}
 		if _, err := store.Start(FencedParams{
@@ -839,11 +869,7 @@ func reviewFixture(t *testing.T, store *Store, subjectID, recipient string) revi
 		}); err != nil {
 			t.Fatalf("start the subject: %v", err)
 		}
-		if _, err := store.Complete(FencedParams{
-			ID: subject.ID, Epoch: subject.ClaimEpoch, Actor: actor,
-		}); err != nil {
-			t.Fatalf("complete the subject: %v", err)
-		}
+		completeWithEvidence(t, store, subject.ID, subject.ClaimEpoch)
 		subject, err = store.Get(subjectID)
 		if err != nil {
 			t.Fatalf("re-read the subject: %v", err)
@@ -1171,7 +1197,14 @@ func TestExecuteReviewRefusesWhileAnEarlierReviewIsLive(t *testing.T) {
 			if err == nil {
 				t.Fatalf("a second reviewer started while the first was %s", state)
 			}
-			if !strings.Contains(err.Error(), "previous review attempt") {
+			// TR19 moved the barrier to admission: an ambiguous prior
+			// attempt bars the whole tree before the duplicate-review
+			// check runs. Launched still reports the duplicate.
+			if state == SessionAmbiguous {
+				if !errors.Is(err, ErrAmbiguousAttempt) {
+					t.Errorf("an ambiguous prior refused as %v, want %v", err, ErrAmbiguousAttempt)
+				}
+			} else if !strings.Contains(err.Error(), "previous review attempt") {
 				t.Errorf("refused, but not as a duplicate review: %v", err)
 			}
 		})

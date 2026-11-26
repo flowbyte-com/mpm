@@ -72,6 +72,10 @@ var assignmentRestoreTables = []string{
 	// agent_tasks, because it holds a foreign key to it — the dump
 	// creates tables in this order.
 	"agent_task_sessions",
+	// Recovery: the supersession lineage. An aware dump carries it
+	// (possibly with zero rows — T118); a pre-feature dump omits it
+	// and the additive migrations add it back.
+	"agent_task_supersessions",
 }
 
 // assignmentOwnedTables are the tables this change creates.
@@ -82,6 +86,7 @@ var assignmentOwnedTables = []string{
 	// restore inventory — a dump that omitted it would restore a database
 	// whose executed assignments had lost their session records.
 	"agent_task_sessions",
+	"agent_task_supersessions",
 }
 
 // assignmentRestoreIndexes are the seven indexes the approved DDL
@@ -100,6 +105,8 @@ var assignmentRestoreIndexes = []string{
 	"idx_agent_task_sessions_native",
 	"idx_agent_task_sessions_task_attempt",
 	"idx_agent_task_sessions_task_state",
+	// Recovery lineage index.
+	"idx_agent_task_supersessions_root",
 }
 
 // assignmentRestoreTriggers are the thirty triggers the approved
@@ -151,6 +158,29 @@ var assignmentRestoreTriggers = []string{
 	"trg_agent_task_sessions_identity_is_immutable",
 	"trg_agent_task_sessions_not_deletable",
 	"trg_agent_task_sessions_state_moves_forward",
+	// Recovery: TR1–TR20 (21 trigger statements; TR20 has separate
+	// UPDATE and INSERT guards).
+	"trg_agent_task_supersessions_no_update",
+	"trg_agent_task_supersessions_no_delete",
+	"trg_agent_task_supersessions_original_eligible",
+	"trg_agent_task_supersessions_contained",
+	"trg_agent_task_supersessions_attempt_is_ambiguity",
+	"trg_agent_task_supersessions_single_ambiguity",
+	"trg_agent_task_supersessions_fresh_identities",
+	"trg_agent_task_supersessions_no_cycle",
+	"trg_agent_tasks_reserved_key",
+	"trg_agent_tasks_superseded_shape",
+	"trg_agent_tasks_claim_epoch_guard",
+	"trg_agent_tasks_start_guard",
+	"trg_agent_tasks_complete_guard",
+	"trg_agent_tasks_cancel_guard",
+	"trg_agent_tasks_handoff_guard",
+	"trg_agent_tasks_review_passed_guard",
+	"trg_agent_tasks_approval_guard",
+	"trg_agent_tasks_reviewer_evidence_guard",
+	"trg_agent_task_sessions_admission_guard",
+	"trg_agent_task_sessions_completion_guard",
+	"trg_agent_task_sessions_completion_insert_guard",
 }
 
 // seedAssignmentRows writes one project, one well-formed ROOT assignment
@@ -255,13 +285,13 @@ func buildAssignmentDump(t *testing.T, db *sql.DB) string {
 			values = append(values, `quote("`+c+`")`)
 		}
 		q := fmt.Sprintf(
-			`SELECT 'INSERT INTO "%s" (%s) VALUES (' || group_concat(%s, ',') || ');' FROM "%s"`,
+			`SELECT 'INSERT INTO "%s" (%s) VALUES (' || %s || ');' FROM "%s"`,
 			table, strings.Join(quoted, ", "), strings.Join(values, " || ',' || "), table,
 		)
 
-		// AN EMPTY TABLE RENDERS NOTHING. group_concat over zero rows is
-		// NULL, and scanning NULL into a string aborts the dump — so a
-		// table the fixture legitimately leaves empty must not break it.
+		// AN EMPTY TABLE RENDERS NOTHING. The per-row SELECT emits
+		// nothing when the table is empty, so a table the fixture
+		// legitimately leaves empty does not break the dump.
 		var count int
 		require.NoError(t, db.QueryRow(
 			fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, table)).Scan(&count),
@@ -282,7 +312,36 @@ func buildAssignmentDump(t *testing.T, db *sql.DB) string {
 		rows.Close()
 	}
 
+	// 5. The schema markers. A dump without recognised sentinels is
+	// unrecognised_assignment_schema (refused); the markers travel
+	// with the schema they describe, so the classifier sees the same
+	// classes the live database has.
+	b.WriteString(assignmentSentinelInserts(t, db))
+
 	b.WriteString("COMMIT;\n")
+	return b.String()
+}
+
+// assignmentSentinelInserts renders the schema_migrations rows that mark
+// the assignment schema, straight from the live table. A real sqlite3
+// .dump carries these rows; without them the dump is unrecognised.
+func assignmentSentinelInserts(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var b strings.Builder
+	rows, err := db.Query(
+		`SELECT id, applied_at FROM schema_migrations
+		  WHERE id IN ('agent_assignments_v1','agent_task_sessions_v1','agent_task_supersessions_v1')
+		  ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var appliedAt int64
+		require.NoError(t, rows.Scan(&id, &appliedAt))
+		fmt.Fprintf(&b, "INSERT INTO \"schema_migrations\" (\"id\", \"applied_at\") VALUES ('%s', %d);\n",
+			strings.ReplaceAll(id, "'", "''"), appliedAt)
+	}
+	require.NoError(t, rows.Err())
 	return b.String()
 }
 
@@ -559,12 +618,12 @@ func buildAssignmentDumpInDumpOrder(t *testing.T, db *sql.DB) string {
 			values = append(values, `quote("`+c+`")`)
 		}
 		q := fmt.Sprintf(
-			`SELECT 'INSERT INTO "%s" (%s) VALUES (' || group_concat(%s, ',') || ');' FROM "%s"`,
+			`SELECT 'INSERT INTO "%s" (%s) VALUES (' || %s || ');' FROM "%s"`,
 			table, strings.Join(quoted, ", "), strings.Join(values, " || ',' || "), table,
 		)
-		// AN EMPTY TABLE RENDERS NOTHING. group_concat over zero rows is
-		// NULL, and scanning NULL into a string aborts the dump — so a
-		// table the fixture legitimately leaves empty must not break it.
+		// AN EMPTY TABLE RENDERS NOTHING. The per-row SELECT emits
+		// nothing when the table is empty, so a table the fixture
+		// legitimately leaves empty does not break the dump.
 		var count int
 		require.NoError(t, db.QueryRow(
 			fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, table)).Scan(&count),
@@ -607,9 +666,19 @@ func buildAssignmentDumpInDumpOrder(t *testing.T, db *sql.DB) string {
 		b.WriteString(";\n")
 	}
 
+	// 5. The schema markers. A dump without recognised sentinels is
+	// unrecognised_assignment_schema (refused); the markers travel
+	// with the schema they describe, so the classifier sees the same
+	// classes the live database has.
+	b.WriteString(assignmentSentinelInserts(t, db))
+
 	b.WriteString("COMMIT;\n")
 	return b.String()
 }
+
+// assignmentSentinelInserts renders the schema_migrations rows that mark
+// the assignment schema, straight from the live table. A real sqlite3
+// .dump carries these rows; without them the dump is unrecognised.
 
 // TestHandleRestoreDB_AcceptsAssignmentDumpInDumpOrder — AT8, in the
 // shape the backup command actually writes.
