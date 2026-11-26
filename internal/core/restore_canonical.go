@@ -205,77 +205,118 @@ func isIdentChar(c byte) bool {
 }
 
 // parseTriggerStatement splits a CREATE TRIGGER statement into its name
-// and its body (everything from the trigger name onward is the body for
-// normalisation; the name is extracted from the header).
+// and its body (the statement itself is the normalisation input).
 //
-// The name may be bare, quoted, or schema-qualified, and the qualifier
-// and the name may be quoted independently — `"main"."trg_x"`,
-// `main.trg_x`, `[main].[trg_x]` and `trg_x` all name `trg_x` (B1).
+// The name comes from the token-aware header parser, so quoting, schema
+// qualification and a NEWLINE or a BEGIN inside the name are resolved the
+// same way everywhere (F13).
 func parseTriggerStatement(stmt string) (name, body string, err error) {
 	s := strings.TrimSpace(stmt)
-	upper := strings.ToUpper(s)
-	if !strings.HasPrefix(upper, "CREATE TRIGGER") {
-		return "", "", fmt.Errorf("restore: not a trigger statement")
-	}
-	rest := strings.TrimSpace(s[len("CREATE TRIGGER"):])
-	restUpper := strings.ToUpper(rest)
-	if strings.HasPrefix(restUpper, "IF NOT EXISTS") {
-		rest = strings.TrimSpace(rest[len("IF NOT EXISTS"):])
-	}
-	name, _, ok := parseQualifiedIdentifier(rest)
-	if !ok || name == "" {
-		return "", "", fmt.Errorf("restore: trigger without a name")
+	name, _, ok := parseTriggerHeader(s)
+	if !ok {
+		return "", "", fmt.Errorf("restore: not a trigger statement, or its header cannot be resolved")
 	}
 	return name, s, nil
 }
 
 // parseTriggerTarget returns the table a CREATE TRIGGER is defined ON.
 //
-// The target lives in the validated statement header (`... ON <table>
-// ... BEGIN`), so it is parsed from there rather than guessed from the
-// body. A body that merely READS a managed table does not make its
-// trigger a managed-table trigger (F11).
+// The target is resolved from the TOKEN STREAM of the header, never by
+// searching the statement text: a trigger name, a quoted identifier or a
+// string literal that contains the word BEGIN cannot terminate header
+// parsing (F13). The header ends where the trigger BODY begins, and the
+// body begins at the first `BEGIN` KEYWORD token after the target —
+// which is why only `sqlTokenWord` counts as that keyword.
 func parseTriggerTarget(stmt string) (string, bool) {
-	s := stripSQLComments(strings.TrimSpace(stmt))
-	upper := strings.ToUpper(s)
-	if !strings.HasPrefix(upper, "CREATE TRIGGER") {
-		return "", false
+	_, target, ok := parseTriggerHeader(stmt)
+	return target, ok
+}
+
+// parseTriggerHeader resolves the trigger's NAME and the table its header
+// defines it ON.
+//
+// Grammar handled (SQLite's CREATE TRIGGER header):
+//
+//	CREATE TRIGGER [IF NOT EXISTS] <name>
+//	    [BEFORE|AFTER|INSTEAD OF] <DELETE|INSERT|UPDATE [OF cols]>
+//	    ON <table> [FOR EACH ROW] [WHEN expr] BEGIN ... END
+//
+// Every component is read as a TOKEN: quoted identifiers (`"x"`, `[x]`,
+// “ `x` “) are identifier tokens, string literals are string tokens,
+// and keywords are word tokens. `BEGIN` inside a name or literal is
+// therefore not the body's BEGIN.
+//
+// ok is false when the statement is not a CREATE TRIGGER, when the name
+// or the target cannot be resolved, or when the header ends without an
+// ON clause. Callers MUST treat false as "unknown", never as "not
+// managed" (F13): an unclassifiable trigger is refused.
+func parseTriggerHeader(stmt string) (name, target string, ok bool) {
+	tokens := tokenizeSQL(stripSQLComments(strings.TrimSpace(stmt)))
+	i := 0
+	word := func(want string) bool {
+		if i < len(tokens) && tokens[i].kind == sqlTokenWord && tokens[i].text == want {
+			i++
+			return true
+		}
+		return false
 	}
-	// The header ends at BEGIN (or at the WHEN clause's expression,
-	// which follows ON). Scan tokens and keep the LAST `ON` token
-	// before BEGIN: the header grammar contains exactly one, and the
-	// event's optional column list cannot contain an unquoted ON.
-	begin := strings.Index(upper, "BEGIN")
-	header := s
-	if begin >= 0 {
-		header = s[:begin]
+	if !word("CREATE") || !word("TRIGGER") {
+		return "", "", false
 	}
-	tokens := tokenizeSQL(header)
-	target := ""
-	for i, t := range tokens {
-		if t.kind != sqlTokenWord || !strings.EqualFold(t.text, "ON") || i+1 >= len(tokens) {
+	// Optional IF NOT EXISTS.
+	if i+2 < len(tokens) &&
+		tokens[i].kind == sqlTokenWord && tokens[i].text == "IF" &&
+		tokens[i+1].kind == sqlTokenWord && tokens[i+1].text == "NOT" &&
+		tokens[i+2].kind == sqlTokenWord && tokens[i+2].text == "EXISTS" {
+		i += 3
+	}
+	name, i, ok = qualifiedIdentifierAt(tokens, i)
+	if !ok {
+		return "", "", false
+	}
+	// The header's ON is the first ON KEYWORD after the name and before
+	// the body. Anything else in between (BEFORE/AFTER/INSTEAD, the
+	// event name, an OF column list) cannot contain that keyword as a
+	// bare word.
+	for ; i < len(tokens); i++ {
+		if tokens[i].kind == sqlTokenWord && tokens[i].text == "BEGIN" {
+			// The body started before an ON: not a valid trigger header.
+			return name, "", false
+		}
+		if tokens[i].kind != sqlTokenWord || tokens[i].text != "ON" {
 			continue
 		}
-		// The target may be schema-qualified (`main.memories`,
-		// `"main"."memories"`): take the FINAL component.
-		j := i + 1
-		if tokens[j].kind != sqlTokenWord && tokens[j].kind != sqlTokenIdentifier {
-			continue
+		target, _, ok = qualifiedIdentifierAt(tokens, i+1)
+		if !ok {
+			return name, "", false
 		}
-		component := tokens[j].text
-		j++
-		for j+1 < len(tokens) &&
-			tokens[j].kind == sqlTokenOperator && tokens[j].text == "." &&
-			(tokens[j+1].kind == sqlTokenWord || tokens[j+1].kind == sqlTokenIdentifier) {
-			component = tokens[j+1].text
-			j += 2
-		}
-		target = component
+		return name, target, true
 	}
-	if target == "" {
-		return "", false
+	return name, "", false
+}
+
+// qualifiedIdentifierAt reads `[schema .] name` starting at tokens[i] and
+// returns the FINAL component (the object's own name) with the index just
+// past it.
+//
+// The tokenizer has already resolved quoting, so a quoted component is
+// one identifier token; the caller never has to strip quotes itself.
+func qualifiedIdentifierAt(tokens []sqlToken, i int) (string, int, bool) {
+	if i < 0 || i >= len(tokens) {
+		return "", i, false
 	}
-	return strings.ToLower(target), true
+	if tokens[i].kind != sqlTokenWord && tokens[i].kind != sqlTokenIdentifier {
+		return "", i, false
+	}
+	name := tokens[i].text
+	i++
+	for i+1 < len(tokens) &&
+		tokens[i].kind == sqlTokenOperator && tokens[i].text == "." &&
+		(tokens[i+1].kind == sqlTokenWord || tokens[i+1].kind == sqlTokenIdentifier) {
+		name = tokens[i+1].text
+		i += 2
+	}
+	return strings.ToLower(name), i, true
 }
 
 // ── identifier and token scanning ────────────────────────────────────────
@@ -362,6 +403,10 @@ const (
 	sqlTokenIdentifier                     // a QUOTED identifier, unquoted
 	sqlTokenString                         // a single-quoted literal, verbatim
 	sqlTokenOperator                       // operator or punctuation
+	// sqlTokenInvalid is an unterminated quoted identifier or literal.
+	// It is never accepted as a name or a target: the statement cannot
+	// be classified, and classification fails closed (F13).
+	sqlTokenInvalid
 )
 
 // sqlToken is one token of the comparison form.
@@ -405,9 +450,10 @@ func tokenizeSQL(s string) []sqlToken {
 		case c == '"' || c == '`' || c == '[':
 			ident, rest, ok := scanIdentifier(s[i:])
 			if !ok {
-				// Unterminated quote: keep the remainder as one token
-				// so the comparison cannot silently drop it.
-				out = append(out, sqlToken{kind: sqlTokenIdentifier, text: strings.ToUpper(s[i:])})
+				// Unterminated quote: the remainder is INVALID, not an
+				// identifier. Keeping it as an identifier made an
+				// unparseable quoted target look like a real one (F13).
+				out = append(out, sqlToken{kind: sqlTokenInvalid, text: strings.ToUpper(s[i:])})
 				return out
 			}
 			out = append(out, sqlToken{kind: sqlTokenIdentifier, text: strings.ToUpper(ident)})

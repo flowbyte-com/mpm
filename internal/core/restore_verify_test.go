@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 )
@@ -86,8 +87,11 @@ func TestRestoreTriggerVerification(t *testing.T) {
 	liveInv := &restoreDumpInventory{
 		tables: map[string]bool{"agent_tasks": true, "agent_task_events": true,
 			"agent_task_sessions": true, "agent_task_supersessions": true},
-		sentinels: map[string]bool{restoreSentinelSupersessions: true},
-		triggers:  map[string]string{}, triggerCounts: map[string]int{},
+		sentinels:          map[string]bool{restoreSentinelSupersessions: true},
+		triggers:           map[string]string{},
+		triggerCounts:      map[string]int{},
+		triggerTargets:     map[string]string{},
+		triggerTargetKnown: map[string]bool{},
 	}
 	for rows.Next() {
 		var name, sql string
@@ -96,20 +100,39 @@ func TestRestoreTriggerVerification(t *testing.T) {
 		}
 		liveInv.triggers[name] = normalizeTriggerBody(sql)
 		liveInv.triggerCounts[name]++
+		// Classification records a POSITIVELY resolved target; the
+		// fixture must do the same or the fail-closed rule refuses
+		// every trigger (F13).
+		if target, ok := parseTriggerTarget(sql); ok {
+			liveInv.triggerTargets[name] = target
+			liveInv.triggerTargetKnown[name] = true
+		}
 	}
 	rows.Close()
+	// clone copies every map a fixture needs, so a derived fixture
+	// cannot silently drop the target maps and be refused for the wrong
+	// reason (F13's fail-closed rule).
+	clone := func(src *restoreDumpInventory) *restoreDumpInventory {
+		out := &restoreDumpInventory{
+			tables: src.tables, sentinels: src.sentinels,
+			triggers:           map[string]string{},
+			triggerCounts:      map[string]int{},
+			triggerTargets:     map[string]string{},
+			triggerTargetKnown: map[string]bool{},
+		}
+		for name, body := range src.triggers {
+			out.triggers[name] = body
+			out.triggerCounts[name] = src.triggerCounts[name]
+			out.triggerTargets[name] = src.triggerTargets[name]
+			out.triggerTargetKnown[name] = src.triggerTargetKnown[name]
+		}
+		return out
+	}
 	if _, err := verifyManagedTriggers(restoreClassAware, liveInv, inv); err != nil {
 		t.Fatalf("live triggers rejected: %v", err)
 	}
 	// A modified body is refused.
-	modInv := &restoreDumpInventory{
-		tables: liveInv.tables, sentinels: liveInv.sentinels,
-		triggers: map[string]string{}, triggerCounts: map[string]int{},
-	}
-	for name, body := range liveInv.triggers {
-		modInv.triggers[name] = body
-		modInv.triggerCounts[name] = 1
-	}
+	modInv := clone(liveInv)
 	modInv.triggers["trg_agent_tasks_claim_epoch_guard"] =
 		normalizeTriggerBody(`CREATE TRIGGER trg_agent_tasks_claim_epoch_guard
 			BEFORE UPDATE OF claim_epoch ON agent_tasks FOR EACH ROW
@@ -119,30 +142,15 @@ func TestRestoreTriggerVerification(t *testing.T) {
 		t.Fatalf("modified trigger returned %v", err)
 	}
 	// A missing trigger is refused.
-	missInv := &restoreDumpInventory{
-		tables: liveInv.tables, sentinels: liveInv.sentinels,
-		triggers: map[string]string{}, triggerCounts: map[string]int{},
-	}
-	for name, body := range liveInv.triggers {
-		if name == "trg_agent_tasks_claim_epoch_guard" {
-			continue
-		}
-		missInv.triggers[name] = body
-		missInv.triggerCounts[name] = 1
-	}
+	missInv := clone(liveInv)
+	delete(missInv.triggers, "trg_agent_tasks_claim_epoch_guard")
+	delete(missInv.triggerCounts, "trg_agent_tasks_claim_epoch_guard")
 	if _, err := verifyManagedTriggers(restoreClassAware, missInv, inv); err == nil ||
 		!strings.Contains(err.Error(), "missing_canonical_trigger") {
 		t.Fatalf("missing trigger returned %v", err)
 	}
 	// A duplicate definition is refused.
-	dupInv := &restoreDumpInventory{
-		tables: liveInv.tables, sentinels: liveInv.sentinels,
-		triggers: map[string]string{}, triggerCounts: map[string]int{},
-	}
-	for name, body := range liveInv.triggers {
-		dupInv.triggers[name] = body
-		dupInv.triggerCounts[name] = 1
-	}
+	dupInv := clone(liveInv)
 	dupInv.triggerCounts["trg_agent_tasks_claim_epoch_guard"] = 2
 	if _, err := verifyManagedTriggers(restoreClassAware, dupInv, inv); err == nil ||
 		!strings.Contains(err.Error(), "duplicate_trigger_definition") {
@@ -423,4 +431,121 @@ func TestRestorePostSupersessionOnOriginalIsC2(t *testing.T) {
 		!strings.Contains(err.Error(), "post_supersession_activity") {
 		t.Fatalf("C2 activity returned %v", err)
 	}
+}
+
+// TestFinalSchemaVerificationIsAnIndependentBackstopIsF13 proves the
+// final check alone — with NO help from dump classification — refuses
+// every managed-schema discrepancy. This is the check that must remain
+// effective even if an earlier defect lets an unexpected trigger
+// through (N28/N33).
+func TestFinalSchemaVerificationIsAnIndependentBackstopIsF13(t *testing.T) {
+	inventory, err := canonicalManagedTriggers()
+	if err != nil {
+		t.Fatalf("canonical inventory: %v", err)
+	}
+
+	run := func(t *testing.T, mutate func(t *testing.T, tx *sqlTxLike)) error {
+		t.Helper()
+		dm := NewTestLocalOnlyDM(t)
+		tx, err := dm.SQLDB().Begin()
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback()
+		mutate(t, &sqlTxLike{tx})
+		return verifyFinalManagedSchema(tx, inventory)
+	}
+
+	t.Run("unexpected trigger with an arbitrary name", func(t *testing.T) {
+		err := run(t, func(t *testing.T, tx *sqlTxLike) {
+			if _, err := tx.Exec(`CREATE TRIGGER rogue_shadow BEFORE INSERT ON agent_tasks
+				FOR EACH ROW BEGIN SELECT 1; END`); err != nil {
+				t.Fatalf("plant the rogue trigger: %v", err)
+			}
+		})
+		if err == nil || !strings.Contains(err.Error(), "final_canonical_schema_mismatch") {
+			t.Fatalf("the final check accepted an unexpected managed trigger: %v", err)
+		}
+		if !strings.Contains(err.Error(), "rogue_shadow") {
+			t.Fatalf("the refusal does not name the trigger: %v", err)
+		}
+	})
+	t.Run("unexpected trigger with a BEGIN-containing name", func(t *testing.T) {
+		err := run(t, func(t *testing.T, tx *sqlTxLike) {
+			if _, err := tx.Exec(`CREATE TRIGGER trg_begin_shadow BEFORE INSERT ON agent_tasks
+				FOR EACH ROW BEGIN SELECT 1; END`); err != nil {
+				t.Fatalf("plant the BEGIN-named trigger: %v", err)
+			}
+		})
+		if err == nil {
+			t.Fatal("the final check accepted a BEGIN-named trigger on a managed table")
+		}
+	})
+	t.Run("missing canonical trigger", func(t *testing.T) {
+		err := run(t, func(t *testing.T, tx *sqlTxLike) {
+			if _, err := tx.Exec(`DROP TRIGGER trg_agent_tasks_reserved_key`); err != nil {
+				t.Fatalf("drop the canonical trigger: %v", err)
+			}
+		})
+		if err == nil || !strings.Contains(err.Error(), "missing") {
+			t.Fatalf("the final check did not report the missing trigger: %v", err)
+		}
+	})
+	t.Run("modified canonical body", func(t *testing.T) {
+		err := run(t, func(t *testing.T, tx *sqlTxLike) {
+			if _, err := tx.Exec(`DROP TRIGGER trg_agent_tasks_reserved_key`); err != nil {
+				t.Fatalf("drop: %v", err)
+			}
+			if _, err := tx.Exec(`CREATE TRIGGER trg_agent_tasks_reserved_key
+				BEFORE INSERT ON agent_tasks FOR EACH ROW WHEN (1 = 1)
+				BEGIN SELECT RAISE(ABORT, 'weakened'); END`); err != nil {
+				t.Fatalf("recreate weakened: %v", err)
+			}
+		})
+		if err == nil || !strings.Contains(err.Error(), "drifted") {
+			t.Fatalf("the final check did not report the modified body: %v", err)
+		}
+	})
+	t.Run("canonical name bound to the wrong table", func(t *testing.T) {
+		err := run(t, func(t *testing.T, tx *sqlTxLike) {
+			if _, err := tx.Exec(`DROP TRIGGER trg_agent_tasks_reserved_key`); err != nil {
+				t.Fatalf("drop: %v", err)
+			}
+			// Same NAME, different table: a name-prefix query would see
+			// nothing wrong; the tbl_name check must.
+			if _, err := tx.Exec(`CREATE TRIGGER trg_agent_tasks_reserved_key
+				BEFORE INSERT ON projects FOR EACH ROW BEGIN SELECT 1; END`); err != nil {
+				t.Fatalf("rebind: %v", err)
+			}
+		})
+		// A canonical body names its table in the ON clause, so a
+		// rebind necessarily also drifts; both guards refuse it. The
+		// binding comparison itself is pinned separately below.
+		if err == nil || !strings.Contains(err.Error(), "trg_agent_tasks_reserved_key") {
+			t.Fatalf("the final check did not refuse the rebind: %v", err)
+		}
+	})
+	t.Run("the binding comparison is explicit", func(t *testing.T) {
+		if err := checkTriggerBinding("t", "agent_tasks", "agent_tasks"); err != nil {
+			t.Fatalf("a correct binding was refused: %v", err)
+		}
+		err := checkTriggerBinding("t", "projects", "agent_tasks")
+		if err == nil || !strings.Contains(err.Error(), "is defined on") {
+			t.Fatalf("a wrong binding was not reported: %v", err)
+		}
+	})
+	t.Run("a clean canonical schema passes", func(t *testing.T) {
+		err := run(t, func(t *testing.T, tx *sqlTxLike) {})
+		if err != nil {
+			t.Fatalf("the clean canonical schema was refused: %v", err)
+		}
+	})
+}
+
+// sqlTxLike narrows *sql.Tx to the two methods the backstop test uses,
+// so the test's mutation closures stay readable.
+type sqlTxLike struct{ tx *sql.Tx }
+
+func (t *sqlTxLike) Exec(query string, args ...interface{}) (sql.Result, error) {
+	return t.tx.Exec(query, args...)
 }

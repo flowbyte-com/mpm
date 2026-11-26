@@ -1461,3 +1461,107 @@ func startAmbiguousForTest(t *testing.T, store *assignment.Store, id string, epo
 	}
 	return att
 }
+
+// TestRestoreRefusesBEGINNamedManagedTriggerIsF13 reproduces the exact
+// review finding: a trigger whose NAME contains BEGIN used to truncate
+// header parsing, escape managed-trigger classification, and be
+// installed on `agent_tasks` by the restore. It must be refused as
+// `unexpected_trigger`, and the original database must remain intact.
+func TestRestoreRefusesBEGINNamedManagedTriggerIsF13(t *testing.T) {
+	dm, taskID := roundTripFixture(t)
+	dump := buildRecoveryDump(t, dm.SQLDB())
+	dump += `CREATE TRIGGER trg_begin_shadow BEFORE INSERT ON agent_tasks
+FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'shadow-injected'); END;
+`
+	restoreMarker(t, dm.SQLDB(), taskID)
+	assertRestoreRefusedAndIntact(t, dm, dump, "unexpected_trigger")
+
+	// No unexpected trigger may be installed, and the source database
+	// must be byte-for-byte unchanged.
+	db := openRestored(t, dm.DBPath())
+	require.Equal(t, 0, restoreRowCount(t, db,
+		"sqlite_master", "type='trigger' AND name='trg_begin_shadow'"))
+}
+
+// TestRestoreRefusesQuotedBEGINNamedManagedTriggerIsF13 covers the
+// quoted and schema-qualified spellings of the same attack, plus an
+// arbitrary (non-BEGIN) trigger name: every one is a trigger defined on
+// a managed table outside the canonical inventory.
+func TestRestoreRefusesQuotedBEGINNamedManagedTriggerIsF13(t *testing.T) {
+	variants := []struct {
+		name string
+		stmt string
+	}{
+		{"quoted name", `CREATE TRIGGER "trg_begin_shadow" BEFORE INSERT ON agent_tasks
+FOR EACH ROW BEGIN SELECT 1; END;`},
+		{"schema-qualified quoted name", `CREATE TRIGGER "main"."trg_begin_shadow" BEFORE INSERT ON "main"."agent_tasks"
+FOR EACH ROW BEGIN SELECT 1; END;`},
+		{"bracketed name", `CREATE TRIGGER [trg_begin_shadow] AFTER UPDATE ON [agent_tasks]
+FOR EACH ROW BEGIN SELECT 1; END;`},
+		{"arbitrary name", `CREATE TRIGGER shadow_guard BEFORE DELETE ON agent_tasks
+FOR EACH ROW BEGIN SELECT 1; END;`},
+		{"name containing ON and BEGIN", `CREATE TRIGGER trg_on_begin_x BEFORE INSERT ON agent_tasks
+FOR EACH ROW BEGIN SELECT 1; END;`},
+	}
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			dm, taskID := roundTripFixture(t)
+			dump := buildRecoveryDump(t, dm.SQLDB())
+			restoreMarker(t, dm.SQLDB(), taskID)
+			assertRestoreRefusedAndIntact(t, dm, dump+string('\n')+v.stmt+string('\n'),
+				"unexpected_trigger")
+			db := openRestored(t, dm.DBPath())
+			require.Equal(t, 0, restoreRowCount(t, db,
+				"sqlite_master", "type='trigger' AND tbl_name='agent_tasks' AND name NOT LIKE 'trg\\_agent\\_task%' ESCAPE '\\'"),
+				"an unexpected managed trigger was installed")
+		})
+	}
+}
+
+// TestRestoreRefusesUnexpectedTriggerOnEveryManagedTableIsF13 proves the
+// ownership boundary is the TABLE, not a name prefix: an unexpected
+// trigger on each of the four managed tables is refused.
+func TestRestoreRefusesUnexpectedTriggerOnEveryManagedTableIsF13(t *testing.T) {
+	for _, table := range []string{
+		"agent_tasks", "agent_task_sessions", "agent_task_supersessions", "agent_task_events",
+	} {
+		t.Run(table, func(t *testing.T) {
+			dm, taskID := roundTripFixture(t)
+			dump := buildRecoveryDump(t, dm.SQLDB())
+			dump += "CREATE TRIGGER audit_shadow BEFORE INSERT ON " + table + "\n" +
+				"FOR EACH ROW BEGIN SELECT 1; END;\n"
+			restoreMarker(t, dm.SQLDB(), taskID)
+			assertRestoreRefusedAndIntact(t, dm, dump, "unexpected_trigger")
+		})
+	}
+}
+
+// TestRestoreRefusesUnparseableTriggerHeaderIsF13 proves the classifier
+// fails CLOSED: a trigger whose header cannot be resolved (no ON, or an
+// unterminated quoted name) is refused, never replayed as a user
+// trigger.
+func TestRestoreRefusesUnparseableTriggerHeaderIsF13(t *testing.T) {
+	variants := []struct {
+		name string
+		stmt string
+	}{
+		{"no ON clause", "CREATE TRIGGER trg_no_target BEFORE INSERT agent_tasks\n" +
+			"FOR EACH ROW BEGIN SELECT 1; END;\n"},
+		{"unterminated quoted name", "CREATE TRIGGER \"trg_unterminated BEFORE INSERT ON projects\n" +
+			"FOR EACH ROW BEGIN SELECT 1; END;\n"},
+	}
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			dm, taskID := roundTripFixture(t)
+			dump := buildRecoveryDump(t, dm.SQLDB())
+			restoreMarker(t, dm.SQLDB(), taskID)
+			if code := runRestoreDB(t, dm, dump+string('\n')+v.stmt+string('\n')); code == 0 {
+				t.Fatalf("an unparseable trigger header was accepted")
+			}
+			// The original database still carries the marker.
+			db := openRestored(t, dm.DBPath())
+			require.Equal(t, 1, restoreRowCount(t, db,
+				"agent_task_events", "id = 'ate-not-in-the-dump'"))
+		})
+	}
+}

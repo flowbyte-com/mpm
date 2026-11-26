@@ -189,3 +189,110 @@ func TestParseTriggerTargetUsesTheHeaderIsF11(t *testing.T) {
 		}
 	}
 }
+
+// TestTriggerHeaderParsingIsTokenAwareIsF13 proves the header is resolved
+// from TOKENS, so a name, a quoted identifier or a string literal that
+// contains BEGIN cannot truncate it, and an unparseable header is
+// reported as unknown rather than guessed.
+func TestTriggerHeaderParsingIsTokenAwareIsF13(t *testing.T) {
+	cases := []struct {
+		name       string
+		sql        string
+		wantName   string
+		wantTarget string
+		wantOK     bool
+	}{
+		{
+			"name containing BEGIN",
+			`CREATE TRIGGER trg_begin_shadow BEFORE INSERT ON agent_tasks
+			 FOR EACH ROW BEGIN SELECT 1; END;`,
+			"trg_begin_shadow", "agent_tasks", true,
+		},
+		{
+			"quoted name containing BEGIN",
+			`CREATE TRIGGER "trg_begin_shadow" BEFORE INSERT ON agent_tasks
+			 FOR EACH ROW BEGIN SELECT 1; END;`,
+			"trg_begin_shadow", "agent_tasks", true,
+		},
+		{
+			"schema-qualified quoted name containing BEGIN",
+			`CREATE TRIGGER "main"."trg_begin_shadow" BEFORE INSERT ON "main"."agent_tasks"
+			 FOR EACH ROW BEGIN SELECT 1; END;`,
+			"trg_begin_shadow", "agent_tasks", true,
+		},
+		{
+			"name and target containing ON and BEGIN",
+			`CREATE TRIGGER trg_on_begin BEFORE UPDATE OF title ON agent_tasks
+			 FOR EACH ROW BEGIN SELECT 1; END;`,
+			"trg_on_begin", "agent_tasks", true,
+		},
+		{
+			"string literal containing BEGIN in the WHEN clause",
+			`CREATE TRIGGER t AFTER INSERT ON projects FOR EACH ROW
+			 WHEN (NEW.created_by = 'BEGIN') BEGIN SELECT 1; END;`,
+			"t", "projects", true,
+		},
+		{
+			"unrelated trigger reading a managed table",
+			`CREATE TRIGGER t AFTER INSERT ON projects BEGIN
+			 INSERT INTO memories_fts(rowid) SELECT new.rowid FROM agent_tasks; END;`,
+			"t", "projects", true,
+		},
+		{
+			"no ON clause",
+			`CREATE TRIGGER t BEFORE INSERT agent_tasks BEGIN SELECT 1; END;`,
+			"t", "", false,
+		},
+		{
+			"unterminated quoted name",
+			`CREATE TRIGGER "t BEFORE INSERT ON agent_tasks BEGIN SELECT 1; END;`,
+			"", "", false,
+		},
+		{
+			"unterminated quoted target",
+			`CREATE TRIGGER t BEFORE INSERT ON "agent_tasks BEGIN SELECT 1; END;`,
+			"t", "", false,
+		},
+		{
+			"not a trigger",
+			`CREATE TABLE t (a TEXT);`,
+			"", "", false,
+		},
+	}
+	for _, c := range cases {
+		name, target, ok := parseTriggerHeader(c.sql)
+		if ok != c.wantOK {
+			t.Errorf("%s: ok=%v, want %v (name=%q target=%q)", c.name, ok, c.wantOK, name, target)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if name != c.wantName || target != c.wantTarget {
+			t.Errorf("%s: got (%q,%q), want (%q,%q)", c.name, name, target, c.wantName, c.wantTarget)
+		}
+	}
+}
+
+// TestTriggerHeaderNameMatchesStatementParser pins the two parsers to
+// the same name: the canonical inventory keys and the classification
+// map must agree for every statement shape.
+func TestTriggerHeaderNameMatchesStatementParser(t *testing.T) {
+	for _, sql := range []string{
+		`CREATE TRIGGER trg_x BEFORE INSERT ON agent_tasks BEGIN SELECT 1; END;`,
+		`CREATE TRIGGER "main"."trg_x" BEFORE INSERT ON agent_tasks BEGIN SELECT 1; END;`,
+		`CREATE TRIGGER IF NOT EXISTS [trg_begin_y] BEFORE INSERT ON agent_tasks BEGIN SELECT 1; END;`,
+	} {
+		name, _, ok := parseTriggerHeader(sql)
+		if !ok {
+			t.Fatalf("header parse failed for %q", sql)
+		}
+		stmtName, _, err := parseTriggerStatement(sql)
+		if err != nil {
+			t.Fatalf("statement parse failed for %q: %v", sql, err)
+		}
+		if name != stmtName {
+			t.Fatalf("parsers disagree: header=%q statement=%q", name, stmtName)
+		}
+	}
+}

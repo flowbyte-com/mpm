@@ -52,6 +52,11 @@ type restoreDumpInventory struct {
 	// body-text scan: a trigger that merely READS a managed table is
 	// not a managed-table trigger (F11).
 	triggerTargets map[string]string
+	// triggerTargetKnown records whether the target was POSITIVELY
+	// resolved. A trigger whose target is unknown is refused rather
+	// than replayed: absence of proof that it is unmanaged is not proof
+	// that it is safe (F13).
+	triggerTargetKnown map[string]bool
 	// triggerOrder counts definitions per name (duplicates).
 	triggerCounts map[string]int
 	// unexpected managed triggers (on managed tables, not canonical).
@@ -63,11 +68,12 @@ type restoreDumpInventory struct {
 // schema_migrations rows. Lineage-row presence is never consulted.
 func classifyRestoreDump(statements []string) (restoreClass, *restoreDumpInventory, error) {
 	inv := &restoreDumpInventory{
-		tables:         map[string]bool{},
-		sentinels:      map[string]bool{},
-		triggers:       map[string]string{},
-		triggerTargets: map[string]string{},
-		triggerCounts:  map[string]int{},
+		tables:             map[string]bool{},
+		sentinels:          map[string]bool{},
+		triggers:           map[string]string{},
+		triggerTargets:     map[string]string{},
+		triggerTargetKnown: map[string]bool{},
+		triggerCounts:      map[string]int{},
 	}
 	for _, stmt := range statements {
 		upper := strings.ToUpper(strings.TrimSpace(stmt))
@@ -88,6 +94,7 @@ func classifyRestoreDump(statements []string) (restoreClass, *restoreDumpInvento
 			}
 			if target, ok := parseTriggerTarget(stmt); ok {
 				inv.triggerTargets[name] = target
+				inv.triggerTargetKnown[name] = true
 			}
 		case strings.HasPrefix(upper, "INSERT INTO"):
 			if tbl, vals := dumpInsertTarget(stmt); strings.ToLower(tbl) == "schema_migrations" {
@@ -250,6 +257,13 @@ func verifyManagedTriggers(class restoreClass, inv *restoreDumpInventory, invent
 			continue
 		}
 		if isManagedDumpTrigger(name, inventory) {
+			continue
+		}
+		// FAIL CLOSED (F13): a trigger whose validated header cannot be
+		// resolved cannot be proven to be unrelated to the managed
+		// tables, so it is refused rather than replayed.
+		if !inv.triggerTargetKnown[name] {
+			unexpected = append(unexpected, name)
 			continue
 		}
 		if managedRestoreTables[inv.triggerTargets[name]] {

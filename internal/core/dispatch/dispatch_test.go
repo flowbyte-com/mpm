@@ -1029,3 +1029,38 @@ func candidateIDs(items []*assignment.Assignment) []string {
 	}
 	return out
 }
+
+// TestDispatchPageSizeIsClampedIsF10 proves a non-positive page size
+// cannot turn the bounded pagination into an unbounded loop: the knob is
+// clamped to the production default, and a call still returns.
+func TestDispatchPageSizeIsClampedIsF10(t *testing.T) {
+	store, projectID := testStore(t)
+	root := dispatchRoot(t, store, projectID)
+	eligible := dispatchChild(t, store, root, "alpha",
+		assignment.RoleImplementer, "idem:dispatch:clamp")
+
+	for _, size := range []int{0, -1, -256} {
+		previous := assignment.DispatchCandidatePageSize
+		assignment.DispatchCandidatePageSize = size
+		done := make(chan struct{})
+		var got []*assignment.Assignment
+		var err error
+		go func() {
+			got, err = store.DispatchCandidates(assignment.DispatchQuery{Limit: 1})
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			assignment.DispatchCandidatePageSize = previous
+			t.Fatalf("page size %d did not terminate: the pagination could not progress", size)
+		}
+		assignment.DispatchCandidatePageSize = previous
+		if err != nil {
+			t.Fatalf("page size %d: %v", size, err)
+		}
+		if len(got) != 1 || got[0].ID != eligible.ID {
+			t.Fatalf("page size %d returned %v, want %s", size, candidateIDs(got), eligible.ID)
+		}
+	}
+}

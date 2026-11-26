@@ -65,13 +65,14 @@ func (s *Store) DispatchCandidates(q DispatchQuery) ([]*Assignment, error) {
 	out := []*Assignment{}
 	var lastCreated int64
 	var lastID string
+	pageSize := dispatchPageSize()
 	for {
 		rows, err := s.db.SQLDB().Query(
 			`SELECT `+assignmentColumns+` FROM agent_tasks
 			  WHERE state IN `+dispatchableStates+`
 			    AND (created_at > ? OR (created_at = ? AND id > ?))
 			  ORDER BY created_at ASC, id ASC
-			  LIMIT ?`, lastCreated, lastCreated, lastID, DispatchCandidatePageSize)
+			  LIMIT ?`, lastCreated, lastCreated, lastID, pageSize)
 		if err != nil {
 			return nil, fmt.Errorf("assignment: read the dispatch candidates: %w", err)
 		}
@@ -103,16 +104,32 @@ func (s *Store) DispatchCandidates(q DispatchQuery) ([]*Assignment, error) {
 			return nil, fmt.Errorf("assignment: read the dispatch candidates: %w", err)
 		}
 		rows.Close()
-		if page < DispatchCandidatePageSize {
+		if page < pageSize {
 			return out, nil
 		}
 	}
 }
 
+// defaultDispatchCandidatePageSize is the page bound production uses.
+const defaultDispatchCandidatePageSize = 256
+
 // DispatchCandidatePageSize bounds ONE page of dispatch-candidate
 // retrieval. It is EXPORTED so a test can prove the pagination behaviour
 // with a small population; production never writes it.
-var DispatchCandidatePageSize = 256
+//
+// A non-positive value is CLAMPED rather than honoured: `LIMIT 0`
+// returns no rows, which would leave the page cursor unchanged and the
+// loop unable to progress. The knob exists for tests, so it must be
+// unable to turn a bounded read into an unbounded loop (F10 residual).
+var DispatchCandidatePageSize = defaultDispatchCandidatePageSize
+
+// dispatchPageSize is the page size actually used for one call.
+func dispatchPageSize() int {
+	if DispatchCandidatePageSize <= 0 {
+		return defaultDispatchCandidatePageSize
+	}
+	return DispatchCandidatePageSize
+}
 
 // OutstandingAttempt is one attempt that has not reached a terminal state.
 //

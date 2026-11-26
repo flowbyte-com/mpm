@@ -14,7 +14,6 @@ package opencode
 // runtime is bound, and it records what it can reach.
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,32 +91,54 @@ func containmentFixture(t *testing.T, probeScript string) (Spec, string, []strin
 	return spec, secret, []string{root, workspace, secret}
 }
 
-// skipIfNoUserNamespace recognises an environment that FORBIDS user
-// namespaces (most CI containers write-protect /proc/self/uid_map).
+// requireUserNamespace skips ONLY when the environment independently
+// demonstrates it cannot create a user namespace — the exact outer step
+// the production launcher performs (`unshare --user --map-root-user`).
 //
-// That is an environment limitation, not a containment failure, and it
-// is not evidence either way. A capable host executes these tests; the
-// report names where they ran. A REAL containment breach still fails,
-// because the assertions only run when the namespace is created.
-func skipIfNoUserNamespace(t *testing.T, out string, err error) {
+// The probe is the authority, not the launcher's output: a generic
+// "operation not permitted" from a later launcher step never converts a
+// real containment failure into an environmental skip. If the probe
+// fails for any reason OTHER than a user-namespace limitation, the test
+// fails: that is a broken prerequisite, not an excuse.
+func requireUserNamespace(t *testing.T) {
 	t.Helper()
-	if err == nil {
+	unshare, err := exec.LookPath("unshare")
+	if err != nil {
+		t.Skipf("`unshare` is not installed, so the containment cannot be executed here")
+	}
+	probe := exec.Command(unshare, "--user", "--map-root-user", "true")
+	// The environment is pinned: no child may inherit the operator's
+	// workspace or HOME (internal/testenv guard).
+	probe.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"MPM_WORKSPACE=" + t.TempDir(),
+	}
+	out, probeErr := probe.CombinedOutput()
+	if probeErr == nil {
 		return
 	}
-	lower := strings.ToLower(out)
-	for _, marker := range []string{
-		"uid_map",
-		"operation not permitted",
-		"no permissions to create",
-		"unshare failed",
-		"failed to unshare",
-	} {
+	if userNamespaceLimitation(string(out)) {
+		t.Skipf("this environment cannot create a user namespace, so the "+
+			"containment cannot be executed here (a capable host runs it): %s",
+			strings.TrimSpace(string(out)))
+	}
+	t.Fatalf("`unshare --user --map-root-user` failed for a reason that is not a "+
+		"user-namespace limitation: %v\n%s", probeErr, out)
+}
+
+// userNamespaceLimitation reports whether the probe's output names a
+// USER-NAMESPACE prerequisite. Generic permission text does not qualify:
+// a launcher that fails later with EPERM must never be reported as an
+// environmental skip.
+func userNamespaceLimitation(output string) bool {
+	lower := strings.ToLower(output)
+	for _, marker := range []string{"uid_map", "newuidmap", "user namespace", "userns"} {
 		if strings.Contains(lower, marker) {
-			t.Skipf("this environment forbids user namespaces, so the containment "+
-				"cannot be executed here (a capable host runs it): %s",
-				strings.TrimSpace(out))
+			return true
 		}
 	}
+	return false
 }
 
 // runContained executes the containment argv with the same explicit
@@ -146,6 +167,7 @@ func runContained(t *testing.T, spec Spec) (string, error) {
 // operator CLI, or the host's MPM database — while the authorised
 // worktree IS reachable and writable.
 func TestContainedWorkerCannotReachHostPathsIsT49(t *testing.T) {
+	requireUserNamespace(t)
 	if _, bwrap := containmentTools(t); bwrap == "" {
 		t.Skip("bubblewrap is not installed, so containment cannot be executed here")
 	}
@@ -215,7 +237,8 @@ fi
 
 	out, err := runContained(t, spec)
 	if err != nil {
-		skipIfNoUserNamespace(t, out, err)
+		// The prerequisite was established above, so this is a REAL
+		// failure: never a skip.
 		t.Fatalf("the containment did not run: %v\n%s", err, out)
 	}
 	findings, err := os.ReadFile(filepath.Join(spec.Root, "findings", "probe.txt"))
@@ -256,6 +279,7 @@ fi
 // operator's home are not mounted, while the reviewer's own sandbox
 // tree is.
 func TestContainedReviewerCannotReachTheDatabaseOrHomeIsT50(t *testing.T) {
+	requireUserNamespace(t)
 	if _, bwrap := containmentTools(t); bwrap == "" {
 		t.Skip("bubblewrap is not installed, so containment cannot be executed here")
 	}
@@ -282,7 +306,6 @@ if [ -d /sandbox/findings ]; then echo "findings=writable" >> "$out"; fi
 
 	out, err := runContained(t, spec)
 	if err != nil {
-		skipIfNoUserNamespace(t, out, err)
 		t.Fatalf("the reviewer containment did not run: %v\n%s", err, out)
 	}
 	findings, err := os.ReadFile(filepath.Join(spec.Root, "findings", "reviewer.txt"))
@@ -355,21 +378,46 @@ func TestNoBubblewrapMeansNoLaunchIsT51(t *testing.T) {
 	}
 }
 
-// TestSkipIfNoUserNamespaceRecognisesTheCIMessage pins the skip helper:
-// the CI runner's exact message must be recognised as an environment
-// limitation, so the suite reports it as a skip rather than a failure —
-// while a genuine containment failure still fails.
-func TestSkipIfNoUserNamespaceRecognisesTheCIMessage(t *testing.T) {
-	t.Run("the CI message skips", func(t *testing.T) {
-		skipIfNoUserNamespace(t,
+// TestUserNamespaceLimitationClassificationIsNarrow proves the skip
+// classification is decided by the PREREQUISITE, not by generic
+// permission text: the CI runner's uid_map message qualifies, while a
+// launcher failure that merely says "operation not permitted" does not
+// (that must remain a hard failure).
+func TestUserNamespaceLimitationClassificationIsNarrow(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{
+			"the CI runner's uid_map refusal",
 			"unshare: write failed /proc/self/uid_map: Operation not permitted",
-			errors.New("exit status 1"))
-		// Reaching here means the helper did NOT skip.
-		t.Fatal("the helper did not recognise the forbidden-user-namespace message")
-	})
-	t.Run("a genuine failure does not skip", func(t *testing.T) {
-		// No skip call: the helper must return, and the assertion below
-		// records that the failure was NOT swallowed.
-		skipIfNoUserNamespace(t, "probe exited 3: assertion failed", errors.New("exit status 3"))
-	})
+			true,
+		},
+		{
+			"a missing newuidmap",
+			"unshare: newuidmap is not installed",
+			true,
+		},
+		{
+			"a generic launcher EPERM",
+			"bwrap: bind mount /run: Operation not permitted",
+			false,
+		},
+		{
+			"a containment assertion failure",
+			"probe exited 3: assertion failed",
+			false,
+		},
+		{
+			"a missing runtime binary",
+			"bwrap: execvp /opt/opencode/opencode: No such file or directory",
+			false,
+		},
+	}
+	for _, c := range cases {
+		if got := userNamespaceLimitation(c.out); got != c.want {
+			t.Errorf("%s: userNamespaceLimitation=%v, want %v", c.name, got, c.want)
+		}
+	}
 }

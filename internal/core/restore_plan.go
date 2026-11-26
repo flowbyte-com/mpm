@@ -85,31 +85,55 @@ func PlanRestore(statements []string) (*restorePlan, error) {
 	// exactly as the pre-contract replay did (nested transactions
 	// conflict with the outer Go tx; the catalog rows are redundant and
 	// the driver refuses them).
-	addSchema := func(stmt string) {
+	// addSchema classifies one replayable statement. It FAILS CLOSED:
+	// a trigger whose name or ON target cannot be resolved is refused
+	// here rather than appended to the user-trigger list. Appending was
+	// the F13 fail-open path: the statement would have been executed
+	// after the rows, on whatever table its body named (F13/F11).
+	addSchema := func(stmt string) error {
 		if skipReplayStatement(stmt) {
-			return
+			return nil
 		}
 		upper := strings.ToUpper(strings.TrimSpace(stmt))
 		if strings.HasPrefix(upper, "CREATE TRIGGER") || strings.HasPrefix(upper, "CREATE TEMP TRIGGER") {
 			name, _, err := parseTriggerStatement(stmt)
-			if err == nil {
-				if _, ok := inventory[name]; ok {
-					return
-				}
+			if err != nil {
+				return fmt.Errorf("restore: unclassifiable trigger statement: %w", err)
+			}
+			if _, ok := inventory[name]; ok {
+				// Canonical managed triggers are installed from trusted
+				// text, never from the dump.
+				return nil
+			}
+			target, ok := parseTriggerTarget(stmt)
+			if !ok {
+				return fmt.Errorf(
+					"restore: unclassifiable trigger %q: its ON target cannot be resolved", name)
+			}
+			if managedRestoreTables[target] {
+				return fmt.Errorf(
+					"restore: unexpected_trigger: %s is defined on the managed table %s", name, target)
 			}
 			plan.userTriggerStmts = append(plan.userTriggerStmts, stmt)
-			return
+			return nil
 		}
 		plan.schemaStmts = append(plan.schemaStmts, stmt)
+		return nil
 	}
 	for _, stmt := range model.createStmts {
-		addSchema(stmt)
+		if err := addSchema(stmt); err != nil {
+			return nil, err
+		}
 	}
 	for _, stmt := range model.triggerStmts {
-		addSchema(stmt)
+		if err := addSchema(stmt); err != nil {
+			return nil, err
+		}
 	}
 	for _, stmt := range model.other {
-		addSchema(stmt)
+		if err := addSchema(stmt); err != nil {
+			return nil, err
+		}
 	}
 	resequenced, err := model.resequencedInserts()
 	if err != nil {
@@ -343,23 +367,46 @@ func runAdditiveMigrations(tx *sql.Tx) error {
 	return nil
 }
 
+// managedRestoreTableList is the four tables whose schema the final
+// verification owns, derived from managedRestoreTables so the two
+// definitions cannot drift.
+func managedRestoreTableList() []string {
+	tables := make([]string, 0, len(managedRestoreTables))
+	for tbl := range managedRestoreTables {
+		tables = append(tables, tbl)
+	}
+	sort.Strings(tables)
+	return tables
+}
+
 // verifyFinalManagedSchema compares the live managed schema against the
 // full canonical inventory: every table with its columns, every index,
-// every trigger body. Drift fails closed with
-// final_canonical_schema_mismatch.
+// every canonical trigger with its trusted body AND its table binding,
+// and NO other trigger on a managed table.
+//
+// Triggers are enumerated through sqlite_master's authoritative
+// tbl_name, not through a name prefix. A dump-supplied trigger with an
+// arbitrary name is therefore visible here even when an earlier
+// classification defect let it through: this check is the independent
+// backstop (F13/N28/N33).
 func verifyFinalManagedSchema(tx *sql.Tx, inventory map[string]string) error {
+	managedTables := managedRestoreTableList()
+	inList := strings.Join(quotedList(managedTables), ",")
 	rows, err := tx.Query(`SELECT type, name, tbl_name, COALESCE(sql,'') FROM sqlite_master
-		WHERE (type='table' AND name IN ('agent_tasks','agent_task_events','agent_task_sessions','agent_task_supersessions'))
-		   OR (type='index' AND tbl_name IN ('agent_tasks','agent_task_events','agent_task_sessions','agent_task_supersessions'))
-		   OR (type='trigger' AND name LIKE 'trg\_agent\_task%' ESCAPE '\')`)
+		WHERE (type='table' AND name IN (` + inList + `))
+		   OR (type='index' AND tbl_name IN (` + inList + `))
+		   OR type='trigger'`)
 	if err != nil {
 		return fmt.Errorf("restore: read the final schema: %w", err)
 	}
 	defer rows.Close()
 	liveTables := map[string]bool{}
 	liveIndexes := map[string]bool{}
-	liveTriggers := map[string]string{}
 	liveColumns := map[string][]string{}
+	// ALL triggers are read: a canonical NAME bound to the wrong table
+	// must be visible too, not only triggers bound to a managed table.
+	liveTriggerBodies := map[string]string{}
+	liveTriggerTables := map[string]string{}
 	for rows.Next() {
 		var typ, name, tbl, sqlText string
 		if err := rows.Scan(&typ, &name, &tbl, &sqlText); err != nil {
@@ -378,7 +425,8 @@ func verifyFinalManagedSchema(tx *sql.Tx, inventory map[string]string) error {
 				liveIndexes[name] = true
 			}
 		case "trigger":
-			liveTriggers[name] = normalizeTriggerBody(sqlText)
+			liveTriggerBodies[name] = normalizeTriggerBody(sqlText)
+			liveTriggerTables[name] = strings.ToLower(tbl)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -402,24 +450,44 @@ func verifyFinalManagedSchema(tx *sql.Tx, inventory map[string]string) error {
 			return fmt.Errorf("restore: final_canonical_schema_mismatch: index %q missing", idx)
 		}
 	}
+	// Every canonical trigger must exist, carry its trusted body, and be
+	// bound to the table its canonical definition names.
 	for name, wantBody := range inventory {
-		got, ok := liveTriggers[name]
+		got, ok := liveTriggerBodies[name]
 		if !ok {
 			return fmt.Errorf("restore: final_canonical_schema_mismatch: trigger %q missing", name)
 		}
 		if got != wantBody {
 			return fmt.Errorf("restore: final_canonical_schema_mismatch: trigger %q drifted", name)
 		}
+		wantTable, err := canonicalTriggerTable(name)
+		if err != nil {
+			return err
+		}
+		if err := checkTriggerBinding(name, liveTriggerTables[name], wantTable); err != nil {
+			return err
+		}
+	}
+	// NO other trigger may be defined on a managed table. This is the
+	// check that catches a trigger whose name is not canonical, which a
+	// name-prefix query could never see.
+	managed := map[string]bool{}
+	for _, tbl := range managedTables {
+		managed[tbl] = true
 	}
 	var extra []string
-	for name := range liveTriggers {
-		if _, ok := inventory[name]; !ok {
-			extra = append(extra, name)
+	for name, tbl := range liveTriggerTables {
+		if _, canonical := inventory[name]; canonical {
+			continue
+		}
+		if managed[tbl] {
+			extra = append(extra, name+"@"+tbl)
 		}
 	}
 	sort.Strings(extra)
 	if len(extra) > 0 {
-		return fmt.Errorf("restore: final_canonical_schema_mismatch: unexpected triggers %s", strings.Join(extra, ","))
+		return fmt.Errorf("restore: final_canonical_schema_mismatch: unexpected triggers on managed tables: %s",
+			strings.Join(extra, ","))
 	}
 	var fkViolations int
 	fkRows, err := tx.Query(`PRAGMA foreign_key_check`)
@@ -429,11 +497,6 @@ func verifyFinalManagedSchema(tx *sql.Tx, inventory map[string]string) error {
 	defer fkRows.Close()
 	for fkRows.Next() {
 		fkViolations++
-		var table, rowid, ftable, fkid string
-		_ = fkRows.Scan(&table, &rowid, &ftable, &fkid)
-		if fkViolations == 1 {
-			_ = table
-		}
 	}
 	if err := fkRows.Err(); err != nil {
 		return fmt.Errorf("restore: read foreign_key_check: %w", err)
@@ -442,6 +505,46 @@ func verifyFinalManagedSchema(tx *sql.Tx, inventory map[string]string) error {
 		return fmt.Errorf("restore: %d foreign key violations after replay", fkViolations)
 	}
 	return nil
+}
+
+// checkTriggerBinding reports a canonical trigger whose live table
+// binding differs from the table its canonical definition names.
+//
+// The body comparison already includes the `ON <table>` clause, so a
+// rebind normally reports as drift first; this guard is the explicit,
+// independent statement of the same invariant (the review requires the
+// binding itself to be checked, not inferred).
+func checkTriggerBinding(name, got, want string) error {
+	if got == want {
+		return nil
+	}
+	return fmt.Errorf(
+		"restore: final_canonical_schema_mismatch: trigger %q is defined on %q, want %q",
+		name, got, want)
+}
+
+// quotedList renders names as a SQL list of literals. The names are the
+// package's own constants, never input.
+func quotedList(names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = "'" + strings.ReplaceAll(n, "'", "''") + "'"
+	}
+	return out
+}
+
+// canonicalTriggerTable returns the managed table a canonical trigger is
+// defined ON, from its trusted statement header.
+func canonicalTriggerTable(name string) (string, error) {
+	stmt, err := canonicalTriggerStatement(name)
+	if err != nil {
+		return "", err
+	}
+	target, ok := parseTriggerTarget(stmt)
+	if !ok {
+		return "", fmt.Errorf("restore: canonical trigger %q has no resolvable ON target", name)
+	}
+	return target, nil
 }
 
 // ExecuteSchemaStmt executes one schema statement inside the restore
