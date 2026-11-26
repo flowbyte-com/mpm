@@ -182,6 +182,14 @@ var (
 	// permanently blocked. The approval is preserved.
 	ErrLegacyApprovedAmbiguity = errors.New("assignment: legacy_approved_ambiguity: an approved task with ambiguity is not eligible for recovery")
 
+	// ErrReworkRequired names the A4/T66/T80 boundary: a tree whose
+	// recovery scope is rework_required admits no further ordinary
+	// assignment. Rework is not implementable through delegation — the
+	// contract provides no rework operation in this slice — and an
+	// informal child would be a dead obligation inside a tree the
+	// status already says needs an operator decision.
+	ErrReworkRequired = errors.New("assignment: rework_required: the tree needs an operator rework decision; no further assignment may be delegated")
+
 	// ErrLeaseHeld is returned when a claim is attempted while another
 	// holder's lease is still alive. A live lease is not stealable.
 	ErrLeaseHeld = errors.New("assignment: the work is leased to another holder")

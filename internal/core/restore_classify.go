@@ -9,7 +9,6 @@ package internal
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 )
@@ -48,6 +47,11 @@ type restoreDumpInventory struct {
 	tables    map[string]bool
 	sentinels map[string]bool
 	triggers  map[string]string // name -> normalized body (dump text)
+	// triggerTargets maps a trigger name to the table its validated
+	// statement header defines it ON. Identification uses this, never a
+	// body-text scan: a trigger that merely READS a managed table is
+	// not a managed-table trigger (F11).
+	triggerTargets map[string]string
 	// triggerOrder counts definitions per name (duplicates).
 	triggerCounts map[string]int
 	// unexpected managed triggers (on managed tables, not canonical).
@@ -59,10 +63,11 @@ type restoreDumpInventory struct {
 // schema_migrations rows. Lineage-row presence is never consulted.
 func classifyRestoreDump(statements []string) (restoreClass, *restoreDumpInventory, error) {
 	inv := &restoreDumpInventory{
-		tables:        map[string]bool{},
-		sentinels:     map[string]bool{},
-		triggers:      map[string]string{},
-		triggerCounts: map[string]int{},
+		tables:         map[string]bool{},
+		sentinels:      map[string]bool{},
+		triggers:       map[string]string{},
+		triggerTargets: map[string]string{},
+		triggerCounts:  map[string]int{},
 	}
 	for _, stmt := range statements {
 		upper := strings.ToUpper(strings.TrimSpace(stmt))
@@ -80,6 +85,9 @@ func classifyRestoreDump(statements []string) (restoreClass, *restoreDumpInvento
 			inv.triggerCounts[name]++
 			if _, ok := inv.triggers[name]; !ok {
 				inv.triggers[name] = normalizeTriggerBody(stmt)
+			}
+			if target, ok := parseTriggerTarget(stmt); ok {
+				inv.triggerTargets[name] = target
 			}
 		case strings.HasPrefix(upper, "INSERT INTO"):
 			if tbl, vals := dumpInsertTarget(stmt); strings.ToLower(tbl) == "schema_migrations" {
@@ -229,14 +237,22 @@ func verifyManagedTriggers(class restoreClass, inv *restoreDumpInventory, invent
 	// Unexpected: a managed-table trigger outside the canonical
 	// inventory for this class. A canonical trigger not required for
 	// this class (e.g. a recovery trigger in a pre-feature dump) is
-	// unexpected: a pre-feature dump must not carry future guards. An
-	// unknown trigger whose body touches a managed table is unexpected
-	// for the same reason.
+	// unexpected: a pre-feature dump must not carry future guards.
+	//
+	// An unknown trigger is unexpected only when its VALIDATED header
+	// defines it ON a managed table. A trigger on an unrelated table
+	// that merely references a managed table in its body is a
+	// legitimate user object and replays verbatim (F11).
 	var unexpected []string
 	for name := range inv.triggers {
 		if isManagedDumpTrigger(name, inventory) && !requiredSet[name] {
 			unexpected = append(unexpected, name)
-		} else if !isManagedDumpTrigger(name, inventory) && isManagedTableTrigger(inv.triggers[name]) {
+			continue
+		}
+		if isManagedDumpTrigger(name, inventory) {
+			continue
+		}
+		if managedRestoreTables[inv.triggerTargets[name]] {
 			unexpected = append(unexpected, name)
 		}
 	}
@@ -282,21 +298,6 @@ func verifyManagedTriggers(class restoreClass, inv *restoreDumpInventory, invent
 func isManagedDumpTrigger(name string, inventory map[string]string) bool {
 	_, ok := inventory[name]
 	return ok
-}
-
-// triggerTargetTable guesses the trigger's table from its normalized
-// body (FOR EACH ROW ... UPDATE/INSERT/DELETE ON <table> is not in the
-// body; triggers name tables in WHEN/SELECT). Conservative: any body
-// mentioning a managed table name as a bare word counts.
-func isManagedTableTrigger(normalizedBody string) bool {
-	upper := " " + normalizedBody + " "
-	for tbl := range managedRestoreTables {
-		pattern := regexp.MustCompile(`[^A-Z0-9_]` + strings.ToUpper(tbl) + `[^A-Z0-9_]`)
-		if pattern.MatchString(upper) {
-			return true
-		}
-	}
-	return false
 }
 
 // canonicalTriggerStatement returns the trusted CREATE TRIGGER text for

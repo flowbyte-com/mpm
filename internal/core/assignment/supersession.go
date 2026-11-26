@@ -1167,6 +1167,73 @@ func (s *Store) TreeStatus(rootID string) (*TreeStatus, error) {
 	return out, nil
 }
 
+// reworkRequiredTx reports whether the tree's recovery scope is
+// rework_required, evaluated INSIDE the caller's transaction so the
+// answer is consistent with the write it guards (T66/T80).
+//
+// The predicate mirrors the recovery_status arm order exactly (arms 2
+// and 3 precede arm 4), so a tree that is blocked by an unresolved
+// ambiguity is reported through that arm rather than as rework. The
+// equivalence with TreeStatus is pinned by a test rather than assumed.
+func reworkRequiredTx(node internal.DBNode, rootID string) (bool, error) {
+	// Arm 4: a LIVE lineage's reviewer ended completed.
+	var rework int
+	if err := node.QueryRowTracked(`
+		SELECT COUNT(*)
+		  FROM agent_task_supersessions l
+		  JOIN agent_tasks rev ON rev.id = l.reviewer_task_id
+		 WHERE l.root_id = ?
+		   AND rev.state = 'completed'
+		   AND NOT EXISTS (
+		       SELECT 1 FROM agent_task_supersessions l2
+		        WHERE l2.superseded_task_id = l.replacement_task_id)`,
+		rootID).Scan(&rework); err != nil {
+		return false, fmt.Errorf("assignment: read the recovery scope: %w", err)
+	}
+	if rework == 0 {
+		return false, nil
+	}
+	// Arm 2: a LIVE lineage's reviewer has its own ambiguous attempt.
+	var reviewerAmb int
+	if err := node.QueryRowTracked(`
+		SELECT COUNT(*)
+		  FROM agent_task_supersessions l
+		  JOIN agent_task_sessions s ON s.task_id = l.reviewer_task_id
+		 WHERE l.root_id = ?
+		   AND s.launch_state = 'ambiguous'
+		   AND NOT EXISTS (
+		       SELECT 1 FROM agent_task_supersessions l2
+		        WHERE l2.superseded_task_id = l.replacement_task_id)`,
+		rootID).Scan(&reviewerAmb); err != nil {
+		return false, fmt.Errorf("assignment: read the recovery scope: %w", err)
+	}
+	if reviewerAmb > 0 {
+		return false, nil
+	}
+	// Arm 3: an ambiguous attempt no lineage names, excluding a scoped
+	// reviewer of a live lineage.
+	var unnamed int
+	if err := node.QueryRowTracked(`
+		SELECT COUNT(*)
+		  FROM agent_task_sessions s
+		  JOIN agent_tasks t ON t.id = s.task_id
+		 WHERE t.root_id = ?
+		   AND s.launch_state = 'ambiguous'
+		   AND NOT EXISTS (
+		       SELECT 1 FROM agent_task_supersessions l3
+		        WHERE l3.attempt_id = s.id)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM agent_task_supersessions l4
+		        WHERE l4.reviewer_task_id = s.task_id
+		          AND NOT EXISTS (
+		              SELECT 1 FROM agent_task_supersessions l5
+		               WHERE l5.superseded_task_id = l4.replacement_task_id))`,
+		rootID).Scan(&unnamed); err != nil {
+		return false, fmt.Errorf("assignment: read the recovery scope: %w", err)
+	}
+	return unnamed == 0, nil
+}
+
 // ── shared execution-authorisation enforcement ───────────────────────────
 
 // execBlocked reports whether an execution step is barred for the task,

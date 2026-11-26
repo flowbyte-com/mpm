@@ -400,6 +400,10 @@ func handleRestoreDB(args []string) int {
 		tx.Rollback()
 		return restoreFromBackup(dbPath, preDeleteCopy, "rows", err)
 	}
+	if err := restorePlan.ExecuteUserTriggers(tx); err != nil {
+		tx.Rollback()
+		return restoreFromBackup(dbPath, preDeleteCopy, "user triggers", err)
+	}
 	if err := restorePlan.ExecuteDeferredTriggers(tx); err != nil {
 		tx.Rollback()
 		return restoreFromBackup(dbPath, preDeleteCopy, "deferred triggers", err)

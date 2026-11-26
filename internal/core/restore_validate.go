@@ -81,7 +81,7 @@ func buildRestoreGraph(m *restoreModel) (*restoreGraph, error) {
 	}
 	get := func(rm map[string]restoreValue, col string) (string, bool) {
 		v, ok := rm[strings.ToLower(col)]
-		if !ok || v.null {
+		if !ok || v.isNull() {
 			return "", false
 		}
 		return v.text, true
@@ -309,7 +309,7 @@ func checkReservedKeys(m *restoreModel, g *restoreGraph) error {
 	for _, r := range m.managed["agent_tasks"] {
 		rm := r.rowMap()
 		key, ok := rm["idempotency_key"]
-		if !ok || key.null {
+		if !ok || key.isNull() {
 			continue
 		}
 		if !strings.HasPrefix(key.text, "supersede:") {
@@ -471,7 +471,7 @@ func checkTemporalBounds(g *restoreGraph) error {
 		for _, role := range []struct {
 			taskID string
 			kind   string
-		}{ {l.replacement, "replacement"}, {l.reviewer, "reviewer"} } {
+		}{{l.replacement, "replacement"}, {l.reviewer, "reviewer"}} {
 			for _, a := range g.byTask[role.taskID] {
 				if a.createdAt == nil {
 					return fmt.Errorf("restore: indeterminate_temporal_order: attempt %q has no created_at", a.id)

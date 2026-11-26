@@ -54,37 +54,65 @@ func (s *Store) DispatchCandidates(q DispatchQuery) ([]*Assignment, error) {
 	// recovery_required, which is the dispatcher's own policy input.
 	//
 	// The historical test lives in Go (isHistorical), not in a second
-	// copy of the trigger predicate: one implementation, no drift. The
-	// rows arrive in dispatch order and are truncated after filtering,
-	// so the caller still gets at most Limit live candidates in order.
-	rows, err := s.db.SQLDB().Query(
-		`SELECT ` + assignmentColumns + ` FROM agent_tasks
-		  WHERE state IN ` + dispatchableStates + `
-		  ORDER BY created_at ASC, id ASC`)
-	if err != nil {
-		return nil, fmt.Errorf("assignment: read the dispatch candidates: %w", err)
-	}
-	defer rows.Close()
+	// copy of the trigger predicate: one implementation, no drift.
+	//
+	// Retrieval is BOUNDED BY DETERMINISTIC PAGINATION, not by a bare
+	// SQL LIMIT: a LIMIT applied before the historical filter would let
+	// a long run of frozen rows hide eligible work behind it, while
+	// reading every row at once materialises the whole table (F10).
+	// Each page is keyset-paged on the same (created_at, id) order the
+	// dispatcher uses, so a later page can never repeat or skip a row.
 	out := []*Assignment{}
-	for rows.Next() {
-		a, err := scanAssignment(rows.Scan)
+	var lastCreated int64
+	var lastID string
+	for {
+		rows, err := s.db.SQLDB().Query(
+			`SELECT `+assignmentColumns+` FROM agent_tasks
+			  WHERE state IN `+dispatchableStates+`
+			    AND (created_at > ? OR (created_at = ? AND id > ?))
+			  ORDER BY created_at ASC, id ASC
+			  LIMIT ?`, lastCreated, lastCreated, lastID, DispatchCandidatePageSize)
 		if err != nil {
 			return nil, fmt.Errorf("assignment: read the dispatch candidates: %w", err)
 		}
-		historical, err := s.isHistorical(a)
-		if err != nil {
-			return nil, err
+		page := 0
+		for rows.Next() {
+			a, err := scanAssignment(rows.Scan)
+			if err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("assignment: read the dispatch candidates: %w", err)
+			}
+			page++
+			lastCreated, lastID = a.CreatedAt, a.ID
+			historical, err := s.isHistorical(a)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if historical {
+				continue
+			}
+			out = append(out, a)
+			if len(out) >= q.Limit {
+				rows.Close()
+				return out, nil
+			}
 		}
-		if historical {
-			continue
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("assignment: read the dispatch candidates: %w", err)
 		}
-		out = append(out, a)
-		if len(out) >= q.Limit {
-			break
+		rows.Close()
+		if page < DispatchCandidatePageSize {
+			return out, nil
 		}
 	}
-	return out, rows.Err()
 }
+
+// DispatchCandidatePageSize bounds ONE page of dispatch-candidate
+// retrieval. It is EXPORTED so a test can prove the pagination behaviour
+// with a small population; production never writes it.
+var DispatchCandidatePageSize = 256
 
 // OutstandingAttempt is one attempt that has not reached a terminal state.
 //

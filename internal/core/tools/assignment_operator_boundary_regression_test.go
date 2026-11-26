@@ -77,8 +77,14 @@
 package tools
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/assignment"
@@ -376,6 +382,26 @@ func TestAssignment_TheAgentSurfaceStillDoesItsWork(t *testing.T) {
 	}
 	reviewing := advanceToInProgress(t, store, reviewer)
 
+	// T84/A2: the verdict must name HOST-captured evidence. The host
+	// captures it through the supported path (a real findings file and
+	// its digest); the agent surface then records the verdict.
+	findings := []byte(`{"findings":"the child is correct"}`)
+	findingsPath := filepath.Join(t.TempDir(), "findings.json")
+	if err := os.WriteFile(findingsPath, findings, 0o600); err != nil {
+		t.Fatalf("write the findings: %v", err)
+	}
+	sum := sha256.Sum256(findings)
+	if _, err := store.CaptureReviewEvidence(assignment.ReviewEvidenceParams{
+		ReviewerID:     reviewing.ID,
+		Epoch:          reviewing.ClaimEpoch,
+		ReviewedSHA:    strings.Repeat("a", 40),
+		FindingsSHA256: hex.EncodeToString(sum[:]),
+		EvidenceRef:    findingsPath,
+		Actor:          assignment.Actor{Address: "charlie", Kind: "agent"},
+	}); err != nil {
+		t.Fatalf("capture the review evidence: %v", err)
+	}
+
 	verdict, err := handleMpmAssignment(dm, mpminternal.ActiveContext{}, map[string]interface{}{
 		"action": "record-review",
 		"params": map[string]interface{}{
@@ -410,6 +436,12 @@ func TestAssignment_TheAgentSurfaceStillDoesItsWork(t *testing.T) {
 
 // advanceToCompleted drives an assignment through the implementer's path
 // to `completed`, through the service.
+//
+// A2: completion requires a CURRENT-EPOCH attempt at `completed` with
+// `runtime_outcome='succeeded'`. The fixture proves that evidence the
+// way the adapter does — begin the attempt, record the runtime outcome,
+// then Complete — rather than completing a bare row. The completion
+// guard is not weakened to keep a fixture short.
 func advanceToCompleted(t *testing.T, store *assignment.Store, a *assignment.Assignment) *assignment.Assignment {
 	t.Helper()
 	cur := advanceToAccepted(t, store, a)
@@ -424,6 +456,20 @@ func advanceToCompleted(t *testing.T, store *assignment.Store, a *assignment.Ass
 			ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: assignment.Actor{Address: cur.Recipient, Kind: "agent"},
 		})
 	})
+	att, err := store.BeginAttempt(assignment.BeginAttemptParams{
+		TaskID: cur.ID, Epoch: cur.ClaimEpoch, Runtime: assignment.RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses_boundary_fixture_" + cur.ID,
+		CorrelationRef: "corr-boundary-fixture-" + cur.ID,
+		WorkspaceID:    "ws", WorkspacePath: "/tmp/ws-boundary-fixture",
+	})
+	if err != nil {
+		t.Fatalf("begin the fixture attempt for %s: %v", cur.ID, err)
+	}
+	if _, err := store.MarkAttemptCompleted(assignment.SessionStateParams{
+		AttemptID: att.ID, Epoch: cur.ClaimEpoch, Outcome: "succeeded",
+	}); err != nil {
+		t.Fatalf("complete the fixture attempt for %s: %v", cur.ID, err)
+	}
 	return assignmentStep(t, cur, func() (*assignment.Assignment, error) {
 		return store.Complete(assignment.FencedParams{
 			ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: assignment.Actor{Address: cur.Recipient, Kind: "agent"},
@@ -571,5 +617,143 @@ func TestAssignment_NoRegistryActionCreatesAProject(t *testing.T) {
 				t.Errorf("the advertised vocabulary offers the operator-only action %q", action)
 			}
 		}
+	}
+}
+
+// TestAssignmentReadSurfacesCarryExecutionStateIsF9 proves the
+// AGENT-facing read surface exposes the same derived execution authority
+// the CLI does: an agent reading its own assignment sees that it is
+// superseded or recovery-required, not merely its stored state.
+func TestAssignmentReadSurfacesCarryExecutionStateIsF9(t *testing.T) {
+	dm := newTestDMForTools(t)
+	if _, err := dm.SQLDB().Exec(
+		`INSERT INTO projects (id, created_by) VALUES ('cpj-agent-readstate', 'boundary-test')`); err != nil {
+		t.Fatalf("seed the project: %v", err)
+	}
+	// A controllable clock: the supersession requires the original's
+	// lease to have expired, and sleeping for it would make the test
+	// slow for no benefit.
+	now := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	store := assignment.NewStoreWithClock(dm, func() time.Time { return now })
+	auth := assignment.NewLocalOperatorAuthority("boundary-test")
+	root, _, err := store.CreateRoot(auth, assignment.CreateRootParams{
+		ProjectID: "cpj-agent-readstate", Title: "root", Objective: "o", Recipient: "alpha",
+		IdempotencyKey: "idem:f9:root", PermittedOperations: []string{"read"},
+		EligibleRecipients: []string{"alpha", "beta"}, MaxDepth: 3, MaxTasks: 16,
+		MaxConcurrency: 2, MaxResourceUnits: 100,
+	})
+	if err != nil {
+		t.Fatalf("create the root: %v", err)
+	}
+	child, _, err := store.Delegate(assignment.DelegateParams{
+		ParentID: root.ID, Title: "child", Objective: "o", Recipient: "alpha",
+		Role: assignment.RoleImplementer, IdempotencyKey: "idem:f9:child",
+		Actor: auth.Actor(),
+	})
+	if err != nil {
+		t.Fatalf("delegate: %v", err)
+	}
+	actor := assignment.Actor{Address: "alpha", Kind: "agent"}
+	for _, step := range []func(assignment.FencedParams) (*assignment.Assignment, error){
+		store.Deliver, store.Acknowledge, store.Accept,
+	} {
+		if _, err := step(assignment.FencedParams{ID: child.ID, Actor: actor}); err != nil {
+			t.Fatalf("advance: %v", err)
+		}
+	}
+	claimed, err := store.Claim(assignment.ClaimParams{
+		ID: child.ID, ExpectedEpoch: 0, Owner: "alpha", LeaseSeconds: 600, Actor: actor,
+	})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if _, err := store.Start(assignment.FencedParams{
+		ID: child.ID, Epoch: claimed.ClaimEpoch, Actor: actor}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	att, err := store.BeginAttempt(assignment.BeginAttemptParams{
+		TaskID: child.ID, Epoch: claimed.ClaimEpoch, Runtime: assignment.RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses-f9",
+		CorrelationRef: "corr-f9", WorkspaceID: "ws", WorkspacePath: "/tmp/ws"})
+	if err != nil {
+		t.Fatalf("begin attempt: %v", err)
+	}
+	if _, err := store.MarkAttemptAmbiguous(assignment.SessionStateParams{
+		AttemptID: att.ID, Epoch: claimed.ClaimEpoch, Error: "lost"}); err != nil {
+		t.Fatalf("mark ambiguous: %v", err)
+	}
+
+	// show: the derived state distinguishes "stored in_progress" from
+	// "cannot proceed".
+	shownRaw, err := handleMpmAssignment(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "show", "params": map[string]interface{}{"id": child.ID},
+	})
+	if err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	shown, ok := shownRaw.(*assignment.AssignmentView)
+	if !ok {
+		t.Fatalf("show returned %T, want the execution-aware view", shownRaw)
+	}
+	if shown.State != assignment.StateInProgress {
+		t.Fatalf("the stored state is %q, want in_progress", shown.State)
+	}
+	if shown.EffectiveState != "recovery_required" {
+		t.Fatalf("effective_state=%q, want recovery_required", shown.EffectiveState)
+	}
+
+	// tree: the same statuses, per task.
+	treeRaw, err := handleMpmAssignment(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "tree", "params": map[string]interface{}{"root_id": root.ID},
+	})
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	tree, ok := treeRaw.(*assignment.TreeView)
+	if !ok {
+		t.Fatalf("tree returned %T, want the tree view", treeRaw)
+	}
+	if tree.Tree == "" || tree.Recovery == "" {
+		t.Fatalf("the tree carries no derived status: %+v", tree)
+	}
+	if tree.Count != len(tree.Assignments) {
+		t.Fatalf("tree count %d, assignments %d", tree.Count, len(tree.Assignments))
+	}
+	found := false
+	for _, a := range tree.Assignments {
+		if a.ID != child.ID {
+			continue
+		}
+		found = true
+		if a.EffectiveState != "recovery_required" {
+			t.Fatalf("tree item effective_state=%q, want recovery_required", a.EffectiveState)
+		}
+	}
+	if !found {
+		t.Fatalf("the tree does not list the child")
+	}
+
+	// After an operator supersession the same read says `superseded`.
+	now = now.Add(2 * time.Hour)
+	if _, err := store.Supersede(auth, assignment.SupersedeParams{
+		SupersededID: child.ID, AttemptID: att.ID, Epoch: claimed.ClaimEpoch,
+		Replacement: assignment.SupersedeTaskParams{
+			Title: "redo", Objective: "o", Recipient: "beta",
+			ResourceUnits: 1, BaseSHA: strings.Repeat("a", 40)},
+		Reviewer: assignment.SupersedeTaskParams{
+			Title: "review", Objective: "o", Recipient: "alpha", ResourceUnits: 1},
+		EvidenceRef: "gh:test/f9#1", Justification: "fixture",
+	}); err != nil {
+		t.Fatalf("supersede: %v", err)
+	}
+	afterRaw, err := handleMpmAssignment(dm, mpminternal.ActiveContext{}, map[string]interface{}{
+		"action": "show", "params": map[string]interface{}{"id": child.ID},
+	})
+	if err != nil {
+		t.Fatalf("show after supersession: %v", err)
+	}
+	after := afterRaw.(*assignment.AssignmentView)
+	if after.EffectiveState != "superseded" {
+		t.Fatalf("effective_state=%q after supersession, want superseded", after.EffectiveState)
 	}
 }

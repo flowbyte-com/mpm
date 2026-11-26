@@ -207,6 +207,10 @@ func isIdentChar(c byte) bool {
 // parseTriggerStatement splits a CREATE TRIGGER statement into its name
 // and its body (everything from the trigger name onward is the body for
 // normalisation; the name is extracted from the header).
+//
+// The name may be bare, quoted, or schema-qualified, and the qualifier
+// and the name may be quoted independently — `"main"."trg_x"`,
+// `main.trg_x`, `[main].[trg_x]` and `trg_x` all name `trg_x` (B1).
 func parseTriggerStatement(stmt string) (name, body string, err error) {
 	s := strings.TrimSpace(stmt)
 	upper := strings.ToUpper(s)
@@ -218,114 +222,266 @@ func parseTriggerStatement(stmt string) (name, body string, err error) {
 	if strings.HasPrefix(restUpper, "IF NOT EXISTS") {
 		rest = strings.TrimSpace(rest[len("IF NOT EXISTS"):])
 	}
-	// The name is the next token, possibly quoted or schema-qualified.
-	nameTok := rest
-	if i := strings.IndexAny(rest, " \t\n\r("); i >= 0 {
-		nameTok = rest[:i]
-	}
-	name = strings.Trim(nameTok, "\"'`[]")
-	if idx := strings.LastIndex(name, "."); idx >= 0 {
-		name = name[idx+1:]
-	}
-	if name == "" {
+	name, _, ok := parseQualifiedIdentifier(rest)
+	if !ok || name == "" {
 		return "", "", fmt.Errorf("restore: trigger without a name")
 	}
 	return name, s, nil
 }
 
+// parseTriggerTarget returns the table a CREATE TRIGGER is defined ON.
+//
+// The target lives in the validated statement header (`... ON <table>
+// ... BEGIN`), so it is parsed from there rather than guessed from the
+// body. A body that merely READS a managed table does not make its
+// trigger a managed-table trigger (F11).
+func parseTriggerTarget(stmt string) (string, bool) {
+	s := stripSQLComments(strings.TrimSpace(stmt))
+	upper := strings.ToUpper(s)
+	if !strings.HasPrefix(upper, "CREATE TRIGGER") {
+		return "", false
+	}
+	// The header ends at BEGIN (or at the WHEN clause's expression,
+	// which follows ON). Scan tokens and keep the LAST `ON` token
+	// before BEGIN: the header grammar contains exactly one, and the
+	// event's optional column list cannot contain an unquoted ON.
+	begin := strings.Index(upper, "BEGIN")
+	header := s
+	if begin >= 0 {
+		header = s[:begin]
+	}
+	tokens := tokenizeSQL(header)
+	target := ""
+	for i, t := range tokens {
+		if t.kind != sqlTokenWord || !strings.EqualFold(t.text, "ON") || i+1 >= len(tokens) {
+			continue
+		}
+		// The target may be schema-qualified (`main.memories`,
+		// `"main"."memories"`): take the FINAL component.
+		j := i + 1
+		if tokens[j].kind != sqlTokenWord && tokens[j].kind != sqlTokenIdentifier {
+			continue
+		}
+		component := tokens[j].text
+		j++
+		for j+1 < len(tokens) &&
+			tokens[j].kind == sqlTokenOperator && tokens[j].text == "." &&
+			(tokens[j+1].kind == sqlTokenWord || tokens[j+1].kind == sqlTokenIdentifier) {
+			component = tokens[j+1].text
+			j += 2
+		}
+		target = component
+	}
+	if target == "" {
+		return "", false
+	}
+	return strings.ToLower(target), true
+}
+
+// ── identifier and token scanning ────────────────────────────────────────
+
+// scanIdentifier consumes one SQL identifier at the start of s and
+// returns its unquoted text plus the remainder. Quoted forms
+// ("x", `x`, [x]) unquote; a doubled closing quote is a literal.
+func scanIdentifier(s string) (ident, rest string, ok bool) {
+	s = strings.TrimLeft(s, " \t\n\r\f")
+	if s == "" {
+		return "", s, false
+	}
+	switch s[0] {
+	case '"', '`', '[':
+		open := s[0]
+		closeCh := open
+		if open == '[' {
+			closeCh = ']'
+		}
+		var b strings.Builder
+		for i := 1; i < len(s); i++ {
+			c := s[i]
+			if c != closeCh {
+				b.WriteByte(c)
+				continue
+			}
+			if i+1 < len(s) && s[i+1] == closeCh {
+				b.WriteByte(closeCh)
+				i++
+				continue
+			}
+			return b.String(), s[i+1:], true
+		}
+		return "", s, false // unterminated
+	default:
+		i := 0
+		for i < len(s) && isIdentChar(s[i]) {
+			i++
+		}
+		if i == 0 {
+			return "", s, false
+		}
+		return s[:i], s[i:], true
+	}
+}
+
+// parseQualifiedIdentifier parses `[schema .] name` and returns the
+// FINAL component — the object's own name — plus the remainder.
+func parseQualifiedIdentifier(s string) (name, rest string, ok bool) {
+	name, rest, ok = scanIdentifier(s)
+	if !ok {
+		return "", s, false
+	}
+	for {
+		r := strings.TrimLeft(rest, " \t\n\r\f")
+		if !strings.HasPrefix(r, ".") {
+			return name, rest, true
+		}
+		next, r2, ok2 := scanIdentifier(r[1:])
+		if !ok2 {
+			return name, rest, true
+		}
+		name, rest = next, r2
+	}
+}
+
+// trimIdentifierToken returns the final component of a possibly
+// qualified identifier token, or "" when it is not one.
+func trimIdentifierToken(tok string) string {
+	name, _, ok := parseQualifiedIdentifier(strings.TrimSpace(tok))
+	if !ok {
+		return ""
+	}
+	return name
+}
+
+// ── token-aware normalisation ────────────────────────────────────────────
+
+// sqlTokenKind classifies one token in the comparison form.
+type sqlTokenKind int
+
+const (
+	sqlTokenWord       sqlTokenKind = iota // keyword, identifier or number
+	sqlTokenIdentifier                     // a QUOTED identifier, unquoted
+	sqlTokenString                         // a single-quoted literal, verbatim
+	sqlTokenOperator                       // operator or punctuation
+)
+
+// sqlToken is one token of the comparison form.
+type sqlToken struct {
+	kind sqlTokenKind
+	text string
+}
+
+// sqlOperators are the multi-character operators SQLite recognises.
+// Matching is longest-first so `->>` cannot be read as `-` `>` `>`.
+var sqlOperators = []string{
+	"->>", "||", "<=", ">=", "<>", "!=", "==", "<<", ">>", "->",
+}
+
+// tokenizeSQL splits SQL text into tokens while preserving string
+// literals and unquoting quoted identifiers. Comments must already be
+// stripped. Tokens are case-folded EXCEPT string literals, which are
+// preserved byte for byte: only their characters carry meaning.
+func tokenizeSQL(s string) []sqlToken {
+	var out []sqlToken
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f':
+			i++
+		case c == '\'':
+			start := i
+			i++
+			for i < len(s) {
+				if s[i] == '\'' {
+					if i+1 < len(s) && s[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			out = append(out, sqlToken{kind: sqlTokenString, text: s[start:i]})
+		case c == '"' || c == '`' || c == '[':
+			ident, rest, ok := scanIdentifier(s[i:])
+			if !ok {
+				// Unterminated quote: keep the remainder as one token
+				// so the comparison cannot silently drop it.
+				out = append(out, sqlToken{kind: sqlTokenIdentifier, text: strings.ToUpper(s[i:])})
+				return out
+			}
+			out = append(out, sqlToken{kind: sqlTokenIdentifier, text: strings.ToUpper(ident)})
+			i = len(s) - len(rest)
+		default:
+			if matched := matchOperator(s[i:]); matched != "" {
+				out = append(out, sqlToken{kind: sqlTokenOperator, text: matched})
+				i += len(matched)
+				continue
+			}
+			if isIdentChar(c) {
+				start := i
+				for i < len(s) && isIdentChar(s[i]) {
+					i++
+				}
+				out = append(out, sqlToken{kind: sqlTokenWord, text: strings.ToUpper(s[start:i])})
+				continue
+			}
+			out = append(out, sqlToken{kind: sqlTokenOperator, text: string(c)})
+			i++
+		}
+	}
+	return out
+}
+
+// matchOperator returns the longest operator at the start of s.
+func matchOperator(s string) string {
+	for _, op := range sqlOperators {
+		if strings.HasPrefix(s, op) {
+			return op
+		}
+	}
+	switch s[0] {
+	case '=', '<', '>', '(', ')', ',', ';', '.', '+', '-', '*', '/', '%', '&', '|', '~':
+		return string(s[0])
+	}
+	return ""
+}
+
 // normalizeTriggerBody renders the canonical comparison form: comments
 // stripped, IF NOT EXISTS dropped, identifier quoting and schema
-// qualification removed, whitespace collapsed, SQL keywords and
-// identifiers case-folded, string literals preserved byte for byte.
+// qualification removed, tokens separated by a single space, keywords
+// and unquoted identifiers case-folded, string literals preserved byte
+// for byte. Whitespace differences — including those around
+// multi-character operators such as `||` — carry no meaning (B1).
 func normalizeTriggerBody(s string) string {
 	s = stripSQLComments(s)
 	// Drop IF NOT EXISTS (case-insensitive, word-boundaried).
 	reIfNotExists := regexp.MustCompile(`(?i)\bIF\s+NOT\s+EXISTS\b`)
 	s = reIfNotExists.ReplaceAllString(s, " ")
-	// Strip identifier quoting: "x", [x], `x` -> x. String literals
-	// use single quotes and are preserved.
-	var b strings.Builder
-	inStr := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '\'' {
-			if inStr && i+1 < len(s) && s[i+1] == '\'' {
-				b.WriteString("''")
-				i++
-				continue
-			}
-			inStr = !inStr
-			b.WriteByte(c)
+	tokens := tokenizeSQL(s)
+	// Drop a `main.` schema qualifier wherever it appears. The
+	// qualifier is an identifier token followed by a dot operator;
+	// quoted and bare forms have already converged.
+	filtered := make([]sqlToken, 0, len(tokens))
+	for i := 0; i < len(tokens); i++ {
+		if (tokens[i].kind == sqlTokenWord || tokens[i].kind == sqlTokenIdentifier) &&
+			tokens[i].text == "MAIN" &&
+			i+1 < len(tokens) && tokens[i+1].kind == sqlTokenOperator && tokens[i+1].text == "." {
+			i++ // skip the qualifier AND its dot
 			continue
 		}
-		if inStr {
-			b.WriteByte(c)
-			continue
-		}
-		if c == '"' || c == '[' || c == ']' || c == '`' {
-			continue
-		}
-		b.WriteByte(c)
+		filtered = append(filtered, tokens[i])
 	}
-	s = b.String()
-	// Drop schema qualification on known objects: main.<name> -> <name>.
-	// Conservative: only the main schema qualifier.
-	reSchema := regexp.MustCompile(`(?i)\bmain\s*\.\s*`)
-	s = reSchema.ReplaceAllString(s, "")
-	// Collapse whitespace and case-fold outside string literals.
-	// Spaces adjacent to operator punctuation (= < > ( ) , ;) carry no
-	// meaning and are dropped, so `a='x'` and `a = 'x'` compare equal.
-	// String literals are preserved byte for byte.
-	var out strings.Builder
-	inStr = false
-	needSpace := false
-	isPunct := func(c byte) bool {
-		switch c {
-		case '=', '<', '>', '(', ')', ',', ';':
-			return true
-		}
-		return false
+	// A trailing statement terminator is not part of the definition:
+	// sqlite_master stores trigger text without it and the migration
+	// text carries it.
+	for len(filtered) > 0 && filtered[len(filtered)-1].kind == sqlTokenOperator &&
+		filtered[len(filtered)-1].text == ";" {
+		filtered = filtered[:len(filtered)-1]
 	}
-	lastWritten := func() byte {
-		s := out.String()
-		if len(s) == 0 {
-			return 0
-		}
-		return s[len(s)-1]
+	parts := make([]string, len(filtered))
+	for i, t := range filtered {
+		parts[i] = t.text
 	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '\'' {
-			if inStr && i+1 < len(s) && s[i+1] == '\'' {
-				out.WriteString("''")
-				i++
-				continue
-			}
-			inStr = !inStr
-			out.WriteByte(c)
-			needSpace = false
-			continue
-		}
-		if inStr {
-			out.WriteByte(c)
-			continue
-		}
-		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' {
-			needSpace = true
-			continue
-		}
-		if needSpace {
-			if out.Len() > 0 && !isPunct(lastWritten()) && !isPunct(c) {
-				out.WriteByte(' ')
-			}
-			needSpace = false
-		}
-		if c >= 'a' && c <= 'z' {
-			c = c - 'a' + 'A'
-		}
-		out.WriteByte(c)
-	}
-	// Trailing statement terminator: sqlite_master stores trigger text
-	// without it, migration text carries it.
-	return strings.TrimSuffix(strings.TrimSpace(out.String()), ";")
+	return strings.Join(parts, " ")
 }

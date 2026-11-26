@@ -12,16 +12,37 @@ package internal
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 )
 
+// restoreValueKind is the SQL type of one parsed literal.
+//
+// The kind is CARRIED through parsing rather than re-derived from the
+// text at render time. A value's SQL type is a property of how the dump
+// spelled it (quoted or bare), not of what the characters happen to look
+// like: `'007'` is TEXT and must stay `007`, never become the integer 7.
+type restoreValueKind int
+
+const (
+	restoreKindNull restoreValueKind = iota
+	restoreKindText
+	restoreKindNumber
+	restoreKindBlob
+)
+
 // restoreValue is one parsed literal.
 type restoreValue struct {
-	null bool
-	text string // unescaped text for strings; raw token for numbers
+	kind restoreValueKind
+	// text holds the DECODED text for kindText and the original SQL
+	// token for kindNumber/kindBlob.
+	text string
 }
+
+// isNull reports a NULL literal.
+func (v restoreValue) isNull() bool { return v.kind == restoreKindNull }
 
 // restoreRow is one parsed INSERT row.
 type restoreRow struct {
@@ -51,6 +72,24 @@ type restoreModel struct {
 	other []string
 }
 
+// restoreParsedTables are the tables whose rows are parsed for semantic
+// inspection or dependency ordering (contract §4.6/B2). Every other
+// table's INSERT statements pass through VERBATIM: the dump is the
+// authority for them, and the canonical validator already vetted them.
+//
+// Parsing all INSERTs was the F1 defect: a genuine `sqlite3 .dump`
+// carries `replace(...)`, `char(...)` and blob literals in ordinary
+// application tables (memories, FTS shadow tables, artifacts), and a
+// parser that runs before the target is known refuses legal dumps.
+var restoreParsedTables = map[string]bool{
+	"agent_tasks":              true,
+	"agent_task_events":        true,
+	"agent_task_sessions":      true,
+	"agent_task_supersessions": true,
+	"projects":                 true,
+	"schema_migrations":        true,
+}
+
 // parseRestoreModel parses validated dump statements into the replay
 // model. Column lists come from the dump's own CREATE TABLE text; a
 // managed INSERT without a resolvable column order is refused rather
@@ -76,11 +115,22 @@ func parseRestoreModel(statements []string) (*restoreModel, error) {
 		case strings.HasPrefix(upper, "CREATE "):
 			m.createStmts = append(m.createStmts, stmt)
 		case strings.HasPrefix(upper, "INSERT INTO"):
+			// Inspect the TARGET before parsing values. Only the
+			// tables this pipeline reasons about are parsed; anything
+			// else is the dump's own business and replays verbatim.
+			table, err := insertTargetTable(stmt)
+			if err != nil {
+				return nil, err
+			}
+			lower := strings.ToLower(table)
+			if !restoreParsedTables[lower] {
+				m.passthrough = append(m.passthrough, stmt)
+				continue
+			}
 			row, err := parseInsertRow(stmt, m.tableCols)
 			if err != nil {
 				return nil, err
 			}
-			lower := strings.ToLower(row.table)
 			if managedRestoreTables[lower] {
 				m.managed[lower] = append(m.managed[lower], *row)
 				continue
@@ -89,14 +139,12 @@ func parseRestoreModel(statements []string) (*restoreModel, error) {
 				m.projects = append(m.projects, *row)
 				continue
 			}
-			if lower == "schema_migrations" {
-				for _, v := range row.vals {
-					if !v.null {
-						m.sentinels[v.text] = true
-					}
+			// schema_migrations: sentinel ids feed classification, and
+			// the row itself replays verbatim.
+			for _, v := range row.vals {
+				if !v.isNull() {
+					m.sentinels[v.text] = true
 				}
-				m.passthrough = append(m.passthrough, stmt)
-				continue
 			}
 			m.passthrough = append(m.passthrough, stmt)
 		default:
@@ -108,6 +156,32 @@ func parseRestoreModel(statements []string) (*restoreModel, error) {
 	// schema first — but an INSERT that arrived before its table
 	// definition fails closed instead of guessing.
 	return m, nil
+}
+
+// insertTargetTable reads the table token of an INSERT statement
+// without parsing its values. This is the F1 boundary: the target
+// decides whether the statement is managed rows or passthrough, and no
+// value grammar is applied to a statement that will not be replayed
+// through the model.
+func insertTargetTable(stmt string) (string, error) {
+	upper := strings.ToUpper(stmt)
+	idx := strings.Index(upper, "INSERT INTO")
+	if idx < 0 {
+		return "", fmt.Errorf("restore: not an INSERT statement")
+	}
+	rest := strings.TrimSpace(stmt[idx+len("INSERT INTO"):])
+	if rest == "" {
+		return "", fmt.Errorf("restore: INSERT without a target")
+	}
+	tok := rest
+	if i := strings.IndexAny(rest, " \t\n\r("); i >= 0 {
+		tok = rest[:i]
+	}
+	table := trimIdentifierToken(tok)
+	if table == "" {
+		return "", fmt.Errorf("restore: INSERT without a target")
+	}
+	return table, nil
 }
 
 // parseCreateTableColumns extracts the table name and top-level column
@@ -231,20 +305,17 @@ func splitTopLevel(s string) []string {
 // list and one or more VALUES tuples. Multi-row VALUES produce one
 // restoreRow per tuple.
 func parseInsertRow(stmt string, tableCols map[string][]string) (*restoreRow, error) {
+	table, err := insertTargetTable(stmt)
+	if err != nil {
+		return nil, err
+	}
 	upper := strings.ToUpper(stmt)
 	idx := strings.Index(upper, "INSERT INTO")
-	if idx < 0 {
-		return nil, fmt.Errorf("restore: not an INSERT statement")
-	}
 	rest := strings.TrimSpace(stmt[idx+len("INSERT INTO"):])
 	// Table token ends at whitespace or '('.
 	tok := rest
 	if i := strings.IndexAny(rest, " \t\n\r("); i >= 0 {
 		tok = rest[:i]
-	}
-	table := strings.Trim(tok, "\"'`[]")
-	if idx := strings.LastIndex(table, "."); idx >= 0 {
-		table = table[idx+1:]
 	}
 	after := strings.TrimSpace(rest[len(tok):])
 	var cols []string
@@ -358,9 +429,27 @@ func splitValueTuples(s string) ([]string, error) {
 	return out, nil
 }
 
-// parseValueTuple parses one "(...)" body into literals. Supported:
-// single-quoted strings (with ” escapes), integers, floats, NULL and
-// bare keywords TRUE/FALSE (stored as 1/0). Anything else fails closed.
+// sqlNumberRe matches a SQL numeric literal. Parsing a token as a Go
+// float is NOT the same question: Go accepts "Inf" and "NaN", which are
+// not SQL literals, and it ignores the leading zeros that make the
+// token's SPELLING significant.
+var sqlNumberRe = regexp.MustCompile(`^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$|^[+-]?0[xX][0-9a-fA-F]+$`)
+
+// parseValueTuple parses one "(...)" body into typed literals. Every SQL
+// value kind a genuine `sqlite3 .dump` emits is recognised:
+//
+//   - NULL;
+//   - single-quoted text (with ” escapes);
+//   - the bounded replace(<text>, '<escape>', char(<code>)) form the
+//     shell uses for control characters, nested left-to-right;
+//   - blob literals X'…';
+//   - integer and real literals, TRUE/FALSE (stored as 1/0).
+//
+// Anything else fails closed. This is deliberately a closed grammar, not
+// an expression evaluator: the validator already refused anything that
+// is not a canonical table INSERT, and a dump expression this parser
+// does not recognise is a dump shape the restore does not claim to
+// support.
 func parseValueTuple(body string) ([]restoreValue, error) {
 	parts := splitTopLevel(body)
 	out := make([]restoreValue, 0, len(parts))
@@ -371,51 +460,134 @@ func parseValueTuple(body string) ([]restoreValue, error) {
 		}
 		up := strings.ToUpper(p)
 		if up == "NULL" {
-			out = append(out, restoreValue{null: true})
-			continue
-		}
-		if strings.HasPrefix(p, "'") {
-			if len(p) < 2 || !strings.HasSuffix(p, "'") {
-				return nil, fmt.Errorf("restore: unterminated string literal")
-			}
-			inner := p[1 : len(p)-1]
-			var b strings.Builder
-			for i := 0; i < len(inner); i++ {
-				if inner[i] == '\'' {
-					if i+1 < len(inner) && inner[i+1] == '\'' {
-						b.WriteByte('\'')
-						i++
-						continue
-					}
-					return nil, fmt.Errorf("restore: bad string escape")
-				}
-				b.WriteByte(inner[i])
-			}
-			out = append(out, restoreValue{text: b.String()})
-			continue
-		}
-		if up == "TRUE" {
-			out = append(out, restoreValue{text: "1"})
-			continue
-		}
-		if up == "FALSE" {
-			out = append(out, restoreValue{text: "0"})
-			continue
-		}
-		if _, err := strconv.ParseInt(p, 10, 64); err == nil {
-			out = append(out, restoreValue{text: p})
-			continue
-		}
-		if _, err := strconv.ParseFloat(p, 64); err == nil {
-			out = append(out, restoreValue{text: p})
+			out = append(out, restoreValue{kind: restoreKindNull})
 			continue
 		}
 		if strings.HasPrefix(p, "X'") || strings.HasPrefix(p, "x'") {
-			return nil, fmt.Errorf("restore: blob literals are not replayable")
+			if !strings.HasSuffix(p, "'") || len(p) < 3 {
+				return nil, fmt.Errorf("restore: unterminated blob literal")
+			}
+			out = append(out, restoreValue{kind: restoreKindBlob, text: p})
+			continue
+		}
+		if strings.HasPrefix(p, "'") || isReplaceLiteral(p) {
+			v, err := parseDumpTextLiteral(p)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, v)
+			continue
+		}
+		if up == "TRUE" {
+			out = append(out, restoreValue{kind: restoreKindNumber, text: "1"})
+			continue
+		}
+		if up == "FALSE" {
+			out = append(out, restoreValue{kind: restoreKindNumber, text: "0"})
+			continue
+		}
+		if sqlNumberRe.MatchString(p) {
+			out = append(out, restoreValue{kind: restoreKindNumber, text: p})
+			continue
 		}
 		return nil, fmt.Errorf("restore: unsupported literal %q", p)
 	}
 	return out, nil
+}
+
+// isReplaceLiteral reports the sqlite shell's escaped-text form.
+func isReplaceLiteral(p string) bool {
+	lower := strings.ToLower(strings.TrimSpace(p))
+	return strings.HasPrefix(lower, "replace(") && strings.HasSuffix(lower, ")")
+}
+
+// parseDumpTextLiteral parses a recognised TEXT representation from a
+// SQLite dump: a single-quoted literal, or the shell's
+// replace(<text>, '<escape>', char(<code>)) wrapper for control
+// characters (the shell escapes LF and CR, choosing an escape token that
+// does not collide with the text and escaping the token itself when it
+// would).
+//
+// The recursion is bounded by the nesting the shell emits (one wrapper
+// per escaped character class) and the grammar is closed: the inner
+// value must be another recognised text representation, the search token
+// a plain literal, and the replacement exactly char(<integer>). No other
+// expression shape is interpreted.
+func parseDumpTextLiteral(p string) (restoreValue, error) {
+	p = strings.TrimSpace(p)
+	if strings.HasPrefix(p, "'") {
+		decoded, rest, err := decodeQuotedLiteral(p)
+		if err != nil {
+			return restoreValue{}, err
+		}
+		if strings.TrimSpace(rest) != "" {
+			return restoreValue{}, fmt.Errorf("restore: trailing text after string literal %q", p)
+		}
+		return restoreValue{kind: restoreKindText, text: decoded}, nil
+	}
+	if !isReplaceLiteral(p) {
+		return restoreValue{}, fmt.Errorf("restore: unsupported text literal %q", p)
+	}
+	inner := strings.TrimSpace(p[len("replace(") : len(p)-1])
+	args := splitTopLevel(inner)
+	if len(args) != 3 {
+		return restoreValue{}, fmt.Errorf("restore: replace() needs three arguments")
+	}
+	base, err := parseDumpTextLiteral(strings.TrimSpace(args[0]))
+	if err != nil {
+		return restoreValue{}, err
+	}
+	esc, rest, err := decodeQuotedLiteral(strings.TrimSpace(args[1]))
+	if err != nil {
+		return restoreValue{}, err
+	}
+	if strings.TrimSpace(rest) != "" {
+		return restoreValue{}, fmt.Errorf("restore: unsupported replace() search token %q", args[1])
+	}
+	code, err := parseCharCall(strings.TrimSpace(args[2]))
+	if err != nil {
+		return restoreValue{}, err
+	}
+	if esc == "" {
+		return restoreValue{}, fmt.Errorf("restore: replace() with an empty search token")
+	}
+	base.text = strings.ReplaceAll(base.text, esc, string(rune(code)))
+	return base, nil
+}
+
+// decodeQuotedLiteral decodes a single-quoted SQL literal, returning the
+// decoded text and the remainder after the closing quote.
+func decodeQuotedLiteral(p string) (string, string, error) {
+	if !strings.HasPrefix(p, "'") {
+		return "", p, fmt.Errorf("restore: not a string literal")
+	}
+	var b strings.Builder
+	for i := 1; i < len(p); i++ {
+		c := p[i]
+		if c != '\'' {
+			b.WriteByte(c)
+			continue
+		}
+		if i+1 < len(p) && p[i+1] == '\'' {
+			b.WriteByte('\'')
+			i++
+			continue
+		}
+		return b.String(), p[i+1:], nil
+	}
+	return "", p, fmt.Errorf("restore: unterminated string literal")
+}
+
+// parseCharCall parses the shell's char(<integer>) replacement argument.
+func parseCharCall(p string) (int, error) {
+	if len(p) < len("char()") || !strings.EqualFold(p[:len("char(")], "char(") || p[len(p)-1] != ')' {
+		return 0, fmt.Errorf("restore: replace() replacement must be char(<code>)")
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(p[len("char(") : len(p)-1]))
+	if err != nil || n < 0 || n > 0x10FFFF {
+		return 0, fmt.Errorf("restore: invalid char() code in %q", p)
+	}
+	return n, nil
 }
 
 // rowMap renders a parsed row as column->value.
@@ -449,7 +621,7 @@ func (m *restoreModel) resequencedInserts() ([]string, error) {
 	for _, r := range m.managed["agent_tasks"] {
 		rm := r.rowMap()
 		if id, ok := rm["id"]; ok {
-			if key, ok := rm["idempotency_key"]; ok && !key.null &&
+			if key, ok := rm["idempotency_key"]; ok && !key.isNull() &&
 				strings.HasPrefix(key.text, "supersede:") {
 				reserved[id.text] = true
 			}
@@ -476,7 +648,7 @@ func (m *restoreModel) resequencedInserts() ([]string, error) {
 			rm := r.rowMap()
 			id, _ := rm["id"]
 			parent, _ := rm["parent_id"]
-			parentOK := parent.null || parent.text == "" || insertedTasks[parent.text]
+			parentOK := parent.isNull() || parent.text == "" || insertedTasks[parent.text]
 			namedOK := true
 			if reserved[id.text] {
 				namedOK = false
@@ -552,7 +724,11 @@ func (m *restoreModel) resequencedInserts() ([]string, error) {
 	return out, nil
 }
 
-// an explicit column list.
+// renderInsert emits the explicit column list and a VALUES tuple whose
+// literals keep their PARSED TYPE. Text is always quoted; numbers and
+// blobs replay their validated original token. Nothing infers a type
+// from a value's characters, so `'007'`, `'1e5'` and `'-0'` survive a
+// round trip unchanged (F6).
 func renderInsert(r restoreRow) string {
 	var b strings.Builder
 	b.WriteString("INSERT INTO \"")
@@ -571,21 +747,16 @@ func renderInsert(r restoreRow) string {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		if v.null {
+		switch v.kind {
+		case restoreKindNull:
 			b.WriteString("NULL")
-			continue
-		}
-		if _, err := strconv.ParseInt(v.text, 10, 64); err == nil {
+		case restoreKindNumber, restoreKindBlob:
 			b.WriteString(v.text)
-			continue
+		default:
+			b.WriteString("'")
+			b.WriteString(strings.ReplaceAll(v.text, "'", "''"))
+			b.WriteString("'")
 		}
-		if _, err := strconv.ParseFloat(v.text, 64); err == nil {
-			b.WriteString(v.text)
-			continue
-		}
-		b.WriteString("'")
-		b.WriteString(strings.ReplaceAll(v.text, "'", "''"))
-		b.WriteString("'")
 	}
 	b.WriteString(")")
 	return b.String()

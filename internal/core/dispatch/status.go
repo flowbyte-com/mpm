@@ -171,18 +171,35 @@ func Status(store *assignment.Store, cfg Config) (*StatusReport, error) {
 	// Every item carries the execution-aware reading, from the same
 	// EffectiveState every guard uses. The state column stays the
 	// stored state; the effective column says what it MEANS.
-	annotate := func(items []StatusItem) []StatusItem {
-		for i := range items {
-			if es, err := store.EffectiveState(items[i].AssignmentID); err == nil {
-				items[i].EffectiveState = es
-			}
-		}
-		return items
+	if err := annotateEffective(out.Pending, store.EffectiveState); err != nil {
+		return nil, err
 	}
-	out.Pending = annotate(out.Pending)
-	out.Blocked = annotate(out.Blocked)
-	out.Recoverable = annotate(out.Recoverable)
+	if err := annotateEffective(out.Blocked, store.EffectiveState); err != nil {
+		return nil, err
+	}
+	if err := annotateEffective(out.Recoverable, store.EffectiveState); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// annotateEffective fills each item's execution-aware state.
+//
+// A FAILURE IS RETURNED, never swallowed. An empty effective state would
+// read as "nothing blocks this", which is the most dangerous possible
+// lie for an operator deciding whether to enable the dispatcher (F12).
+// The lookup is a parameter so the fault path is exercisable without
+// corrupting a real database.
+func annotateEffective(items []StatusItem, lookup func(string) (string, error)) error {
+	for i := range items {
+		es, err := lookup(items[i].AssignmentID)
+		if err != nil {
+			return fmt.Errorf("dispatch status: effective state of %s: %w",
+				items[i].AssignmentID, err)
+		}
+		items[i].EffectiveState = es
+	}
+	return nil
 }
 
 // statusCandidateLimit bounds the status read.

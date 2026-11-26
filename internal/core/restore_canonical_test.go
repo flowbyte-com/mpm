@@ -91,3 +91,101 @@ END;`
 		t.Fatal("a weakened body normalises identically: the comparison would miss it")
 	}
 }
+
+// TestTriggerNormalisationEquivalencesIsT110T116 proves B1's benign
+// differences compare EQUAL: identifier quoting, schema qualification,
+// comments, whitespace, and whitespace around multi-character operators
+// such as `||`.
+func TestTriggerNormalisationEquivalencesIsT110T116(t *testing.T) {
+	base := `CREATE TRIGGER trg_example BEFORE INSERT ON agent_tasks
+FOR EACH ROW
+WHEN (NEW.idempotency_key GLOB 'supersede:*')
+BEGIN
+    SELECT RAISE(ABORT, 'reserved');
+END;`
+	want := normalizeTriggerBody(base)
+	cases := []struct{ name, sql string }{
+		{"quoted name", `CREATE TRIGGER "trg_example" BEFORE INSERT ON agent_tasks
+FOR EACH ROW WHEN (NEW.idempotency_key GLOB 'supersede:*')
+BEGIN SELECT RAISE(ABORT, 'reserved'); END;`},
+		{"schema-qualified quoted name", `CREATE TRIGGER "main"."trg_example" BEFORE INSERT ON agent_tasks
+FOR EACH ROW WHEN (NEW.idempotency_key GLOB 'supersede:*')
+BEGIN SELECT RAISE(ABORT, 'reserved'); END;`},
+		{"bracket quoting", `CREATE TRIGGER [main].[trg_example] BEFORE INSERT ON [agent_tasks]
+FOR EACH ROW WHEN (NEW.idempotency_key GLOB 'supersede:*')
+BEGIN SELECT RAISE(ABORT, 'reserved'); END;`},
+		{"if not exists", `CREATE TRIGGER IF NOT EXISTS trg_example BEFORE INSERT ON agent_tasks
+FOR EACH ROW WHEN (NEW.idempotency_key GLOB 'supersede:*')
+BEGIN SELECT RAISE(ABORT, 'reserved'); END;`},
+		{"comments", `-- a leading comment
+CREATE TRIGGER trg_example /* inline */ BEFORE INSERT ON agent_tasks
+FOR EACH ROW WHEN (NEW.idempotency_key GLOB 'supersede:*') -- trailing
+BEGIN
+    SELECT RAISE(ABORT, 'reserved');
+END;`},
+		{"whitespace", "CREATE   TRIGGER\ntrg_example\tBEFORE  INSERT   ON agent_tasks\nFOR EACH ROW\nWHEN (NEW.idempotency_key GLOB 'supersede:*')\nBEGIN\n  SELECT RAISE(ABORT,'reserved');\nEND ;"},
+	}
+	for _, c := range cases {
+		if got := normalizeTriggerBody(c.sql); got != want {
+			t.Errorf("%s normalised to\n  %s\nwant\n  %s", c.name, got, want)
+		}
+	}
+}
+
+// TestTriggerNormalisationOperatorWhitespaceIsT116 pins the multi-
+// character operator case specifically: `a || b` and `a||b` are the same
+// expression, and the normaliser must not treat the spacing as
+// significant.
+func TestTriggerNormalisationOperatorWhitespaceIsT116(t *testing.T) {
+	spaced := `CREATE TRIGGER trg_op BEFORE INSERT ON agent_tasks FOR EACH ROW
+WHEN ('x' || NEW.id = 'y') BEGIN SELECT RAISE(ABORT, 'n'); END;`
+	tight := `CREATE TRIGGER trg_op BEFORE INSERT ON agent_tasks FOR EACH ROW
+WHEN ('x'||NEW.id='y') BEGIN SELECT RAISE(ABORT, 'n'); END;`
+	if normalizeTriggerBody(spaced) != normalizeTriggerBody(tight) {
+		t.Fatalf("spacing around || changed the meaning:\n  %s\n  %s",
+			normalizeTriggerBody(spaced), normalizeTriggerBody(tight))
+	}
+}
+
+// TestTriggerNormalisationKeepsMeaning proves the normaliser does not
+// equate SEMANTICALLY DIFFERENT definitions: string literals are
+// preserved byte for byte, and different operators stay different.
+func TestTriggerNormalisationKeepsMeaning(t *testing.T) {
+	different := [][2]string{
+		{`SELECT RAISE(ABORT, 'a b');`, `SELECT RAISE(ABORT, 'a  b');`},
+		{`SELECT RAISE(ABORT, 'Upper');`, `SELECT RAISE(ABORT, 'upper');`},
+		{`WHEN (NEW.id = 'x')`, `WHEN (NEW.id <> 'x')`},
+		{`WHEN (NEW.id = 'x')`, `WHEN (NEW.id >= 'x')`},
+		{`SELECT 'a' || 'b';`, `SELECT 'a' | 'b';`},
+		{`WHEN (NEW.a = 1)`, `WHEN (NEW.b = 1)`},
+	}
+	for _, pair := range different {
+		a := normalizeTriggerBody(`CREATE TRIGGER t BEFORE INSERT ON agent_tasks FOR EACH ROW BEGIN ` + pair[0] + ` END;`)
+		b := normalizeTriggerBody(`CREATE TRIGGER t BEFORE INSERT ON agent_tasks FOR EACH ROW BEGIN ` + pair[1] + ` END;`)
+		if a == b {
+			t.Errorf("the normaliser equated different definitions:\n  %s\n  %s", pair[0], pair[1])
+		}
+	}
+}
+
+// TestParseTriggerTargetUsesTheHeaderIsF11 proves the target is read
+// from the validated statement header, not guessed from the body: a
+// trigger on an unrelated table whose body merely reads a managed table
+// is NOT a managed-table trigger.
+func TestParseTriggerTargetUsesTheHeaderIsF11(t *testing.T) {
+	cases := []struct{ name, sql, want string }{
+		{"bare", `CREATE TRIGGER t AFTER INSERT ON memories BEGIN SELECT 1; END;`, "memories"},
+		{"quoted", `CREATE TRIGGER t AFTER INSERT ON "memories" BEGIN SELECT 1; END;`, "memories"},
+		{"schema-qualified", `CREATE TRIGGER t AFTER INSERT ON "main"."memories" BEGIN SELECT 1; END;`, "memories"},
+		{"bracketed", `CREATE TRIGGER t AFTER INSERT ON [memories] BEGIN SELECT 1; END;`, "memories"},
+		{"managed target", `CREATE TRIGGER t BEFORE UPDATE ON agent_tasks BEGIN SELECT 1; END;`, "agent_tasks"},
+		{"body mentions managed", `CREATE TRIGGER t AFTER INSERT ON memories BEGIN
+			INSERT INTO memories_fts(rowid, content) SELECT new.rowid, agent_tasks.title FROM agent_tasks; END;`, "memories"},
+	}
+	for _, c := range cases {
+		got, ok := parseTriggerTarget(c.sql)
+		if !ok || got != c.want {
+			t.Errorf("%s: parseTriggerTarget=%q ok=%v, want %q", c.name, got, ok, c.want)
+		}
+	}
+}

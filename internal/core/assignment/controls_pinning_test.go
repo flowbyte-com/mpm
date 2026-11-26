@@ -1086,7 +1086,7 @@ const publishedLoadBearingControls = 14
 // publishedTestFunctions is the number of test functions in the four
 // suites this PR adds. It is checked against the tree — a published
 // number nobody checks drifts.
-const publishedTestFunctions = 77
+const publishedTestFunctions = 78
 
 // publishedControls is the number of controls the harness publishes in
 // its CONTROLS list: sixteen, of which fourteen are load-bearing and

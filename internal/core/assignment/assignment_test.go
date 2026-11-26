@@ -1,7 +1,11 @@
 package assignment
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -168,6 +172,30 @@ func mustAdvance(t *testing.T, store *Store, a *Assignment, to string) *Assignme
 	}
 	t.Fatalf("no fixture path to %q", to)
 	return nil
+}
+
+// captureForVerdict records host-captured review evidence on a
+// reviewing assignment. The evidence is REAL — a file on disk and its
+// digest — because the T84 guard requires exactly that; providing it
+// keeps the evidence rule from masking the rule a test is about.
+func captureForVerdict(t *testing.T, store *Store, reviewer *Assignment, subjectID string) {
+	t.Helper()
+	body := []byte(`{"findings":"fixture for ` + subjectID + `"}`)
+	path := filepath.Join(t.TempDir(), "findings.json")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write the fixture findings: %v", err)
+	}
+	sum := sha256.Sum256(body)
+	if _, err := store.CaptureReviewEvidence(ReviewEvidenceParams{
+		ReviewerID:     reviewer.ID,
+		Epoch:          reviewer.ClaimEpoch,
+		ReviewedSHA:    strings.Repeat("a", 40),
+		FindingsSHA256: hex.EncodeToString(sum[:]),
+		EvidenceRef:    path,
+		Actor:          agentActor(reviewer.Recipient),
+	}); err != nil {
+		t.Fatalf("capture the fixture review evidence: %v", err)
+	}
 }
 
 // mustGet reads an assignment and fails the test if it is gone.
@@ -1920,6 +1948,15 @@ func TestAPIChangesRequestedLeavesTheSubjectAndRecordsANote(t *testing.T) {
 //
 // A reviewer delegated BY the work it reviews has the subject on its
 // parent chain, and that is refused.
+//
+// EVERY OTHER PREREQUISITE IS SATISFIED BEFORE THE GUARD IS TESTED, and
+// the refusal is matched on the INDEPENDENCE rule, not on the error
+// class. Both matter: a bare `ErrConstraint` would also match the T84
+// missing-evidence refusal, and the load-bearing negative control
+// (`reviewer-independence`) removes the guard to prove this test
+// notices. Without the evidence capture below, removing the guard still
+// left this test passing on the evidence refusal, so the control
+// measured nothing.
 func TestAPIReviewerCannotReviewItsOwnWork(t *testing.T) {
 	store, _, _, projectID := newTestStore(t)
 	root := mustCreateRoot(t, store, projectID, func(p *CreateRootParams) {
@@ -1938,13 +1975,21 @@ func TestAPIReviewerCannotReviewItsOwnWork(t *testing.T) {
 	})
 	reviewing := mustStartReviewer(t, store, reviewer)
 
-	if _, err := store.RecordReviewResult(ReviewResultParams{
+	// T84 evidence is a prerequisite, not the subject of this test:
+	// capture it so the independence rule is the ONLY possible refusal.
+	captureForVerdict(t, store, reviewing, subject.ID)
+
+	_, err := store.RecordReviewResult(ReviewResultParams{
 		ReviewerID: reviewing.ID,
 		Verdict:    VerdictPassed,
 		Epoch:      reviewing.ClaimEpoch,
 		Actor:      agentActor("charlie"),
-	}); !errors.Is(err, ErrConstraint) {
+	})
+	if !errors.Is(err, ErrConstraint) {
 		t.Fatalf("a review of the reviewer's own work returned %v, want %v", err, ErrConstraint)
+	}
+	if err == nil || !strings.Contains(err.Error(), "does not review its own work") {
+		t.Fatalf("the refusal names %v, want the independence rule", err)
 	}
 }
 

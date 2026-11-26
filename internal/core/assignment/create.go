@@ -295,6 +295,23 @@ func (s *Store) Delegate(p DelegateParams) (*Assignment, bool, error) {
 			return err
 		}
 
+		// T66/T80: a tree whose recovery scope is rework_required
+		// admits NO further ordinary assignment. There is no rework
+		// operation in this slice, so any child created here would be
+		// an informal bypass of the operator's decision — and a dead
+		// obligation in a tree the status already reports as blocked.
+		// The check runs inside this transaction, before the insert,
+		// and refuses before any row, event or budget is touched.
+		rework, err := reworkRequiredTx(node, root.ID)
+		if err != nil {
+			return err
+		}
+		if rework {
+			return fmt.Errorf(
+				"%w: the tree %s has a completed reviewer on a live recovery lineage",
+				ErrReworkRequired, root.ID)
+		}
+
 		// N3: the child's depth is within the ROOT's budget.
 		childDepth := int64(parent.Depth) + 1
 		if childDepth > root.MaxDepth {

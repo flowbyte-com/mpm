@@ -1219,3 +1219,245 @@ func TestRestoreMisorderedClaimIsRefused(t *testing.T) {
 	restoreMarker(t, dm.SQLDB(), taskID)
 	assertRestoreRefusedAndIntact(t, dm, dump, "indeterminate_temporal_order")
 }
+
+// canonicalTriggerTextFor returns the exact canonical CREATE TRIGGER
+// text a live database carries for one trigger.
+func canonicalTriggerTextFor(t *testing.T, db *sql.DB, name string) string {
+	t.Helper()
+	var sqlText string
+	require.NoError(t, db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, name).Scan(&sqlText),
+		"the live schema must carry %s", name)
+	return sqlText
+}
+
+// TestRestoreAcceptsQuotedAndQualifiedTriggerNamesIsT110 proves B1's
+// identifier equivalence end to end: a dump whose canonical trigger is
+// written with a quoted, schema-qualified name (and a quoted ON target)
+// restores, and the restored database carries the TRUSTED canonical
+// text, not the dump's spelling.
+func TestRestoreAcceptsQuotedAndQualifiedTriggerNamesIsT110(t *testing.T) {
+	dm, _ := roundTripFixture(t)
+	dump := buildRecoveryDump(t, dm.SQLDB())
+	name := "trg_agent_tasks_reserved_key"
+	canonical := canonicalTriggerTextFor(t, dm.SQLDB(), name)
+	require.True(t, strings.Contains(dump, canonical), "the dump must carry the canonical text")
+
+	quoted := strings.Replace(canonical,
+		"CREATE TRIGGER "+name, `CREATE TRIGGER "main"."`+name+`"`, 1)
+	quoted = strings.Replace(quoted, "ON agent_tasks", `ON "main"."agent_tasks"`, 1)
+	require.NotEqual(t, canonical, quoted, "the rewrite must change the dump")
+
+	dump = strings.Replace(dump, canonical, quoted, 1)
+	require.Equal(t, 0, runRestoreDB(t, dm, dump),
+		"a quoted, schema-qualified trigger name is a benign B1 difference")
+
+	db := openRestored(t, dm.DBPath())
+	var restored string
+	require.NoError(t, db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, name).Scan(&restored))
+	require.Equal(t, canonical, restored,
+		"the restore must install the TRUSTED canonical text, never the dump's spelling")
+}
+
+// TestRestoreAcceptsOperatorWhitespaceIsT116 proves a benign whitespace
+// difference around a multi-character operator (||) is accepted, and the
+// canonical text is what lands.
+func TestRestoreAcceptsOperatorWhitespaceIsT116(t *testing.T) {
+	dm, _ := roundTripFixture(t)
+	dump := buildRecoveryDump(t, dm.SQLDB())
+	name := "trg_agent_tasks_reserved_key"
+	canonical := canonicalTriggerTextFor(t, dm.SQLDB(), name)
+
+	tight := strings.ReplaceAll(canonical, "' || ", "'||")
+	tight = strings.ReplaceAll(tight, " || L.", "||L.")
+	require.NotEqual(t, canonical, tight, "the rewrite must remove the spacing")
+	dump = strings.Replace(dump, canonical, tight, 1)
+
+	require.Equal(t, 0, runRestoreDB(t, dm, dump),
+		"whitespace around || is not a meaningful difference")
+	db := openRestored(t, dm.DBPath())
+	var restored string
+	require.NoError(t, db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, name).Scan(&restored))
+	require.Equal(t, canonical, restored,
+		"the canonical operator spacing is restored, not the dump's")
+}
+
+// TestRestoreTriggerTargetClassificationIsF11 proves an unrelated
+// trigger that merely READS a managed table is not a managed-table
+// trigger: it replays verbatim. A trigger DEFINED ON a managed table but
+// outside the canonical set is still refused (T115b). Modified canonical
+// definitions stay refused (T112).
+func TestRestoreTriggerTargetClassificationIsF11(t *testing.T) {
+	t.Run("unrelated trigger referencing a managed table is accepted", func(t *testing.T) {
+		dm, _ := roundTripFixture(t)
+		dump := buildRecoveryDump(t, dm.SQLDB())
+		// `projects` exists in this dump; the trigger is defined ON it
+		// and merely READS a managed table.
+		unrelated := `CREATE TRIGGER projects_audit_managed AFTER INSERT ON projects
+BEGIN
+    SELECT COUNT(*) FROM agent_tasks;
+END;`
+		require.Equal(t, 0, runRestoreDB(t, dm, dump+string('\n')+unrelated+string('\n')),
+			"a trigger on an unrelated table must replay, even when its body reads a managed table")
+		db := openRestored(t, dm.DBPath())
+		var sqlText string
+		require.NoError(t, db.QueryRow(
+			`SELECT sql FROM sqlite_master WHERE type='trigger' AND name='projects_audit_managed'`).Scan(&sqlText))
+		require.Contains(t, sqlText, "agent_tasks")
+	})
+	t.Run("unexpected trigger defined on a managed table is refused", func(t *testing.T) {
+		dm, taskID := roundTripFixture(t)
+		dump := buildRecoveryDump(t, dm.SQLDB())
+		dump += `CREATE TRIGGER "main"."trg_agent_tasks_shadow" BEFORE UPDATE ON "main"."agent_tasks"
+FOR EACH ROW BEGIN SELECT RAISE(ABORT, 'shadow'); END;
+`
+		restoreMarker(t, dm.SQLDB(), taskID)
+		assertRestoreRefusedAndIntact(t, dm, dump, "unexpected_trigger")
+	})
+	t.Run("modified canonical definition is refused", func(t *testing.T) {
+		dm, taskID := roundTripFixture(t)
+		dump := buildRecoveryDump(t, dm.SQLDB())
+		name := "trg_agent_tasks_reserved_key"
+		canonical := canonicalTriggerTextFor(t, dm.SQLDB(), name)
+		weakened := strings.Replace(canonical, "GLOB 'supersede:*'", "GLOB '*'", 1)
+		require.NotEqual(t, canonical, weakened)
+		dump = strings.Replace(dump, canonical, weakened, 1)
+		restoreMarker(t, dm.SQLDB(), taskID)
+		assertRestoreRefusedAndIntact(t, dm, dump, "modified_canonical_trigger")
+	})
+}
+
+// TestRestoreAwareDumpMissingAGuardIsT114 proves a supersession-aware
+// dump that omits ONE required canonical guard is refused with the
+// missing-trigger diagnostic (T113 covers the general removal; this is
+// the aware-class case the reviewer called out).
+func TestRestoreAwareDumpMissingAGuardIsT114(t *testing.T) {
+	dm, ids, _, _ := temporalFixture(t)
+	dump := buildRecoveryDump(t, dm.SQLDB())
+	name := "trg_agent_tasks_superseded_shape"
+	text := canonicalTriggerText(t, dm.SQLDB(), name)
+	stripped, _, found := strings.Cut(dump, text+";\n")
+	require.True(t, found, "the aware dump must carry %s", name)
+	require.NotContains(t, stripped, name)
+	restoreMarker(t, dm.SQLDB(), ids["a"])
+	assertRestoreRefusedAndIntact(t, dm, stripped, "missing_canonical_trigger")
+}
+
+// TestRestorePostFeatureZeroLineagesIsT118 proves classification is
+// table+sentinel based: a supersession-aware database with ZERO lineage
+// rows is aware (not pre-feature), so its canonical guards are
+// REQUIRED, and it restores.
+func TestRestorePostFeatureZeroLineagesIsT118(t *testing.T) {
+	dm, taskID := roundTripFixture(t)
+	require.Equal(t, 0, restoreRowCount(t, dm.SQLDB(), "agent_task_supersessions", ""),
+		"the fixture must carry zero lineages")
+	dump := buildRecoveryDump(t, dm.SQLDB())
+	// Read the guard's text BEFORE the restore closes this manager.
+	text := canonicalTriggerText(t, dm.SQLDB(), "trg_agent_task_sessions_completion_guard")
+	require.Equal(t, 0, runRestoreDB(t, dm, dump),
+		"a zero-lineage aware dump must restore")
+	// It is classified aware: dropping a session-class guard is refused.
+	// The success above closed dm, so the marker is written through a
+	// fresh connection to the restored file.
+	stripped, _, found := strings.Cut(dump, text+";\n")
+	require.True(t, found)
+	restored := openRestored(t, dm.DBPath())
+	restoreMarker(t, restored, taskID)
+	assertRestoreRefusedAndIntact(t, dm, stripped, "missing_canonical_trigger")
+}
+
+// TestRestoreScopedSiblingBeforeAmbiguityIsT128Accept proves C1's
+// ACCEPT arm: an unscoped sibling whose claim event and attempt row both
+// strictly predate the ambiguity is admitted, and its history survives.
+func TestRestoreScopedSiblingBeforeAmbiguityIsT128Accept(t *testing.T) {
+	dm, ids := roundTripFixture(t)
+	store := assignment.NewStore(dm)
+	actor := assignment.Actor{Address: "alpha", Kind: "agent"}
+	cur, err := store.Get(ids)
+	require.NoError(t, err)
+	for _, step := range []func(assignment.FencedParams) (*assignment.Assignment, error){
+		store.Deliver, store.Acknowledge, store.Accept,
+	} {
+		_, err := step(assignment.FencedParams{ID: ids, Actor: actor})
+		require.NoError(t, err)
+	}
+	claimed, err := store.Claim(assignment.ClaimParams{
+		ID: ids, ExpectedEpoch: cur.ClaimEpoch, Owner: "alpha", LeaseSeconds: 600, Actor: actor,
+	})
+	require.NoError(t, err)
+	if _, err := store.Start(assignment.FencedParams{
+		ID: ids, Epoch: claimed.ClaimEpoch, Actor: actor}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// One second of separation so the ordering is unambiguous at the
+	// storage's resolution.
+	time.Sleep(1100 * time.Millisecond)
+	att := startAmbiguousForTest(t, store, ids, claimed.ClaimEpoch, "ses-t128-acc")
+	dump := buildRecoveryDump(t, dm.SQLDB())
+	restoreMarker(t, dm.SQLDB(), ids)
+	_ = att
+	require.Equal(t, 0, runRestoreDB(t, dm, dump),
+		"a claim and attempt both strictly before the ambiguity are admitted")
+	db := openRestored(t, dm.DBPath())
+	require.Equal(t, 1, restoreRowCount(t, db, "agent_task_sessions", "id = ?", att.ID),
+		"the admitted attempt must survive")
+}
+
+// TestRestoreUnscopedAttemptAfterAmbiguityIsT128Refuse proves C1's
+// REFUSE arm: an earlier claim does not authorise an attempt recorded at
+// or after the ambiguity.
+func TestRestoreUnscopedAttemptAfterAmbiguityIsT128Refuse(t *testing.T) {
+	dm, ids := roundTripFixture(t)
+	store := assignment.NewStore(dm)
+	actor := assignment.Actor{Address: "alpha", Kind: "agent"}
+	cur, err := store.Get(ids)
+	require.NoError(t, err)
+	for _, step := range []func(assignment.FencedParams) (*assignment.Assignment, error){
+		store.Deliver, store.Acknowledge, store.Accept,
+	} {
+		_, err := step(assignment.FencedParams{ID: ids, Actor: actor})
+		require.NoError(t, err)
+	}
+	claimed, err := store.Claim(assignment.ClaimParams{
+		ID: ids, ExpectedEpoch: cur.ClaimEpoch, Owner: "alpha", LeaseSeconds: 600, Actor: actor,
+	})
+	require.NoError(t, err)
+	if _, err := store.Start(assignment.FencedParams{
+		ID: ids, Epoch: claimed.ClaimEpoch, Actor: actor}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	att := startAmbiguousForTest(t, store, ids, claimed.ClaimEpoch, "ses-t128-ref")
+	var tAmb int64
+	require.NoError(t, dm.SQLDB().QueryRow(
+		`SELECT updated_at FROM agent_task_sessions WHERE id = ?`, att.ID).Scan(&tAmb))
+	// A second attempt on the same epoch recorded AT the ambiguity: the
+	// claim predates it, the attempt does not.
+	plantedAttempt(t, dm.SQLDB(), "ats-t128-late", ids, 2, claimed.ClaimEpoch,
+		"completed", "succeeded", tAmb, tAmb)
+	dump := buildRecoveryDump(t, dm.SQLDB())
+	restoreMarker(t, dm.SQLDB(), ids)
+	assertRestoreRefusedAndIntact(t, dm, dump, "post_ambiguity_unscoped_session")
+}
+
+// startAmbiguousForTest records an ambiguous attempt (the fixture names
+// it separately so the T128 tests read clearly).
+func startAmbiguousForTest(t *testing.T, store *assignment.Store, id string, epoch int64, ses string) *assignment.SessionAttempt {
+	t.Helper()
+	att, err := store.BeginAttempt(assignment.BeginAttemptParams{
+		TaskID: id, Epoch: epoch, Runtime: assignment.RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: ses,
+		CorrelationRef: "corr-" + ses, WorkspaceID: "ws", WorkspacePath: "/tmp/ws",
+	})
+	require.NoError(t, err)
+	if _, err := store.MarkAttemptLaunched(assignment.SessionStateParams{
+		AttemptID: att.ID, Epoch: epoch}); err != nil {
+		t.Fatalf("mark launched: %v", err)
+	}
+	if _, err := store.MarkAttemptAmbiguous(assignment.SessionStateParams{
+		AttemptID: att.ID, Epoch: epoch, Error: "lost"}); err != nil {
+		t.Fatalf("mark ambiguous: %v", err)
+	}
+	return att
+}

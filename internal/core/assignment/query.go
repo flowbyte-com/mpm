@@ -177,6 +177,9 @@ type TreeView struct {
 	Recovery    string           `json:"recovery_status"`
 	Lineages    []*Supersession  `json:"lineages,omitempty"`
 	Assignments []AssignmentView `json:"assignments"`
+	// Count is len(Assignments), carried so the tree read keeps the
+	// list shape existing consumers expect.
+	Count int `json:"count"`
 }
 
 // View reads one assignment with its execution-aware state.
@@ -217,6 +220,7 @@ func (s *Store) Tree(rootID string) (*TreeView, error) {
 		}
 		view.Assignments = append(view.Assignments, AssignmentView{Assignment: t, EffectiveState: state})
 	}
+	view.Count = len(view.Assignments)
 	return view, nil
 }
 

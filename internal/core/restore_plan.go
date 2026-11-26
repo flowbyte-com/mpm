@@ -39,7 +39,8 @@ var restoreDeferredTriggers = map[string]bool{
 type restorePlan struct {
 	class              restoreClass
 	inventory          map[string]string // canonical name -> normalized body
-	schemaStmts        []string          // CREATE TABLE/INDEX/VIEW + non-managed triggers, dump order
+	schemaStmts        []string          // CREATE TABLE/INDEX/VIEW, dump order
+	userTriggerStmts   []string          // non-managed triggers, replayed AFTER the rows
 	rowStmts           []string          // resequenced INSERTs
 	immediateTriggers  []string          // canonical CREATE TRIGGER text (non-deferred managed)
 	deferredTriggers   []string          // canonical CREATE TRIGGER text (deferred managed)
@@ -70,55 +71,45 @@ func PlanRestore(statements []string) (*restorePlan, error) {
 	}
 	plan := &restorePlan{class: class, inventory: inventory}
 	// Schema replay: everything except managed TRIGGER CREATEs (those
-	// come from canonical text, never from the dump). Non-managed
-	// triggers replay verbatim. Transaction-control and sqlite-catalog
-	// statements are skipped exactly as the pre-contract replay did
-	// (nested transactions conflict with the outer Go tx; the catalog
-	// rows are redundant and the driver refuses them).
-	for _, stmt := range model.createStmts {
+	// come from canonical text, never from the dump).
+	//
+	// NON-MANAGED triggers are held back until AFTER the rows, which is
+	// where `sqlite3 .dump` puts them. Replaying them before the data
+	// makes them fire during the data copy — an FTS5 maintenance
+	// trigger would write to a virtual table the dump does not (and
+	// cannot legally) recreate, and a genuine backup would fail to
+	// restore (F1). The deferral is also the faithful order: a dump's
+	// data precedes its triggers.
+	//
+	// Transaction-control and sqlite-catalog statements are skipped
+	// exactly as the pre-contract replay did (nested transactions
+	// conflict with the outer Go tx; the catalog rows are redundant and
+	// the driver refuses them).
+	addSchema := func(stmt string) {
 		if skipReplayStatement(stmt) {
-			continue
+			return
 		}
 		upper := strings.ToUpper(strings.TrimSpace(stmt))
-		if strings.HasPrefix(upper, "CREATE TRIGGER") {
+		if strings.HasPrefix(upper, "CREATE TRIGGER") || strings.HasPrefix(upper, "CREATE TEMP TRIGGER") {
 			name, _, err := parseTriggerStatement(stmt)
-			if err != nil {
-				return nil, err
+			if err == nil {
+				if _, ok := inventory[name]; ok {
+					return
+				}
 			}
-			if _, ok := inventory[name]; ok {
-				continue
-			}
+			plan.userTriggerStmts = append(plan.userTriggerStmts, stmt)
+			return
 		}
 		plan.schemaStmts = append(plan.schemaStmts, stmt)
+	}
+	for _, stmt := range model.createStmts {
+		addSchema(stmt)
 	}
 	for _, stmt := range model.triggerStmts {
-		if skipReplayStatement(stmt) {
-			continue
-		}
-		name, _, err := parseTriggerStatement(stmt)
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := inventory[name]; ok {
-			continue
-		}
-		plan.schemaStmts = append(plan.schemaStmts, stmt)
+		addSchema(stmt)
 	}
 	for _, stmt := range model.other {
-		if skipReplayStatement(stmt) {
-			continue
-		}
-		upper := strings.ToUpper(strings.TrimSpace(stmt))
-		if strings.HasPrefix(upper, "CREATE TRIGGER") {
-			name, _, err := parseTriggerStatement(stmt)
-			if err != nil {
-				return nil, err
-			}
-			if _, ok := inventory[name]; ok {
-				continue
-			}
-		}
-		plan.schemaStmts = append(plan.schemaStmts, stmt)
+		addSchema(stmt)
 	}
 	resequenced, err := model.resequencedInserts()
 	if err != nil {
@@ -267,19 +258,22 @@ func indexStatementName(stmt string) string {
 }
 
 // tableColumns lists a live table's columns in order.
+//
+// The table is bound as a PARAMETER through SQLite's table-valued
+// pragma function, so this path builds no SQL text: the repository's
+// zero-tolerance `sql-built` gate stays at zero and no table name is
+// ever interpolated into a statement (F4).
 func tableColumns(tx *sql.Tx, table string) ([]string, error) {
-	rows, err := tx.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	rows, err := tx.Query(
+		`SELECT name FROM pragma_table_info(?) ORDER BY cid`, table)
 	if err != nil {
 		return nil, fmt.Errorf("restore: read columns of %s: %w", table, err)
 	}
 	defer rows.Close()
 	var cols []string
 	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return nil, fmt.Errorf("restore: scan columns of %s: %w", table, err)
 		}
 		cols = append(cols, strings.ToLower(name))
@@ -492,6 +486,19 @@ func (p *restorePlan) ExecuteRows(tx *sql.Tx) error {
 	for i, stmt := range p.rowStmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("restore row statement %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// ExecuteUserTriggers installs the dump's non-managed triggers AFTER
+// the rows, which is the order `sqlite3 .dump` emits them in and the
+// order that keeps a maintenance trigger from firing on a table the
+// dump cannot recreate.
+func (p *restorePlan) ExecuteUserTriggers(tx *sql.Tx) error {
+	for i, stmt := range p.userTriggerStmts {
+		if err := execRestoreStmt(tx, stmt); err != nil {
+			return fmt.Errorf("restore user trigger %d: %w", i+1, err)
 		}
 	}
 	return nil

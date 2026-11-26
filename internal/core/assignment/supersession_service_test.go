@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	internal "github.com/flowbyte-com/mpm-core"
 )
 
 // supBlock builds the minimum supersedeable shape: a root, an implementer
@@ -1499,4 +1501,754 @@ func TestReadViewsCarryExecutionState(t *testing.T) {
 	if _, err := store.LineageByAttempt(child.ID, "no-such-attempt"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing lineage by attempt returned %v, want ErrNotFound", err)
 	}
+}
+
+// supBlockWide is supBlock with room for the supersession's two rows AND
+// a follow-up delegation. The adapter fixture's budget is deliberately
+// tight, so a control that needs to delegate after a recovery must build
+// its own root.
+func supBlockWide(t *testing.T, store *Store, clock *testClock, projectID, tag string) (rootID, taskID, attemptID string, epoch int64) {
+	t.Helper()
+	root, _, err := store.CreateRoot(NewLocalOperatorAuthority("test"), CreateRootParams{
+		ProjectID: projectID, Title: "wide " + tag, Objective: "o", Recipient: "alpha",
+		IdempotencyKey:      "idem:wide:" + tag,
+		PermittedOperations: []string{"deliver", "acknowledge", "accept", "claim", "start", "complete", "delegate"},
+		EligibleRecipients:  []string{"alpha", "charlie"},
+		MaxDepth:            3, MaxTasks: 16, MaxConcurrency: 2, MaxResourceUnits: 100,
+	})
+	if err != nil {
+		t.Fatalf("create the wide root: %v", err)
+	}
+	child, _, err := store.Delegate(DelegateParams{
+		ParentID: root.ID, Title: "work", Objective: "w", Recipient: "alpha",
+		Role: RoleImplementer, IdempotencyKey: "idem:wide:" + tag + ":child",
+		Actor: Actor{Address: "operator", Kind: "agent"},
+	})
+	if err != nil {
+		t.Fatalf("delegate in the wide root: %v", err)
+	}
+	actor := Actor{Address: "alpha", Kind: "agent"}
+	for _, step := range []func(FencedParams) (*Assignment, error){store.Deliver, store.Acknowledge, store.Accept} {
+		if _, err := step(FencedParams{ID: child.ID, Actor: actor}); err != nil {
+			t.Fatalf("advance in the wide root: %v", err)
+		}
+	}
+	claimed, err := store.Claim(ClaimParams{ID: child.ID, ExpectedEpoch: 0,
+		Owner: "alpha", LeaseSeconds: 3600, Actor: actor})
+	if err != nil {
+		t.Fatalf("claim in the wide root: %v", err)
+	}
+	att := startAmbiguous(t, store, child.ID, claimed.ClaimEpoch, "ses-wide-"+tag)
+	clock.Advance(2 * 60 * 60 * 1e9)
+	return root.ID, child.ID, att.ID, claimed.ClaimEpoch
+}
+
+// reworkRequiredTree drives a tree to recovery_status=rework_required:
+// root → implementer (ambiguous) → supersede → replacement completes →
+// the lineage reviewer records changes_requested.
+//
+// It returns the root id, the completed replacement, the completed
+// reviewer, the reviewer's recorded epoch and the task count BEFORE any
+// attempted rework delegation.
+func reworkRequiredTree(t *testing.T, store *Store, clock *testClock, projectID, tag string) (rootID, replacementID, reviewerID string, reviewerEpoch int64) {
+	t.Helper()
+	return recoveryTreeWithVerdict(t, store, clock, projectID, tag, VerdictChangesRequested)
+}
+
+// recoveryTreeWithVerdict is the shared builder: the SAME tree shape with
+// only the reviewer's verdict changed, which is what makes the rework
+// control a single-variable comparison.
+func recoveryTreeWithVerdict(t *testing.T, store *Store, clock *testClock, projectID, tag, verdict string) (rootID, replacementID, reviewerID string, reviewerEpoch int64) {
+	t.Helper()
+	rootID, taskID, attemptID, epoch := supBlockWide(t, store, clock, projectID, tag)
+	auth := NewLocalOperatorAuthority("operator")
+	res, err := store.Supersede(auth, supParams(taskID, attemptID, epoch, tag))
+	if err != nil {
+		t.Fatalf("supersede: %v", err)
+	}
+	R, V := res.Replacement, res.Reviewer
+
+	rActor := Actor{Address: "beta", Kind: "agent"}
+	for _, step := range []func(FencedParams) (*Assignment, error){store.Deliver, store.Acknowledge, store.Accept} {
+		if _, err := step(FencedParams{ID: R.ID, Actor: rActor}); err != nil {
+			t.Fatalf("advance the replacement: %v", err)
+		}
+	}
+	rClaimed, err := store.Claim(ClaimParams{ID: R.ID, ExpectedEpoch: 0,
+		Owner: "beta", LeaseSeconds: 3600, Actor: rActor})
+	if err != nil {
+		t.Fatalf("claim the replacement: %v", err)
+	}
+	if _, err := store.Start(FencedParams{ID: R.ID, Epoch: rClaimed.ClaimEpoch, Actor: rActor}); err != nil {
+		t.Fatalf("start the replacement: %v", err)
+	}
+	completeWithEvidence(t, store, R.ID, rClaimed.ClaimEpoch)
+
+	vActor := Actor{Address: "charlie", Kind: "agent"}
+	for _, step := range []func(FencedParams) (*Assignment, error){store.Deliver, store.Acknowledge, store.Accept} {
+		if _, err := step(FencedParams{ID: V.ID, Actor: vActor}); err != nil {
+			t.Fatalf("advance the reviewer: %v", err)
+		}
+	}
+	vClaimed, err := store.Claim(ClaimParams{ID: V.ID, ExpectedEpoch: 0,
+		Owner: "charlie", LeaseSeconds: 3600, Actor: vActor})
+	if err != nil {
+		t.Fatalf("claim the reviewer: %v", err)
+	}
+	if _, err := store.Start(FencedParams{ID: V.ID, Epoch: vClaimed.ClaimEpoch, Actor: vActor}); err != nil {
+		t.Fatalf("start the reviewer: %v", err)
+	}
+	vAtt, err := store.BeginAttempt(BeginAttemptParams{
+		TaskID: V.ID, Epoch: vClaimed.ClaimEpoch, Runtime: RuntimeOpenCode,
+		IntendedAgent: "mpm-reviewer", NativeSessionID: "ses-" + tag + "-rework",
+		CorrelationRef: "corr-" + tag, WorkspaceID: "ws", WorkspacePath: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("begin the reviewer attempt: %v", err)
+	}
+	if _, err := store.MarkAttemptCompleted(SessionStateParams{
+		AttemptID: vAtt.ID, Epoch: vClaimed.ClaimEpoch, Outcome: "succeeded"}); err != nil {
+		t.Fatalf("complete the reviewer attempt: %v", err)
+	}
+	mustCaptureEvidence(t, store, V.ID, vClaimed.ClaimEpoch)
+	if _, err := store.RecordReviewResult(ReviewResultParams{
+		ReviewerID: V.ID, Verdict: verdict, Epoch: vClaimed.ClaimEpoch,
+		Actor: vActor, Note: "the verdict",
+	}); err != nil {
+		t.Fatalf("record %s: %v", verdict, err)
+	}
+
+	ts, err := store.TreeStatus(rootID)
+	if err != nil {
+		t.Fatalf("tree status: %v", err)
+	}
+	if verdict == VerdictPassed {
+		// A passed review leaves the lineage awaiting the operator's
+		// approval, which is progress — the point is that it is NOT
+		// rework.
+		if ts.Recovery == "rework_required" {
+			t.Fatalf("a passed review reported rework_required")
+		}
+	} else if ts.Recovery != "rework_required" {
+		t.Fatalf("recovery_status=%q, want rework_required", ts.Recovery)
+	}
+	return rootID, R.ID, V.ID, vClaimed.ClaimEpoch
+}
+
+// TestUnsupportedReworkIsRefusedIsT66T80 proves the A4 boundary for
+// unsupported rework: once the live lineage's reviewer has completed
+// with changes requested, NEITHER the completed reviewer NOR the
+// completed replacement admits another assignment, and the refusal
+// writes nothing.
+func TestUnsupportedReworkIsRefusedIsT66T80(t *testing.T) {
+	for _, parent := range []string{"reviewer", "replacement"} {
+		t.Run(parent, func(t *testing.T) {
+			store, dm, clock, projectID := newTestStore(t)
+			rootID, replacementID, reviewerID, _ := reworkRequiredTree(t, store, clock, projectID, "rework-"+parent)
+
+			parentID := reviewerID
+			if parent == "replacement" {
+				parentID = replacementID
+			}
+			before := countRows(t, dm, "agent_tasks")
+			beforeEvents := countRows(t, dm, "agent_task_events")
+			beforeBudget, err := store.BudgetStatus(rootID)
+			if err != nil {
+				t.Fatalf("budget before: %v", err)
+			}
+
+			_, created, err := store.Delegate(DelegateParams{
+				ParentID: parentID, Title: "the rework", Objective: "do it again",
+				Recipient: "beta", Role: RoleImplementer,
+				IdempotencyKey: "idem:rework:" + parent, ResourceUnits: 1,
+				Actor: Actor{Address: "beta", Kind: "agent"},
+			})
+			if !errors.Is(err, ErrReworkRequired) {
+				t.Fatalf("delegating beneath the completed %s returned %v (created=%v), want %v",
+					parent, err, created, ErrReworkRequired)
+			}
+			if created {
+				t.Fatalf("the refused rework was reported as created")
+			}
+			if got := countRows(t, dm, "agent_tasks"); got != before {
+				t.Fatalf("the refused rework wrote a task: %d -> %d", before, got)
+			}
+			if got := countRows(t, dm, "agent_task_events"); got != beforeEvents {
+				t.Fatalf("the refused rework wrote an event: %d -> %d", beforeEvents, got)
+			}
+			afterBudget, err := store.BudgetStatus(rootID)
+			if err != nil {
+				t.Fatalf("budget after: %v", err)
+			}
+			if afterBudget.Tasks != beforeBudget.Tasks || afterBudget.Units != beforeBudget.Units {
+				t.Fatalf("the refused rework consumed budget: %+v -> %+v", beforeBudget, afterBudget)
+			}
+			// The existing work and evidence are untouched.
+			for _, id := range []string{rootID, replacementID, reviewerID} {
+				if _, err := store.Get(id); err != nil {
+					t.Fatalf("the refused rework disturbed %s: %v", id, err)
+				}
+			}
+		})
+	}
+}
+
+// TestOrdinaryDelegationStillWorksOutsideRework proves the refusal did
+// not become a blanket one: an ordinary tree delegates exactly as it
+// did before, and a tree that recovered COMPLETELY also delegates.
+func TestOrdinaryDelegationStillWorksOutsideRework(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	root := mustCreateRoot(t, store, projectID, func(p *CreateRootParams) {
+		p.EligibleRecipients = []string{"alpha", "beta"}
+		p.MaxDepth = 3
+	})
+	if _, created, err := store.Delegate(DelegateParams{
+		ParentID: root.ID, Title: "ordinary", Objective: "work", Recipient: "alpha",
+		Role: RoleImplementer, IdempotencyKey: "idem:ordinary:child",
+		Actor: Actor{Address: "operator", Kind: "agent"},
+	}); err != nil || !created {
+		t.Fatalf("an ordinary delegation returned %v (created=%v)", err, created)
+	}
+}
+
+// TestReworkPredicateMatchesTreeStatus pins the transactional predicate
+// against TreeStatus: the two must agree on every fixture, so the
+// refusal can never act on a tree the status does not call
+// rework_required (and vice versa).
+func TestReworkPredicateMatchesTreeStatus(t *testing.T) {
+	t.Run("rework-required", func(t *testing.T) {
+		store, dm, clock, projectID := newTestStore(t)
+		rootID, _, _, _ := reworkRequiredTree(t, store, clock, projectID, "pred-rework")
+		var got bool
+		if err := dm.WithTx(func(node internal.DBNode) error {
+			var err error
+			got, err = reworkRequiredTx(node, rootID)
+			return err
+		}); err != nil {
+			t.Fatalf("predicate: %v", err)
+		}
+		ts, err := store.TreeStatus(rootID)
+		if err != nil {
+			t.Fatalf("tree status: %v", err)
+		}
+		if want := ts.Recovery == "rework_required"; got != want {
+			t.Fatalf("predicate=%v, TreeStatus=%q", got, ts.Recovery)
+		}
+		if !got {
+			t.Fatal("the fixture must be rework_required")
+		}
+	})
+	t.Run("ordinary", func(t *testing.T) {
+		store, dm, _, projectID := newTestStore(t)
+		root := mustCreateRoot(t, store, projectID, func(p *CreateRootParams) {
+			p.EligibleRecipients = []string{"alpha", "beta"}
+		})
+		var got bool
+		if err := dm.WithTx(func(node internal.DBNode) error {
+			var err error
+			got, err = reworkRequiredTx(node, root.ID)
+			return err
+		}); err != nil {
+			t.Fatalf("predicate: %v", err)
+		}
+		if got {
+			t.Fatal("an ordinary tree must not read as rework_required")
+		}
+	})
+	t.Run("complete", func(t *testing.T) {
+		// A tree that recovered and whose reviewer PASSED is complete,
+		// not rework: the predicate must not confuse the two.
+		store, dm, clock, projectID := newTestStore(t)
+		rootID, taskID, attemptID, epoch := supBlock(t, store, clock, projectID, "pred-complete")
+		auth := NewLocalOperatorAuthority("operator")
+		res, err := store.Supersede(auth, supParams(taskID, attemptID, epoch, "pred-complete"))
+		if err != nil {
+			t.Fatalf("supersede: %v", err)
+		}
+		R, V := res.Replacement, res.Reviewer
+		rActor := Actor{Address: "beta", Kind: "agent"}
+		for _, step := range []func(FencedParams) (*Assignment, error){store.Deliver, store.Acknowledge, store.Accept} {
+			if _, err := step(FencedParams{ID: R.ID, Actor: rActor}); err != nil {
+				t.Fatalf("advance the replacement: %v", err)
+			}
+		}
+		rClaimed, err := store.Claim(ClaimParams{ID: R.ID, ExpectedEpoch: 0,
+			Owner: "beta", LeaseSeconds: 3600, Actor: rActor})
+		if err != nil {
+			t.Fatalf("claim the replacement: %v", err)
+		}
+		if _, err := store.Start(FencedParams{ID: R.ID, Epoch: rClaimed.ClaimEpoch, Actor: rActor}); err != nil {
+			t.Fatalf("start the replacement: %v", err)
+		}
+		completeWithEvidence(t, store, R.ID, rClaimed.ClaimEpoch)
+		vActor := Actor{Address: "charlie", Kind: "agent"}
+		for _, step := range []func(FencedParams) (*Assignment, error){store.Deliver, store.Acknowledge, store.Accept} {
+			if _, err := step(FencedParams{ID: V.ID, Actor: vActor}); err != nil {
+				t.Fatalf("advance the reviewer: %v", err)
+			}
+		}
+		vClaimed, err := store.Claim(ClaimParams{ID: V.ID, ExpectedEpoch: 0,
+			Owner: "charlie", LeaseSeconds: 3600, Actor: vActor})
+		if err != nil {
+			t.Fatalf("claim the reviewer: %v", err)
+		}
+		if _, err := store.Start(FencedParams{ID: V.ID, Epoch: vClaimed.ClaimEpoch, Actor: vActor}); err != nil {
+			t.Fatalf("start the reviewer: %v", err)
+		}
+		vAtt, err := store.BeginAttempt(BeginAttemptParams{
+			TaskID: V.ID, Epoch: vClaimed.ClaimEpoch, Runtime: RuntimeOpenCode,
+			IntendedAgent: "mpm-reviewer", NativeSessionID: "ses-pred-complete-reviewer",
+			CorrelationRef: "corr-pred", WorkspaceID: "ws", WorkspacePath: "/tmp/ws",
+		})
+		if err != nil {
+			t.Fatalf("begin the reviewer attempt: %v", err)
+		}
+		if _, err := store.MarkAttemptCompleted(SessionStateParams{
+			AttemptID: vAtt.ID, Epoch: vClaimed.ClaimEpoch, Outcome: "succeeded"}); err != nil {
+			t.Fatalf("complete the reviewer attempt: %v", err)
+		}
+		mustCaptureEvidence(t, store, V.ID, vClaimed.ClaimEpoch)
+		if _, err := store.RecordReviewResult(ReviewResultParams{
+			ReviewerID: V.ID, Verdict: VerdictPassed, Epoch: vClaimed.ClaimEpoch, Actor: vActor,
+		}); err != nil {
+			t.Fatalf("record passed: %v", err)
+		}
+		var got bool
+		if err := dm.WithTx(func(node internal.DBNode) error {
+			var err error
+			got, err = reworkRequiredTx(node, rootID)
+			return err
+		}); err != nil {
+			t.Fatalf("predicate: %v", err)
+		}
+		ts, err := store.TreeStatus(rootID)
+		if err != nil {
+			t.Fatalf("tree status: %v", err)
+		}
+		if want := ts.Recovery == "rework_required"; got != want {
+			t.Fatalf("predicate=%v, TreeStatus=%q", got, ts.Recovery)
+		}
+		if got {
+			t.Fatalf("a passed review is not rework (recovery=%q)", ts.Recovery)
+		}
+	})
+}
+
+// ── concurrency, relabelling and old-runtime compatibility ───────────────
+
+// TestConcurrentClaimAndSupersessionIsT41 races a claim on a sibling
+// against the supersession of the ambiguous original.
+//
+// The winner is CONSISTENT, never both: if the claim commits first the
+// supersession's quiescence predicate refuses (a live lease exists in
+// the tree); if the supersession commits first the sibling is not
+// authorised in the recovered tree and the claim refuses. Both orderings
+// leave a tree that the status can explain.
+func TestConcurrentClaimAndSupersessionIsT41(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		store, dm, _, projectID := newTestStore(t)
+		// A root with room for the supersession's two rows: the
+		// default adapter fixture budget is deliberately tight and
+		// would make this test measure the budget instead of the race.
+		root, _, err := store.CreateRoot(NewLocalOperatorAuthority("test"), CreateRootParams{
+			ProjectID: projectID, Title: "race root", Objective: "race",
+			Recipient: "alpha", IdempotencyKey: fmt.Sprintf("idem:race41:root:%d", i),
+			PermittedOperations: []string{"deliver", "acknowledge", "accept", "claim", "start", "complete", "delegate"},
+			EligibleRecipients:  []string{"alpha", "charlie"},
+			MaxDepth:            2, MaxTasks: 12, MaxConcurrency: 2, MaxResourceUnits: 100,
+		})
+		if err != nil {
+			t.Fatalf("create the race root: %v", err)
+		}
+		task, _, err := store.Delegate(DelegateParams{
+			ParentID: root.ID, Title: "work", Objective: "w", Recipient: "alpha",
+			Role: RoleImplementer, IdempotencyKey: fmt.Sprintf("idem:race41:task:%d", i),
+			Actor: Actor{Address: "operator", Kind: "agent"},
+		})
+		if err != nil {
+			t.Fatalf("delegate the task: %v", err)
+		}
+		actor := Actor{Address: "alpha", Kind: "agent"}
+		for _, step := range []func(FencedParams) (*Assignment, error){store.Deliver, store.Acknowledge, store.Accept} {
+			if _, err := step(FencedParams{ID: task.ID, Actor: actor}); err != nil {
+				t.Fatalf("advance: %v", err)
+			}
+		}
+		claimed, err := store.Claim(ClaimParams{ID: task.ID, ExpectedEpoch: 0,
+			Owner: "alpha", LeaseSeconds: 3600, Actor: actor})
+		if err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		// startAmbiguous records the Start AND the ambiguous attempt.
+		att := startAmbiguous(t, store, task.ID, claimed.ClaimEpoch, fmt.Sprintf("ses-race41-%d", i))
+		sibling := mustDelegateSibling(t, store, projectID, task.ID, "charlie")
+
+		claimErr := make(chan error, 1)
+		superErr := make(chan error, 1)
+		go func() {
+			_, err := store.Claim(ClaimParams{
+				ID: sibling.ID, ExpectedEpoch: 0, Owner: "charlie", LeaseSeconds: 3600,
+				Actor: Actor{Address: "charlie", Kind: "agent"},
+			})
+			claimErr <- err
+		}()
+		go func() {
+			_, err := store.Supersede(NewLocalOperatorAuthority("operator"),
+				supParams(task.ID, att.ID, claimed.ClaimEpoch, fmt.Sprintf("race41-%d", i)))
+			superErr <- err
+		}()
+		ce, se := <-claimErr, <-superErr
+		if ce == nil && se == nil {
+			t.Fatalf("iteration %d: BOTH the claim and the supersession committed", i)
+		}
+		if se == nil && ce == nil {
+			t.Fatalf("iteration %d: the claim and the supersession both succeeded", i)
+		}
+		if se != nil && lineageCount(t, store) != 0 {
+			t.Fatalf("iteration %d: a REFUSED supersession wrote %d lineage row(s)", i, lineageCount(t, store))
+		}
+		if se == nil {
+			if es, err := store.EffectiveState(task.ID); err != nil || es != "superseded" {
+				t.Fatalf("iteration %d: the original reads %q after a supersession (err %v)", i, es, err)
+			}
+		}
+		// The database must still pass its own foreign keys.
+		var fkViolations int
+		rows, err := dm.SQLDB().Query(`PRAGMA foreign_key_check`)
+		if err != nil {
+			t.Fatalf("foreign_key_check: %v", err)
+		}
+		for rows.Next() {
+			fkViolations++
+		}
+		rows.Close()
+		if fkViolations != 0 {
+			t.Fatalf("iteration %d: %d foreign-key violation(s) after the race", i, fkViolations)
+		}
+	}
+}
+
+// TestConcurrentSiblingStartAndSupersessionIsT69 races a sibling's
+// Start against the supersession of the ambiguous original.
+//
+// The fixture claims the sibling BEFORE the ambiguity exists (a claim
+// inside an ambiguous tree is refused by TR11) and lets its lease
+// expire, so the supersession's quiescence predicate can pass. Whatever
+// the ordering, the two operations never both commit, and the tree
+// keeps a single explainable state.
+func TestConcurrentSiblingStartAndSupersessionIsT69(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		store, _, clock, projectID := newTestStore(t)
+		id, epoch := claimedAssignment(t, store, projectID, "alpha")
+		sibling := mustDelegateSibling(t, store, projectID, id, "charlie")
+		sibActor := Actor{Address: "charlie", Kind: "agent"}
+		for _, step := range []func(FencedParams) (*Assignment, error){store.Deliver, store.Acknowledge, store.Accept} {
+			if _, err := step(FencedParams{ID: sibling.ID, Actor: sibActor}); err != nil {
+				t.Fatalf("advance the sibling: %v", err)
+			}
+		}
+		claimed := mustDo(t, func() (*Assignment, error) {
+			return store.Claim(ClaimParams{ID: sibling.ID, ExpectedEpoch: 0,
+				Owner: "charlie", LeaseSeconds: 1, Actor: sibActor})
+		})
+		// The original's ambiguity is recorded after the sibling's claim.
+		att := startAmbiguous(t, store, id, epoch, fmt.Sprintf("ses-race69-%d", i))
+		// The sibling's one-second lease expires so quiescence can pass.
+		clock.Advance(2 * 60 * 60 * 1e9)
+
+		startErr := make(chan error, 1)
+		superErr := make(chan error, 1)
+		go func() {
+			_, err := store.Start(FencedParams{ID: sibling.ID, Epoch: claimed.ClaimEpoch, Actor: sibActor})
+			startErr <- err
+		}()
+		go func() {
+			_, err := store.Supersede(NewLocalOperatorAuthority("operator"),
+				supParams(id, att.ID, epoch, fmt.Sprintf("race69-%d", i)))
+			superErr <- err
+		}()
+		ste, se := <-startErr, <-superErr
+		if ste == nil && se == nil {
+			t.Fatalf("iteration %d: BOTH the sibling Start and the supersession committed", i)
+		}
+		if se != nil && lineageCount(t, store) != 0 {
+			t.Fatalf("iteration %d: a refused supersession wrote a lineage", i)
+		}
+		if se == nil {
+			if es, err := store.EffectiveState(id); err != nil || es != "superseded" {
+				t.Fatalf("iteration %d: the original reads %q after a supersession (err %v)", i, es, err)
+			}
+			sib, err := store.Get(sibling.ID)
+			if err != nil {
+				t.Fatalf("read the sibling: %v", err)
+			}
+			if ste == nil && sib.State != StateInProgress {
+				t.Fatalf("iteration %d: a successful Start left the sibling %s", i, sib.State)
+			}
+		}
+	}
+}
+
+// TestAmbiguousAttemptCannotBeRelabelledIsT47 proves the attempt record
+// is born with its identity and cannot be given a new one: the task, the
+// epoch and the native session are write-once, so an old runtime cannot
+// relabel an ambiguous attempt as a fresh one and re-use it.
+func TestAmbiguousAttemptCannotBeRelabelledIsT47(t *testing.T) {
+	store, dm, _, projectID := newTestStore(t)
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+	att := startAmbiguous(t, store, id, epoch, "ses-t47")
+
+	// No forward edge out of 'ambiguous' exists in the state machine.
+	if _, err := store.MarkAttemptCompleted(SessionStateParams{
+		AttemptID: att.ID, Epoch: epoch, Outcome: "succeeded",
+	}); err == nil {
+		t.Fatalf("an ambiguous attempt was relabelled as completed")
+	} else if !errors.Is(err, ErrIllegalTransition) && !errors.Is(err, ErrRefused) {
+		t.Fatalf("relabelling returned %v, want an illegal-transition or storage refusal", err)
+	}
+
+	// The identity columns are write-once even by direct SQL, which is
+	// the old-runtime path (T83).
+	for _, stmt := range []string{
+		`UPDATE agent_task_sessions SET claim_epoch = claim_epoch + 1 WHERE id = ?`,
+		`UPDATE agent_task_sessions SET task_id = 'at-somewhere-else' WHERE id = ?`,
+		`UPDATE agent_task_sessions SET native_session_id = 'ses-forged' WHERE id = ?`,
+	} {
+		if _, err := dm.SQLDB().Exec(stmt, att.ID); err == nil {
+			t.Fatalf("a direct attempt relabelling was accepted: %s", stmt)
+		}
+	}
+	after, err := store.AttemptsFor(id)
+	if err != nil {
+		t.Fatalf("read the attempts: %v", err)
+	}
+	if len(after) != 1 || after[0].ID != att.ID || after[0].ClaimEpoch != epoch ||
+		after[0].NativeSessionID != "ses-t47" {
+		t.Fatalf("the attempt identity changed: %+v", after)
+	}
+}
+
+// TestOldRuntimeOnMigratedDatabaseIsT83 proves the post-migration
+// database is LOUD for an older runtime: the writes a pre-feature
+// runtime issues on an ambiguous tree are refused by the storage, while
+// the ordinary paths it uses keep working.
+func TestOldRuntimeOnMigratedDatabaseIsT83(t *testing.T) {
+	store, dm, _, projectID := newTestStore(t)
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+	startAmbiguous(t, store, id, epoch, "ses-t83")
+
+	// An old runtime's retry: clear the lease and take a new epoch
+	// directly, as the pre-feature recovery did.
+	oldWrites := []struct {
+		name string
+		sql  string
+		args []interface{}
+	}{
+		{"clear the lease", `UPDATE agent_tasks SET lease_expires_at = NULL WHERE id = ?`, []interface{}{id}},
+		{"bump the epoch", `UPDATE agent_tasks SET claim_epoch = claim_epoch + 1 WHERE id = ?`, []interface{}{id}},
+		{"relabel the owner", `UPDATE agent_tasks SET owner = 'someone-else' WHERE id = ?`, []interface{}{id}},
+		{"reopen the work", `UPDATE agent_tasks SET state = 'delivered' WHERE id = ?`, []interface{}{id}},
+	}
+	for _, w := range oldWrites {
+		if _, err := dm.SQLDB().Exec(w.sql, w.args...); err == nil {
+			t.Errorf("an old runtime's write was accepted: %s", w.name)
+		}
+	}
+	// Ordinary paths keep working: a note is a legal append.
+	if _, err := store.Note(NoteParams{ID: id, Note: "old runtime note",
+		Actor: Actor{Address: "alpha", Kind: "agent"}}); err != nil {
+		t.Fatalf("the ordinary note path is blocked: %v", err)
+	}
+	// And a fresh, unrelated tree is entirely unaffected.
+	root := mustCreateRoot(t, store, projectID, func(p *CreateRootParams) {
+		p.EligibleRecipients = []string{"alpha", "epsilon"}
+		p.IdempotencyKey = "idem:t83:fresh"
+	})
+	if _, created, err := store.Delegate(DelegateParams{
+		ParentID: root.ID, Title: "fresh", Objective: "o", Recipient: "epsilon",
+		Role: RoleImplementer, IdempotencyKey: "idem:t83:fresh-child",
+		Actor: Actor{Address: "operator", Kind: "agent"},
+	}); err != nil || !created {
+		t.Fatalf("ordinary delegation on the migrated database returned %v (created=%v)", err, created)
+	}
+}
+
+// TestTwoConcurrentSupersessionsIsT39 proves exactly one of two
+// concurrent authorisations commits. They name the SAME task and attempt
+// with DIFFERENT evidence, so they are not idempotent retries: the
+// UNIQUE (superseded_task_id, attempt_id) constraint admits one winner
+// and the other receives the conflict diagnostic.
+func TestTwoConcurrentSupersessionsIsT39(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		store, _, clock, projectID := newTestStore(t)
+		_, taskID, attemptID, epoch := supBlock(t, store, clock, projectID, fmt.Sprintf("race39-%d", i))
+		auth := NewLocalOperatorAuthority("operator")
+
+		type result struct {
+			res *SupersedeResult
+			err error
+		}
+		results := make(chan result, 2)
+		for j := 0; j < 2; j++ {
+			go func(j int) {
+				p := supParams(taskID, attemptID, epoch, fmt.Sprintf("race39-%d-%d", i, j))
+				p.EvidenceRef = fmt.Sprintf("gh:test/t39#%d", j)
+				res, err := store.Supersede(auth, p)
+				results <- result{res, err}
+			}(j)
+		}
+		a, b := <-results, <-results
+		winners := 0
+		if a.err == nil {
+			winners++
+		}
+		if b.err == nil {
+			winners++
+		}
+		if winners != 1 {
+			t.Fatalf("iteration %d: %d concurrent supersessions committed (a=%v, b=%v)",
+				i, winners, a.err, b.err)
+		}
+		if got := lineageCount(t, store); got != 1 {
+			t.Fatalf("iteration %d: %d lineage row(s) after the race", i, got)
+		}
+		loser := a.err
+		if a.err == nil {
+			loser = b.err
+		}
+		if !errors.Is(loser, ErrSupersessionConflict) {
+			t.Fatalf("iteration %d: the loser returned %v, want %v", i, loser, ErrSupersessionConflict)
+		}
+	}
+}
+
+// TestEvidenceAndVerdictAreAtomicIsT111 proves the atomic
+// evidence+verdict transaction: a fault between the two writes leaves
+// NEITHER. A captured review with no verdict could never be re-run (the
+// capture is write-once), and a verdict with no evidence would publish a
+// decision with nothing behind it.
+func TestEvidenceAndVerdictAreAtomicIsT111(t *testing.T) {
+	// The passed path writes the subject's transition and its ledger
+	// event after the evidence; both are inside the shared transaction.
+	for _, fault := range []string{"transition", "transition-event"} {
+		t.Run(fault, func(t *testing.T) {
+			store, _, _, projectID := newTestStore(t)
+			subject, reviewer := mustReviewSubjectForT111(t, store, projectID)
+			reviewing := mustStartReviewer(t, store, reviewer)
+			beforeSubjectEvents := len(eventTypes(t, store, subject.ID))
+			beforeReviewerEvents := len(eventTypes(t, store, reviewing.ID))
+
+			store.fault = func(stage string) error {
+				if stage == fault {
+					return errors.New("injected " + stage)
+				}
+				return nil
+			}
+			_, err := store.captureReviewEvidenceAndVerdict(ReviewEvidenceParams{
+				ReviewerID:     reviewing.ID,
+				Epoch:          reviewing.ClaimEpoch,
+				ReviewedSHA:    strings.Repeat("a", 40),
+				FindingsSHA256: strings.Repeat("b", 64),
+				EvidenceRef:    "evidence/t111.json",
+				Actor:          agentActor("charlie"),
+			}, VerdictPassed, "the review found nothing")
+			store.fault = nil
+			if err == nil || !strings.Contains(err.Error(), "injected "+fault) {
+				t.Fatalf("the atomic write returned %v, want the injected fault", err)
+			}
+
+			after, err := store.Get(reviewing.ID)
+			if err != nil {
+				t.Fatalf("re-read the reviewer: %v", err)
+			}
+			if after.ReviewedSHA != "" || after.FindingsSHA256 != "" {
+				t.Fatalf("the evidence survived the rollback: %q %q",
+					after.ReviewedSHA, after.FindingsSHA256)
+			}
+			if after.State != StateInProgress {
+				t.Fatalf("the reviewer moved to %q despite the rollback", after.State)
+			}
+			if got := len(eventTypes(t, store, reviewing.ID)); got != beforeReviewerEvents {
+				t.Fatalf("the reviewer ledger grew: %d -> %d", beforeReviewerEvents, got)
+			}
+			if got := len(eventTypes(t, store, subject.ID)); got != beforeSubjectEvents {
+				t.Fatalf("the subject ledger grew: %d -> %d", beforeSubjectEvents, got)
+			}
+			subjectAfter, err := store.Get(subject.ID)
+			if err != nil {
+				t.Fatalf("re-read the subject: %v", err)
+			}
+			if subjectAfter.State != StateCompleted {
+				t.Fatalf("the subject moved to %q despite the rollback", subjectAfter.State)
+			}
+		})
+	}
+}
+
+// mustReviewSubjectForT111 builds the reviewable shape: a completed
+// implementer subject and an independent reviewer that is its sibling.
+func mustReviewSubjectForT111(t *testing.T, store *Store, projectID string) (*Assignment, *Assignment) {
+	t.Helper()
+	root := mustCreateRoot(t, store, projectID, func(p *CreateRootParams) {
+		p.EligibleRecipients = []string{"alpha", "charlie"}
+		p.MaxDepth = 2
+	})
+	subject := mustDelegate(t, store, root, func(p *DelegateParams) {
+		p.Recipient = "alpha"
+		p.IdempotencyKey = "idem:t111:subject"
+	})
+	subject = mustAdvance(t, store, subject, StateCompleted)
+	reviewer := mustCreateReviewer(t, store, root, subject)
+	return subject, reviewer
+}
+
+// TestReworkRefusalIsLoadBearingIsT66T80 is the negative control for the
+// rework refusal: two trees with the SAME shape and the SAME parent role
+// differ only in the recovery outcome, and that difference is what
+// changes the delegation result.
+//
+// Without this pairing a "refusal" test could be satisfied by any other
+// rule (budget, allow-list, depth) — the reviewed failure mode. Here the
+// control tree delegates successfully from a completed reviewer, so the
+// refusal in the rework tree can only come from the rework rule.
+func TestReworkRefusalIsLoadBearingIsT66T80(t *testing.T) {
+	t.Run("control: a passed review is not rework", func(t *testing.T) {
+		store, _, clock, projectID := newTestStore(t)
+		_, _, reviewerID, _ := recoveryTreeWithVerdict(t, store, clock, projectID, "ctl-pass", VerdictPassed)
+		// The SAME delegate call, from the SAME reviewer role, in a tree
+		// whose recovery is complete rather than rework: it succeeds.
+		_, created, err := store.Delegate(DelegateParams{
+			ParentID: reviewerID, Title: "follow-up", Objective: "ordinary",
+			Recipient: "alpha", Role: RoleImplementer,
+			IdempotencyKey: "idem:ctl:pass:child", ResourceUnits: 1,
+			Actor: Actor{Address: "alpha", Kind: "agent"},
+		})
+		if err != nil || !created {
+			t.Fatalf("the control delegation returned %v (created=%v); the refusal must "+
+				"depend on the rework state, not on the parent's role", err, created)
+		}
+	})
+	t.Run("treatment: the same tree in rework_required", func(t *testing.T) {
+		store, _, clock, projectID := newTestStore(t)
+		_, replacementID, reviewerID, _ := reworkRequiredTree(t, store, clock, projectID, "ctl-rework")
+		_, created, err := store.Delegate(DelegateParams{
+			ParentID: reviewerID, Title: "follow-up", Objective: "ordinary",
+			Recipient: "alpha", Role: RoleImplementer,
+			IdempotencyKey: "idem:ctl:rework:child", ResourceUnits: 1,
+			Actor: Actor{Address: "alpha", Kind: "agent"},
+		})
+		if !errors.Is(err, ErrReworkRequired) || created {
+			t.Fatalf("the treatment delegation returned %v (created=%v), want %v",
+				err, created, ErrReworkRequired)
+		}
+		// The replacement parent is refused for the same reason.
+		if _, _, err := store.Delegate(DelegateParams{
+			ParentID: replacementID, Title: "follow-up 2", Objective: "ordinary",
+			Recipient: "alpha", Role: RoleImplementer,
+			IdempotencyKey: "idem:ctl:rework:child2", ResourceUnits: 1,
+			Actor: Actor{Address: "alpha", Kind: "agent"},
+		}); !errors.Is(err, ErrReworkRequired) {
+			t.Fatalf("delegating beneath the replacement returned %v, want %v", err, ErrReworkRequired)
+		}
+	})
 }
