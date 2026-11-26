@@ -272,9 +272,14 @@ counts. Summary after remediation:
   to the pre-feature set; they are not produced by an actual older
   binary (no older binary is installed in CI). The ordinary and
   supersession-aware classes **are** real-binary round trips.
-- Containment tests execute the real namespace on a host with
-  bubblewrap/unshare; on a host without them they skip with an explicit
-  message, and the report distinguishes that from execution.
+- Containment tests (T49/T50/T51) execute the real namespace on a
+  capable host: they PASSED here on bubblewrap 0.11.1 + `unshare`
+  (worker/reviewer invisibility, credential absence, write confinement,
+  and the no-bwrap refusal). The GitHub Actions runner forbids user
+  namespaces (`/proc/self/uid_map: Operation not permitted`), so there
+  they SKIP with an explicit environment message — a skip, never a pass;
+  `TestSkipIfNoUserNamespaceRecognisesTheCIMessage` pins that
+  distinction. A genuine containment breach still fails.
 - `make test` end-to-end is reported only if every constituent target
   ran; see §12.
 
