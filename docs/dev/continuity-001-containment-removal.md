@@ -10,7 +10,7 @@ One focused removal PR. No merge. Subject to independent review.
 | Head / tree | recorded in the PR body (this file is part of the change) |
 | Scope | remove MPM-managed operating-system containment; invoke the agent framework natively |
 | Remediation delta (B1–B7) | 22 files, +1,271 / −541 on top of the reviewed head `a006ce30` |
-| Cumulative delta vs base | 72 files, +2,607 / −11,593 |
+| Cumulative delta vs base | 72 files, +2,706 / −11,594 |
 
 ## 2. What was removed
 
@@ -40,7 +40,7 @@ sandbox tool tests, `test_reviewer_bwrap_sandbox.py`,
 permission fixture.
 
 **Net (initial removal):** 60 files, **+1,189 / −11,050** lines.
-**Net (after the B1–B7 remediation):** 72 files, **+2,607 / −11,593** lines.
+**Net (after the B1–B7 remediation):** 72 files, **+2,706 / −11,594** lines.
 
 ## 3. What remains, and why
 
@@ -154,7 +154,11 @@ New/updated tests (synthetic frameworks, disposable databases):
 - **policy check**: the reviewer installer enforces default-deny + read
   allows + state-changing denies;
 - **host-side Git subprocesses bounded**: the review snapshot and revision
-  observation run under the same bounded lifecycle.
+  observation run under the same bounded lifecycle;
+- **lease-coverage truncation**: a lease that covers the runtime window is
+  not refused when the second boundary falls between the claim's write and
+  the check's reading (`TestACoveringLeaseIsNotRefusedAtASecondBoundary`,
+  found as a CI-only refusal of the first dispatch).
 
 Demonstrated without bubblewrap, unprivileged user namespaces, MPM network
 isolation or a relay: these tests run on a host whose user-namespace
