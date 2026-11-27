@@ -694,12 +694,29 @@ func countOutcome(report *Report, outcome Outcome, launched bool) {
 // The margin is deliberate: the runtime's own timeout plus a margin for
 // the adapter to observe the outcome and write it down. Work that cannot
 // fit inside the lease is refused, not started.
+//
+// THE TWO READINGS ARE WHOLE SECONDS, TAKEN AT DIFFERENT INSTANTS. The
+// claim wrote the lease from one reading of the clock; this check takes
+// another. Truncating each reading to the second can hide the time that
+// genuinely elapsed between them: a claim taken at T.9 writes an expiry
+// of T+900, and a check a few milliseconds later reads T+1, so the
+// margin reads 899 — although the claim granted exactly the span the
+// configuration promised. One second is the whole error two truncated
+// readings can introduce, so the comparison forgives exactly one
+// second. A lease genuinely shorter than the runtime window is still
+// refused: the configuration validation refuses a lease below the
+// window, the margin exists to absorb real elapsed time, and a clock
+// that jumps further than one second between readings still fails this
+// check.
 func (e *Engine) leaseCovers(a *assignment.Assignment) bool {
 	if a.LeaseExpiresAt == nil {
 		return false
 	}
 	need := int64(e.cfg.RuntimeTimeoutSeconds) + int64(e.cfg.LeaseMarginSeconds)
-	return *a.LeaseExpiresAt-e.store.Now() >= need
+	// The whole-second truncation of the two clock readings can
+	// understate the remaining time by one second; forgive exactly that,
+	// and nothing more.
+	return *a.LeaseExpiresAt-e.store.Now() >= need-1
 }
 
 // leaseExpiry reads an assignment's lease expiry, or zero.
