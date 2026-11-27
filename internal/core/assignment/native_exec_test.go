@@ -12,8 +12,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	oc "github.com/flowbyte-com/mpm-core/opencode"
 )
@@ -195,4 +197,126 @@ func TestNativeExecutionIsStillFenced(t *testing.T) {
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatal("the framework ran despite the stale epoch")
 	}
+}
+
+// TestTimeoutRecordsAmbiguityAndTerminatesTheRun proves a run that blows
+// its deadline is recorded as AMBIGUOUS (the framework may have done work),
+// the assignment stays in_progress, and the surviving descendant is
+// terminated rather than left holding the adapter's output pipe.
+func TestTimeoutRecordsAmbiguityAndTerminatesTheRun(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+	actor := Actor{Address: "alpha", Kind: "agent"}
+	mustDo(t, func() (*Assignment, error) {
+		return store.Start(FencedParams{ID: id, Epoch: epoch, Actor: actor})
+	})
+	workspace := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "launch.txt")
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "fake-opencode")
+	sessionFile := filepath.Join(dir, "session")
+	script := `#!/bin/sh
+case "$*" in
+  *"debug agents"*)
+    echo '[{"id":"mpm-worker","mode":"primary","permissions":[]}]'; exit 0;;
+  *"session.list"*) echo '{"data":[]}'; exit 0;;
+  *"run"*)
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "--session" ]; then echo "$a" > "` + sessionFile + `"; fi
+      prev="$a"
+    done
+    sleep 97 &
+    echo "started" > "` + marker + `"
+    sleep 30
+    exit 0;;
+esac
+exit 2
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := oc.NewRuntime(oc.Config{
+		Root:          t.TempDir(),
+		OpenCodeBin:   bin,
+		Model:         "provider/test-model",
+		AllowedAgents: []string{"mpm-worker"},
+		Timeout:       500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	res, execErr := store.Execute(context.Background(), rt, ExecuteParams{
+		ID:                 id,
+		Epoch:              epoch,
+		Actor:              actor,
+		Agent:              "mpm-worker",
+		Workspace:          workspace,
+		ExpectedRuntimeDir: workspace,
+		WorkspaceID:        "ws",
+		Model:              "provider/test-model",
+		Title:              "timeout run",
+	})
+	elapsed := time.Since(start)
+	if execErr != nil {
+		t.Fatalf("a timed-out run was refused instead of recorded: %v", execErr)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("the run returned after %s; the deadline did not bound it", elapsed)
+	}
+	if res.Attempt == nil || res.Attempt.LaunchState != SessionAmbiguous {
+		t.Fatalf("the attempt is %+v, want ambiguous", res.Attempt)
+	}
+	if res.Assignment == nil || res.Assignment.State != StateInProgress {
+		t.Fatalf("the assignment moved to %+v; an ambiguous run must not complete it", res.Assignment)
+	}
+	if res.Evidence.Reason == "" || !strings.Contains(res.Evidence.Reason, "deadline") {
+		t.Fatalf("the diagnostic does not name the deadline: %+v", res.Evidence)
+	}
+	// THE DESCENDANT IS GONE: the terminated group cannot outlive the
+	// accounting.
+	waitForDescendantGone(t)
+}
+
+// waitForDescendantGone polls /proc until the test's descendant process is
+// gone (Linux only; the check skips elsewhere).
+func waitForDescendantGone(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("descendant accounting is proven on Linux")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if !descendantSleeping(t) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a descendant of the terminated run is still alive")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// descendantSleeping reports whether a `sleep 97` process is alive.
+func descendantSleeping(t *testing.T) bool {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Skipf("read /proc: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() == "" || e.Name()[0] < '0' || e.Name()[0] > '9' {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(strings.ReplaceAll(string(raw), "\x00", " "), "sleep 97") {
+			return true
+		}
+	}
+	return false
 }

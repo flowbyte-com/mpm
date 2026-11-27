@@ -12,6 +12,9 @@ func TestContainmentRemovalGate(t *testing.T) {
 	if err := CheckContainmentRemoval(env(nil)); err != nil {
 		t.Fatalf("an empty environment was refused: %v", err)
 	}
+	if err := CheckContainmentRemoval(env(map[string]string{"MPM_OPENCODE_RELAY_SOCKET": "x"})); err == nil {
+		t.Fatal("the relay socket alone did not trigger the gate")
+	}
 	for _, name := range RemovedContainmentEnv {
 		err := CheckContainmentRemoval(env(map[string]string{name: "x"}))
 		if err == nil {

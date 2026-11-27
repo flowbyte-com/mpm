@@ -56,6 +56,12 @@ execution is intended for trusted deployments.
   must not be cited as evidence about native execution.
 - **T51** (same-UID authority limitation) remains the accurate statement
   of native execution's boundary and stays documented.
+- **R3 (relay readiness) is RETIRED**: the relay subsystem no longer
+  exists, so there is no readiness gate to satisfy. R3's historical
+  verification evidence is preserved in the review record; it is retired
+  because its subject was removed, NOT because the historical defect was
+  disproven. **R1 and R2 remain mandatory**, and R3's retirement must not
+  be read as a pass.
 - All other requirements remain mandatory under native execution:
   R1 ambiguity barrier, R2 structured launch diagnostics, immutable
   attempts, tree-scoped authorisation, claim/epoch fencing, leases,
@@ -83,9 +89,19 @@ execution is intended for trusted deployments.
 Environments configured for the removed containment still export its
 variables. MPM **refuses to execute** while any of
 `MPM_OPENCODE_SIDECAR_KEY`, `MPM_OPENCODE_SIDECAR_UPSTREAM`,
-`MPM_OPENCODE_SIDECAR_MODEL`, `MPM_OPENCODE_REVIEWER_KEY` or
-`MPM_OPENCODE_PLUGIN` is set, and reports exactly which ones. Remove them —
-the containment they configured no longer exists — or set
-`MPM_CONTAINMENT_REMOVED_ACK=1` to acknowledge the removal for this
-transitional release. The acknowledgement changes no behaviour and is
-intended to be removed after one upgrade window.
+`MPM_OPENCODE_SIDECAR_MODEL`, `MPM_OPENCODE_REVIEWER_KEY`,
+`MPM_OPENCODE_PLUGIN` or `MPM_OPENCODE_RELAY_SOCKET` is set, and reports
+exactly which ones. Remove them — the containment they configured no
+longer exists — or set `MPM_CONTAINMENT_REMOVED_ACK=1` to acknowledge the
+removal for this transitional release. The acknowledgement changes no
+behaviour and is intended to be removed after one upgrade window.
+
+## 7. Subprocess lifecycle under native execution
+
+Every framework child runs under a finite deadline and a bounded capture;
+the caller's earlier cancellation wins. Where the operating system
+supports it, the child starts in its own process group and cancellation
+terminates THAT group, so a descendant that inherits the child's output
+pipe cannot keep the run alive past the deadline. Nothing outside the
+owned group is ever signalled, and a normal exit signals nothing. This is
+subprocess accounting, not a security boundary.

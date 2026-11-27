@@ -32,9 +32,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ErrReviewerUnavailable says the reviewer's configuration is not usable.
@@ -45,9 +45,8 @@ var ErrReviewerUnavailable = errors.New("opencode: the reviewer's configuration 
 
 // ErrReviewIncomplete says the reviewer process STARTED, but its result could
 // not be captured faithfully: the message stream failed to read, the session
-// state was missing, a session-level permission grant was present, the
-// session's model was not the configured one, or the evidence file could not
-// be written.
+// state was missing, the session's model was not the configured one, or the
+// evidence file could not be written.
 //
 // It is NOT a pre-launch refusal. The model may already have run and produced
 // billable output, so the assignment attempt must be treated as AMBIGUOUS:
@@ -97,8 +96,9 @@ type ReviewResult struct {
 	// Agent and Model are what the session actually used.
 	Agent string
 	Model string
-	// Permissions is the session's own permission overrides; a non-empty
-	// list is a widening and is refused.
+	// Permissions is the session's own permission override list, as the
+	// agent framework reported it. It is recorded, not enforced: tool
+	// permissions are the framework's policy, not MPM's.
 	Permissions []SessionPerm
 }
 
@@ -134,18 +134,18 @@ func (r *Runtime) Review(ctx context.Context, req ReviewRequest) (*ReviewResult,
 		"--title", req.Title,
 		req.Brief,
 	}
-	runCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, cfg.OpenCodeBin, argv...)
-	cmd.Dir = snapshot
-	// THE FRAMEWORK'S OWN ENVIRONMENT: its configuration, credentials and
-	// tool permissions. MPM does not build a sandbox around the reviewer.
-	cmd.Env = os.Environ()
-	var buf boundedBuffer
-	buf.limit = maxCapturedOutput
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	runErr := cmd.Run()
+	// THE SAME SUBPROCESS LIFECYCLE AS EVERY OTHER FRAMEWORK CHILD:
+	// deadline, group-terminating cancellation, bounded capture, reaping.
+	cr, cerr := runChild(ctx, childConfig{
+		bin:     cfg.OpenCodeBin,
+		args:    argv,
+		dir:     snapshot,
+		timeout: cfg.Timeout,
+	})
+	if cerr != nil {
+		return nil, cerr
+	}
+	runErr := cr.waitErr
 
 	// THE NATIVE MESSAGE STREAM, not the process's stdout. The stream is
 	// what the runtime recorded, and it is what a later reader can check.
@@ -403,12 +403,19 @@ func assistantAuthoredText(raw json.RawMessage) string {
 
 // observeRevision reads the repository's HEAD from the HOST.
 func observeRevision(repo string) (string, error) {
-	cmd := exec.Command("git", "-C", repo, "rev-parse", "HEAD")
-	out, err := cmd.Output()
+	cr, err := runChild(context.Background(), childConfig{
+		bin:     "git",
+		args:    []string{"-C", repo, "rev-parse", "HEAD"},
+		dir:     repo,
+		timeout: 2 * time.Minute,
+	})
 	if err != nil {
 		return "", err
 	}
-	rev := strings.TrimSpace(string(out))
+	if cr.waitErr != nil {
+		return "", cr.waitErr
+	}
+	rev := strings.TrimSpace(cr.stdout)
 	if len(rev) != 40 && len(rev) != 64 {
 		return "", fmt.Errorf("not an object id: %q", rev)
 	}
@@ -426,13 +433,22 @@ func observeRevision(repo string) (string, error) {
 // tree under review can keep moving without changing what is being examined.
 func (r *Runtime) snapshotRevision() (string, string, error) {
 	repo := r.cfg.RepoPath
+	// THE HOST-SIDE GIT COMMANDS ARE BOUNDED TOO: they are ordinary child
+	// processes of this run, and a hung Git would otherwise hold the review
+	// past its deadline exactly as a hung framework would.
+	const gitTimeout = 2 * time.Minute
 
-	status, err := exec.Command("git", "-C", repo, "status", "--porcelain", "--untracked-files=normal").Output()
+	status, err := runChild(context.Background(), childConfig{
+		bin:     "git",
+		args:    []string{"-C", repo, "status", "--porcelain", "--untracked-files=normal"},
+		dir:     r.cfg.Root,
+		timeout: gitTimeout,
+	})
 	if err != nil {
 		return "", "", fmt.Errorf("%w: the repository could not be inspected: %v",
 			ErrReviewerUnavailable, err)
 	}
-	if strings.TrimSpace(string(status)) != "" {
+	if strings.TrimSpace(status.stdout) != "" {
 		return "", "", fmt.Errorf(
 			"%w: the worktree has uncommitted changes, so there is no revision to review",
 			ErrReviewerUnavailable)
@@ -446,14 +462,33 @@ func (r *Runtime) snapshotRevision() (string, string, error) {
 
 	snapshot := filepath.Join(r.cfg.Root, "snapshot")
 	_ = os.RemoveAll(snapshot)
-	if out, err := exec.Command("git", "clone", "--quiet", "--no-checkout",
-		"--shared", repo, snapshot).CombinedOutput(); err != nil {
-		return "", "", fmt.Errorf("%w: the snapshot could not be created: %v: %s",
-			ErrReviewerUnavailable, err, strings.TrimSpace(string(out)))
+	clone, err := runChild(context.Background(), childConfig{
+		bin:     "git",
+		args:    []string{"clone", "--quiet", "--no-checkout", "--shared", repo, snapshot},
+		dir:     r.cfg.Root,
+		timeout: gitTimeout,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("%w: the snapshot could not be created: %v",
+			ErrReviewerUnavailable, err)
 	}
-	if out, err := exec.Command("git", "-C", snapshot, "checkout", "--quiet", rev).CombinedOutput(); err != nil {
-		return "", "", fmt.Errorf("%w: the snapshot could not be checked out at %s: %v: %s",
-			ErrReviewerUnavailable, rev, err, strings.TrimSpace(string(out)))
+	if clone.waitErr != nil {
+		return "", "", fmt.Errorf("%w: the snapshot could not be created: %v",
+			ErrReviewerUnavailable, clone.waitErr)
+	}
+	checkout, err := runChild(context.Background(), childConfig{
+		bin:     "git",
+		args:    []string{"-C", snapshot, "checkout", "--quiet", rev},
+		dir:     r.cfg.Root,
+		timeout: gitTimeout,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("%w: the snapshot could not be checked out at %s: %v",
+			ErrReviewerUnavailable, rev, err)
+	}
+	if checkout.waitErr != nil {
+		return "", "", fmt.Errorf("%w: the snapshot could not be checked out at %s: %v",
+			ErrReviewerUnavailable, rev, checkout.waitErr)
 	}
 	// THE SNAPSHOT MUST BE THE PINNED REVISION, verified rather than assumed.
 	at, err := observeRevision(snapshot)

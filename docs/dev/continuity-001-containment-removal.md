@@ -9,6 +9,8 @@ One focused removal PR. No merge. Subject to independent review.
 | Base | `fedfedf9719a84aebb971594f7a5241cd6f55b0f` (canonical `main`) |
 | Head / tree | recorded in the PR body (this file is part of the change) |
 | Scope | remove MPM-managed operating-system containment; invoke the agent framework natively |
+| Remediation delta (B1–B7) | 22 files, +1,271 / −541 on top of the reviewed head `a006ce30` |
+| Cumulative delta vs base | 72 files, +2,607 / −11,593 |
 
 ## 2. What was removed
 
@@ -37,7 +39,8 @@ sandbox tool tests, `test_reviewer_bwrap_sandbox.py`,
 (superseded by the installer's own policy check), and the reviewer
 permission fixture.
 
-**Net:** 60 files, **+1,189 / −11,050** lines.
+**Net (initial removal):** 60 files, **+1,189 / −11,050** lines.
+**Net (after the B1–B7 remediation):** 72 files, **+2,607 / −11,593** lines.
 
 ## 3. What remains, and why
 
@@ -133,10 +136,25 @@ New/updated tests (synthetic frameworks, disposable databases):
   ambient environment, captured findings and written evidence;
 - **no prerequisites**: `TestRuntimeNeedsNoContainmentPrerequisites`
   constructs the runtime with only a state directory and a binary;
-- **migration gate**: obsolete containment configuration is refused, and
-  only `MPM_ACK=1` unblocks it;
+- **bounded subprocess lifecycle**: worker timeout, reviewer timeout,
+  caller cancellation, bounded reads, a normal run that is NOT terminated,
+  and descendant termination verified through /proc
+  (`internal/core/opencode/subprocess_test.go`,
+  `TestTimeoutRecordsAmbiguityAndTerminatesTheRun`);
+- **credential-safe diagnostics**: adversarial sentinels (an unfamiliar
+  credential name and arbitrary secret text) are absent from returned
+  errors, wrapped errors and the persisted attempt record
+  (`TestReadErrorsNeverCarryCapturedOutputIsB2`);
+- **framework-owned permissions**: session-level grants on a worker and a
+  reviewer session are recorded, never refused, and a framework-reported
+  failure is never manufactured into success;
+- **migration gate**: obsolete containment configuration is refused —
+  including `MPM_OPENCODE_RELAY_SOCKET` alone — and only
+  `MPM_CONTAINMENT_REMOVED_ACK=1` unblocks it;
 - **policy check**: the reviewer installer enforces default-deny + read
-  allows + state-changing denies.
+  allows + state-changing denies;
+- **host-side Git subprocesses bounded**: the review snapshot and revision
+  observation run under the same bounded lifecycle.
 
 Demonstrated without bubblewrap, unprivileged user namespaces, MPM network
 isolation or a relay: these tests run on a host whose user-namespace
@@ -153,7 +171,7 @@ Local gates on the exact head:
 | `make test-scripts` | rc 0, 919 tests, `OK (skipped=1)` |
 | `make test-testenv` | rc 0 |
 | `make docs-check` | 13 checks, 0 errors |
-| `make test-agent-installation` | rc 0, 488 tests |
+| `make test-agent-installation` | rc 0, 482 tests (was 488; 6 removed with the dead `reviewer_sandbox.py` helper and its test) |
 | race (`assignment`, `dispatch`, `opencode`) | rc 0 (28.0 s / 11.5 s / 1.1 s) |
 | PR2 negative controls | rc 0, **14/14** |
 
@@ -163,6 +181,9 @@ CI on the exact head: results in the PR body.
 
 - **T49/T50 are retired, not passed.** No MPM-managed boundary exists to
   test.
+- **R3 (relay readiness) is retired** with the relay subsystem; its
+  historical evidence is preserved and its retirement is not a pass.
+  R1/R2 remain mandatory.
 - **Isolation is the operator's.** MPM neither manages nor certifies an
   external container, dedicated user or VM.
 - The capability executor's own bwrap domains are retained and outside

@@ -156,7 +156,12 @@ func TestExecuteReviewRefusesWrongSessionIdentity(t *testing.T) {
 	assertReviewNotRecorded(t, store, rev.id, implID)
 }
 
-func TestExecuteReviewRefusesPermissionOverrides(t *testing.T) {
+// TestExecuteReviewRecordsSessionPermissionsAsReported pins the
+// framework-permission policy for reviewers: a session-level grant the
+// framework reports is RECORDED with the review, never refused and never
+// granted by MPM. Tool permissions are the agent framework's policy; MPM
+// verifies session identity, model, revision and evidence.
+func TestExecuteReviewRecordsSessionPermissionsAsReported(t *testing.T) {
 	store, _, _, projectID := newTestStore(t)
 	implID, _ := claimedAssignment(t, store, projectID, "alpha")
 	rev := reviewFixture(t, store, implID, "charlie")
@@ -166,13 +171,76 @@ func TestExecuteReviewRefusesPermissionOverrides(t *testing.T) {
 			Action: "read", Resource: "*", Effect: "allow",
 		}},
 	}
-	if _, err := store.ExecuteReview(context.Background(), fake, ExecuteReviewParams{
+	res, err := store.ExecuteReview(context.Background(), fake, ExecuteReviewParams{
 		ID: rev.id, Epoch: rev.epoch, Brief: "review it",
-	}); err == nil || !errors.Is(err, ErrReviewAmbiguous) ||
-		!strings.Contains(err.Error(), "permission override") {
-		t.Fatalf("a session permission override was accepted: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("a review whose framework granted a session permission was refused: %v", err)
 	}
-	assertReviewNotRecorded(t, store, rev.id, implID)
+	if res.Verdict != VerdictPassed {
+		t.Fatalf("the verdict is %q, want passed", res.Verdict)
+	}
+	got, err := store.Get(rev.id)
+	if err != nil {
+		t.Fatalf("read the reviewer: %v", err)
+	}
+	// The evidence row is recorded; the permission list is not an MPM
+	// responsibility and is not persisted as an MPM refusal.
+	if got.ReviewedSHA == "" || got.FindingsSHA256 == "" {
+		t.Fatalf("the review evidence was not recorded: %+v", got)
+	}
+}
+
+// TestWorkerSessionPermissionsAreFrameworkPolicy pins the same policy for
+// the worker: a session-level grant the framework reports does not block
+// the assignment, and MPM neither widens nor revokes it.
+func TestWorkerSessionPermissionsAreFrameworkPolicy(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+	ws := t.TempDir()
+	state := okState(ws, "permitted-model", "mpm-worker")
+	state.Permissions = []oc.SessionPerm{{Action: "shell", Resource: "*", Effect: "allow"}}
+	rt := &fakeRuntime{allowed: map[string]bool{"mpm-worker": true}, launchState: state}
+
+	res, err := store.Execute(context.Background(), rt, executeParams(id, epoch, ws))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.Assignment == nil || res.Assignment.State != StateCompleted {
+		t.Fatalf("the assignment is %+v, want completed", res.Assignment)
+	}
+	if res.Attempt == nil || res.Attempt.LaunchState != SessionCompleted {
+		t.Fatalf("the attempt is %+v, want completed", res.Attempt)
+	}
+}
+
+// TestFrameworkRefusalIsNotSuccess proves a framework that reports a
+// terminal FAILURE is recorded as one: no completion is manufactured from
+// a run the framework itself refused.
+func TestFrameworkRefusalIsNotSuccess(t *testing.T) {
+	store, _, _, projectID := newTestStore(t)
+	id, epoch := claimedAssignment(t, store, projectID, "alpha")
+	ws := t.TempDir()
+	rt := &fakeRuntime{
+		allowed:     map[string]bool{"mpm-worker": true},
+		launchState: okState(ws, "permitted-model", "mpm-worker"),
+	}
+	// The framework reports a terminal failure for this session.
+	rt.launchState.Outcome = "failed"
+
+	res, err := store.Execute(context.Background(), rt, executeParams(id, epoch, ws))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.RuntimeOutcome != "failed" {
+		t.Fatalf("runtime outcome %q, want failed", res.RuntimeOutcome)
+	}
+	if res.Attempt == nil || res.Attempt.LaunchState != SessionFailed {
+		t.Fatalf("the attempt is %+v, want failed", res.Attempt)
+	}
+	if res.Assignment != nil && res.Assignment.State == StateCompleted {
+		t.Fatal("a failed framework run completed the assignment")
+	}
 }
 
 func TestExecuteReviewRefusesWrongRevision(t *testing.T) {

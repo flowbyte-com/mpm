@@ -38,6 +38,10 @@ var RemovedContainmentEnv = []string{
 	"MPM_OPENCODE_SIDECAR_MODEL",
 	"MPM_OPENCODE_REVIEWER_KEY",
 	"MPM_OPENCODE_PLUGIN",
+	// The relay's own switch. The relay-mode entry point was removed with
+	// the relay; an environment that still carries it was configured for
+	// the withdrawn subsystem.
+	"MPM_OPENCODE_RELAY_SOCKET",
 }
 
 // ContainmentRemovedAck is the transitional acknowledgement.

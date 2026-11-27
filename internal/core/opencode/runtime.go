@@ -50,12 +50,10 @@ package opencode
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -81,6 +79,9 @@ type Config struct {
 	AllowedAgents []string
 	// Timeout bounds one whole launch.
 	Timeout time.Duration
+	// ReadTimeout bounds one read-only runtime command (session list,
+	// agent list, message stream). Zero means the default.
+	ReadTimeout time.Duration
 }
 
 // LaunchRequest is one bounded execution.
@@ -143,6 +144,12 @@ const (
 	LaunchStartFailed LaunchFailureClass = "command_start_failed"
 	// LaunchExitFailure says the command started and exited unsuccessfully.
 	LaunchExitFailure LaunchFailureClass = "command_exit_failure"
+	// LaunchDeadlineExceeded says the command did not finish within its
+	// deadline and its process group was terminated.
+	LaunchDeadlineExceeded LaunchFailureClass = "command_deadline_exceeded"
+	// LaunchCancelled says the CALLER cancelled the run and its process
+	// group was terminated.
+	LaunchCancelled LaunchFailureClass = "command_cancelled"
 )
 
 // InspectFailureClass is the SESSION half of a launch failure.
@@ -184,6 +191,12 @@ func (e *LaunchError) Error() string {
 		parts = append(parts, "the command could not start")
 	case LaunchExitFailure:
 		parts = append(parts, fmt.Sprintf("the command exited unsuccessfully (exit %d)", e.ExitCode))
+	case LaunchDeadlineExceeded:
+		parts = append(parts,
+			"the command did not finish within its deadline and its process group was terminated")
+	case LaunchCancelled:
+		parts = append(parts,
+			"the caller cancelled the command and its process group was terminated")
 	}
 	switch e.InspectFailure {
 	case InspectNotFound:
@@ -207,27 +220,24 @@ func (e *LaunchError) Error() string {
 }
 
 // newLaunchError classifies a launch failure without retaining raw output.
-func newLaunchError(runErr error, started bool, exitCode int,
-	inspectErr error, res *LaunchResult) *LaunchError {
-
-	le := &LaunchError{ExitCode: exitCode}
+// newLaunchError assembles the SAFE launch diagnostic from a child run
+// and the inspection outcome. It carries the class, the exit status where
+// reliably available, and the bounded-output digest — never the captured
+// text.
+func newLaunchError(cr *childResult, inspectErr error, res *LaunchResult) *LaunchError {
+	le := &LaunchError{ExitCode: cr.exitCode}
 	if res != nil {
 		le.StateObserved = res.State != nil
 		le.InferenceUnknown = res.State == nil || res.State.Outcome == ""
-		if res.Output != "" {
-			sum := sha256.Sum256([]byte(res.Output))
-			le.OutputBytes = len(res.Output)
-			le.OutputSHA256 = fmt.Sprintf("%x", sum)
+		if cr.combinedBytes > 0 {
+			le.OutputBytes = cr.combinedBytes
+			le.OutputSHA256 = cr.combinedDigest
 		}
 	} else {
 		le.InferenceUnknown = true
 	}
-	if runErr != nil {
-		if !started {
-			le.RunFailure = LaunchStartFailed
-		} else {
-			le.RunFailure = LaunchExitFailure
-		}
+	if class, failed := classifyChild(cr); failed {
+		le.RunFailure = class
 	}
 	if inspectErr != nil {
 		if errors.Is(inspectErr, ErrSessionNotFound) {
@@ -264,6 +274,9 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Minute
+	}
+	if cfg.ReadTimeout <= 0 {
+		cfg.ReadTimeout = defaultReadTimeout
 	}
 	if err := os.MkdirAll(cfg.Root, 0o700); err != nil {
 		return nil, fmt.Errorf("opencode: create the runtime's state directory: %w", err)
@@ -368,31 +381,27 @@ func (r *Runtime) Launch(ctx context.Context, req LaunchRequest) (*LaunchResult,
 	}
 	argv = append(argv, "--title", req.Title, req.Prompt)
 
-	runCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(runCtx, r.cfg.OpenCodeBin, argv...)
-	// THE FRAMEWORK'S OWN ENVIRONMENT. MPM does not scrub, manufacture or
-	// isolate it: the operator's configuration, credentials and tool
-	// permissions are the contract.
-	cmd.Env = os.Environ()
-	cmd.Dir = req.Workspace
-	// A BOUNDED capture. The output is used only for a size and a digest,
-	// so an unbounded buffer would let a looping runtime drive the
-	// adapter's memory for no benefit.
-	var buf boundedBuffer
-	buf.limit = maxCapturedOutput
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	runErr := cmd.Run()
-	started := cmd.ProcessState != nil
-	out := buf.Bytes()
-
-	res := &LaunchResult{SessionID: req.SessionID, Output: string(out)}
-	if started {
-		res.ExitCode = cmd.ProcessState.ExitCode()
+	// ONE shared subprocess lifecycle: deadline, cancellation that
+	// terminates the owned process group, bounded capture, reaping.
+	cr, cerr := runChild(ctx, childConfig{
+		bin:     r.cfg.OpenCodeBin,
+		args:    argv,
+		dir:     req.Workspace,
+		timeout: r.cfg.Timeout,
+	})
+	if cerr != nil {
+		return nil, cerr
 	}
-	if runErr != nil {
+	res := &LaunchResult{
+		SessionID: req.SessionID,
+		// The combined capture is what the digest covers; it is the same
+		// material the old single buffer held.
+		Output: cr.stdout + cr.stderr,
+	}
+	if cr.started {
+		res.ExitCode = cr.exitCode
+	}
+	if cr.waitErr != nil {
 		res.InferredOK = false
 	}
 
@@ -405,11 +414,11 @@ func (r *Runtime) Launch(ctx context.Context, req LaunchRequest) (*LaunchResult,
 		// inspection may have failed, or both — and the raw output may
 		// contain anything. Preserve the CLASSIFICATION, exit code and
 		// bounded-output digest, never the text.
-		return res, newLaunchError(runErr, started, res.ExitCode, inspectErr, res)
+		return res, newLaunchError(cr, inspectErr, res)
 	}
 	if state == nil {
 		res.InferredOK = false
-		return res, newLaunchError(runErr, started, res.ExitCode,
+		return res, newLaunchError(cr,
 			errors.New("the runtime returned no state"), res)
 	}
 	res.State = state
@@ -442,42 +451,33 @@ func (r *Runtime) Inspect(ctx context.Context, sessionID string) (*SessionState,
 	return nil, fmt.Errorf("%w: %q", ErrSessionNotFound, sessionID)
 }
 
+// readTimeout is the bounded deadline for one read command.
+func (r *Runtime) readTimeout() time.Duration {
+	if r.cfg.ReadTimeout <= 0 {
+		return defaultReadTimeout
+	}
+	return r.cfg.ReadTimeout
+}
+
 // runRead runs one read-only runtime command with MPM's own working
 // directory and the framework's environment.
+//
+// The command is BOUNDED (its own deadline, and any earlier caller
+// cancellation) and its failure is SAFE: the classification, the exit
+// status and a digest — never the captured text, which may contain
+// anything the framework printed, including credentials.
 func (r *Runtime) runRead(ctx context.Context, bin string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Env = os.Environ()
-	cmd.Dir = r.cfg.Root
-	out, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return "", fmt.Errorf("%s: %w: %s", filepath.Base(bin), err, strings.TrimSpace(string(ee.Stderr)))
-		}
-		return "", err
+	cr, cerr := runChild(ctx, childConfig{
+		bin:     bin,
+		args:    args,
+		dir:     r.cfg.Root,
+		timeout: r.readTimeout(),
+	})
+	if cerr != nil {
+		return "", cerr
 	}
-	return string(out), nil
-}
-
-// maxCapturedOutput bounds the runtime output the adapter keeps.
-const maxCapturedOutput = 1 << 20
-
-// boundedBuffer keeps at most limit bytes and silently discards the rest.
-// It is used where the output is only digested, never interpreted.
-type boundedBuffer struct {
-	buf   []byte
-	limit int
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	room := b.limit - len(b.buf)
-	if room > 0 {
-		if len(p) < room {
-			room = len(p)
-		}
-		b.buf = append(b.buf, p[:room]...)
+	if cr.waitErr != nil {
+		return "", &readCommandError{bin: readBinShort(bin), wait: cr.waitErr}
 	}
-	return len(p), nil
+	return cr.stdout, nil
 }
-
-func (b *boundedBuffer) Bytes() []byte { return b.buf }

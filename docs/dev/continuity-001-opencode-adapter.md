@@ -119,10 +119,16 @@ grant lands *after* the agent rules and therefore wins over them.
 
 Consequences:
 
-* **A permission declaration is not a boundary.** The namespace is.
-* The adapter **refuses a session whose `permissions` array is non-empty**,
-  even when the runtime reports success.
-* The worker's agent definition is a *narrowing*, not the guarantee.
+* **A permission declaration is not an operating-system boundary.** In the
+  withdrawn design the namespace was; the namespace is gone, so the
+  framework's permission configuration plus the deployment environment are
+  what constrains a session.
+* **The adapter neither refuses nor grants on a session whose
+  `permissions` array is non-empty.** The grant is the agent framework's
+  own policy and is recorded as reported; MPM verifies identity, workspace
+  and model, not tool permissions.
+* The worker's agent definition remains a *permission narrowing* owned by
+  the framework.
 
 ---
 
@@ -362,7 +368,7 @@ assistant-authored text is not a completed review, however it exited.
 | the dispatcher, polling, recovery daemon, aggregate budgets | PR 4 |
 | the GitHub evidence contract, read-only `check` discovery | PR 5 |
 | the first real assignment (#253) | PR 6 |
-| a confined command capability for the worker | after the namespace and network boundary are verified independently |
+| a command capability for the worker | an agent-framework and deployment decision (the shipped definition denies the shell; MPM does not sandbox) |
 | project administration | **not PR 3** — an explicitly seeded fixture is used in the disposable integration database, and a separate operator-only project-creation operation is a prerequisite to PR 6. **Manual SQL insertion is not the supported production workflow.** |
 
 ---
@@ -372,14 +378,16 @@ assistant-authored text is not a completed review, however it exited.
 1. **Exactly-once execution is not claimed.** OpenCode has no idempotent
    creation primitive. The adapter narrows the window to "intent persisted,
    launch not observed" and records that as `ambiguous`.
-2. **The sidecar is a credential *isolator*, not a credential *manager*.** It
-   reads one key from one environment variable and forwards to one host. It is
-   not a secrets store and does not try to be.
-3. **The worker cannot execute commands.** That is a scope decision, not a
-   missing feature.
-4. **The `lo`-up composition depends on `unshare --map-root-user`** being
-   permitted in the host's user-namespace policy. On a host that forbids it,
-   the containment refuses to start rather than degrading — which is the
-   correct failure, but it means PR 3's live gate requires that policy.
+2. **MPM holds no provider credential.** The framework reads its own
+   configuration from the operator's environment; MPM neither stores nor
+   isolates credentials.
+3. **The shipped worker definition does not execute commands.** That is a
+   framework permission decision (the operator can change it), not an MPM
+   boundary; whether commands may run is the agent framework's and the
+   deployment environment's policy.
+4. **Isolation is the deployment environment's.** A container, a dedicated
+   user account or a virtual machine is where filesystem, network,
+   credential and privilege isolation belongs. MPM neither manages nor
+   certifies it.
 5. **A credential exposed in an earlier probe requires operator rotation.**
    The value is not repeated here.

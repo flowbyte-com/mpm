@@ -11,11 +11,10 @@ import (
 
 // The two dispatch paths.
 //
-// They are SEPARATE on purpose. An implementer runs in the worker's
-// containment with the worker's agent definition; a reviewer runs in the
-// reviewer's own sandbox with the pinned `mpm-reviewer` definition. The
-// reviewer NEVER runs in the worker's context, and the implementer never
-// gets to record a review's outcome.
+// They are SEPARATE on purpose. An implementer runs with the worker's
+// agent definition; a reviewer runs with the pinned `mpm-reviewer`
+// definition. The reviewer NEVER runs in the worker's context, and the
+// implementer never gets to record a review's outcome.
 
 // dispatchWorker hands an implementer to PR 3's adapter.
 //

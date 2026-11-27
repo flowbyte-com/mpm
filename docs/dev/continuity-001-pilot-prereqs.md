@@ -110,7 +110,7 @@ shell was added.
 
 ---
 
-## 4. The ten required negative controls
+## 4. The required negative controls
 
 Each one is a test that takes the adversarial shape and requires the safe
 answer. The negative controls are the adversarial tests; where a test is
@@ -128,7 +128,7 @@ mutation-style controls remain PR 2's Python harness.
 | 7 | a worker cannot execute a shell or host-side test command | `TestWorkerDefinitionDeniesExecution` (the pinned definition), `TestWorkerDefinitionIsPinnedToTheTemplate` |
 | 8 | restart recovery preserves the worktree identity | `TestARecreatedDispatcherFindsTheSameWorktree`, `TestTheProvisionerReusesTheSameWorktree` |
 | 9 | a running previous session still blocks unsafe reuse | `TestACrashDuringTheExecutionIsRefusedAndVisible`, `TestARunningOlderEpochSessionBlocksTheWorkspace`, `TestAnUnreachableRuntimeBlocksTheOlderEpochAttempt`, `TestTheRecoveryPassRefusesAMissingWorktree` |
-| 10 | missing credentials cause no real inference | `TestTheRealFactoryRefusesAMissingCredential` (both-empty **and** fallback-only), `TestTheRealFactoryRefusesAWorkerWithNoWorkspace` |
+| 10 | execution refuses an environment still configured for the removed containment | `TestContainmentRemovalGate` (every removed variable, the relay socket alone, the acknowledgement, and non-`1` acknowledgements) |
 
 The PR 2 harness (`make test-continuity-controls`) remains at **14/14
 load-bearing**. PR 5's evidence suites are unchanged; PR 4's dispatcher

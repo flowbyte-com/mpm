@@ -9,10 +9,25 @@ import (
 	"testing"
 )
 
+// childFrom is the childResult shape the tests used to assemble by hand.
+func childFrom(runErr error, started bool, exitCode int, output string) *childResult {
+	cr := &childResult{
+		stdout:   output,
+		started:  started,
+		exitCode: exitCode,
+		waitErr:  runErr,
+	}
+	combined := cr.stdout + cr.stderr
+	cr.combinedBytes = len(combined)
+	if combined != "" {
+		cr.combinedDigest = digestOf(combined)
+	}
+	return cr
+}
 func TestNewLaunchErrorClassifiesWithoutRawOutput(t *testing.T) {
 	const marker = "SYNTHETIC-SECRET-MARKER"
 	res := &LaunchResult{Output: marker}
-	le := newLaunchError(errors.New("exit status 7"), true, 7, errors.New("inspect failed"), res)
+	le := newLaunchError(childFrom(errors.New("exit status 7"), true, 7, marker), errors.New("inspect failed"), res)
 	if le.RunFailure != LaunchExitFailure || le.ExitCode != 7 {
 		t.Fatalf("run classification = %q/%d", le.RunFailure, le.ExitCode)
 	}
@@ -37,7 +52,7 @@ func TestNewLaunchErrorClassifiesWithoutRawOutput(t *testing.T) {
 }
 
 func TestNewLaunchErrorStartFailureAndNotFound(t *testing.T) {
-	le := newLaunchError(errors.New("exec: no such file"), false, 0, ErrSessionNotFound, &LaunchResult{})
+	le := newLaunchError(childFrom(errors.New("exec: no such file"), false, 0, ""), ErrSessionNotFound, &LaunchResult{})
 	if le.RunFailure != LaunchStartFailed || le.InspectFailure != InspectNotFound {
 		t.Fatalf("classification = %q/%q", le.RunFailure, le.InspectFailure)
 	}
@@ -48,7 +63,7 @@ func TestNewLaunchErrorStartFailureAndNotFound(t *testing.T) {
 }
 
 func TestNewLaunchErrorInspectionOnly(t *testing.T) {
-	le := newLaunchError(nil, true, 0, errors.New("inspect failed"), &LaunchResult{})
+	le := newLaunchError(childFrom(nil, true, 0, ""), errors.New("inspect failed"), &LaunchResult{})
 	if le.RunFailure != "" {
 		t.Fatalf("a successful command was classified as %q", le.RunFailure)
 	}
@@ -62,7 +77,7 @@ func TestNewLaunchErrorInspectionOnly(t *testing.T) {
 
 func TestNewLaunchErrorObservedStateWithoutOutcome(t *testing.T) {
 	res := &LaunchResult{State: &SessionState{}}
-	le := newLaunchError(nil, true, 0, errors.New("inspect failed"), res)
+	le := newLaunchError(childFrom(nil, true, 0, ""), errors.New("inspect failed"), res)
 	if !le.StateObserved || !le.InferenceUnknown {
 		t.Fatalf("state observed=%v inference unknown=%v", le.StateObserved, le.InferenceUnknown)
 	}
