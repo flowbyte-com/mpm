@@ -142,10 +142,22 @@ Demonstrated without bubblewrap, unprivileged user namespaces, MPM network
 isolation or a relay: these tests run on a host whose user-namespace
 policy **denies** the removed launcher, and they pass.
 
-Gates: `make build`, `mpm-lint --gate`, `make test` end-to-end,
-`make test-scripts`, `make test-testenv`, `make docs-check`, race suites,
-PR2 negative controls (14/14), agent installation (488 tests), and CI.
-Exact results in the PR body.
+Local gates on the exact head:
+
+| Gate | Result |
+|---|---|
+| `make build` | rc 0, six binaries |
+| `mpm-lint --gate` | PASS, `sql-built actual=0 threshold=0` |
+| **`make test` end-to-end** | **rc 0**, 144 packages `ok` |
+| **root `go test ./...` (CI sweep)** | **rc 0**, every root-module package `ok` |
+| `make test-scripts` | rc 0, 919 tests, `OK (skipped=1)` |
+| `make test-testenv` | rc 0 |
+| `make docs-check` | 13 checks, 0 errors |
+| `make test-agent-installation` | rc 0, 488 tests |
+| race (`assignment`, `dispatch`, `opencode`) | rc 0 (28.0 s / 11.5 s / 1.1 s) |
+| PR2 negative controls | rc 0, **14/14** |
+
+CI on the exact head: results in the PR body.
 
 ## 9. Remaining limitations
 
