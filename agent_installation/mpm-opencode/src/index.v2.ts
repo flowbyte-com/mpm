@@ -53,14 +53,6 @@ import {
   resolveProjectIdentity,
 } from "./event-envelope.js";
 import {
-  renderEnvelope,
-  resolveSandboxBase,
-  SandboxManager,
-  SANDBOX_EXEC_DESCRIPTION,
-  SANDBOX_EXEC_INPUT,
-  SANDBOX_EXEC_TOOL,
-} from "./sandbox-exec.js";
-import {
   createLifecycleObserver,
   createMpmSystemTransport,
   createUnconfiguredTransport,
@@ -757,41 +749,6 @@ export default Plugin.define({
                     },
                 });
             }
-
-            // ----- The sandboxed execution tool ----------------------------
-            //
-            // A HOST-CONTROLLED tool.  It is ALWAYS sandboxed: there is
-            // no privileged mode, and no configuration the model can
-            // supply.  The reviewer agent's definition denies the raw
-            // host shell, so this is the reviewer's ONLY way to execute
-            // anything — and what it executes is confined by the kernel.
-            //
-            // The base, the repository copy and the protected set are
-            // resolved by the HOST.  The model supplies the command and
-            // nothing else.
-            const projectDirectory = ctx.location?.directory;
-            const sandbox = new SandboxManager({
-                base: resolveSandboxBase(),
-                source: projectDirectory,
-                protect: projectDirectory ? [projectDirectory] : [],
-            });
-            editor.add({
-                name: SANDBOX_EXEC_TOOL,
-                description: SANDBOX_EXEC_DESCRIPTION,
-                input: SANDBOX_EXEC_INPUT,
-                async execute(input) {
-                    const args = (input ?? {}) as {
-                        command?: string[];
-                        cwd?: string;
-                        timeout_ms?: number;
-                    };
-                    const envelope = await sandbox.run(args.command ?? [], {
-                        cwd: args.cwd,
-                        timeoutMs: args.timeout_ms,
-                    });
-                    return { content: renderEnvelope(envelope) };
-                },
-            });
         });
 
         // ----- Hook: wake context injection ---------------------------------

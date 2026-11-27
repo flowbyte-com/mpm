@@ -265,7 +265,7 @@ func NewEngine(store *assignment.Store, cfg Config, factory RuntimeFactory) (*En
 		// THE LEXICAL CHECK IN Validate MISSES A SYMLINKED ROOT. Resolve
 		// both paths and refuse a relationship that would only be found
 		// after the first claim.
-		if err := provisioner.ValidateContainment(); err != nil {
+		if err := provisioner.ValidatePaths(); err != nil {
 			return nil, err
 		}
 	}

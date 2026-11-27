@@ -96,6 +96,12 @@ func (f *fakeRuntime) Launch(_ context.Context, req oc.LaunchRequest) (*oc.Launc
 	}
 	state := *f.launchState
 	state.ID = req.SessionID
+	// A native runtime runs IN the authorised workspace; the fake says so
+	// unless a test deliberately seeded another directory to test the
+	// refusal.
+	if state.Location.Directory == "" {
+		state.Location.Directory = req.Workspace
+	}
 	if f.states == nil {
 		f.states = map[string]*oc.SessionState{}
 	}
@@ -297,10 +303,9 @@ func testEngine(t *testing.T, store *assignment.Store, cfg Config) (*Engine, *fa
 // the refusal rather than the dispatcher.
 func okState(agent, outcome string) *oc.SessionState {
 	return &oc.SessionState{
-		Outcome:  outcome,
-		Agent:    agent,
-		Model:    oc.SessionModel{ID: "test", ProviderID: "mpm-sidecar"},
-		Location: oc.SessionLocation{Directory: oc.PrefixWorker},
+		Outcome: outcome,
+		Agent:   agent,
+		Model:   oc.SessionModel{ID: "test", ProviderID: "mpm-sidecar"},
 	}
 }
 

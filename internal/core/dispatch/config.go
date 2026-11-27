@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	oc "github.com/flowbyte-com/mpm-core/opencode"
 )
 
 // The dispatcher's configuration.
@@ -294,15 +292,6 @@ func (c Config) Validate() error {
 		return fmt.Errorf(
 			"dispatch: the workspace root %q and the source repository %q must not be the same or contain one another",
 			c.WorkspaceRoot, c.RepositoryPath)
-	}
-	// THE WORKER'S NAMESPACE BINDS /usr AND /usr/local READ-ONLY. A
-	// repository there would put its Git metadata inside the namespace.
-	for _, dir := range oc.RuntimeDirs() {
-		if sameOrWithin(dir, c.RepositoryPath) {
-			return fmt.Errorf(
-				"dispatch: the source repository %q is inside %q, which the worker's namespace binds",
-				c.RepositoryPath, dir)
-		}
 	}
 	if !filepath.IsAbs(c.ReviewRepoPath) {
 		return fmt.Errorf(

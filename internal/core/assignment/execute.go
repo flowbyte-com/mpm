@@ -777,22 +777,27 @@ func (s *Store) recordState(
 //   - `Model` is what it actually ran, which is how a model selection is
 //     verified rather than assumed.
 func verifySession(state *oc.SessionState, p ExecuteParams) string {
+	// THE RUNTIME RUNS IN THE AUTHORISED WORKSPACE, on this host, with no
+	// bind mount in between. The expected directory is therefore the
+	// workspace itself unless the caller names it.
 	expected := p.ExpectedRuntimeDir
 	if expected == "" {
-		expected = oc.PrefixWorker
+		expected = p.Workspace
 	}
-	if dir := filepath.Clean(state.Location.Directory); dir != filepath.Clean(expected) {
-		return fmt.Sprintf("the session ran in %q, not the authorised workspace %q",
-			state.Location.Directory, expected)
-	}
-	if len(state.Permissions) > 0 {
-		names := make([]string, 0, len(state.Permissions))
-		for _, perm := range state.Permissions {
-			names = append(names, perm.Action+":"+perm.Effect)
+	if expected != "" {
+		if dir := filepath.Clean(state.Location.Directory); dir != filepath.Clean(expected) {
+			return fmt.Sprintf("the session ran in %q, not the authorised workspace %q",
+				state.Location.Directory, expected)
 		}
-		return "the session carries a SESSION-LEVEL permission grant (" +
-			strings.Join(names, ",") + "), which overrides the agent definition"
 	}
+	// SESSION-LEVEL PERMISSION GRANTS ARE THE FRAMEWORK'S.
+	//
+	// MPM used to refuse a session that carried one, because such a grant
+	// could widen the agent definition and MPM's containment was the thing
+	// being protected. Without that boundary the definition and its
+	// session overrides are the operator's agent framework policy; MPM
+	// still verifies the agent NAME and the WORKSPACE, which are
+	// orchestration facts, not tool policy.
 	if state.Agent != p.Agent {
 		return fmt.Sprintf("the session used agent %q, not %q", state.Agent, p.Agent)
 	}

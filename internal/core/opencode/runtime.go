@@ -6,16 +6,30 @@
 // state. It does not implement inference, model selection, tool execution
 // or a conversation loop — OpenCode owns all of that. What lives here is:
 //
-//   - which agent definition may be used, and what permissions it really
-//     has (agents.go's checks, below);
+//   - which agent definition may be used (and that it exists);
 //   - how a session is created or resumed (the caller-minted id);
 //   - what the runtime actually did (its own `outcome`, not an inference
 //     from the existence of a session);
 //   - whether the runtime ran where it was told to.
 //
-// THE COMMANDS, AND WHY THEY ARE THE ONES MEASURED
+// # NO OPERATING-SYSTEM CONTAINMENT
 //
-//	opencode run --session <id> --agent <a> --model <m> --title <t> <prompt>
+// MPM is an agent orchestration, memory and continuity system. It does not
+// create namespaces, mount filesystems, isolate credentials or run an
+// inference relay. The process below is an ordinary child of the MPM
+// process: it inherits the operator's environment and the runtime's own
+// configuration, and the runtime's tool permissions and the deployment
+// environment provide whatever isolation the operator wants.
+//
+// That is deliberate. An agent with the operator's operating-system
+// permissions can reach what the operator can reach; MPM does not pretend
+// otherwise, and an external container, dedicated user account or virtual
+// machine is where that boundary belongs.
+//
+// THE COMMANDS
+//
+//	opencode --standalone run --session <id> --agent <a> [--model <m>] \
+//	    --title <t> <prompt>
 //
 //	  `--session <id>` is the idempotency lever: it creates the session
 //	  with the CALLER's id if it does not exist, and CONTINUES it if it
@@ -25,15 +39,13 @@
 //	opencode --standalone api session.list
 //
 //	  The read path for the runtime's OWN report: `outcome` (succeeded /
-//	  failed), `location.directory`, `agent`, `model` and the session's
-//	  `permissions`. The adapter verifies all four before accepting a
-//	  result.
+//	  failed), `location.directory`, `agent` and `model`.
 //
 //	opencode --standalone debug agents
 //
-//	  The only reliable way to read an agent definition's EFFECTIVE
-//	  permission set. `agent.get` answers 404 even for a known agent, so
-//	  the debug surface is what this package uses.
+//	  The only reliable way to read the agent definitions the runtime
+//	  knows. `agent.get` answers 404 even for a known agent, so the debug
+//	  surface is what this package uses.
 package opencode
 
 import (
@@ -49,67 +61,24 @@ import (
 	"time"
 )
 
-// IsolatedEnv is the environment a runtime process receives OUTSIDE the
-// containment (for the read-only inspection commands). Inside the
-// containment the environment is Spec.Env, which is shorter still.
-//
-// A WORKER carries no provider credential: inference goes through the
-// sidecar, so it authenticates to a socket, not to a provider. A REVIEWER
-// carries its own dedicated provider credential (Config.ProviderKey), and
-// that pair is the only provider credential this function ever adds.
-func IsolatedEnv(cfg Config) []string {
-	env := []string{
-		"HOME=" + filepath.Join(cfg.Root, "home"),
-		"PATH=" + sandboxPath,
-		"XDG_CONFIG_HOME=" + filepath.Join(cfg.Root, "ocfg"),
-		"XDG_DATA_HOME=" + filepath.Join(cfg.Root, "odata"),
-		"XDG_CACHE_HOME=" + filepath.Join(cfg.Root, "ocache"),
-		"XDG_STATE_HOME=" + filepath.Join(cfg.Root, "ostate"),
-		"LANG=C.UTF-8",
-		"TERM=dumb",
-	}
-	// A REVIEWER's provider credential is the one exception. It is passed
-	// to the OpenCode PROCESS only; `sandbox_exec` scrubs it from the
-	// child environment and bubblewrap clears the command environment.
-	// The worker's sidecar credential never reaches this function.
-	if cfg.ProviderKey != "" && cfg.ProviderKeyEnv != "" {
-		env = append(env, cfg.ProviderKeyEnv+"="+cfg.ProviderKey)
-	}
-	return env
-}
-
 // Config is one OpenCode integration's fixed configuration.
 type Config struct {
-	// Root is the sandbox root.
+	// Root is MPM's own directory for this runtime: the review snapshot
+	// and the captured evidence live here. It is NOT a sandbox root; it
+	// is MPM state.
 	Root string
 	// OpenCodeBin is the runtime binary.
 	OpenCodeBin string
-	// MPMBin is this MPM binary, used for the relay.
-	MPMBin string
-	// Model is the runtime model identifier, "provider/model".
+	// Model is the runtime model identifier, "provider/model". Empty
+	// means the framework's own configured default is used.
 	Model string
 	// RepoPath is the repository a REVIEW examines. Unused by the worker
 	// path, whose workspace comes from the launch request.
 	RepoPath string
-	// PluginPath is the MPM OpenCode plugin build. The REVIEWER's
-	// `sandbox_exec` comes from it, so an empty value means a review
-	// cannot start.
-	PluginPath string
 	// AllowedAgents is the explicit allow-list. An agent not in it is
 	// refused BEFORE any session is created, regardless of whether the
 	// runtime would have failed anyway.
 	AllowedAgents []string
-	// Sidecar is the WORKER's sidecar configuration. Its APIKey stays in
-	// the sidecar process; a reviewer runtime leaves Sidecar empty and
-	// carries its own ProviderKey instead.
-	Sidecar SidecarConfig
-	// ProviderKey and ProviderKeyEnv are the REVIEWER's dedicated
-	// provider credential. They are set only for the reviewer runtime;
-	// IsolatedEnv passes the pair to the OpenCode process. The
-	// `sandbox_exec` plugin scrubs the variable before spawning its
-	// helper, and bubblewrap clears the command environment.
-	ProviderKey    string
-	ProviderKeyEnv string
 	// Timeout bounds one whole launch.
 	Timeout time.Duration
 }
@@ -288,22 +257,16 @@ type Runtime struct {
 // NewRuntime validates and returns a Runtime.
 func NewRuntime(cfg Config) (*Runtime, error) {
 	if cfg.Root == "" || cfg.OpenCodeBin == "" {
-		return nil, errors.New("opencode: the runtime needs a root and a binary")
-	}
-	// The MPM binary is the RELAY, which only the WORKER path needs. A
-	// review does not run the worker containment, so it has no relay —
-	// requiring one made `execute-review` impossible to construct.
-	if cfg.RepoPath == "" && cfg.MPMBin == "" {
-		return nil, errors.New("opencode: the worker runtime needs the MPM binary for its relay")
-	}
-	if cfg.Model == "" {
-		return nil, errors.New("opencode: the runtime needs a model")
+		return nil, errors.New("opencode: the runtime needs a state directory and a binary")
 	}
 	if len(cfg.AllowedAgents) == 0 {
 		return nil, errors.New("opencode: the runtime has an empty agent allow-list")
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Minute
+	}
+	if err := os.MkdirAll(cfg.Root, 0o700); err != nil {
+		return nil, fmt.Errorf("opencode: create the runtime's state directory: %w", err)
 	}
 	return &Runtime{cfg: cfg, Now: func() time.Time { return time.Now().UTC() }}, nil
 }
@@ -326,15 +289,19 @@ func (r *Runtime) AgentAllowed(name string) bool {
 	return false
 }
 
-// VerifyAgent asks the RUNTIME what an agent definition's effective
-// permissions are, and refuses a definition whose surface is wider than
-// this worker is allowed to have.
+// VerifyAgent proves the runtime knows the definition.
 //
-// It is deliberately a live query rather than a parse of the markdown: the
-// host prepends its own global rules and resolves last-match-wins, so the
-// definition's text is not the effective set. A definition that says "deny
-// shell" can still end up with shell allowed if a later rule re-allows it,
-// and only the resolved list shows that.
+// THE PERMISSIONS ARE THE FRAMEWORK'S. MPM used to reject a definition whose
+// resolved permissions re-opened execution or egress, because the contained
+// worker's sandbox was MPM's own and the check was part of that boundary.
+// Without that boundary the definition, its permissions and the operator's
+// framework configuration are the authority — MPM asking the runtime for an
+// effective permission set and overriding it would be exactly the kind of
+// application-level substitute for operating-system privilege separation
+// this design rejects.
+//
+// Existence is still checked, because a missing definition would otherwise
+// fail AFTER the attempt was recorded, and an operator cannot act on that.
 func (r *Runtime) VerifyAgent(ctx context.Context, name string) error {
 	if !r.AgentAllowed(name) {
 		return fmt.Errorf("opencode: agent %q is not on the allow-list", name)
@@ -343,30 +310,12 @@ func (r *Runtime) VerifyAgent(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	var found *agentInfo
 	for i := range agents {
 		if agents[i].ID == name {
-			found = &agents[i]
-			break
+			return nil
 		}
 	}
-	if found == nil {
-		return fmt.Errorf("opencode: the runtime does not know an agent named %q", name)
-	}
-	// The worker's effective surface must not re-open execution or
-	// egress. A deny that a later rule overrides is not a deny.
-	for _, p := range found.Permissions {
-		if p.Effect != "allow" {
-			continue
-		}
-		switch p.Action {
-		case "shell", "execute", "browser", "webfetch", "websearch", "subagent":
-			return fmt.Errorf(
-				"opencode: agent %q has an EFFECTIVE allow for %q, which this worker may not have",
-				name, p.Action)
-		}
-	}
-	return nil
+	return fmt.Errorf("opencode: the runtime does not know an agent named %q", name)
 }
 
 type agentInfo struct {
@@ -376,7 +325,7 @@ type agentInfo struct {
 }
 
 func (r *Runtime) listAgents(ctx context.Context) ([]agentInfo, error) {
-	out, err := r.runIsolated(ctx, r.cfg.OpenCodeBin, "--standalone", "debug", "agents")
+	out, err := r.runRead(ctx, r.cfg.OpenCodeBin, "--standalone", "debug", "agents")
 	if err != nil {
 		return nil, fmt.Errorf("opencode: list the agent definitions: %w", err)
 	}
@@ -387,8 +336,12 @@ func (r *Runtime) listAgents(ctx context.Context) ([]agentInfo, error) {
 	return agents, nil
 }
 
-// Launch runs the objective in the containment and returns what the runtime
-// reported. It NEVER derives success from the existence of a session.
+// Launch runs the objective and returns what the runtime reported. It NEVER
+// derives success from the existence of a session.
+//
+// The process is an ordinary child of MPM: it runs in the authorised
+// workspace, under the operator's environment, with the runtime's own
+// configuration and credentials. No namespace, mount or relay is involved.
 func (r *Runtime) Launch(ctx context.Context, req LaunchRequest) (*LaunchResult, error) {
 	if req.SessionID == "" {
 		return nil, errors.New("opencode: a launch needs a caller-minted session id")
@@ -400,67 +353,30 @@ func (r *Runtime) Launch(ctx context.Context, req LaunchRequest) (*LaunchResult,
 		return nil, fmt.Errorf("opencode: the workspace must be absolute, got %q", req.Workspace)
 	}
 
-	// ORDER MATTERS. The isolated configuration — including the agent
-	// definition — is written FIRST, because VerifyAgent asks the RUNTIME
-	// what the definition's effective permissions are, and the runtime can
-	// only answer about a definition it has been given.
-	if err := r.writeSandboxConfig(req.Agent); err != nil {
-		return nil, err
-	}
+	// The definition must exist before anything is recorded against it.
 	if err := r.VerifyAgent(ctx, req.Agent); err != nil {
 		return nil, err
 	}
 
-	spec := Spec{
-		Root:           r.cfg.Root,
-		Workspace:      req.Workspace,
-		OpenCodeBin:    r.cfg.OpenCodeBin,
-		MPMBin:         r.cfg.MPMBin,
-		SidecarSocket:  r.cfg.Sidecar.SocketPath,
-		SidecarBaseURL: "http://" + RelayAddr + "/v1",
-		Env: map[string]string{
-			"HOME":            PrefixHome,
-			"TMPDIR":          PrefixTmp,
-			"PATH":            sandboxPath,
-			"XDG_CONFIG_HOME": PrefixOCfg,
-			"XDG_DATA_HOME":   PrefixOData,
-			"XDG_CACHE_HOME":  PrefixOCache,
-			"XDG_STATE_HOME":  PrefixOState,
-			"LANG":            "C.UTF-8",
-			"TERM":            "dumb",
-			// The relay is started by the launcher, not by this
-			// command; the variable is what makes the MPM binary in
-			// the namespace run the relay.
-			RelayEnvVar: PrefixSocket,
-		},
-		RelayCommand: []string{"/opt/mpm/mpm"},
-		Command: []string{
-			"/opt/opencode/opencode", "--standalone", "run",
-			"--session", req.SessionID,
-			"--agent", req.Agent,
-			"--model", r.cfg.Model,
-			"--title", req.Title,
-			req.Prompt,
-		},
+	argv := []string{
+		"--standalone", "run",
+		"--session", req.SessionID,
+		"--agent", req.Agent,
 	}
-
-	argv, err := spec.Argv()
-	if err != nil {
-		return nil, err
+	if r.cfg.Model != "" {
+		argv = append(argv, "--model", r.cfg.Model)
 	}
+	argv = append(argv, "--title", req.Title, req.Prompt)
 
 	runCtx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
-	// THE ENVIRONMENT IS EXPLICIT. This is the fix for the measured leak:
-	// bubblewrap's own init inherits this, and `--clearenv` would
-	// otherwise leave the adapter's whole environment readable at
-	// /proc/1/environ inside the namespace.
-	cmd.Env = []string{
-		"PATH=" + sandboxPath,
-		"HOME=" + filepath.Join(r.cfg.Root, "home"),
-	}
+	cmd := exec.CommandContext(runCtx, r.cfg.OpenCodeBin, argv...)
+	// THE FRAMEWORK'S OWN ENVIRONMENT. MPM does not scrub, manufacture or
+	// isolate it: the operator's configuration, credentials and tool
+	// permissions are the contract.
+	cmd.Env = os.Environ()
+	cmd.Dir = req.Workspace
 	// A BOUNDED capture. The output is used only for a size and a digest,
 	// so an unbounded buffer would let a looping runtime drive the
 	// adapter's memory for no benefit.
@@ -472,10 +388,7 @@ func (r *Runtime) Launch(ctx context.Context, req LaunchRequest) (*LaunchResult,
 	started := cmd.ProcessState != nil
 	out := buf.Bytes()
 
-	res := &LaunchResult{
-		SessionID: req.SessionID,
-		Output:    string(out),
-	}
+	res := &LaunchResult{SessionID: req.SessionID, Output: string(out)}
 	if started {
 		res.ExitCode = cmd.ProcessState.ExitCode()
 	}
@@ -511,7 +424,7 @@ func (r *Runtime) Launch(ctx context.Context, req LaunchRequest) (*LaunchResult,
 
 // Inspect reads a session's OWN report.
 func (r *Runtime) Inspect(ctx context.Context, sessionID string) (*SessionState, error) {
-	out, err := r.runIsolated(ctx, r.cfg.OpenCodeBin, "--standalone", "api", "session.list")
+	out, err := r.runRead(ctx, r.cfg.OpenCodeBin, "--standalone", "api", "session.list")
 	if err != nil {
 		return nil, err
 	}
@@ -529,11 +442,12 @@ func (r *Runtime) Inspect(ctx context.Context, sessionID string) (*SessionState,
 	return nil, fmt.Errorf("%w: %q", ErrSessionNotFound, sessionID)
 }
 
-// runIsolated runs one read-only runtime command in the isolated data tree.
-func (r *Runtime) runIsolated(ctx context.Context, bin string, args ...string) (string, error) {
+// runRead runs one read-only runtime command with MPM's own working
+// directory and the framework's environment.
+func (r *Runtime) runRead(ctx context.Context, bin string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Env = IsolatedEnv(r.cfg)
-	cmd.Dir = filepath.Join(r.cfg.Root, "home")
+	cmd.Env = os.Environ()
+	cmd.Dir = r.cfg.Root
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
@@ -544,75 +458,6 @@ func (r *Runtime) runIsolated(ctx context.Context, bin string, args ...string) (
 	}
 	return string(out), nil
 }
-
-// writeSandboxConfig writes the isolated OpenCode configuration: the
-// allowed agent definitions, and ONE custom provider that points at the
-// relay. There is no provider credential here — the runtime authenticates
-// to a socket.
-func (r *Runtime) writeSandboxConfig(agent string) error {
-	dir := filepath.Join(r.cfg.Root, "ocfg", "opencode")
-	if err := os.MkdirAll(filepath.Join(dir, "agents"), 0o700); err != nil {
-		return fmt.Errorf("opencode: create the config directory: %w", err)
-	}
-
-	cfg := map[string]any{
-		"$schema": "https://opencode.ai/config.json",
-		"providers": map[string]any{
-			"mpm-sidecar": map[string]any{
-				"name":    "MPM Sidecar",
-				"package": "@opencode/ai/providers/openai-compatible",
-				"settings": map[string]any{
-					"baseURL": "http://" + RelayAddr + "/v1",
-				},
-				"models": map[string]any{
-					r.modelID(): map[string]any{
-						"name":  r.modelID(),
-						"limit": map[string]any{"context": 200000},
-					},
-				},
-			},
-		},
-	}
-	body, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("opencode: encode the sandbox config: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "opencode.json"), body, 0o600); err != nil {
-		return fmt.Errorf("opencode: write the sandbox config: %w", err)
-	}
-	// The agent definition the sandbox receives is the one COMPILED INTO
-	// this binary. A definition read from the host would be an input the
-	// adapter never reviewed.
-	if agent != WorkerAgentName {
-		return fmt.Errorf("opencode: %q is not the worker definition this adapter installs", agent)
-	}
-	if err := os.WriteFile(
-		filepath.Join(dir, "agents", WorkerAgentName+".md"),
-		WorkerAgentDefinition, 0o600); err != nil {
-		return fmt.Errorf("opencode: write the worker definition: %w", err)
-	}
-	return nil
-}
-
-// modelID is the part of "provider/model" after the slash, which is what
-// the sidecar's allow-list is keyed on.
-func (r *Runtime) modelID() string {
-	if i := strings.LastIndex(r.cfg.Model, "/"); i >= 0 {
-		return r.cfg.Model[i+1:]
-	}
-	return r.cfg.Model
-}
-
-// sandboxPath is the PATH the containment and the isolated read commands
-// receive.
-//
-// IT INCLUDES /usr/sbin AND /sbin. The first version did not, and `ip` lives
-// in /usr/sbin on Debian, Ubuntu and RHEL-family hosts — so on a
-// non-merged-/usr host the launcher's `ip link set lo up` would not be found
-// and the containment would exit before bubblewrap ever ran. (On a
-// merged-/usr host /usr/bin/ip exists, which is why the omission was
-// invisible here.)
-const sandboxPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 // maxCapturedOutput bounds the runtime output the adapter keeps.
 const maxCapturedOutput = 1 << 20

@@ -11,19 +11,16 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/logging"
 
 	mpminternal "github.com/flowbyte-com/mpm-core"
-	opencode "github.com/flowbyte-com/mpm-core/opencode"
 	"github.com/flowbyte-com/mpm-core/synth"
 	"github.com/flowbyte-com/mpm-core/usererror"
 
@@ -340,30 +337,6 @@ func main() {
 	// perms check, BEFORE any DB open, BEFORE any goroutine that may
 	// write to disk. See internal/core/config/umask.go.
 	config.EnforcePrivateUmask()
-
-	// PR 3: the namespace-side relay.
-	//
-	// The adapter starts this binary INSIDE the worker's namespace with
-	// MPM_OPENCODE_RELAY_SOCKET set, so the runtime has an HTTP address on
-	// the namespace's own loopback that reaches the credential-holding
-	// sidecar. The check is the FIRST thing after the umask because the
-	// relay must not: read the configuration, open a database, resolve a
-	// workspace, start a scheduler nudge, or parse an operator argument.
-	// It is a byte pipe and nothing else.
-	if socket, ok := opencode.RelayModeFromEnv(); ok {
-		// signal.NotifyContext rather than a hand-rolled goroutine: the
-		// ctx IS the lifecycle binding, and the linter's goroutine rule
-		// is right to insist on one.
-		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer stop()
-		if err := opencode.RunRelay(ctx, opencode.RelayConfig{
-			UpstreamSocket: socket,
-		}); err != nil {
-			fmt.Fprintln(os.Stderr, "mpm relay:", err)
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
 
 	// Version reporting is intercepted BEFORE the permission sweep, the
 	// scheduler health nudge and any database access. It is the command

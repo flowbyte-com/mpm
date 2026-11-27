@@ -6,8 +6,6 @@
 // asserts a REFUSAL or a TRUTHFUL RECORD, never a happy path alone:
 //
 //   - an unknown agent is refused BEFORE a session exists;
-//   - a session-level permission grant is refused even when the runtime
-//     reports success;
 //   - a session that ran in a different directory is refused;
 //   - a stale claim cannot record an attempt, and cannot publish a result;
 //   - a retry reconciles on evidence rather than launching again;
@@ -200,8 +198,7 @@ func executeParams(id string, epoch int64, workspace string) ExecuteParams {
 		Actor:     Actor{Address: "alpha", Kind: "agent"},
 		Agent:     "mpm-worker",
 		Workspace: workspace,
-		// Contained runtimes report the bind-mounted path; the fake
-		// reports whatever the test tells it, so name it here.
+		// The runtime runs in the authorised workspace on this host.
 		ExpectedRuntimeDir: workspace,
 		WorkspaceID:        "ws",
 		Model:              "mpm-sidecar/permitted-model",
@@ -242,31 +239,6 @@ func TestExecuteRefusesUnknownAgentBeforeAnySession(t *testing.T) {
 // definition's denies — measured on v2.3.2 — so a grant on a worker session
 // is a privilege widening. The adapter must refuse even though the runtime
 // reported success.
-func TestExecuteRefusesSessionLevelPermissionGrant(t *testing.T) {
-	store, _, _, projectID := newTestStore(t)
-	ws := t.TempDir()
-	id, epoch := claimedAssignment(t, store, projectID, "alpha")
-
-	state := okState(ws, "permitted-model", "mpm-worker")
-	state.Permissions = []oc.SessionPerm{{Action: "shell", Resource: "*", Effect: "allow"}}
-	rt := &fakeRuntime{allowed: map[string]bool{"mpm-worker": true}, launchState: state}
-
-	res, err := store.Execute(context.Background(), rt, executeParams(id, epoch, ws))
-	if err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if res.LaunchState != SessionFailed {
-		t.Errorf("a session with a permission grant ended %q, want %q", res.LaunchState, SessionFailed)
-	}
-	if !strings.Contains(res.Attempt.LastError, "SESSION-LEVEL permission grant") {
-		t.Errorf("the refusal did not name the grant: %q", res.Attempt.LastError)
-	}
-	// AND THE ASSIGNMENT DID NOT COMPLETE.
-	if res.Assignment.State == StateCompleted {
-		t.Error("the assignment completed on a session whose permissions were widened")
-	}
-}
-
 // TestExecuteRefusesWrongWorkspace is the F2 boundary.
 //
 // The runtime binds its working directory from the PROCESS CWD and IGNORES

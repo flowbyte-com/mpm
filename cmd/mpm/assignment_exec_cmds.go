@@ -3,13 +3,21 @@
 // Two verbs live here, and neither is in the agent-facing tool registry:
 //
 //	mpm assignment execute --id ... --epoch ... --agent ... --workspace ...
+//	mpm assignment execute-review --id ... --epoch ... --brief ... --reviewed-sha ...
 //	mpm assignment capture-review-evidence --id ... --epoch ... ...
 //
 // # WHY THEY ARE CLI-ONLY
 //
-// `execute` starts a contained runtime process and spends real model
-// budget. PR 4's dispatcher is the intended automatic path; PR 3 is
-// explicitly invoked, so the door is the operator's shell.
+// `execute` starts a runtime process and spends real model budget. PR 4's
+// dispatcher is the intended automatic path; PR 3 is explicitly invoked, so
+// the door is the operator's shell.
+//
+// # WHAT MPM DOES NOT DO
+//
+// These verbs do not create namespaces or sandboxes. The runtime is an
+// ordinary child process with the operator's environment, and the runtime's
+// tool permissions and the deployment environment are where isolation, if
+// any, lives.
 //
 // `capture-review-evidence` writes the reviewed revision and the findings
 // digest. An agent-facing action for that would let an implementer
@@ -30,29 +38,15 @@ import (
 	"github.com/flowbyte-com/mpm-core/config"
 	"github.com/flowbyte-com/mpm-core/dispatch"
 	oc "github.com/flowbyte-com/mpm-core/opencode"
-	"github.com/flowbyte-com/mpm-core/usererror"
 )
 
-// Environment variables the sidecar reads. They are the ADAPTER's
-// environment — the sidecar runs on the host, outside the worker's
-// namespace, and the credential never enters the sandbox.
+// Environment variables this surface reads.
 const (
-	// The names are the dispatch package's: one vocabulary, so the
-	// CLI's explicit execution and the dispatcher's automatic one read
-	// the same environment and cannot drift apart.
-	envSidecarKey      = dispatch.EnvSidecarKey
-	envSidecarUpstream = dispatch.EnvSidecarUpstream
-	envOpenCodeBin     = dispatch.EnvOpenCodeBin
-	// The UPSTREAM model id. The worker asks for the stable local id
-	// ("permitted-model"); the sidecar translates it. That way the
-	// worker's configuration never names a real provider model.
-	envUpstreamModel = dispatch.EnvUpstreamModel
-	// Where the MPM OpenCode plugin lives. The REVIEWER's `sandbox_exec`
-	// comes from it, so a review cannot start without it.
-	envOpenCodePlugin = dispatch.EnvOpenCodePlugin
+	// envOpenCodeBin names the runtime binary. Everything else — the
+	// model, the agent definitions, the provider credentials and the tool
+	// permissions — is the agent framework's own configuration.
+	envOpenCodeBin = dispatch.EnvOpenCodeBin
 )
-
-const defaultSidecarUpstream = "https://api.deepseek.com"
 
 // assignmentVerbExecute runs one explicitly selected assignment.
 func assignmentVerbExecute(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
@@ -66,118 +60,46 @@ func assignmentVerbExecute(store *assignment.Store, f *assignmentFlags) (interfa
 		return nil, fmt.Errorf("the workspace must be an absolute path, got %q", f.workspace)
 	}
 
-	mpmDir := config.GetMPMDir()
-	sandboxRoot := filepath.Join(mpmDir, "opencode", "runs", f.id)
-
-	// The credential. It is read HERE, in the adapter, and handed to the
-	// sidecar — which lives outside the sandbox. It is never written to
-	// disk, never placed in argv, and never passed into the namespace.
-	key := os.Getenv(envSidecarKey)
-	if key == "" {
-		return nil, fmt.Errorf(
-			"no sidecar credential: set %s. The worker cannot be given a "+
-				"provider key, so inference runs through the sidecar, and the sidecar "+
-				"needs one.", envSidecarKey)
+	if err := dispatch.CheckContainmentRemoval(os.Getenv); err != nil {
+		return nil, err
 	}
-	upstream := os.Getenv(envSidecarUpstream)
-	if upstream == "" {
-		upstream = defaultSidecarUpstream
-	}
-	upstreamModel := os.Getenv(envUpstreamModel)
-	if upstreamModel == "" {
-		upstreamModel = defaultUpstreamModel
-	}
-
-	opencodeBin := os.Getenv(envOpenCodeBin)
-	mpmBin, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("resolve the MPM binary: %w", err)
-	}
-	if opencodeBin == "" {
-		opencodeBin = "opencode"
-	}
-	opencodeBin, err = resolveExecutable(opencodeBin)
+	opencodeBin, err := resolveExecutable(envOr(envOpenCodeBin, "opencode"))
 	if err != nil {
 		return nil, err
 	}
-
-	model := f.model
-	if model == "" {
-		model = "mpm-sidecar/" + defaultSidecarModel
-	}
-
 	workspaceID := f.workspaceID
 	if workspaceID == "" {
 		workspaceID = filepath.Base(filepath.Clean(f.workspace))
 	}
-
-	// The sandbox tree is built BEFORE the runtime, and it is stable per
-	// ASSIGNMENT (not per attempt) so a retry finds the same isolated data
-	// store — which is where the native session lives.
-	spec := oc.Spec{Root: sandboxRoot, Workspace: f.workspace}
-	if err := oc.BuildTree(spec); err != nil {
-		return nil, err
-	}
-
-	sidecar, err := oc.NewSidecar(oc.SidecarConfig{
-		SocketPath:      filepath.Join(sandboxRoot, "sidecar.sock"),
-		UpstreamBaseURL: upstream,
-		APIKey:          key,
-		ModelAllowList: map[string]string{
-			defaultSidecarModel: upstreamModel,
-		},
-		Audit: auditSink(sandboxRoot),
-	})
-	if err != nil {
-		return nil, err
-	}
-	defer sidecar.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- sidecar.Serve(ctx) }()
-
 	rt, err := oc.NewRuntime(oc.Config{
-		Root:          sandboxRoot,
+		Root:          filepath.Join(config.GetMPMDir(), "opencode", "runs", f.id),
 		OpenCodeBin:   opencodeBin,
-		MPMBin:        mpmBin,
-		Model:         model,
+		Model:         f.model,
 		AllowedAgents: []string{workerAgentDefinition},
-		Sidecar: oc.SidecarConfig{
-			SocketPath: sidecar.SocketPath(),
-		},
 	})
 	if err != nil {
 		return nil, err
 	}
-
 	res, err := store.Execute(context.Background(), rt, assignment.ExecuteParams{
-		ID:          f.id,
-		Epoch:       f.epoch,
-		Actor:       assignmentActorFrom(f),
-		Agent:       f.agent,
-		Workspace:   f.workspace,
-		WorkspaceID: workspaceID,
-		Model:       model,
-		Title:       "assignment " + f.id,
-		References:  f.references,
+		ID:        f.id,
+		Epoch:     f.epoch,
+		Actor:     assignmentActorFrom(f),
+		Agent:     f.agent,
+		Workspace: f.workspace,
+		// The runtime runs IN the authorised workspace on this host, so
+		// the directory it reports is the workspace itself.
+		ExpectedRuntimeDir: f.workspace,
+		WorkspaceID:        workspaceID,
+		Model:              f.model,
+		Title:              "assignment " + f.id,
+		References:         f.references,
 	})
 	if err != nil {
 		return nil, err
-	}
-	select {
-	case serr := <-serveErr:
-		if serr != nil {
-			return nil, serr
-		}
-	default:
 	}
 	return res, nil
 }
 
-// assignmentVerbCaptureReviewEvidence records the reviewed revision and the
-// findings digest a HOST captured.
 func assignmentVerbCaptureReviewEvidence(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
 	return store.CaptureReviewEvidence(assignment.ReviewEvidenceParams{
 		ReviewerID:     f.id,
@@ -191,11 +113,17 @@ func assignmentVerbCaptureReviewEvidence(store *assignment.Store, f *assignmentF
 
 const (
 	workerAgentDefinition   = "mpm-worker"
-	defaultSidecarModel     = "permitted-model"
-	defaultUpstreamModel    = "deepseek-chat"
-	defaultReviewModel      = "minimax-coding-plan/MiniMax-M3.1-Flash"
+	defaultReviewModel      = dispatch.DefaultReviewModel
 	reviewerAgentDefinition = "mpm-reviewer"
 )
+
+// envOr reads an environment variable with a fallback.
+func envOr(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
+}
 
 // resolveExecutable finds a binary on PATH or at an absolute path.
 func resolveExecutable(name string) (string, error) {
@@ -212,19 +140,13 @@ func resolveExecutable(name string) (string, error) {
 	return p, nil
 }
 
-// auditSink opens the sidecar's bounded audit log beside the sandbox.
-func auditSink(root string) *os.File {
-	path := filepath.Join(root, "sidecar-audit.log")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		usererror.Error("mpm assignment: the sidecar audit log could not be opened: %v", err)
-		return nil
-	}
-	return f
-}
-
-// assignmentVerbExecuteReview runs one INDEPENDENT REVIEW in the reviewer's
-// own isolation and records the evidence the HOST captured.
+// assignmentVerbExecuteReview runs one INDEPENDENT REVIEW and records the
+// evidence the HOST captured.
+//
+// The reviewer is an ordinary child process with the operator's
+// environment and the configured reviewer definition. The exact-revision
+// snapshot and the host-captured findings are MPM orchestration and are
+// unchanged.
 func assignmentVerbExecuteReview(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
 	if strings.TrimSpace(f.id) == "" {
 		return nil, fmt.Errorf("execute-review needs --id (the REVIEWER assignment)")
@@ -243,76 +165,27 @@ func assignmentVerbExecuteReview(store *assignment.Store, f *assignmentFlags) (i
 			"execute-review needs --reviewed-sha (the exact revision to review)")
 	}
 
-	mpmDir := config.GetMPMDir()
-	root := filepath.Join(mpmDir, "opencode", "reviews", f.id)
-	// THE SANDBOX TREE, and not just the root.
-	//
-	// The runtime's read-only commands run with their working directory
-	// at <root>/home, and the review path reads the reviewer's session
-	// through exactly that command. Without the tree, the capture fails
-	// with "chdir …: no such file or directory" — so the review would
-	// never produce a finding, and a review that cannot be read can only
-	// ever be reported, never recovered.
-	spec := oc.Spec{Root: root, Workspace: f.workspace}
-	if err := oc.BuildTree(spec); err != nil {
+	if err := dispatch.CheckContainmentRemoval(os.Getenv); err != nil {
 		return nil, err
 	}
-
-	opencodeBin := os.Getenv(envOpenCodeBin)
-	if opencodeBin == "" {
-		opencodeBin = "opencode"
-	}
-	var err error
-	opencodeBin, err = resolveExecutable(opencodeBin)
+	opencodeBin, err := resolveExecutable(envOr(envOpenCodeBin, "opencode"))
 	if err != nil {
 		return nil, err
 	}
-
-	// The plugin is where `sandbox_exec` comes from. `resolveExecutable`
-	// already found the runtime, so the plugin is resolved from the MPM
-	// install beside this binary.
-	pluginPath := os.Getenv(envOpenCodePlugin)
-	if pluginPath == "" {
-		pluginPath = filepath.Join(filepath.Dir(filepath.Dir(mpmDir)),
-			"agent_installation", "mpm-opencode")
-		if _, statErr := os.Stat(pluginPath); statErr != nil {
-			pluginPath = filepath.Join(mpmDir, "agent_installation", "mpm-opencode")
-		}
-	}
-
 	model := f.model
 	if model == "" {
 		model = defaultReviewModel
 	}
-	// THE REVIEWER'S OWN CREDENTIAL. It is separate from the worker's
-	// sidecar key and has no fallback to an ambient provider key.
-	reviewerKey := os.Getenv(dispatch.EnvReviewerKey)
-	if reviewerKey == "" {
-		return nil, fmt.Errorf(
-			"no reviewer credential: set %s. The reviewer has its own provider "+
-				"boundary and does not use the worker's sidecar credential.",
-			dispatch.EnvReviewerKey)
-	}
-	providerEnv, err := dispatch.ReviewerProviderEnv(model)
-	if err != nil {
-		return nil, err
-	}
-
 	rt, err := oc.NewRuntime(oc.Config{
-		Root:           root,
-		OpenCodeBin:    opencodeBin,
-		MPMBin:         "",
-		Model:          model,
-		RepoPath:       f.workspace,
-		PluginPath:     pluginPath,
-		AllowedAgents:  []string{reviewerAgentDefinition},
-		ProviderKey:    reviewerKey,
-		ProviderKeyEnv: providerEnv,
+		Root:          filepath.Join(config.GetMPMDir(), "opencode", "reviews", f.id),
+		OpenCodeBin:   opencodeBin,
+		Model:         model,
+		RepoPath:      f.workspace,
+		AllowedAgents: []string{reviewerAgentDefinition},
 	})
 	if err != nil {
 		return nil, err
 	}
-
 	return store.ExecuteReview(context.Background(), rt, assignment.ExecuteReviewParams{
 		ID:               f.id,
 		Epoch:            f.epoch,

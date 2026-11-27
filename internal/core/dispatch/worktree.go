@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/flowbyte-com/mpm-core/assignment"
-	oc "github.com/flowbyte-com/mpm-core/opencode"
 )
 
 // The WORKTREE PROVISIONER.
@@ -188,27 +187,17 @@ func (p *WorktreeProvisioner) resolve(a *assignment.Assignment) (root, repo, wor
 	if err := p.requireRepository(repo); err != nil {
 		return "", "", "", err
 	}
-	// THE WORKER'S NAMESPACE BINDS /usr AND /usr/local READ-ONLY. A
-	// repository there would put its Git metadata inside the namespace.
-	for _, dir := range oc.RuntimeDirs() {
-		if sameOrWithin(dir, repo) {
-			return "", "", "", fmt.Errorf(
-				"dispatch: the source repository %q is inside %q, which the worker's namespace binds; "+
-					"the Git metadata would be reachable",
-				repo, dir)
-		}
-	}
 	return root, repo, filepath.Join(root, a.ID), nil
 }
 
-// ValidateContainment resolves the repository and the workspace root and
+// ValidatePaths resolves the repository and the workspace root and
 // refuses a relationship the lexical configuration check cannot see.
 //
 // A symlinked root can resolve equal to, or inside, the repository while
 // the raw strings look unrelated. `Ensure` would catch it — but only
 // after the claim, where the failure leaves a live lease and no attempt.
 // NewEngine runs this before an engine exists.
-func (p *WorktreeProvisioner) ValidateContainment() error {
+func (p *WorktreeProvisioner) ValidatePaths() error {
 	if strings.TrimSpace(p.Root) == "" || strings.TrimSpace(p.Repository) == "" {
 		return fmt.Errorf("dispatch: the workspace root and the repository must both be configured")
 	}
@@ -287,13 +276,6 @@ func (p *WorktreeProvisioner) ValidateRepository() error {
 	}
 	if err := p.requireRepository(repo); err != nil {
 		return err
-	}
-	for _, dir := range oc.RuntimeDirs() {
-		if sameOrWithin(dir, repo) {
-			return fmt.Errorf(
-				"dispatch: the source repository %q is inside %q, which the worker's namespace binds",
-				repo, dir)
-		}
 	}
 	return nil
 }

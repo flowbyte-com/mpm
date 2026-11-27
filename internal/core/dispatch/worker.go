@@ -62,10 +62,10 @@ func (e *Engine) dispatchWorker(ctx context.Context, claimed *assignment.Assignm
 // dispatchReview hands a reviewer to PR 3's review path.
 //
 // The review path is the ONLY way a reviewer runs. It keeps the pinned
-// definition, the default-deny permissions, the `sandbox_exec` boundary,
-// the exact-revision snapshot, the host-captured findings, and the
-// separation between the reviewer's EVIDENCE, the reviewer's VERDICT and
-// the operator's APPROVAL.
+// definition, the exact-revision snapshot, the host-captured findings, and
+// the separation between the reviewer's EVIDENCE, the reviewer's VERDICT
+// and the operator's APPROVAL. Tool permissions come from the agent
+// framework; MPM provides no operating-system sandbox.
 func (e *Engine) dispatchReview(ctx context.Context, claimed *assignment.Assignment,
 	reviewer assignment.ReviewRuntime, outcome Outcome) (Outcome, error) {
 

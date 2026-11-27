@@ -1,6 +1,12 @@
 # Continuity 001, PR 6 — the pilot prerequisites
 
-Status: **current** (the prerequisite for the first autonomous pilot).
+Status: **historical, amended**. MPM-managed operating-system containment
+has been removed: execution is native, the agent framework and the
+deployment environment own isolation, and T49/T50 are retired with the
+removed subsystem. The current contract is
+[`continuity-001-containment-removal-amendment.md`](continuity-001-containment-removal-amendment.md).
+Credential closeout, operator-authorised recovery and explicit execution
+authorisation remain mandatory.
 
 This note records the two safe prerequisites the operator authorised before
 any live inference: the operator-only project-creation operation and the
@@ -17,7 +23,7 @@ Baseline: `origin/main` = `b72d408d8e01a140706d248861b31b66b70e9441`
 
 `mpm assignment create-project --id cpj-<16 lowercase hex>`.
 
-The `projects` row is the containment boundary every assignment names. The
+The `projects` row is the identity every assignment names. The
 schema existed; the supported way to create the row did not, and the only
 path was a raw `INSERT` in tests. The new operation:
 
@@ -53,11 +59,8 @@ work. The dispatcher now owns a genuine Git worktree:
   the source repository. The two must be absolute and must not be the same
   or contain one another. Both are resolved, so a symlinked root that
   resolves equal to or inside the repository is refused too. The
-  repository must also be outside `/usr` and `/usr/local`, which the
-  configuration refuses; the operator must keep it outside the MPM runtime
-  and sandbox trees, which are not known to the configuration. An
-  existing root entry must be a directory: a regular file or a dangling
-  symlink is refused. The repository and the resolved containment are
+  An existing root entry must be a directory: a regular file or a
+  dangling symlink is refused. The repository and the resolved root are
   validated when the engine is built, before any claim.
 - The host runs `git worktree add -b mpm/assignment/<id> <root>/<id>
   <base_sha>` for an implementation assignment. The base is the
@@ -75,12 +78,13 @@ work. The dispatcher now owns a genuine Git worktree:
   worktree, another branch, a moved worktree (even with the same
   assignment id), metadata outside `.git/worktrees/`, a tampered pointer
   or a base that is not an ancestor is **refused**, never adopted.
-- The worktree's `.git` points outside the worker's namespace. For a
-  repository outside the runtime dirs and the sandbox roots (which the
-  configuration enforces for `/usr` and `/usr/local`), the worker can read
-  the checked-out files but cannot reach or modify the host's Git
-  metadata. The pointer's text names the host path; the target is not
-  mounted. The worker does not run `git`; the host stages and commits.
+- The worktree's `.git` is a file whose pointer names the host's Git
+  metadata. The worker can read the checked-out files; it does not run
+  `git` (its agent definition denies the shell), and the host stages and
+  commits. MPM does not sandbox the worker, so the pointer target is
+  reachable by an agent with shell access; the agent definition is the
+  permission boundary, and the deployment environment is the isolation
+  boundary.
 - On the **dispatch** path, the claim is taken before provisioning; a
   live lease or a stale epoch refuses before any workspace exists.
 - On the **recovery** path, the worktree is never created: recovery
@@ -120,7 +124,7 @@ mutation-style controls remain PR 2's Python harness.
 | 3 | an unexpected existing workspace is not adopted | `TestTheProvisionerRefusesAnUnexpectedDirectory`, `TestTheProvisionerRefusesAnUnexpectedFile`, `TestTheProvisionerRefusesAFullClone` |
 | 4 | a worktree cannot escape its configured root | `TestTheProvisionerRefusesASymlinkedWorkspace`, `TestTheProvisionerRefusesAnAssignmentIDThatIsNotAPathShape`, `TestTheProvisionerRefusesAWorkspaceRootInsideTheRepository` (and the refusal leaves no directory behind), `TestTheProvisionerRefusesARootEqualToTheRepository`, `TestANewEngineRefusesAResolvedRootInsideTheRepository`, `TestANewEngineRefusesAResolvedRootEqualToTheRepository`, `TestANewEngineRefusesAWorkspaceRootThatIsAFile`, `TestANewEngineRefusesADanglingSymlinkRoot` |
 | 5 | a stale/second claim cannot take another assignment's workspace | `TestALiveLeaseDoesNotProvisionAWorkspace`, `TestTheProvisionerRefusesAnotherRepository`, `TestTheProvisionerRefusesTheWrongBranch` |
-| 6 | a worker cannot reach or modify the real Git metadata | `TestTheProvisionerCreatesAWorktreeAtTheBase` (the pointer target is outside the workspace), `TestTheProvisionerRefusesATamperedPointer`, `TestTheProvisionerRefusesAPointerToTheMainGitDirectory`, `TestTheProvisionerRefusesAMovedWorktree`, `TestTheProvisionerRefusesMetadataOutsideTheWorktreeDirectory`, `TestTheProvisionerRefusesASameIDMove`, `TestTheProvisionerIgnoresAnAmbientGitDir`, `TestTheRepositoryMustNotBeInsideARuntimeDir`, `TestTheConfiguredPathsMustNotContainOneAnother`, `TestANewEngineRefusesAResolvedRootInsideTheRepository`, and PR 3's containment argv pins (`TestContainmentArgvKeepsTheOrderingThatMakesLoopbackPossible`, `TestContainmentNeverCarriesACredentialInArgv`). Residual: the pointer's text names the host path; the target is not mounted. |
+| 6 | a worker cannot reach or modify the real Git metadata | `TestTheProvisionerCreatesAWorktreeAtTheBase` (the pointer target is outside the workspace), `TestTheProvisionerRefusesATamperedPointer`, `TestTheProvisionerRefusesAPointerToTheMainGitDirectory`, `TestTheProvisionerRefusesAMovedWorktree`, `TestTheProvisionerRefusesMetadataOutsideTheWorktreeDirectory`, `TestTheProvisionerRefusesASameIDMove`, `TestTheProvisionerIgnoresAnAmbientGitDir`, `TestTheConfiguredPathsMustNotContainOneAnother`, `TestANewEngineRefusesAResolvedRootInsideTheRepository`. Residual: the pointer's text names the host path; MPM does not sandbox the worker, so an agent with shell access could follow it. |
 | 7 | a worker cannot execute a shell or host-side test command | `TestWorkerDefinitionDeniesExecution` (the pinned definition), `TestWorkerDefinitionIsPinnedToTheTemplate` |
 | 8 | restart recovery preserves the worktree identity | `TestARecreatedDispatcherFindsTheSameWorktree`, `TestTheProvisionerReusesTheSameWorktree` |
 | 9 | a running previous session still blocks unsafe reuse | `TestACrashDuringTheExecutionIsRefusedAndVisible`, `TestARunningOlderEpochSessionBlocksTheWorkspace`, `TestAnUnreachableRuntimeBlocksTheOlderEpochAttempt`, `TestTheRecoveryPassRefusesAMissingWorktree` |
@@ -147,17 +151,20 @@ here only as an intention. Publication remains an operator authorisation.
 
 ## 6. What remains blocked
 
-- **Credential (Gate 1.1).** The operator confirms rotation and supplies a
-  new key through the protected environment (`MPM_OPENCODE_SIDECAR_KEY`,
-  and optionally the upstream/model variables). The factory now requires
-  that explicit key: there is **no fallback** to the general provider key,
-  so a dispatcher cannot run on a credential the operator prepared for a
-  different boundary. No live inference was attempted.
+- **Credential (Gate 1.1).** The operator confirms rotation and supplies
+  the provider credential through the agent framework's own configuration.
+  The removed containment's variables (`MPM_OPENCODE_SIDECAR_KEY`,
+  `MPM_OPENCODE_SIDECAR_UPSTREAM`, `MPM_OPENCODE_SIDECAR_MODEL`,
+  `MPM_OPENCODE_REVIEWER_KEY`, `MPM_OPENCODE_PLUGIN`) are no longer read;
+  an environment that still sets them is refused with a migration
+  diagnostic until they are removed (or `MPM_CONTAINMENT_REMOVED_ACK=1` is
+  set for one transitional release). No live inference was attempted.
 - **Gate 1 re-run.** After this prerequisite merges, Gate 1 must be re-run
   against the new `main`; the other blockers (project creation, worktree,
   evidence target) are addressed by this change or remain operator
   decisions.
-- **The worker cannot run tests (Gate 1.4, accepted limitation).** That is
-  the accepted containment decision. The pilot's tests run outside
-  Alpha's namespace under operator/CI control; the pilot assessment must
-  not describe them as commands Alpha executed.
+- **The worker does not run tests by default (Gate 1.4).** Its shipped
+  definition denies the shell; whether an agent may execute commands is
+  the agent framework's and the deployment environment's decision. The
+  pilot's tests run on the host under operator/CI control, and the pilot
+  assessment must not describe them as commands Alpha executed.

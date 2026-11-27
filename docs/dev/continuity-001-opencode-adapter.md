@@ -1,5 +1,14 @@
 # Continuity 001, PR 3 — the OpenCode adapter and the reviewer integration
 
+> **Superseded in part.** MPM-managed operating-system containment
+> (bubblewrap, user/network namespaces, the inference sidecar and the
+> reviewer `sandbox_exec` path) has been **removed**. Sections 5 and 6
+> below record what was withdrawn; the amendment is
+> [`continuity-001-containment-removal-amendment.md`](continuity-001-containment-removal-amendment.md).
+> Execution is now native: the agent framework and the deployment
+> environment own isolation.
+
+
 **Status:** design of record for PR 3 of six, issue #258.
 **Prerequisite:** PR #260, merged as `ccf5895c`; its accepted head `9bd04b7c` is
 an ancestor of `main`.
@@ -31,7 +40,7 @@ budgets, the GitHub evidence publisher, deployment, or any operator merge.
 | the mapping | one row per execution attempt, written **before** the launch | `internal/core/migration_agent_task_sessions.go` |
 | the adapter | validates, reconciles, launches, records | `internal/core/assignment/execute.go` |
 | the runtime | the only code that talks to OpenCode | `internal/core/opencode/` |
-| the sidecar | the worker's provider credential holder; the reviewer has its own isolated process credential | `internal/core/opencode/sidecar.go` |
+| ~~the sidecar~~ | **removed** with the containment; the framework holds its own credentials | — |
 
 ---
 
@@ -251,169 +260,58 @@ assignment simply does not move.
 
 ---
 
-## 5. Runtime containment
+## 5. Runtime containment — REMOVED
 
-The worker's whole process tree runs inside a bubblewrap mount namespace.
+The containment this section described has been removed: the bubblewrap
+mount namespace, the unshared network namespace, the containment mounts,
+the environment scrubbing and the credential isolation are gone, along
+with the `reviewer_bwrap.py` helper and the reviewer's `sandbox_exec`
+tool.
 
-### The composition, and why the order is the security property
+MPM now launches the agent framework as an ordinary child process in the
+authorised workspace, with the operator's environment. Tool permissions
+come from the agent framework's configuration; filesystem, network and
+credential isolation are the deployment environment's responsibility. The
+shipped agent templates remain as FRAMEWORK permission definitions
+(`agent_installation/mpm-opencode/templates/agents/`), not as an
+operating-system boundary.
 
-```
-unshare --user --map-root-user --net -- /bin/sh -c '
-    ip link set lo up
-    <relay> &
-    exec <bwrap args> -- <runtime>'
-```
+## 6. The inference sidecar — REMOVED
 
-The outer `unshare` is **not** incidental. `bwrap --unshare-net` produces a
-network namespace owned by the **parent** user namespace, so `ip link set lo up`
-inside it fails with `EPERM` — and without loopback there is no address for the
-relay, and without the relay there is no inference. Making the network
-namespace a child of the **new** user namespace is what lets its owner bring
-loopback up.
+The sidecar and its relay were how a network-isolated worker reached a
+provider. Without that isolation they have no purpose: the framework
+reads its own provider configuration and credentials from the operator's
+environment. `MPM_OPENCODE_SIDECAR_KEY`, `MPM_OPENCODE_SIDECAR_UPSTREAM`,
+`MPM_OPENCODE_SIDECAR_MODEL`, `MPM_OPENCODE_REVIEWER_KEY` and
+`MPM_OPENCODE_PLUGIN` are no longer read; an environment that still sets
+them is refused with a migration diagnostic until the operator removes
+them (or sets `MPM_CONTAINMENT_REMOVED_ACK=1` for one transitional
+release).
 
-Measured result of this composition:
-
-| | observed |
-|---|---|
-| `lo` | up (`127.0.0.1/8`) |
-| egress to `1.1.1.1:443` | **BLOCKED** |
-| the host's live OpenCode service on `127.0.0.1:49374` | **UNREACHABLE** |
-| `/home`, `/home/v`, the production MPM database, the operator's checkout | **ABSENT** |
-| `/etc/shadow`, `/etc/sudoers`, `/root` | **ABSENT** |
-| the authorised worktree | reachable, read-write |
-
-### Two credential leaks found and closed
-
-Both were reproduced before they were fixed, and both are regression-tested.
-
-1. **`--clearenv` does not clear bubblewrap's own init.** `/proc/1/environ`
-   inside the namespace exposed the **caller's entire environment** — every
-   provider key and `SSH_AUTH_SOCK`. Fix: the containment is launched with an
-   explicit, short environment (`exec.Cmd.Env`), never the adapter's.
-
-2. **`--setenv NAME VALUE` puts the value in argv**, readable through
-   `/proc/<pid>/cmdline`. Fix: no credential is ever passed to the sandbox.
-   The runtime authenticates to a **socket**, not to a provider.
-
-### The worker is file-edit-only
-
-`shell` is **denied**. The worker edits files and nothing else.
-
-This is deliberate and provisional: with loopback up (the relay needs it), a
-shell would let the model originate connections. A confined command capability
-is a worthwhile later addition, but it needs the namespace and network
-boundary verified independently first. **This is not a complete autonomous
-coding environment, and the documentation does not claim it is.**
-
----
-
-## 6. The inference sidecar
-
-The worker's provider-credential holder, and it lives **outside** the
-worker's namespace. The reviewer does not use this sidecar: its dedicated
-credential is read only by the isolated reviewer process, and the
-`sandbox_exec` helper scrubs it.
-
-```
-worker runtime ──HTTP──► relay (in namespace, no credential)
-                              │ unix socket (bound in)
-                              ▼
-                        sidecar (outside, holds the credential)
-                              │ HTTPS, one allow-listed host
-                              ▼
-                          the provider
-```
-
-A unix socket is a filesystem object, so it is the one channel that survives
-network-namespace separation. That is why the relay exists.
-
-### What the sidecar refuses
-
-* any path but the one chat-completions endpoint;
-* any method but `POST`;
-* a model outside the allow-list;
-* a body over the request ceiling;
-* a completion length over the token ceiling;
-* a response over the response ceiling;
-* an exchange longer than the timeout.
-
-It never forwards a caller-supplied `base_url`, `baseURL`, `api_base` or
-`endpoint`: the upstream is **fixed at construction**, so the worker cannot
-use it as a general proxy. The caller never supplies the credential; the
-sidecar attaches it.
-
-### Audit
-
-One bounded line per request: outcome, reason, model, request bytes, response
-bytes, duration. **Never** prompt text, completion text, headers or
-credentials — asserted by a test that sends a marker string and reads the log
-back.
-
----
+The reviewer still has its OWN model, and the session's reported model is
+still verified against it. That is orchestration, not isolation.
 
 ## 7. The reviewer integration
 
-Unchanged in spirit and **not weakened**:
+The reviewer path is **orchestration**, and it is unchanged:
 
-* `mpm-reviewer` stays default-deny, with `sandbox_exec` as its only execution
-  path;
-* as of PR #260 it also denies `mpm_assignment`; verified in the isolated
-  installation at rule index 23 of 47;
-* `skill` is host-refused — `{"type":"permission.rejected","message":"Permission denied: skill"}`
-  — verified by an actual attempted invocation rather than by reading the
-  definition;
-* a session-level grant on a reviewer session is the negative control: the
-  host honours it, and the adapter refuses to **accept the result**. The
-  check runs after the reviewer process, so the grant was effective during
-  that run; the namespace, not the permission declaration, is the boundary.
+* `mpm-reviewer` is still the pinned reviewer definition, and the shipped
+  template is still default-deny — now with the READ tools (`read`,
+  `grep`, `glob`, `list`) as its only allowed actions. That is a FRAMEWORK
+  permission definition, not an operating-system boundary;
+* the reviewer still has its own model, and the session's reported model
+  is still verified against it;
+* the review still runs in a disposable checkout of the EXACT revision,
+  and the reviewed revision is read from that snapshot by the HOST;
+* the findings are still captured from the native message stream, and only
+  assistant-authored text can be transcribed as a verdict;
+* the reviewer still never runs in the worker's workspace or under the
+  worker's agent definition.
 
-The reviewer's provider credential is `MPM_OPENCODE_REVIEWER_KEY`, separate
-from the worker's `MPM_OPENCODE_SIDECAR_KEY`. The adapter maps the measured
-`minimax-coding-plan/MiniMax-M3.1-Flash` model to OpenCode's
-`MINIMAX_API_KEY` **in the isolated reviewer process only**. It has no
-fallback to an ambient provider key, the worker key or the operator's auth
-store, and a model other than the measured
-`minimax-coding-plan/MiniMax-M3.1-Flash` is refused rather than tried with
-another provider. The CN endpoint and other same-family models were not
-measured and are refused too.
-
-Both the CONFIGURED model and the SESSION's own reported model are checked.
-`Review` compares `session.model` with the configured model before returning,
-and `ExecuteReview` checks the result against the model the dispatcher or the
-explicit verb authorised. A runtime that silently fell back to another
-provider does not produce an acceptable verdict.
-
-The plugin's `sandboxProcessEnv` removes provider credentials before it
-spawns its helper; `reviewer_bwrap.py` removes them from the environment it
-passes to bubblewrap; bubblewrap's `--clearenv` then clears the command's
-environment. The wrapper's own `/proc/<pid>/environ` can retain the
-pre-scrub bytes until the process exits — `os.environ.pop` updates the
-mapping, it does not erase the kernel's exec-time record — but that process
-is on the HOST, outside the sandbox's PID namespace, so the command cannot
-reach it. The scrub is an environment-passing boundary, not a process-memory
-eraser.
-
-The verifier reads the **ordered** resolved list and applies the host's
-last-match-wins rule to both actions and resources. It is a conservative
-coverage proof, not a full host-matcher implementation: it refuses a shape it
-cannot prove. A host-prepended allow that a later agent deny overrides —
-OpenCode 2.3.2's `read *.env.example` allow, overridden by `read * deny` — is
-not treated as effective. An allow that survives is refused, including
-`shell`, `execute`, network, subagent, skill and MPM actions; `sandbox_exec`
-must itself survive, not merely appear before an overridden rule. Resource
-patterns are matched, not collapsed into action-wide permissions, and a broad
-allow is not accepted because a narrow later deny happened to match one
-example. An effective `ask` is requestable, not denied, so it is unsafe unless
-a later allow or deny fully covers it; the host's original `.env` asks are
-covered by the later `read * deny`. Unknown permission effects fail closed,
-and escapes, `?`, character classes, `**`, empty patterns, multi-star action
-patterns, and two-star resource allows are refused because their host
-semantics were not measured. The measured two-star `*middle*` resource form is
-accepted for an ask or a deny; the host's `.env.*` asks pass, and a two-star
-deny can cover a narrower one-star allow.
-
-**There is no fallback to a less restricted reviewer.** If the sandbox or the
-reviewer configuration is unavailable, the review refuses to start.
+What is gone is the claim that the reviewer's tool permissions are an OS
+boundary. An agent with the operator's operating-system permissions can
+reach what the operator can reach; the deployment environment is where
+that is controlled.
 
 ### Evidence capture
 
@@ -444,7 +342,7 @@ activity and the runtime's diagnostics all appear, because a review that
 refused to run is not a review that found nothing.
 
 The *authorship* gate is a separate question, and it is stricter than "the
-transcript is not empty". A tool part renders as `[tool sandbox_exec]`, which
+transcript is not empty". A tool part renders as `[tool bash]`, which
 is not whitespace — so a session where the reviewer only **ran tools** would
 otherwise pass as a review. A review counts only when the **assistant wrote
 text**: a prompt-only session, an empty assistant turn, tool activity alone

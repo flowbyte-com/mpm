@@ -202,7 +202,6 @@ class GateFixture(unittest.TestCase):
         )
         for js in (
             "index.v2.js",
-            "sandbox-exec.js",
             "wake-context.js",
             "event-envelope.js",
             "event-mapper.js",
@@ -214,12 +213,6 @@ class GateFixture(unittest.TestCase):
                 f"// {js}\nexport const name = '{js}';\n"
             )
         (adapter / "package.json").write_text('{"name":"mpm-opencode"}\n')
-        # The reviewer sandbox is a source file the payload ships, not a
-        # compiled module.
-        (adapter / "scripts").mkdir()
-        (adapter / "scripts" / "reviewer_bwrap.py").write_text(
-            "# synthetic reviewer sandbox\n"
-        )
 
         # The installer's own source, stripped for sourcing.
         (self.project / "install.sh.lib").write_text(

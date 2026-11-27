@@ -188,7 +188,6 @@ class BootstrapFixture(unittest.TestCase):
         )
         for js in (
             "index.v2.js",
-            "sandbox-exec.js",
             "wake-context.js",
             "event-envelope.js",
             "event-mapper.js",
@@ -198,12 +197,6 @@ class BootstrapFixture(unittest.TestCase):
         ):
             (adapter / "dist" / js).write_text(f"// {js}\nexport const name = '{js}';\n")
         (adapter / "package.json").write_text('{"name":"mpm-opencode"}\n')
-        # The reviewer sandbox is a source file the payload ships, not a
-        # compiled module.
-        (adapter / "scripts").mkdir()
-        (adapter / "scripts" / "reviewer_bwrap.py").write_text(
-            "# synthetic reviewer sandbox\n"
-        )
 
         (self.project / "install.sh.lib").write_text(
             build_sourced_lib(INSTALL_SH.read_text())

@@ -53,14 +53,12 @@ BINARIES = (
 OPENCODE_MANIFEST = (
     "server.js",
     "dist/index.v2.js",
-    "dist/sandbox-exec.js",
     "dist/wake-context.js",
     "dist/event-envelope.js",
     "dist/event-mapper.js",
     "dist/event-subscriber.js",
     "dist/workspace.js",
     "dist/resolve-mpm-binary.js",
-    "scripts/reviewer_bwrap.py",
     "package.json",
 )
 

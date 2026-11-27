@@ -64,14 +64,12 @@ PLUGIN_ID = "mpm-opencode"
 OPENCODE_MANIFEST = [
     "server.js",
     "dist/index.v2.js",
-    "dist/sandbox-exec.js",
     "dist/wake-context.js",
     "dist/event-envelope.js",
     "dist/event-mapper.js",
     "dist/event-subscriber.js",
     "dist/workspace.js",
     "dist/resolve-mpm-binary.js",
-    "scripts/reviewer_bwrap.py",
     "package.json",
 ]
 
@@ -79,7 +77,6 @@ OPENCODE_MANIFEST = [
 # the sandbox script the plugin spawns, and the package descriptor.
 OPENCODE_MANIFEST_NON_TSC = (
     "server.js",
-    "scripts/reviewer_bwrap.py",
     "package.json",
 )
 
@@ -118,17 +115,10 @@ def opencode_source_tree(root: Path) -> Path:
         "event-subscriber",
         "workspace",
         "resolve-mpm-binary",
-        "sandbox-exec",
     ):
         (src / "dist" / f"{name}.js").write_text(
             "export const x = () => {};\n", encoding="utf-8"
         )
-    # The sandbox script the plugin spawns. It is payload, not a build
-    # artefact, so it travels in the manifest.
-    (src / "scripts").mkdir()
-    (src / "scripts" / "reviewer_bwrap.py").write_text(
-        "#!/usr/bin/env python3\n", encoding="utf-8"
-    )
     (src / "package.json").write_text(json.dumps({
         "name": PLUGIN_ID,
         "type": "module",
@@ -851,8 +841,7 @@ class TestManifestEntriesExistInSource(unittest.TestCase):
         expected = sorted([
             "dist/index.js",
             "dist/index.v2.js",
-            "dist/sandbox-exec.js",
-            "dist/wake-context.js",
+                    "dist/wake-context.js",
             "dist/event-envelope.js",
             "dist/event-mapper.js",
             "dist/event-subscriber.js",
