@@ -92,6 +92,19 @@ type assignmentFlags struct {
 	findingsSHA256 string
 	evidenceRef    string
 
+	// supersession (operator-only recovery; §A7 sealed scope)
+	attemptID            string
+	replacementTitle     string
+	replacementObjective string
+	replacementRecipient string
+	replacementUnits     int64
+	reviewerTitle        string
+	reviewerObjective    string
+	reviewerRecipient    string
+	reviewerUnits        int64
+	justification        string
+	requireQuiescence    bool
+
 	// query
 	states []string
 	limit  int
@@ -176,12 +189,16 @@ func handleAssignment(args []string) int {
 		return assignmentVerb(rest, assignmentVerbCreateRoot)
 	case "record-approval":
 		return assignmentVerb(rest, assignmentVerbRecordApproval)
+	case "supersede":
+		return assignmentVerb(rest, assignmentVerbSupersede)
 	case "execute":
 		return assignmentVerb(rest, assignmentVerbExecute)
 	case "capture-review-evidence":
 		return assignmentVerb(rest, assignmentVerbCaptureReviewEvidence)
 	case "execute-review":
 		return assignmentVerb(rest, assignmentVerbExecuteReview)
+	case "lineage":
+		return assignmentVerb(rest, assignmentVerbLineage)
 	case "dispatch":
 		return assignmentVerb(rest, assignmentVerbDispatch)
 	case "dispatch-status":
@@ -191,9 +208,10 @@ func handleAssignment(args []string) int {
 		return 0
 	default:
 		usererror.Error("mpm assignment: unknown verb %q\n"+
-			"available verbs: inbox, show, history, tree, deliver, acknowledge, accept,\n"+
+			"available verbs: inbox, show, history, tree, lineage, deliver, acknowledge, accept,\n"+
 			"  refuse, claim, renew, start, complete, delegate, cancel, note,\n"+
 			"  record-review, handoff, create-project, create-root, record-approval,\n"+
+			"  supersede,\n"+
 			"  execute, execute-review, capture-review-evidence,\n"+
 			"  dispatch, dispatch-status", sub)
 		return 1
@@ -305,6 +323,17 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 	reviewedSHA := fs.String("reviewed-sha", "", "the revision that was reviewed")
 	findingsSHA256 := fs.String("findings-sha256", "", "the digest of the review's findings")
 	evidenceRef := fs.String("evidence-ref", "", "a pointer to the evidence")
+	justification := fs.String("justification", "", "supersede: why the original cannot proceed")
+	attemptID := fs.String("attempt", "", "supersede: the exact ambiguous attempt the lineage names")
+	replacementTitle := fs.String("replacement-title", "", "supersede: the replacement's title")
+	replacementObjective := fs.String("replacement-objective", "", "supersede: the replacement's objective")
+	replacementRecipient := fs.String("replacement-recipient", "", "supersede: the replacement's recipient")
+	replacementUnits := fs.Int64("replacement-units", 0, "supersede: the replacement's resource units")
+	reviewerTitle := fs.String("reviewer-title", "", "supersede: the reviewer's title")
+	reviewerObjective := fs.String("reviewer-objective", "", "supersede: the reviewer's objective")
+	reviewerRecipient := fs.String("reviewer-recipient", "", "supersede: the reviewer's recipient")
+	reviewerUnits := fs.Int64("reviewer-units", 0, "supersede: the reviewer's resource units")
+	requireQuiescence := fs.Bool("require-quiescence", true, "supersede: refuse when live claims or attempts exist elsewhere in the tree")
 	states := &assignmentListFlag{}
 	fs.Var(states, "state",
 		"the states to filter the inbox by (comma-separated, or repeated)")
@@ -331,52 +360,63 @@ func assignmentParseFlags(args []string) (*assignmentFlags, error) {
 	}
 
 	return &assignmentFlags{
-		dispatchConfig:   *dispatchConfig,
-		id:               *id,
-		rootID:           *rootID,
-		parentID:         *parentID,
-		projectID:        *projectID,
-		recipient:        *recipient,
-		actor:            *actor,
-		actorKind:        *actorKind,
-		title:            *title,
-		objective:        *objective,
-		role:             *role,
-		note:             *note,
-		verdict:          *verdict,
-		awaitingAction:   *awaitingAction,
-		epoch:            *epoch,
-		owner:            *owner,
-		leaseSeconds:     *leaseSeconds,
-		idempotencyKey:   *idempotencyKey,
-		permitted:        permitted.values,
-		eligible:         eligible.values,
-		maxDepth:         *maxDepth,
-		maxTasks:         *maxTasks,
-		maxConcurrency:   *maxConcurrency,
-		maxResourceUnits: *maxResourceUnits,
-		resourceUnits:    *resourceUnits,
-		issueRef:         *issueRef,
-		prRef:            *prRef,
-		baseSHA:          *baseSHA,
-		headSHA:          *headSHA,
-		reviewedSHA:      *reviewedSHA,
-		findingsSHA256:   *findingsSHA256,
-		evidenceRef:      *evidenceRef,
-		states:           states.values,
-		limit:            *limit,
-		action:           *action,
-		revision:         *revision,
-		source:           *source,
-		evidence:         *evidence,
-		payload:          *payload,
-		agent:            *agent,
-		workspace:        *workspace,
-		workspaceID:      *workspaceID,
-		model:            *model,
-		brief:            *brief,
-		references:       references.values,
-		jsonOutput:       *jsonOutput,
+		dispatchConfig:       *dispatchConfig,
+		id:                   *id,
+		rootID:               *rootID,
+		parentID:             *parentID,
+		projectID:            *projectID,
+		recipient:            *recipient,
+		actor:                *actor,
+		actorKind:            *actorKind,
+		title:                *title,
+		objective:            *objective,
+		role:                 *role,
+		note:                 *note,
+		verdict:              *verdict,
+		awaitingAction:       *awaitingAction,
+		epoch:                *epoch,
+		owner:                *owner,
+		leaseSeconds:         *leaseSeconds,
+		idempotencyKey:       *idempotencyKey,
+		permitted:            permitted.values,
+		eligible:             eligible.values,
+		maxDepth:             *maxDepth,
+		maxTasks:             *maxTasks,
+		maxConcurrency:       *maxConcurrency,
+		maxResourceUnits:     *maxResourceUnits,
+		resourceUnits:        *resourceUnits,
+		issueRef:             *issueRef,
+		prRef:                *prRef,
+		baseSHA:              *baseSHA,
+		headSHA:              *headSHA,
+		reviewedSHA:          *reviewedSHA,
+		findingsSHA256:       *findingsSHA256,
+		evidenceRef:          *evidenceRef,
+		attemptID:            *attemptID,
+		replacementTitle:     *replacementTitle,
+		replacementObjective: *replacementObjective,
+		replacementRecipient: *replacementRecipient,
+		replacementUnits:     *replacementUnits,
+		reviewerTitle:        *reviewerTitle,
+		reviewerObjective:    *reviewerObjective,
+		reviewerRecipient:    *reviewerRecipient,
+		reviewerUnits:        *reviewerUnits,
+		justification:        *justification,
+		requireQuiescence:    *requireQuiescence,
+		states:               states.values,
+		limit:                *limit,
+		action:               *action,
+		revision:             *revision,
+		source:               *source,
+		evidence:             *evidence,
+		payload:              *payload,
+		agent:                *agent,
+		workspace:            *workspace,
+		workspaceID:          *workspaceID,
+		model:                *model,
+		brief:                *brief,
+		references:           references.values,
+		jsonOutput:           *jsonOutput,
 	}, nil
 }
 
@@ -480,6 +520,32 @@ func assignmentRender(out interface{}, asJSON bool) int {
 		if v.ApprovalAction != "" {
 			fmt.Printf("  approved  : %s @ %s\n", v.ApprovalAction, v.ApprovalRevision)
 		}
+	case *assignment.AssignmentView:
+		fmt.Printf("%s  %s (effective: %s)\n", v.ID, v.State, v.EffectiveState)
+		fmt.Printf("  title     : %s\n", v.Title)
+		fmt.Printf("  recipient : %s (%s)\n", v.Recipient, v.Role)
+		fmt.Printf("  epoch     : %d", v.ClaimEpoch)
+		if v.Owner != "" {
+			fmt.Printf("  owner: %s", v.Owner)
+		}
+		fmt.Println()
+		if v.AwaitingAction != "" {
+			fmt.Printf("  awaiting  : %s\n", v.AwaitingAction)
+		}
+		if v.ApprovalAction != "" {
+			fmt.Printf("  approved  : %s @ %s\n", v.ApprovalAction, v.ApprovalRevision)
+		}
+	case *assignment.TreeView:
+		fmt.Printf("%s  tree: %s  recovery: %s\n", v.RootID, v.Tree, v.Recovery)
+		for _, a := range v.Assignments {
+			fmt.Printf("  %s  %-18s %-18s %s\n", a.ID, a.State, a.EffectiveState, a.Title)
+		}
+		fmt.Printf("\n%d assignment(s)  %d lineage(s)\n", len(v.Assignments), len(v.Lineages))
+	case *assignment.Supersession:
+		fmt.Printf("%s\n", v.ID)
+		fmt.Printf("  superseded : %s (attempt %s)\n", v.SupersededTaskID, v.AttemptID)
+		fmt.Printf("  replacement: %s  reviewer: %s\n", v.ReplacementTaskID, v.ReviewerTaskID)
+		fmt.Printf("  by         : %s (%s)  evidence: %s\n", v.AuthorisedBy, v.AuthorityKind, v.EvidenceRef)
 	case assignment.Assignment:
 		return assignmentRender(&v, asJSON)
 	case *assignment.AssignmentList:
@@ -527,7 +593,7 @@ func assignmentVerbInbox(store *assignment.Store, f *assignmentFlags) (interface
 }
 
 func assignmentVerbShow(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
-	return store.Get(f.id)
+	return store.View(f.id)
 }
 
 func assignmentVerbHistory(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
@@ -543,11 +609,14 @@ func assignmentVerbTree(store *assignment.Store, f *assignmentFlags) (interface{
 	if rootID == "" {
 		rootID = f.id
 	}
-	items, err := store.ListByRoot(rootID)
-	if err != nil {
-		return nil, err
+	return store.Tree(rootID)
+}
+
+func assignmentVerbLineage(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
+	if f.attemptID != "" && f.id != "" {
+		return store.LineageByAttempt(f.id, f.attemptID)
 	}
-	return &assignment.AssignmentList{Assignments: items}, nil
+	return store.Lineage(f.id)
 }
 
 func assignmentVerbDeliver(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
@@ -732,6 +801,36 @@ func assignmentVerbRecordApproval(store *assignment.Store, f *assignmentFlags) (
 		})
 }
 
+// assignmentVerbSupersede is the OPERATOR's recovery verb.
+//
+// It records an operator-authorised recovery lineage and creates the
+// replacement implementer and independent reviewer that continue the
+// work. The original is never rewritten: its state, epoch, owner, lease
+// and ledger stay exactly as they are. Like the other operator verbs it
+// is absent from the agent tool registry, so no agent-facing action can
+// reach it.
+func assignmentVerbSupersede(store *assignment.Store, f *assignmentFlags) (interface{}, error) {
+	return store.Supersede(
+		assignment.NewLocalOperatorAuthority(assignmentOperatorName(f)),
+		assignment.SupersedeParams{
+			SupersededID: f.id,
+			AttemptID:    f.attemptID,
+			Epoch:        f.epoch,
+			Replacement: assignment.SupersedeTaskParams{
+				Title: f.replacementTitle, Objective: f.replacementObjective,
+				Recipient: f.replacementRecipient, ResourceUnits: f.replacementUnits,
+				BaseSHA: f.baseSHA,
+			},
+			Reviewer: assignment.SupersedeTaskParams{
+				Title: f.reviewerTitle, Objective: f.reviewerObjective,
+				Recipient: f.reviewerRecipient, ResourceUnits: f.reviewerUnits,
+			},
+			EvidenceRef:       f.evidenceRef,
+			Justification:     f.justification,
+			RequireQuiescence: f.requireQuiescence,
+		})
+}
+
 // assignmentFenced builds the fenced parameters of a transition.
 func assignmentFenced(f *assignmentFlags) assignment.FencedParams {
 	return assignment.FencedParams{
@@ -776,9 +875,11 @@ func printAssignmentHelp() int {
 
 READ
   inbox             list the work addressed to a recipient
-  show              show one assignment
+  show              show one assignment with its effective state
   history           show an assignment's ledger
-  tree              show a delegation tree
+  tree              show a delegation tree with its tree and recovery status
+  lineage           show one immutable recovery lineage (by --id, or by
+                    --id superseded plus --attempt)
 
 THE WORK
   deliver           hand the work to a runtime
@@ -807,6 +908,9 @@ OPERATOR ONLY
   create-project    create a project identity (cpj- + 16 lowercase hex)
   create-root       create the top-level work order
   record-approval   record an externally verified approval
+  supersede         record an operator-authorised recovery lineage and
+                    create the replacement implementer plus reviewer;
+                    the original is never rewritten
 
 DISPATCH (PR 4, OFF unless the operator enables it)
   dispatch          perform ONE bounded dispatch pass

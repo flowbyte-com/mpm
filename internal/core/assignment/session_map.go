@@ -138,6 +138,13 @@ func (s *Store) BeginAttempt(p BeginAttemptParams) (*SessionAttempt, error) {
 		if err != nil {
 			return err
 		}
+		// TR19: attempts open only for authorised execution. The
+		// trigger is the backstop; this names the refusal before the
+		// write so callers get ErrAmbiguousAttempt/ErrSuperseded
+		// rather than a generic storage refusal.
+		if err := s.execBlocked(task); err != nil {
+			return err
+		}
 		// THE SAME SEAM, INSIDE THE TRANSACTION. It fires after the
 		// authoritative row has been read and before the evidence check,
 		// so a test can hold a caller at the exact point where the

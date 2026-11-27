@@ -169,12 +169,18 @@ func TestSessionLaunchStateMovesForwardOnly(t *testing.T) {
 		t.Fatalf("seed the attempt: %v", err)
 	}
 
-	// The forward path is accepted.
-	for _, s := range []string{"launched", "running", "completed"} {
+	// The forward path is accepted. TR20 requires a completed attempt
+	// to report success, so the final step carries the outcome the
+	// runtime would have reported.
+	for _, s := range []string{"launched", "running"} {
 		if _, err := dm.SQLDB().Exec(
 			`UPDATE agent_task_sessions SET launch_state = ? WHERE id = 'ats-state'`, s); err != nil {
 			t.Fatalf("moving forward to %q was refused: %v", s, err)
 		}
+	}
+	if _, err := dm.SQLDB().Exec(
+		`UPDATE agent_task_sessions SET launch_state = 'completed', runtime_outcome = 'succeeded' WHERE id = 'ats-state'`); err != nil {
+		t.Fatalf("moving forward to %q was refused: %v", "completed", err)
 	}
 
 	// Going back is not.

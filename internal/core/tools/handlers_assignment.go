@@ -183,11 +183,12 @@ func assignmentInbox(store *assignment.Store, p map[string]interface{}) (interfa
 }
 
 func assignmentShow(store *assignment.Store, p map[string]interface{}) (interface{}, error) {
-	a, err := store.Get(assignmentID(p))
-	if err != nil {
-		return nil, err
-	}
-	return a, nil
+	// The agent-facing read is the SAME view the CLI returns, from the
+	// same implementation every guard uses. An agent reading its own
+	// assignment must see derived execution authority — blocked,
+	// recovery_required, superseded, authorised — and not only the
+	// stored state (F9/T46).
+	return store.View(assignmentID(p))
 }
 
 func assignmentHistory(store *assignment.Store, p map[string]interface{}) (interface{}, error) {
@@ -203,11 +204,11 @@ func assignmentTree(store *assignment.Store, p map[string]interface{}) (interfac
 	if rootID == "" {
 		rootID = assignmentID(p)
 	}
-	items, err := store.ListByRoot(rootID)
-	if err != nil {
-		return nil, err
-	}
-	return &assignment.AssignmentList{Assignments: items, Count: len(items)}, nil
+	// The same TreeView the CLI returns: the derived tree and recovery
+	// status, the immutable lineages that authorise recovery, and each
+	// task's effective state (F9/T54). The shape keeps `assignments`
+	// and `count` so existing consumers of the list keep working.
+	return store.Tree(rootID)
 }
 
 // ── the transitions ───────────────────────────────────────────────────────

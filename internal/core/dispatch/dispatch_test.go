@@ -22,6 +22,7 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -606,6 +607,20 @@ func TestAReviewerCannotGainWorkerPrivileges(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("start the subject: %v", err)
 	}
+	// TR13: completion needs a current-epoch completed+succeeded
+	// attempt; the fixture proves one rather than completing bare.
+	subAtt, err := store.BeginAttempt(assignment.BeginAttemptParams{
+		TaskID: subject.ID, Epoch: claimed.ClaimEpoch, Runtime: assignment.RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses_dispatch_rev_subject",
+		CorrelationRef: "corr-dispatch-rev", WorkspaceID: "ws", WorkspacePath: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("begin the subject attempt: %v", err)
+	}
+	if _, err := store.MarkAttemptCompleted(assignment.SessionStateParams{
+		AttemptID: subAtt.ID, Epoch: claimed.ClaimEpoch, Outcome: "succeeded"}); err != nil {
+		t.Fatalf("complete the subject attempt: %v", err)
+	}
 	if _, err := store.Complete(assignment.FencedParams{
 		ID: subject.ID, Epoch: claimed.ClaimEpoch, Actor: subjectActor,
 	}); err != nil {
@@ -787,4 +802,265 @@ func mustAttempts(t *testing.T, store *assignment.Store, id string) []*assignmen
 		t.Fatalf("read the attempts of %s: %v", id, err)
 	}
 	return out
+}
+
+// TestAnEarlyReviewIsRefusedBeforeTheRuntimeRunsIsT5 proves the
+// dispatch-time half of the no-early-review rule: a reviewer whose
+// subject has not completed is refused in dependency checking, before
+// any claim, launch or inference — the reviewer's session is never
+// opened for work that cannot be judged yet.
+func TestAnEarlyReviewIsRefusedBeforeTheRuntimeRunsIsT5(t *testing.T) {
+	store, projectID := testStore(t)
+	root := dispatchRoot(t, store, projectID)
+	subject := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:dispatch:early:subj")
+	// dispatchChild already walked the subject to accepted: it has NOT
+	// completed its work, which is exactly the early-review shape.
+	reviewer, _, err := store.Delegate(assignment.DelegateParams{
+		ParentID:       root.ID,
+		Title:          "the early review",
+		Objective:      "review unfinished work",
+		Recipient:      "charlie",
+		Role:           assignment.RoleReviewer,
+		IdempotencyKey: "idem:dispatch:early:reviewer",
+		HeadSHA:        strings.Repeat("1", 40),
+		Payload:        map[string]interface{}{assignment.PayloadKeyReviewTarget: subject.ID},
+	})
+	if err != nil {
+		t.Fatalf("delegate the reviewer: %v", err)
+	}
+	reviewerActor := assignment.Actor{Address: "charlie", Kind: "agent"}
+	for _, step := range []func(assignment.FencedParams) (*assignment.Assignment, error){
+		store.Deliver, store.Acknowledge, store.Accept,
+	} {
+		if _, err := step(assignment.FencedParams{ID: reviewer.ID, Actor: reviewerActor}); err != nil {
+			t.Fatalf("advance the reviewer: %v", err)
+		}
+	}
+	engine, fake := testEngine(t, store, testConfig(t))
+	// Room for both candidates: the refusal must come from the
+	// dependency (unfinished subject), not from the concurrency cap.
+	engine.cfg.Concurrency = 2
+	fake.launchState = okState("mpm-reviewer", "succeeded")
+	report, err := engine.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if fake.Reviews() != 0 {
+		t.Fatalf("the refused review ran %d time(s); no inference may precede the subject's completion", fake.Reviews())
+	}
+	outcome, ok := outcomeFor(report, reviewer.ID)
+	if !ok {
+		t.Fatalf("the report has no outcome for the reviewer: %+v", report.Outcomes)
+	}
+	if outcome.Reason != ReasonRefused {
+		t.Errorf("an early review was %q, want %q: %+v", outcome.Reason, ReasonRefused, outcome)
+	}
+}
+
+// TestStatusCarriesEffectiveStateAndTrees proves the status shares one
+// reading with the tree verb and every guard: each item carries the
+// execution-aware state, and each tree involved carries its derived
+// tree/recovery picture.
+func TestStatusCarriesEffectiveStateAndTrees(t *testing.T) {
+	store, projectID := testStore(t)
+	root := dispatchRoot(t, store, projectID)
+	pending := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:dispatch:status:eff")
+	cfg := testConfig(t)
+	status, err := Status(store, cfg)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	found := false
+	for _, item := range status.Pending {
+		if item.AssignmentID != pending.ID {
+			continue
+		}
+		found = true
+		if item.EffectiveState == "" {
+			t.Fatalf("the pending item carries no effective state: %+v", item)
+		}
+		es, err := store.EffectiveState(pending.ID)
+		if err != nil {
+			t.Fatalf("effective state: %v", err)
+		}
+		if item.EffectiveState != es {
+			t.Fatalf("status says %q, the store says %q", item.EffectiveState, es)
+		}
+	}
+	if !found {
+		t.Fatalf("the pending assignment is not in the status: %+v", status.Pending)
+	}
+	if len(status.Trees) != 1 || status.Trees[0].RootID != root.ID {
+		t.Fatalf("the status carries %+v trees, want the one tree %s", status.Trees, root.ID)
+	}
+	ts, err := store.TreeStatus(root.ID)
+	if err != nil {
+		t.Fatalf("tree status: %v", err)
+	}
+	if status.Trees[0].Tree != ts.Tree || status.Trees[0].Recovery != ts.Recovery {
+		t.Fatalf("status trees say %+v, the tree verb says %+v", status.Trees[0], ts)
+	}
+}
+
+// TestDispatchCandidatesAreBoundedButNotBlindedIsF10 proves the two
+// properties at once: retrieval is BOUNDED (a page, not the whole table)
+// and it never lets a run of frozen rows hide eligible work behind them.
+//
+// The fixture puts several historical candidates BEFORE the eligible
+// one, and shrinks the page size so the eligible row is only reachable
+// on a later page. A bare SQL LIMIT before the historical filter would
+// return nothing; unbounded retrieval would return everything.
+func TestDispatchCandidatesAreBoundedButNotBlindedIsF10(t *testing.T) {
+	store, clock, projectID := clockStore(t)
+	_, base := testRepository(t)
+
+	// One tree per frozen task: TR11 refuses a claim in a tree that
+	// already carries an unresolved ambiguity, so frozen work is built
+	// in its own tree — which is also the realistic shape of many
+	// abandoned recoveries.
+	frozenRoot := func(i int) *assignment.Assignment {
+		root, _, err := store.CreateRoot(assignment.NewLocalOperatorAuthority("operator"),
+			assignment.CreateRootParams{
+				ProjectID: projectID, Title: fmt.Sprintf("frozen %d", i), Objective: "o",
+				Recipient:           "alpha",
+				IdempotencyKey:      fmt.Sprintf("idem:f10:root:%d", i),
+				PermittedOperations: []string{"deliver", "accept", "claim", "start", "complete"},
+				EligibleRecipients:  []string{"alpha", "charlie"},
+				MaxDepth:            2, MaxTasks: 8, MaxConcurrency: 2, MaxResourceUnits: 100,
+				BaseSHA: base,
+			})
+		if err != nil {
+			t.Fatalf("create frozen root %d: %v", i, err)
+		}
+		return root
+	}
+
+	for i := 0; i < 3; i++ {
+		root := frozenRoot(i)
+		child := dispatchChild(t, store, root, "alpha",
+			assignment.RoleImplementer, fmt.Sprintf("idem:dispatch:frozen:%d", i))
+		actor := assignment.Actor{Address: "alpha", Kind: "agent"}
+		claimed, err := store.Claim(assignment.ClaimParams{
+			ID: child.ID, ExpectedEpoch: 0, Owner: "alpha", LeaseSeconds: 3600, Actor: actor,
+		})
+		if err != nil {
+			t.Fatalf("claim frozen %d: %v", i, err)
+		}
+		if _, err := store.Start(assignment.FencedParams{
+			ID: child.ID, Epoch: claimed.ClaimEpoch, Actor: actor,
+		}); err != nil {
+			t.Fatalf("start frozen %d: %v", i, err)
+		}
+		att, err := store.BeginAttempt(assignment.BeginAttemptParams{
+			TaskID: child.ID, Epoch: claimed.ClaimEpoch, Runtime: assignment.RuntimeOpenCode,
+			IntendedAgent: "mpm-worker", NativeSessionID: fmt.Sprintf("ses_frozen_%d", i),
+			CorrelationRef: fmt.Sprintf("corr-frozen-%d", i), WorkspaceID: "ws",
+			WorkspacePath: "/tmp/ws",
+		})
+		if err != nil {
+			t.Fatalf("begin frozen %d: %v", i, err)
+		}
+		if _, err := store.MarkAttemptAmbiguous(assignment.SessionStateParams{
+			AttemptID: att.ID, Epoch: claimed.ClaimEpoch, Error: "lost",
+		}); err != nil {
+			t.Fatalf("mark frozen %d ambiguous: %v", i, err)
+		}
+		// A supersession requires the original's lease to have expired.
+		clock.Advance(2 * time.Hour)
+		if _, err := store.Supersede(assignment.NewLocalOperatorAuthority("operator"),
+			assignment.SupersedeParams{
+				SupersededID: child.ID, AttemptID: att.ID, Epoch: claimed.ClaimEpoch,
+				Replacement: assignment.SupersedeTaskParams{
+					Title: "replacement", Objective: "o", Recipient: "alpha",
+					ResourceUnits: 1, BaseSHA: strings.Repeat("a", 40),
+				},
+				Reviewer: assignment.SupersedeTaskParams{
+					Title: "reviewer", Objective: "o", Recipient: "alpha", ResourceUnits: 1,
+				},
+				EvidenceRef: "gh:test/f10#1", Justification: "fixture",
+				RequireQuiescence: false,
+			}); err != nil {
+			t.Fatalf("supersede frozen %d: %v", i, err)
+		}
+	}
+	// The eligible task is created LAST, so it sorts after every frozen
+	// task in dispatch order.
+	finalRoot := dispatchRoot(t, store, projectID)
+	eligible := dispatchChild(t, store, finalRoot, "alpha",
+		assignment.RoleImplementer, "idem:dispatch:frozen:eligible")
+
+	// Shrink the page so the eligible row can only be reached on a later
+	// page: a bare SQL LIMIT before the historical filter would return
+	// nothing, and unbounded retrieval would materialise everything.
+	previous := assignment.DispatchCandidatePageSize
+	assignment.DispatchCandidatePageSize = 2
+	t.Cleanup(func() { assignment.DispatchCandidatePageSize = previous })
+
+	candidates, err := store.DispatchCandidates(assignment.DispatchQuery{Limit: 1})
+	if err != nil {
+		t.Fatalf("dispatch candidates: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != eligible.ID {
+		t.Fatalf("bounded pagination returned %v, want the eligible %s", candidateIDs(candidates), eligible.ID)
+	}
+	all, err := store.DispatchCandidates(assignment.DispatchQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("dispatch candidates (all): %v", err)
+	}
+	for _, a := range all {
+		if a.ID == eligible.ID {
+			continue
+		}
+		state, err := store.EffectiveState(a.ID)
+		if err != nil {
+			t.Fatalf("effective state: %v", err)
+		}
+		if state == "superseded" {
+			t.Fatalf("a superseded row was returned as a dispatch candidate: %s", a.ID)
+		}
+	}
+}
+
+// candidateIDs lists candidate ids for failure messages.
+func candidateIDs(items []*assignment.Assignment) []string {
+	out := make([]string, len(items))
+	for i, a := range items {
+		out[i] = a.ID
+	}
+	return out
+}
+
+// TestDispatchPageSizeIsClampedIsF10 proves a non-positive page size
+// cannot turn the bounded pagination into an unbounded loop: the knob is
+// clamped to the production default, and a call still returns.
+func TestDispatchPageSizeIsClampedIsF10(t *testing.T) {
+	store, projectID := testStore(t)
+	root := dispatchRoot(t, store, projectID)
+	eligible := dispatchChild(t, store, root, "alpha",
+		assignment.RoleImplementer, "idem:dispatch:clamp")
+
+	for _, size := range []int{0, -1, -256} {
+		previous := assignment.DispatchCandidatePageSize
+		assignment.DispatchCandidatePageSize = size
+		done := make(chan struct{})
+		var got []*assignment.Assignment
+		var err error
+		go func() {
+			got, err = store.DispatchCandidates(assignment.DispatchQuery{Limit: 1})
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			assignment.DispatchCandidatePageSize = previous
+			t.Fatalf("page size %d did not terminate: the pagination could not progress", size)
+		}
+		assignment.DispatchCandidatePageSize = previous
+		if err != nil {
+			t.Fatalf("page size %d: %v", size, err)
+		}
+		if len(got) != 1 || got[0].ID != eligible.ID {
+			t.Fatalf("page size %d returned %v, want %s", size, candidateIDs(got), eligible.ID)
+		}
+	}
 }

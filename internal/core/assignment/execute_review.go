@@ -299,6 +299,10 @@ func (s *Store) validateReviewable(rev *Assignment, p ExecuteReviewParams) error
 	if rev.Role != RoleReviewer {
 		return fmt.Errorf("%w: %s is a %s and does not review", ErrConstraint, rev.ID, rev.Role)
 	}
+	// TR19: a review launches only for authorised execution.
+	if err := s.execBlocked(rev); err != nil {
+		return err
+	}
 	if p.Epoch != rev.ClaimEpoch {
 		return fmt.Errorf("%w: %s is at epoch %d", ErrStaleClaim, rev.ID, rev.ClaimEpoch)
 	}
@@ -327,6 +331,18 @@ func (s *Store) validateReviewable(rev *Assignment, p ExecuteReviewParams) error
 	}
 	if subject.Role != RoleImplementer {
 		return fmt.Errorf("%w: %s is not reviewable", ErrConstraint, subject.ID)
+	}
+	// T5: no early review. The subject must have completed its work
+	// before the reviewer runs: a review of unfinished work spends
+	// inference and can only fail at verdict time. The subject also
+	// passes the same authorisation gate as the reviewer, so an
+	// ambiguous tree admits only a scoped subject.
+	if subject.State != StateCompleted {
+		return fmt.Errorf("%w: %s is %s and has not completed the work; the review runs after completion",
+			ErrIllegalTransition, subject.ID, subject.State)
+	}
+	if err := s.execBlocked(subject); err != nil {
+		return err
 	}
 	return nil
 }

@@ -22,6 +22,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/flowbyte-com/mpm-core/assignment"
@@ -89,9 +91,13 @@ func TestASpentConcurrencyBudgetIsReportedAsABudget(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Concurrency = 2
 	engine, fake := testEngine(t, store, cfg)
-	// The launch produces NO STATE, so the attempt is ambiguous and the
-	// assignment stays in progress: its claim is still live.
-	fake.launchState = nil
+	// The launch fails definitively: no ambiguity, but the assignment
+	// stays in progress holding its claim, so the second dispatch is
+	// refused by the budget, not by the ambiguity barrier. (An
+	// ambiguous first launch would refuse the second claim under TR11
+	// instead — that barrier has its own tests — so the budget path
+	// needs a clean launch.)
+	fake.launchState = okState("mpm-worker", "failed")
 
 	report, err := engine.RunOnce(context.Background())
 	if err != nil {
@@ -644,4 +650,62 @@ func countAssignments(t *testing.T, dm interface {
 		t.Fatalf("count the assignments: %v", err)
 	}
 	return n
+}
+
+// TestStatusSurfacesADerivedStateFailureIsF12 proves the status never
+// presents a blank effective state as if it meant "unrestricted": a
+// lookup failure is returned, and the caller can tell the difference
+// between "nothing blocks this" and "the reading failed".
+func TestStatusSurfacesADerivedStateFailureIsF12(t *testing.T) {
+	items := []StatusItem{
+		{AssignmentID: "at-ok"},
+		{AssignmentID: "at-fails"},
+	}
+	boom := errors.New("storage is gone")
+	err := annotateEffective(items, func(id string) (string, error) {
+		if id == "at-fails" {
+			return "", boom
+		}
+		return "authorised", nil
+	})
+	if err == nil {
+		t.Fatal("a derived-state failure was swallowed")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("the failure is %v, want it to wrap the cause", err)
+	}
+	if !strings.Contains(err.Error(), "at-fails") {
+		t.Fatalf("the failure does not name the assignment: %v", err)
+	}
+	// The successful lookup still landed, so the failure is precise.
+	if items[0].EffectiveState != "authorised" {
+		t.Fatalf("the readable item reads %q", items[0].EffectiveState)
+	}
+}
+
+// TestStatusNeverLeavesAnEffectiveStateEmpty proves the real Status read
+// annotates every item it returns.
+func TestStatusNeverLeavesAnEffectiveStateEmpty(t *testing.T) {
+	store, _, projectID := clockStore(t)
+	root := dispatchRoot(t, store, projectID)
+	pending := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:limits:status:annotated")
+	cfg := testConfig(t)
+	status, err := Status(store, cfg)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	found := false
+	for _, bucket := range [][]StatusItem{status.Pending, status.Blocked, status.Recoverable} {
+		for _, item := range bucket {
+			if item.EffectiveState == "" {
+				t.Fatalf("an item carries no effective state: %+v", item)
+			}
+			if item.AssignmentID == pending.ID {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the pending assignment is missing from the status")
+	}
 }

@@ -50,6 +50,13 @@ func (s *Store) CreateRoot(auth OperatorAuthority, p CreateRootParams) (*Assignm
 	if len(p.IdempotencyKey) > 128 {
 		return nil, false, fmt.Errorf("%w: the idempotency key is longer than 128 bytes", ErrConstraint)
 	}
+	// The supersede: namespace belongs to recovery lineages (A3/TR9).
+	// An agent-supplied squatting key is refused before any lookup, so
+	// it can neither collide with nor impersonate a lineage row.
+	if strings.HasPrefix(p.IdempotencyKey, "supersede:") {
+		return nil, false, fmt.Errorf("%w: idempotency keys starting with %q belong to recovery lineages",
+			ErrReservedKeyCollision, "supersede:")
+	}
 	if len(p.PermittedOperations) == 0 {
 		return nil, false, fmt.Errorf("%w: a root must name at least one permitted operation", ErrConstraint)
 	}
@@ -231,6 +238,13 @@ func (s *Store) Delegate(p DelegateParams) (*Assignment, bool, error) {
 	if len(p.IdempotencyKey) > 128 {
 		return nil, false, fmt.Errorf("%w: the idempotency key is longer than 128 bytes", ErrConstraint)
 	}
+	// The supersede: namespace belongs to recovery lineages (A3/TR9).
+	// An agent-supplied squatting key is refused before any lookup, so
+	// it can neither collide with nor impersonate a lineage row.
+	if strings.HasPrefix(p.IdempotencyKey, "supersede:") {
+		return nil, false, fmt.Errorf("%w: idempotency keys starting with %q belong to recovery lineages",
+			ErrReservedKeyCollision, "supersede:")
+	}
 	if p.ResourceUnits < 0 {
 		return nil, false, fmt.Errorf("%w: resource_units must not be negative", ErrConstraint)
 	}
@@ -279,6 +293,23 @@ func (s *Store) Delegate(p DelegateParams) (*Assignment, bool, error) {
 		root, err := getAssignmentTx(node, parent.RootID)
 		if err != nil {
 			return err
+		}
+
+		// T66/T80: a tree whose recovery scope is rework_required
+		// admits NO further ordinary assignment. There is no rework
+		// operation in this slice, so any child created here would be
+		// an informal bypass of the operator's decision — and a dead
+		// obligation in a tree the status already reports as blocked.
+		// The check runs inside this transaction, before the insert,
+		// and refuses before any row, event or budget is touched.
+		rework, err := reworkRequiredTx(node, root.ID)
+		if err != nil {
+			return err
+		}
+		if rework {
+			return fmt.Errorf(
+				"%w: the tree %s has a completed reviewer on a live recovery lineage",
+				ErrReworkRequired, root.ID)
 		}
 
 		// N3: the child's depth is within the ROOT's budget.

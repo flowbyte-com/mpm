@@ -84,6 +84,14 @@ func (e *Engine) dependencyReason(a *assignment.Assignment) (string, string) {
 				"the review target %s is a %s, and only an implementer's work is reviewable",
 				subject.ID, subject.Role)
 		}
+		// T5: no early review at dispatch either. A reviewer whose
+		// subject has not completed would spend a runtime session only
+		// to fail at verdict time.
+		if subject.State != assignment.StateCompleted {
+			return ReasonRefused, fmt.Sprintf(
+				"the review target %s is %s and has not completed the work",
+				subject.ID, subject.State)
+		}
 		return "", ""
 
 	case assignment.RoleImplementer:

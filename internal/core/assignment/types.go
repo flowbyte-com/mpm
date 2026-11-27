@@ -148,6 +148,48 @@ var (
 	// request, which is worse than an error.
 	ErrIdempotencyConflict = errors.New("assignment: the idempotency key already names a different assignment")
 
+	// ErrSupersessionConflict is returned when a supersession is
+	// requested for an attempt that already has a lineage, but with
+	// different authorisation parameters. The message names the first
+	// field that differs, so the operator can see what changed.
+	ErrSupersessionConflict = errors.New("assignment: the supersession parameters conflict with the existing lineage")
+
+	// ErrReservedKeyCollision is returned when an idempotency key in the
+	// supersede: namespace is already taken by a row no lineage names.
+	// A pre-feature legacy row may occupy the key; it is never rewritten
+	// or adopted, and no lineage, replacement or reviewer is created.
+	ErrReservedKeyCollision = errors.New("assignment: the reserved supersession key is already taken by an unrelated row")
+
+	// ErrSuperseded is returned when an operation targets an assignment
+	// the recovery lineage has superseded. Superseded work is frozen:
+	// its state, epoch, owner, lease and ledger never change again.
+	ErrSuperseded = errors.New("assignment: the assignment was superseded by a recovery lineage")
+
+	// ErrRootSupersession names the A4 boundary: the root (depth 0) can
+	// never be superseded. Permanent block.
+	ErrRootSupersession = errors.New("assignment: root_supersession: the root cannot be superseded")
+
+	// ErrReviewerOriginal names the A4 boundary: a reviewer cannot be
+	// superseded. No lineage, task or event is written.
+	ErrReviewerOriginal = errors.New("assignment: reviewer_original: a reviewer cannot be superseded")
+
+	// ErrMultipleAmbiguousAttempts names the A4 boundary: more than one
+	// unresolved ambiguous attempt on the original. Explicit refusal.
+	ErrMultipleAmbiguousAttempts = errors.New("assignment: multiple_ambiguous_attempts: the original carries more than one unresolved ambiguous attempt")
+
+	// ErrLegacyApprovedAmbiguity names the A4/A5 boundary: an
+	// operator-approved task with ambiguity is not eligible and remains
+	// permanently blocked. The approval is preserved.
+	ErrLegacyApprovedAmbiguity = errors.New("assignment: legacy_approved_ambiguity: an approved task with ambiguity is not eligible for recovery")
+
+	// ErrReworkRequired names the A4/T66/T80 boundary: a tree whose
+	// recovery scope is rework_required admits no further ordinary
+	// assignment. Rework is not implementable through delegation — the
+	// contract provides no rework operation in this slice — and an
+	// informal child would be a dead obligation inside a tree the
+	// status already says needs an operator decision.
+	ErrReworkRequired = errors.New("assignment: rework_required: the tree needs an operator rework decision; no further assignment may be delegated")
+
 	// ErrLeaseHeld is returned when a claim is attempted while another
 	// holder's lease is still alive. A live lease is not stealable.
 	ErrLeaseHeld = errors.New("assignment: the work is leased to another holder")

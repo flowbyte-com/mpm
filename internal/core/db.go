@@ -3316,6 +3316,23 @@ func (dm *DatabaseManager) initUnifiedSchema() error {
 		_ = tx.Rollback()
 		return fmt.Errorf("agent task sessions migration failed: %w", err)
 	}
+
+	// Continuity 001 recovery: the immutable supersession lineage.
+	//
+	// Same reasoning again: local-only, created here rather than in
+	// BaseTables, idempotent via the agent_task_supersessions_v1 sentinel,
+	// and the sentinel is written last inside this same transaction.
+	//
+	// PR 1/PR 3's hash-pinned DDL is NOT touched by this migration: the
+	// twenty recovery triggers live in the new migration file, and the
+	// existing triggers are neither edited nor re-created.
+	//
+	// See internal/core/migration_agent_task_supersessions.go for the DDL,
+	// the trigger inventory and what each trigger refuses.
+	if err := MigrateAgentTaskSupersessions(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("agent task supersessions migration failed: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration tx: %w", err)
 	}

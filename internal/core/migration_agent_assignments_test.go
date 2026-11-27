@@ -250,6 +250,85 @@ func assignmentMustExec(t *testing.T, db *sql.DB, query string, args ...interfac
 	}
 }
 
+// provisionTransitionEvidence satisfies the evidence rules for one raw-SQL
+// state step, so the state-machine tests keep testing transitions.
+//
+//   - An implementer step to `completed` needs TR13's current-epoch
+//     completed+succeeded attempt; the task is claimed first if it holds
+//     no claim (raw-SQL walks never claim).
+//   - A reviewer step to `completed` or `review_passed` needs TR18's
+//     host-captured evidence pointer; fixed test vectors are recorded if
+//     the row carries none.
+//
+// Any other role/state is a no-op. Evidence has its own dedicated tests;
+// this keeps the transition tests about transitions.
+func provisionTransitionEvidence(t *testing.T, db *sql.DB, taskID, target string) {
+	t.Helper()
+	var epoch int64
+	var role string
+	if err := db.QueryRow(`SELECT claim_epoch, role FROM agent_tasks WHERE id = ?`, taskID).Scan(&epoch, &role); err != nil {
+		t.Fatalf("read the task: %v", err)
+	}
+	if role == "implementer" && target == "completed" {
+		provisionCompletionEvidence(t, db, taskID)
+		return
+	}
+	if role == "reviewer" && (target == "completed" || target == "review_passed") {
+		var sha, digest sql.NullString
+		if err := db.QueryRow(`SELECT reviewed_sha, findings_sha256 FROM agent_tasks WHERE id = ?`, taskID).Scan(&sha, &digest); err != nil {
+			t.Fatalf("read the review evidence: %v", err)
+		}
+		if !sha.Valid || sha.String == "" {
+			if _, err := db.Exec(`UPDATE agent_tasks SET reviewed_sha = ?, findings_sha256 = ?,
+				evidence_ref = ? WHERE id = ?`,
+				strings.Repeat("2", 40), strings.Repeat("f", 64),
+				"evidence/test.json", taskID); err != nil {
+				t.Fatalf("record the review evidence: %v", err)
+			}
+		}
+	}
+}
+
+// provisionCompletionEvidence claims the task (if unclaimed) and records
+// a current-epoch completed+succeeded attempt, satisfying TR13.
+func provisionCompletionEvidence(t *testing.T, db *sql.DB, taskID string) {
+	t.Helper()
+	var epoch int64
+	var role string
+	if err := db.QueryRow(`SELECT claim_epoch, role FROM agent_tasks WHERE id = ?`, taskID).Scan(&epoch, &role); err != nil {
+		t.Fatalf("read the task: %v", err)
+	}
+	if role != "implementer" {
+		return
+	}
+	if epoch == 0 {
+		if _, err := db.Exec(`UPDATE agent_tasks SET claim_epoch = 1, owner = 'evidence-fixture',
+			lease_expires_at = ? WHERE id = ? AND claim_epoch = 0`, int64(1)<<40, taskID); err != nil {
+			t.Fatalf("claim the task: %v", err)
+		}
+		epoch = 1
+	}
+	var maxAttempt sql.NullInt64
+	if err := db.QueryRow(`SELECT MAX(attempt) FROM agent_task_sessions WHERE task_id = ?`, taskID).Scan(&maxAttempt); err != nil {
+		t.Fatalf("read the attempts: %v", err)
+	}
+	next := int64(1)
+	if maxAttempt.Valid {
+		next = maxAttempt.Int64 + 1
+	}
+	id := fmt.Sprintf("ats-evidence-%s-%d", taskID, next)
+	if _, err := db.Exec(`
+		INSERT INTO agent_task_sessions (
+			id, task_id, attempt, claim_epoch, runtime, intended_agent,
+			native_session_id, correlation_ref, workspace_id, workspace_path,
+			launch_state, runtime_outcome, created_at, updated_at
+		) VALUES (?, ?, ?, ?, 'opencode', 'mpm-worker', ?, 'corr-evidence',
+			'ws-evidence', '/tmp/ws-evidence', 'completed', 'succeeded', 100, 100)`,
+		id, taskID, next, epoch, "ses-evidence-"+id); err != nil {
+		t.Fatalf("record the completion attempt: %v", err)
+	}
+}
+
 // assignmentMustRefuse runs a statement and fails the test if it SUCCEEDS.
 //
 // It returns the error so a caller can assert on its shape.
@@ -913,12 +992,14 @@ func TestAgentAssignmentAT8RestoreAllowList(t *testing.T) {
 	// 1. the exact delta.
 	//
 	// PR 3 adds a THIRD name to the same allow-list (the session mapping),
-	// so the pre-change reproduction removes all three. The assertion's
+	// and the recovery supersession adds a FOURTH (its lineage table),
+	// so the pre-change reproduction removes all four. The assertion's
 	// purpose is unchanged: the list must have gained the Continuity 001
 	// tables and nothing else.
 	var without []string
 	for _, name := range CanonicalMPMSchema {
-		if name == "agent_tasks" || name == "agent_task_events" || name == "agent_task_sessions" {
+		if name == "agent_tasks" || name == "agent_task_events" || name == "agent_task_sessions" ||
+			name == "agent_task_supersessions" {
 			continue
 		}
 		without = append(without, name)
@@ -1127,6 +1208,9 @@ func TestAssignmentStateMachineIsRoleAware(t *testing.T) {
 				    approval_source = 'operator', approval_evidence = 'docs/evidence/x.json'
 				WHERE id = ?`, step.to, impl)
 		default:
+			if step.to == "completed" || step.to == "review_passed" {
+				provisionTransitionEvidence(t, db, impl, step.to)
+			}
 			assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step.to, impl)
 		}
 		var state string
@@ -1150,6 +1234,7 @@ func TestAssignmentStateMachineIsRoleAware(t *testing.T) {
 
 	// The implementer may NOT reach the operator's gate without the
 	// independent review. This is the hole the second review found.
+	provisionTransitionEvidence(t, db, impl2, "completed")
 	assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'completed' WHERE id = ?`, impl2)
 	assignmentMustRefuseWith(t, db, "an implementer jumping from completed to awaiting_operator",
 		"illegal state transition", `
@@ -1170,6 +1255,7 @@ func TestAssignmentStateMachineIsRoleAware(t *testing.T) {
 	assignmentMustRefuseWith(t, db, "a reviewer jumping from in_progress to awaiting_operator",
 		"illegal state transition", `
 		UPDATE agent_tasks SET state = 'awaiting_operator' WHERE id = ?`, rev)
+	provisionTransitionEvidence(t, db, rev, "review_passed")
 	assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'review_passed' WHERE id = ?`, rev)
 
 	// A reviewer's terminal state is terminal.
@@ -1184,6 +1270,7 @@ func TestAssignmentStateMachineIsRoleAware(t *testing.T) {
 	assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'acknowledged' WHERE id = ?`, rev2)
 	assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'accepted' WHERE id = ?`, rev2)
 	assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'in_progress' WHERE id = ?`, rev2)
+	provisionTransitionEvidence(t, db, rev2, "completed")
 	assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'completed' WHERE id = ?`, rev2)
 	assignmentMustRefuseWith(t, db, "a completed reviewer being moved on",
 		"illegal state transition", `
@@ -1215,7 +1302,13 @@ func TestAssignmentCancellationIsUniversal(t *testing.T) {
 			fmt.Sprintf("at-cancel-impl-%d", i), "alpha", "implementer",
 			fmt.Sprintf("idem:cancel-impl-%d", i))
 		for _, step := range implementerPath[:i+1] {
+			if step == "completed" || step == "review_passed" {
+				provisionTransitionEvidence(t, db, id, step)
+			}
 			assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
+		}
+		if target == "completed" || target == "review_passed" {
+			provisionTransitionEvidence(t, db, id, target)
 		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, target, id)
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'cancelled' WHERE id = ?`, id)
@@ -1225,6 +1318,9 @@ func TestAssignmentCancellationIsUniversal(t *testing.T) {
 	gate := insertRootAssignment(t, dm, projectID, "at-cancel-gate", "alpha", "implementer", "idem:cancel-gate")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, gate, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, gate)
 	}
 	assignmentMustExec(t, db, `
@@ -1236,6 +1332,9 @@ func TestAssignmentCancellationIsUniversal(t *testing.T) {
 	approved := insertRootAssignment(t, dm, projectID, "at-cancel-approved", "alpha", "implementer", "idem:cancel-approved")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, approved, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, approved)
 	}
 	assignmentMustExec(t, db, `
@@ -1255,6 +1354,9 @@ func TestAssignmentCancellationIsUniversal(t *testing.T) {
 			fmt.Sprintf("at-cancel-rev-%d", i), "charlie", "reviewer",
 			fmt.Sprintf("idem:cancel-rev-%d", i))
 		for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress", target} {
+			if step == "completed" || step == "review_passed" {
+				provisionTransitionEvidence(t, db, id, step)
+			}
 			assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = 'cancelled' WHERE id = ?`, id)
@@ -2063,6 +2165,9 @@ func TestAssignmentOperatorGateNamesItsAction(t *testing.T) {
 	id := insertRootAssignment(t, dm, projectID, "at-gate", "alpha", "implementer", "idem:gate")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, id, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 	}
 
@@ -2110,6 +2215,9 @@ func TestAssignmentOperatorGateNamesItsAction(t *testing.T) {
 	gated := insertRootAssignment(t, dm, projectID, "at-gate2", "alpha", "implementer", "idem:gate2")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, gated, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, gated)
 	}
 	assignmentMustExec(t, db, `
@@ -2210,6 +2318,9 @@ func TestAssignmentGateRecordIsImmutable(t *testing.T) {
 	id := insertRootAssignment(t, dm, projectID, "at-immutable", "alpha", "implementer", "idem:immutable")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, id, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 	}
 	assignmentMustExec(t, db, `
@@ -2293,6 +2404,9 @@ func TestAssignmentIllegalTransitionIsReportedAsSuch(t *testing.T) {
 	id := insertRootAssignment(t, dm, projectID, "at-order", "alpha", "implementer", "idem:order")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, id, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 	}
 	assignmentMustExec(t, db, `
@@ -2841,6 +2955,9 @@ func TestAssignmentTerminalStatesCannotBeClaimed(t *testing.T) {
 	approved := insertRootAssignment(t, dm, projectID, "at-approved", "alpha", "implementer", "idem:approved")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, approved, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, approved)
 	}
 	assignmentMustExec(t, db, `
@@ -2945,6 +3062,9 @@ func TestAssignmentApprovalRequiresEvidence(t *testing.T) {
 	id := insertRootAssignment(t, dm, projectID, "at-evidence", "alpha", "implementer", "idem:evidence")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, id, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 	}
 	assignmentMustExec(t, db, `
@@ -2986,6 +3106,9 @@ func TestAssignmentGateRecordSurvivesCancellation(t *testing.T) {
 	id := insertRootAssignment(t, dm, projectID, "at-cancelrec", "alpha", "implementer", "idem:cancelrec")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, id, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 	}
 	assignmentMustExec(t, db, `
@@ -3186,6 +3309,9 @@ func TestAssignmentRecordsAreSetOnlyByTheirTransition(t *testing.T) {
 	// The legal path still works: the transition supplies the record.
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, id, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 	}
 	assignmentMustExec(t, db, `
@@ -3216,6 +3342,9 @@ func TestAssignmentCannotBeClaimedAtTheGate(t *testing.T) {
 	id := insertRootAssignment(t, dm, projectID, "at-gateclaim", "alpha", "implementer", "idem:gateclaim")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, id, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 	}
 	assignmentMustExec(t, db, `
@@ -3233,6 +3362,9 @@ func TestAssignmentCannotBeClaimedAtTheGate(t *testing.T) {
 	live := insertRootAssignment(t, dm, projectID, "at-liveclaim", "alpha", "implementer", "idem:liveclaim")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, live, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, live)
 	}
 	assignmentMustRefuseWith(t, db, "a claim and the gate in one statement",
@@ -3264,6 +3396,9 @@ func TestAssignmentGateRecordIsImmutableWhileLeavingTheGate(t *testing.T) {
 	id := insertRootAssignment(t, dm, projectID, "at-leavegate", "alpha", "implementer", "idem:leavegate")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, id, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 	}
 	assignmentMustExec(t, db, `
@@ -3320,6 +3455,9 @@ func TestAssignmentApprovalRecordIsImmutable(t *testing.T) {
 	id := insertRootAssignment(t, dm, projectID, "at-approvev", "alpha", "implementer", "idem:approvev")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, id, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 	}
 	assignmentMustExec(t, db, `
@@ -3373,6 +3511,9 @@ func TestAssignmentApprovalMustNameTheSameAction(t *testing.T) {
 	id := insertRootAssignment(t, dm, projectID, "at-sameaction", "alpha", "implementer", "idem:sameaction")
 	for _, step := range []string{"delivered", "acknowledged", "accepted", "in_progress",
 		"completed", "review_passed"} {
+		if step == "completed" || step == "review_passed" {
+			provisionTransitionEvidence(t, db, id, step)
+		}
 		assignmentMustExec(t, db, `UPDATE agent_tasks SET state = ? WHERE id = ?`, step, id)
 	}
 	assignmentMustExec(t, db, `
@@ -3786,6 +3927,24 @@ func TestAgentAssignmentObjectInventoryIsStable(t *testing.T) {
 	sort.Strings(added)
 
 	want := append([]string{}, agentAssignmentObjectNames...)
+	// The recovery supersession migration (agent_task_supersessions)
+	// adds ten triggers TO agent_tasks. Dropping agent_tasks for the
+	// stripped baseline takes those triggers with it, so they appear in
+	// this delta alongside the base objects. They are pinned in full by
+	// TestAgentSupersessionObjectInventoryIsStable; they are listed here
+	// only so the base delta stays exact.
+	want = append(want,
+		"trg_agent_tasks_approval_guard",
+		"trg_agent_tasks_cancel_guard",
+		"trg_agent_tasks_claim_epoch_guard",
+		"trg_agent_tasks_complete_guard",
+		"trg_agent_tasks_handoff_guard",
+		"trg_agent_tasks_reserved_key",
+		"trg_agent_tasks_review_passed_guard",
+		"trg_agent_tasks_reviewer_evidence_guard",
+		"trg_agent_tasks_start_guard",
+		"trg_agent_tasks_superseded_shape",
+	)
 	sort.Strings(want)
 
 	if len(added) != len(want) {

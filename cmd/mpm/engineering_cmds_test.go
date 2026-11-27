@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -251,6 +252,27 @@ func TestTheStorePublicationCarriesTheNewestReview(t *testing.T) {
 	clock := &storeTestClock{at: time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)}
 	store, subject := storeFixture(t, clock.Now)
 
+	// Verdicts name host-captured evidence (T84): each reviewer captures
+	// its findings before its verdict is recorded.
+	capture := func(reviewerID string, epoch int64, tag string) {
+		t.Helper()
+		body := []byte(`{"findings":"` + tag + `"}`)
+		path := filepath.Join(t.TempDir(), "review-"+tag+".json")
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatalf("write the capture: %v", err)
+		}
+		if _, err := store.CaptureReviewEvidence(assignment.ReviewEvidenceParams{
+			ReviewerID:     reviewerID,
+			Epoch:          epoch,
+			ReviewedSHA:    storeTestHead,
+			FindingsSHA256: storeTestDigest(body),
+			EvidenceRef:    path,
+			Actor:          assignment.Actor{Address: "charlie", Kind: "agent"},
+		}); err != nil {
+			t.Fatalf("capture the review evidence: %v", err)
+		}
+	}
+
 	// The FIRST reviewer refuses the work.
 	old, created, err := store.Delegate(assignment.DelegateParams{
 		ParentID:       subject.RootID,
@@ -265,6 +287,7 @@ func TestTheStorePublicationCarriesTheNewestReview(t *testing.T) {
 		t.Fatalf("delegate the first reviewer: %v (created=%v)", err, created)
 	}
 	old = cliAdvance(t, store, old, assignment.StateInProgress)
+	capture(old.ID, old.ClaimEpoch, "the first review")
 	if _, err := store.RecordReviewResult(assignment.ReviewResultParams{
 		ReviewerID: old.ID,
 		Verdict:    assignment.VerdictChangesRequested,
@@ -289,6 +312,7 @@ func TestTheStorePublicationCarriesTheNewestReview(t *testing.T) {
 		t.Fatalf("delegate the second reviewer: %v (created=%v)", err, created)
 	}
 	fresh = cliAdvance(t, store, fresh, assignment.StateInProgress)
+	capture(fresh.ID, fresh.ClaimEpoch, "the second review")
 	if _, err := store.RecordReviewResult(assignment.ReviewResultParams{
 		ReviewerID: fresh.ID,
 		Verdict:    assignment.VerdictPassed,

@@ -140,7 +140,7 @@ func renderDispatchStatus(status *dispatch.StatusReport) {
 	fmt.Printf("dispatcher: %s\n", enabledWord(status.Enabled))
 	fmt.Printf("\npending (%d)\n", len(status.Pending))
 	for _, item := range status.Pending {
-		fmt.Printf("  %s  %-11s %-11s %s\n", item.AssignmentID, item.Role, item.State, item.Title)
+		fmt.Printf("  %s  %-11s %-11s %-16s %s\n", item.AssignmentID, item.Role, item.State, item.EffectiveState, item.Title)
 	}
 	fmt.Printf("\nblocked (%d)\n", len(status.Blocked))
 	for _, item := range status.Blocked {
@@ -155,6 +155,13 @@ func renderDispatchStatus(status *dispatch.StatusReport) {
 		fmt.Printf("  %s  tasks %d/%d  units %d/%d  live claims %d/%d\n",
 			b.RootID, b.Tasks, b.MaxTasks, b.Units, b.MaxUnits,
 			b.LiveClaims, b.MaxConcurrent)
+	}
+	if len(status.Trees) > 0 {
+		fmt.Printf("\ntrees (%d)\n", len(status.Trees))
+		for _, t := range status.Trees {
+			fmt.Printf("  %s  tree: %s  recovery: %s  lineages: %d\n",
+				t.RootID, t.Tree, t.Recovery, len(t.Lineages))
+		}
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/flowbyte-com/mpm-core"
 	"github.com/flowbyte-com/mpm-core/assignment"
@@ -316,6 +317,15 @@ func assignmentCLIGatedSubject(t *testing.T, store *assignment.Store, key string
 	}
 	reviewing := cliAdvance(t, store, reviewer, assignment.StateInProgress)
 
+	// TR18: a verdict needs host-captured evidence. The fixture records
+	// it the way the adapter would before transcribing the verdict.
+	if _, err := store.CaptureReviewEvidence(assignment.ReviewEvidenceParams{
+		ReviewerID: reviewing.ID, Epoch: reviewing.ClaimEpoch,
+		ReviewedSHA: strings.Repeat("1", 40), FindingsSHA256: strings.Repeat("e", 64),
+		EvidenceRef: "evidence/cli.json", Actor: assignment.Actor{Address: "charlie", Kind: "agent"},
+	}); err != nil {
+		t.Fatalf("capture the review evidence: %v", err)
+	}
 	if _, err := store.RecordReviewResult(assignment.ReviewResultParams{
 		ReviewerID: reviewing.ID,
 		Verdict:    assignment.VerdictPassed,
@@ -572,6 +582,20 @@ func cliAdvance(t *testing.T, store *assignment.Store, a *assignment.Assignment,
 	cur = step(func() (*assignment.Assignment, error) {
 		return store.Start(assignment.FencedParams{ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: actor})
 	})
+	// TR13: completion needs a current-epoch completed+succeeded
+	// attempt. The fixture proves one rather than completing bare.
+	att, err := store.BeginAttempt(assignment.BeginAttemptParams{
+		TaskID: cur.ID, Epoch: cur.ClaimEpoch, Runtime: assignment.RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses-cli-" + cur.ID,
+		CorrelationRef: "corr-cli", WorkspaceID: "ws", WorkspacePath: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("begin the completion attempt: %v", err)
+	}
+	if _, err := store.MarkAttemptCompleted(assignment.SessionStateParams{
+		AttemptID: att.ID, Epoch: cur.ClaimEpoch, Outcome: "succeeded"}); err != nil {
+		t.Fatalf("complete the completion attempt: %v", err)
+	}
 	return step(func() (*assignment.Assignment, error) {
 		return store.Complete(assignment.FencedParams{ID: cur.ID, Epoch: cur.ClaimEpoch, Actor: actor})
 	})
@@ -643,5 +667,200 @@ func TestAssignmentCLICreateProjectRefusesANonIdentity(t *testing.T) {
 		if code == 0 {
 			t.Errorf("the invalid project id %q was accepted: %s", id, out)
 		}
+	}
+}
+
+// TestAssignmentCLITheOperatorCanSupersede proves the operator's recovery
+// verb works end to end through the router: an ambiguous task is
+// superseded, the lineage names it, and the replacement and reviewer
+// start unclaimed while the original stands unchanged.
+//
+// The fixture — the work and its lost launch — is built with the
+// service, because those are the runtime's steps. The thing under test
+// is the operator's VERB. The claim uses a one-second lease and the test
+// outlives it, so the supersession authorises against an expired lease
+// on real time.
+func TestAssignmentCLITheOperatorCanSupersede(t *testing.T) {
+	dm := assignmentCLIFixture(t)
+	store := assignment.NewStore(dm)
+	auth := assignment.NewLocalOperatorAuthority("operator")
+	root, created, err := store.CreateRoot(auth, assignment.CreateRootParams{
+		ProjectID: "cpj-cli", Title: "the root", Objective: "the objective",
+		Recipient: "alpha", IdempotencyKey: "idem:cli:sup:root",
+		PermittedOperations: []string{"read", "write"},
+		EligibleRecipients:  []string{"alpha", "charlie"},
+		MaxDepth:            2, MaxTasks: 8, MaxConcurrency: 2, MaxResourceUnits: 100,
+	})
+	if err != nil || !created {
+		t.Fatalf("create the root: %v (created=%v)", err, created)
+	}
+	subject, created, err := store.Delegate(assignment.DelegateParams{
+		ParentID: root.ID, Title: "the work", Objective: "do it",
+		Recipient: "alpha", Role: assignment.RoleImplementer,
+		IdempotencyKey: "idem:cli:sup:subject",
+	})
+	if err != nil || !created {
+		t.Fatalf("delegate the subject: %v (created=%v)", err, created)
+	}
+	subjectActor := assignment.Actor{Address: "alpha", Kind: "agent"}
+	for _, step := range []func(assignment.FencedParams) (*assignment.Assignment, error){
+		store.Deliver, store.Acknowledge, store.Accept,
+	} {
+		if _, err := step(assignment.FencedParams{ID: subject.ID, Actor: subjectActor}); err != nil {
+			t.Fatalf("advance the subject: %v", err)
+		}
+	}
+	claimed, err := store.Claim(assignment.ClaimParams{
+		ID: subject.ID, ExpectedEpoch: 0, Owner: "alpha", LeaseSeconds: 1,
+		Actor: subjectActor,
+	})
+	if err != nil {
+		t.Fatalf("claim the subject: %v", err)
+	}
+	if _, err := store.Start(assignment.FencedParams{
+		ID: subject.ID, Epoch: claimed.ClaimEpoch, Actor: subjectActor,
+	}); err != nil {
+		t.Fatalf("start the subject: %v", err)
+	}
+	att, err := store.BeginAttempt(assignment.BeginAttemptParams{
+		TaskID: subject.ID, Epoch: claimed.ClaimEpoch, Runtime: assignment.RuntimeOpenCode,
+		IntendedAgent: "mpm-worker", NativeSessionID: "ses-cli-sup",
+		CorrelationRef: "corr-cli-sup", WorkspaceID: "ws", WorkspacePath: "/tmp/ws",
+	})
+	if err != nil {
+		t.Fatalf("begin the attempt: %v", err)
+	}
+	if _, err := store.MarkAttemptAmbiguous(assignment.SessionStateParams{
+		AttemptID: att.ID, Epoch: claimed.ClaimEpoch, Error: "lost"}); err != nil {
+		t.Fatalf("mark the attempt ambiguous: %v", err)
+	}
+	time.Sleep(1200 * time.Millisecond)
+
+	code, out, refusals := runAssignmentCLI(t, "assignment", "supersede",
+		"--id", subject.ID,
+		"--attempt", att.ID,
+		"--epoch", "1",
+		"--replacement-title", "redo the work",
+		"--replacement-objective", "redo it",
+		"--replacement-recipient", "beta",
+		"--replacement-units", "1",
+		"--base-sha", strings.Repeat("a", 40),
+		"--reviewer-title", "review the redo",
+		"--reviewer-objective", "review it",
+		"--reviewer-recipient", "charlie",
+		"--reviewer-units", "1",
+		"--evidence-ref", "gh:flowbyte-com/mpm#258",
+		"--justification", "the original launch is ambiguous",
+		"--actor", "operator",
+		"--json",
+	)
+	if code != 0 {
+		t.Fatalf("the operator's supersede exited %d: %s\nrefusals: %s", code, out, refusals)
+	}
+	var res struct {
+		Lineage struct {
+			ID         string `json:"id"`
+			Superseded string `json:"superseded_task_id"`
+			Attempt    string `json:"attempt_id"`
+		} `json:"lineage"`
+		Replacement assignmentCLIState `json:"replacement"`
+		Reviewer    assignmentCLIState `json:"reviewer"`
+		Created     bool               `json:"created"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("the supersede output is not JSON: %v\n%s", err, out)
+	}
+	if !res.Created {
+		t.Errorf("the supersession reports created=false")
+	}
+	if res.Lineage.Superseded != subject.ID || res.Lineage.Attempt != att.ID {
+		t.Errorf("the lineage names %s/%s, want %s/%s",
+			res.Lineage.Superseded, res.Lineage.Attempt, subject.ID, att.ID)
+	}
+	if res.Replacement.State != assignment.StateEnqueued || res.Replacement.ClaimEpoch != 0 {
+		t.Errorf("the replacement is %s epoch %d, want enqueued epoch 0",
+			res.Replacement.State, res.Replacement.ClaimEpoch)
+	}
+	if res.Reviewer.State != assignment.StateEnqueued {
+		t.Errorf("the reviewer is %s, want enqueued", res.Reviewer.State)
+	}
+	after, err := store.Get(subject.ID)
+	if err != nil {
+		t.Fatalf("re-read the original: %v", err)
+	}
+	if after.State != assignment.StateInProgress {
+		t.Errorf("the original is %q after supersession, want in_progress", after.State)
+	}
+}
+
+// TestAssignmentCLIReadVerbsCarryExecutionState proves the operator's
+// read verbs carry the derived picture: show names the effective state,
+// tree names the tree/recovery picture with per-task effective states,
+// and lineage returns the exact immutable authorisation.
+func TestAssignmentCLIReadVerbsCarryExecutionState(t *testing.T) {
+	assignmentCLIFixture(t)
+
+	code, out := runCLI(t, "assignment", "create-root",
+		"--project-id", "cpj-cli",
+		"--title", "the root",
+		"--objective", "the objective",
+		"--recipient", "alpha",
+		"--idempotency-key", "idem:cli:readview:root",
+		"--permitted-operation", "read",
+		"--eligible-recipient", "alpha,beta",
+		"--max-depth", "3",
+		"--max-tasks", "16",
+		"--max-concurrency", "2",
+		"--max-resource-units", "100",
+		"--json",
+	)
+	if code != 0 {
+		t.Fatalf("create-root exited %d: %s", code, out)
+	}
+	var created assignmentCLIState
+	if err := json.Unmarshal([]byte(out), &created); err != nil {
+		t.Fatalf("create-root output is not JSON: %v\n%s", err, out)
+	}
+
+	// Show names the effective state alongside the stored one.
+	_, show, _ := runAssignmentCLI(t, "assignment", "show", "--id", created.ID, "--json")
+	var shown struct {
+		ID             string `json:"id"`
+		State          string `json:"state"`
+		EffectiveState string `json:"effective_state"`
+	}
+	if err := json.Unmarshal([]byte(show), &shown); err != nil {
+		t.Fatalf("show output is not JSON: %v\n%s", err, show)
+	}
+	if shown.ID != created.ID || shown.EffectiveState == "" {
+		t.Fatalf("show carries %+v, want the assignment with an effective state", shown)
+	}
+
+	// Tree names the derived picture and every task's effective state.
+	_, treeOut, _ := runAssignmentCLI(t, "assignment", "tree", "--id", created.ID, "--json")
+	var tree struct {
+		RootID      string `json:"root_id"`
+		Tree        string `json:"tree_status"`
+		Recovery    string `json:"recovery_status"`
+		Assignments []struct {
+			ID             string `json:"id"`
+			EffectiveState string `json:"effective_state"`
+		} `json:"assignments"`
+	}
+	if err := json.Unmarshal([]byte(treeOut), &tree); err != nil {
+		t.Fatalf("tree output is not JSON: %v\n%s", err, treeOut)
+	}
+	if tree.RootID != created.ID || tree.Tree == "" || tree.Recovery == "" {
+		t.Fatalf("tree carries %+v, want the derived picture", tree)
+	}
+	if len(tree.Assignments) == 0 || tree.Assignments[0].EffectiveState == "" {
+		t.Fatalf("tree items carry no effective state: %+v", tree.Assignments)
+	}
+
+	// Lineage of a missing id is a refusal, not an empty row.
+	if code, _, errOut := runAssignmentCLI(t, "assignment", "lineage", "--id", "no-such-lineage"); code == 0 {
+		t.Fatalf("a missing lineage exited 0")
+	} else if errOut == "" {
+		t.Fatalf("a missing lineage named no reason")
 	}
 }

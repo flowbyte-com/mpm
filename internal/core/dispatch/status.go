@@ -33,6 +33,11 @@ type StatusItem struct {
 	Title string `json:"title"`
 	// State is the assignment's state.
 	State string `json:"state"`
+	// EffectiveState is the execution-aware state: stored state plus the
+	// lineage reading (superseded, recovery_required, authorised,
+	// blocked). It shares the implementation with TreeStatus and every
+	// claim/start/attempt guard: one reading, not a second opinion.
+	EffectiveState string `json:"effective_state,omitempty"`
 	// Owner is the lease holder, when there is one.
 	Owner string `json:"owner,omitempty"`
 	// Epoch is the current claim epoch.
@@ -61,6 +66,10 @@ type StatusReport struct {
 	Recoverable []StatusItem `json:"recoverable"`
 	// Budgets is the budget picture of every tree involved.
 	Budgets []assignment.BudgetStatus `json:"budgets"`
+	// Trees is the derived completion picture of every tree involved:
+	// the same TreeStatus the tree verb reads, so the status and the
+	// tree agree about what is finished and what needs recovery.
+	Trees []assignment.TreeStatus `json:"trees,omitempty"`
 	// GeneratedAt is the moment the status was taken, in unix seconds.
 	GeneratedAt int64 `json:"generated_at"`
 }
@@ -153,8 +162,44 @@ func Status(store *assignment.Store, cfg Config) (*StatusReport, error) {
 			return nil, err
 		}
 		out.Budgets = append(out.Budgets, b)
+		ts, err := store.TreeStatus(rootID)
+		if err != nil {
+			return nil, err
+		}
+		out.Trees = append(out.Trees, *ts)
+	}
+	// Every item carries the execution-aware reading, from the same
+	// EffectiveState every guard uses. The state column stays the
+	// stored state; the effective column says what it MEANS.
+	if err := annotateEffective(out.Pending, store.EffectiveState); err != nil {
+		return nil, err
+	}
+	if err := annotateEffective(out.Blocked, store.EffectiveState); err != nil {
+		return nil, err
+	}
+	if err := annotateEffective(out.Recoverable, store.EffectiveState); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// annotateEffective fills each item's execution-aware state.
+//
+// A FAILURE IS RETURNED, never swallowed. An empty effective state would
+// read as "nothing blocks this", which is the most dangerous possible
+// lie for an operator deciding whether to enable the dispatcher (F12).
+// The lookup is a parameter so the fault path is exercisable without
+// corrupting a real database.
+func annotateEffective(items []StatusItem, lookup func(string) (string, error)) error {
+	for i := range items {
+		es, err := lookup(items[i].AssignmentID)
+		if err != nil {
+			return fmt.Errorf("dispatch status: effective state of %s: %w",
+				items[i].AssignmentID, err)
+		}
+		items[i].EffectiveState = es
+	}
+	return nil
 }
 
 // statusCandidateLimit bounds the status read.
