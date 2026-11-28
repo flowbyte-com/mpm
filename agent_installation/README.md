@@ -153,88 +153,48 @@ On 2026-11-15 a review subagent wrote a memory into the operator's
 **live** MPM database through the `mpm_memory` tool, against an
 explicit instruction not to touch it.
 
-The isolation is **capability removal**, and it has three parts.
+The reviewer definition is a FRAMEWORK PERMISSION definition, not an
+operating-system boundary.
 
 **1. The tool catalogue is DEFAULT-DENY.**
-[`tests/../mpm-opencode/templates/agents/mpm-reviewer.md`](./mpm-opencode/templates/agents/mpm-reviewer.md)
-denies `action: "*"` for `resource: "*"`, and re-opens exactly **one**
-action: `sandbox_exec`. An omitted permission rule is not a closure, and
-a default deny makes the omission safe — a capability the host adds
-later is closed on arrival.
+[`mpm-reviewer.md`](mpm-opencode/templates/agents/mpm-reviewer.md) denies
+`action: "*"` for `resource: "*"`, and re-opens only the READ tools the
+reviewer needs (`read`, `grep`, `glob`, `list`). An omitted permission rule
+is not a closure, and a default deny makes the omission safe — a capability
+the host adds later is closed on arrival.
 
-**2. The one route out is HOST-CONTROLLED and always sandboxed.**
-`sandbox_exec` is registered by the installed plugin
-(`mpm-opencode/src/sandbox-exec.ts`). It runs the command inside a
-**bubblewrap mount namespace** built by
-`mpm-opencode/scripts/reviewer_bwrap.py`: the runtime is bound read-only,
-the reviewer's disposable tree is bound read-write at `/sandbox`, and
-**every other path is not bound at all** — so it does not exist inside.
-`/etc` is a **synthetic** directory (the trust store, the private keys
-and the operator's account database are not readable), `/tmp` is a
-private tmpfs, the network is unshared, the environment is cleared
-before the disposable variables are set, every capability is dropped and
-a nested user namespace is refused.
-
-The host controls the sandbox's base, the repository copy and the
-protected set. The model supplies the command and nothing else: it
-arrives as a **JSON array on stdin**, so it never reaches a command-line
-parser, and the namespace's own `--` separator stops it reaching
-bubblewrap's parser either.
-
-There is **no unsandboxed fallback**: if bubblewrap is missing or the
-namespace cannot be built, the command does not run and the model gets
-the refusal. There is also **no privileged mode** — the tool does not
-know whether it is being used by the reviewer or by the operator, and
-it does not need to, because it is always confined.
-
-The alternative — rewriting the command in the host's shell hook and
-identifying the reviewer by a session identifier — was measured and
-**rejected**: the hook's event carries no session identifier, and the
-environment's `OPENCODE_SESSION_ID` is agent-influenceable. A security
-authority the agent can influence is not an authority.
+**2. Everything that changes state is CLOSED.** No `write`, `edit`, `patch`,
+shell, code execution, browser, network tools, subagents or MPM substrate
+tools. That is what the agent framework enforces, and it is what keeps a
+reviewer from rewriting the record it reviews.
 
 **3. The install FAILS CLOSED.**
 `mpm-opencode/scripts/install_reviewer_agent.py` parses the canonical
-template, checks its **policy** (the default deny, the one allowed
-action, every host-side capability, and every MPM tool the registry
-publishes), and **refuses** a definition that does not satisfy it. It
-writes the copy atomically with mode `0600`, reads it **back**, compares
-it byte-for-byte with the template, checks its policy again, and exits
-**non-zero** if any of that fails. `install.sh` treats a failed reviewer
-install as **fatal**, because a deployment step that fails open converts
-an error into a **silent downgrade** of the guarantee.
+template, checks its **policy** (the default deny, the read allows, every
+closed capability and every MPM tool), and **refuses** a definition that
+does not satisfy it. It writes the copy atomically with mode `0600`, reads
+it **back**, compares it byte-for-byte with the template, checks its policy
+again, and exits **non-zero** if any of that fails.
 
-**The host-side capabilities that are closed, and why.** The shell is
-closed **entirely** — it is a host process with the host user's
-authority, and no rule on a command string makes it a boundary. The
-file tools (`read`, `write`, `edit`, `patch`, `grep`, `glob`, `list`)
-are closed because they run in the host's process, outside any
-namespace; files are reached **through** the sandbox instead. Code Mode
-(`execute`) is closed, and with it the browser family: the browser can
-open a `file://` URL and move server-local bytes, and no permission rule
-confines it. The network tools (`webfetch`, `websearch`) are closed
-because they reach the network from outside the namespace. The MPM
-tools are closed by name, and the list is **machine-checked against
-the registry** — `internal/core/tools/registry_list.go` is the
-authoritative list, and
-[`tests/test_reviewer_isolation.py`](./tests/test_reviewer_isolation.py)
-fails if a tool is added to the registry without a matching deny rule,
-or if a stale rule survives for a tool the registry no longer publishes.
+**What MPM does NOT do.** MPM does not sandbox the reviewer. There is no
+bubblewrap, no user or network namespace, no containment mount, no
+`sandbox_exec` tool and no inference sidecar: those were removed. The
+reviewer is an ordinary child process with the operator's environment, and
+the agent framework plus the deployment environment (a container, a
+dedicated user, a virtual machine) are where isolation belongs. An agent
+with the operator's operating-system permissions can reach what the
+operator can reach; MPM does not claim otherwise.
 
-**What it does NOT cover.** The operator's own session is trusted. The
-built-in `explore` and `general` subagents are **not** confined: the
-boundary covers the configured reviewer environment only. A common
-sandbox policy for other delegated agents is a future decision. The Go
-module cache is not bound by default, so a build needing a dependency
-the sandbox has not cached fails.
+**Migration.** An environment that still exports the removed containment
+variables (`MPM_OPENCODE_SIDECAR_KEY`, `MPM_OPENCODE_SIDECAR_UPSTREAM`,
+`MPM_OPENCODE_SIDECAR_MODEL`, `MPM_OPENCODE_REVIEWER_KEY`,
+`MPM_OPENCODE_PLUGIN`) is refused with a diagnostic naming them, until the
+operator removes them or sets `MPM_CONTAINMENT_REMOVED_ACK=1` for one
+transitional release.
 
-**The evidence.** The namespace's contract is pinned by
-[`tests/test_reviewer_bwrap_sandbox.py`](./tests/test_reviewer_bwrap_sandbox.py);
-the route closure and the install's fail-closed behaviour by
-[`tests/test_reviewer_isolation.py`](./tests/test_reviewer_isolation.py);
-and the reviewer's **actual execution path** — driven through the exact
-invocation the plugin makes, against disposable sentinels — by
-[`tests/test_reviewer_sandbox_exec_path.py`](./tests/test_reviewer_sandbox_exec_path.py).
+**The evidence.** The installer refuses a definition that does not satisfy
+the policy, and `agent_installation/tests/test_opencode_install.py` covers
+the install flow.
 
 ## Installation
 

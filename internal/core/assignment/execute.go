@@ -32,11 +32,10 @@ import (
 //   - an assignment whose state is not executable;
 //   - a tree that does not permit `start` and `complete`;
 //   - an agent definition that is not on the explicit allow-list;
-//   - a runtime run whose reported workspace is not the authorised one;
-//   - a session carrying a SESSION-LEVEL permission grant. The host
-//     honours those over the agent definition's denies — measured — so the
-//     adapter treats a non-empty `permissions` array as a refusal, not a
-//     detail.
+//   - a runtime run whose reported workspace is not the authorised one.
+//     (Session-level permission grants are the AGENT FRAMEWORK's policy;
+//     MPM records and verifies identity and workspace, not tool
+//     permissions.)
 //
 // WHAT IT WILL NOT DO
 //
@@ -51,7 +50,7 @@ import (
 type Runtime interface {
 	// AgentAllowed answers before a session exists.
 	AgentAllowed(name string) bool
-	// VerifyAgent asks the runtime for the agent's EFFECTIVE permissions.
+	// VerifyAgent proves the runtime knows the definition.
 	VerifyAgent(ctx context.Context, name string) error
 	// Launch creates-or-continues the caller-minted session and runs the
 	// objective.
@@ -770,29 +769,34 @@ func (s *Store) recordState(
 //     `session.create`'s `directory` parameter is ignored. So a session can
 //     run somewhere other than where it was told, and the report is the
 //     only way to see it.
-//   - `Permissions` is the SESSION-LEVEL override list, and the host
-//     honours those over the agent's denies. A non-empty list on a worker
-//     session is a privilege widening, so the adapter refuses.
+//   - `Permissions` is the SESSION-LEVEL override list. It is the agent
+//     framework's own policy, recorded and reported; MPM does not enforce
+//     tool-permission security and neither refuses nor grants on it.
 //   - `Agent` names the definition the runtime actually used.
 //   - `Model` is what it actually ran, which is how a model selection is
 //     verified rather than assumed.
 func verifySession(state *oc.SessionState, p ExecuteParams) string {
+	// THE RUNTIME RUNS IN THE AUTHORISED WORKSPACE, on this host, with no
+	// bind mount in between. The expected directory is therefore the
+	// workspace itself unless the caller names it.
 	expected := p.ExpectedRuntimeDir
 	if expected == "" {
-		expected = oc.PrefixWorker
+		expected = p.Workspace
 	}
-	if dir := filepath.Clean(state.Location.Directory); dir != filepath.Clean(expected) {
-		return fmt.Sprintf("the session ran in %q, not the authorised workspace %q",
-			state.Location.Directory, expected)
-	}
-	if len(state.Permissions) > 0 {
-		names := make([]string, 0, len(state.Permissions))
-		for _, perm := range state.Permissions {
-			names = append(names, perm.Action+":"+perm.Effect)
+	if expected != "" {
+		if dir := filepath.Clean(state.Location.Directory); dir != filepath.Clean(expected) {
+			return fmt.Sprintf("the session ran in %q, not the authorised workspace %q",
+				state.Location.Directory, expected)
 		}
-		return "the session carries a SESSION-LEVEL permission grant (" +
-			strings.Join(names, ",") + "), which overrides the agent definition"
 	}
+	// SESSION-LEVEL PERMISSION GRANTS ARE THE FRAMEWORK'S.
+	//
+	// MPM used to refuse a session that carried one, because such a grant
+	// could widen the agent definition and MPM's containment was the thing
+	// being protected. Without that boundary the definition and its
+	// session overrides are the operator's agent framework policy; MPM
+	// still verifies the agent NAME and the WORKSPACE, which are
+	// orchestration facts, not tool policy.
 	if state.Agent != p.Agent {
 		return fmt.Sprintf("the session used agent %q, not %q", state.Agent, p.Agent)
 	}

@@ -96,6 +96,12 @@ func (f *fakeRuntime) Launch(_ context.Context, req oc.LaunchRequest) (*oc.Launc
 	}
 	state := *f.launchState
 	state.ID = req.SessionID
+	// A native runtime runs IN the authorised workspace; the fake says so
+	// unless a test deliberately seeded another directory to test the
+	// refusal.
+	if state.Location.Directory == "" {
+		state.Location.Directory = req.Workspace
+	}
 	if f.states == nil {
 		f.states = map[string]*oc.SessionState{}
 	}
@@ -297,10 +303,9 @@ func testEngine(t *testing.T, store *assignment.Store, cfg Config) (*Engine, *fa
 // the refusal rather than the dispatcher.
 func okState(agent, outcome string) *oc.SessionState {
 	return &oc.SessionState{
-		Outcome:  outcome,
-		Agent:    agent,
-		Model:    oc.SessionModel{ID: "test", ProviderID: "mpm-sidecar"},
-		Location: oc.SessionLocation{Directory: oc.PrefixWorker},
+		Outcome: outcome,
+		Agent:   agent,
+		Model:   oc.SessionModel{ID: "test", ProviderID: "mpm-sidecar"},
 	}
 }
 
@@ -791,6 +796,83 @@ func TestAFailingAssignmentCannotMonopoliseTheDispatcher(t *testing.T) {
 	}
 	if otherOutcome.Reason == ReasonDeferred {
 		t.Errorf("the other assignment was deferred too: %+v", otherOutcome)
+	}
+}
+
+// TestACoveringLeaseIsNotRefusedAtASecondBoundary pins the whole-second
+// truncation of the lease-coverage check.
+//
+// The claim writes the lease from one reading of the clock and the
+// coverage check takes another. Both readings are whole seconds, so when
+// the second boundary falls between them, a lease that covers the
+// runtime window BY CONSTRUCTION reads one second short (899 of 900),
+// and the run used to refuse it without launching anything — recorded
+// nowhere but a report the caller threw away. CI hit exactly that: the
+// run attempted nothing and returned no error, because the attempted
+// candidate was refused as lease_insufficient before any attempt row
+// existed. The comparison now forgives the one second two truncated
+// readings can hide; a genuinely short lease is still refused, which the
+// 60-seconds-per-reading clock in reporting_test.go proves.
+func TestACoveringLeaseIsNotRefusedAtASecondBoundary(t *testing.T) {
+	dm := core.NewTestLocalOnlyDM(t)
+	base := time.Unix(1_800_000_000, 0).UTC()
+	armed := false
+	calls := 0
+	// boundary is the clock the CI failure implied: the claim and the
+	// start read T, and the coverage check — a few milliseconds of real
+	// time later — reads T+1 because the second boundary fell between
+	// them. Everything before the run reads T unchanged.
+	boundary := func() time.Time {
+		if !armed {
+			return base
+		}
+		calls++
+		if calls <= 2 {
+			return base
+		}
+		return base.Add(time.Second)
+	}
+	store := assignment.NewStoreWithClock(dm, boundary)
+	projectID := "cpj-" + strings.Repeat("a", 16)
+	if _, err := dm.SQLDB().Exec(
+		`INSERT INTO projects (id, created_by) VALUES (?, 'dispatch-test')`, projectID); err != nil {
+		t.Fatalf("seed the project: %v", err)
+	}
+	root := dispatchRoot(t, store, projectID)
+	child := dispatchChild(t, store, root, "alpha", assignment.RoleImplementer, "idem:dispatch:boundary")
+
+	cfg := testConfig(t)
+	cfg.MaxDispatchAttempts = 1
+	cfg.Concurrency = 1
+	engine, fake := testEngine(t, store, cfg)
+	// A run that would terminate failed, exactly as the monopolise test
+	// above records it.
+	fake.launchState = okState("mpm-worker", "failed")
+
+	armed = true
+	report, err := engine.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	outcome, ok := outcomeFor(report, child.ID)
+	if !ok {
+		t.Fatalf("the report has no outcome for the child: %+v", report.Outcomes)
+	}
+	if outcome.Reason == ReasonLeaseInsufficient {
+		t.Fatalf("a lease that covers the window was refused at the second boundary: %+v", report.Outcomes)
+	}
+	if outcome.Reason != ReasonFailed {
+		t.Fatalf("the outcome is %q (%s), want %q", outcome.Reason, outcome.Detail, ReasonFailed)
+	}
+	attempts := mustAttempts(t, store, child.ID)
+	if len(attempts) != 1 {
+		t.Fatalf("the child has %d attempts, want 1", len(attempts))
+	}
+	if attempts[0].LaunchState != assignment.SessionFailed {
+		t.Errorf("the attempt is %q, want %q", attempts[0].LaunchState, assignment.SessionFailed)
+	}
+	if fake.Launches() != 1 {
+		t.Errorf("the runtime was launched %d times, want 1", fake.Launches())
 	}
 }
 

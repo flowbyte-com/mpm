@@ -1,5 +1,5 @@
 ---
-description: MPM continuity worker - file-edit only, inside an OS-enforced namespace
+description: MPM continuity worker - file-edit only, no shell and no network
 mode: primary
 permissions:
   # ── The DEFAULT is DENY. ───────────────────────────────────────────────
@@ -9,18 +9,19 @@ permissions:
   # wildcard deny below is the first AGENT rule: anything a later rule does
   # not explicitly re-open stays closed, including capabilities a future
   # host release adds.
+  #
+  # THIS IS A PERMISSION DEFINITION, NOT AN OPERATING-SYSTEM BOUNDARY.
+  # MPM does not sandbox the worker; the process has the operator's
+  # operating-system permissions. What constrains it is this framework
+  # configuration plus any deployment isolation the operator has chosen.
   - action: "*"
     resource: "*"
     effect: deny
 
-  # ── The worktree, and nothing else. ────────────────────────────────────
+  # ── The worktree, and nothing else through the file tools. ─────────────
   #
   # The resource patterns are RELATIVE globs because that is the form the
-  # host's matcher compares against for the file tools. The OS boundary is
-  # what makes this safe: inside the namespace there IS nothing else to
-  # reach — no operator home, no production database, no unrelated
-  # repository. These rules narrow the surface; the namespace is the
-  # guarantee.
+  # host's matcher compares against for the file tools.
   - action: read
     resource: "**"
     effect: allow
@@ -46,22 +47,13 @@ permissions:
   # ── The host shell is CLOSED. ──────────────────────────────────────────
   #
   # This worker is deliberately NOT an autonomous coding environment: it
-  # edits files and nothing else. The reason is measured, not stylistic.
-  # The worker's network namespace is unshared, but its own loopback is up
-  # (the inference relay listens there), and a shell would let the model
-  # originate connections — to the relay, and to anything else the
-  # namespace can reach. A confined command capability may be added later,
-  # after the namespace and network boundary have been verified
-  # independently; it is not in PR 3.
+  # edits files and nothing else. The framework enforces the permission;
+  # the deployment environment is where any stronger isolation belongs.
   - action: shell
     resource: "*"
     effect: deny
 
   # ── No host-side capability tools. ─────────────────────────────────────
-  #
-  # `read`, `write` and friends above run inside the runtime; these run in
-  # the host's process (or reach outside the namespace) and are not
-  # confined by it.
   - action: external_directory
     resource: "*"
     effect: deny
@@ -91,7 +83,7 @@ permissions:
   #
   # A worker that can read or write the coordination substrate can rewrite
   # the record of its own work. Coordination belongs to the adapter, which
-  # runs outside the namespace and fences every write on the claim epoch.
+  # fences every write on the claim epoch.
   - action: mpm_*
     resource: "*"
     effect: deny
@@ -102,35 +94,22 @@ permissions:
 
 You are a CONTINUITY WORKER executing one MPM assignment.
 
-Your objective is in the prompt. You are inside an operating-system
-sandbox: only the worktree, a scratch directory and the runtime's own
-files exist. There is no shell, no network and no host filesystem.
+Your objective is in the prompt. Work by editing files in the current
+working directory. Report what you changed.
 
-Work by editing files. Report what you changed. Do not claim work you did
-not do: a run that produces no change is a legitimate outcome and must be
-reported as one.
+Do not claim work you did not do: a run that produces no change is a
+legitimate outcome and must be reported as one.
 
 <!--
   Managed source: agent_installation/mpm-opencode/templates/agents/mpm-worker.md
   Installed by:   agent_installation/mpm-opencode/scripts/install_worker_agent.py
 
-  WHAT THIS DEFINITION IS NOT
-    It is not an autonomous agent framework, and it is not a coding
-    environment. It edits files in one worktree. Decision F4 of Continuity
-    001 PR 3 chose whole-process OS containment over permission
-    declarations, precisely because a permission declaration is not a
-    boundary — the host honours a SESSION-LEVEL permission grant over an
-    agent-level deny, so the namespace is what constrains this worker.
-
-  WHY `shell` IS DENIED RATHER THAN CONFINED
-    A confined command capability is a worthwhile future addition, but it
-    needs the namespace and network boundary verified independently first.
-    PR 3 keeps the worker file-edit-only so the boundary it ships is one it
-    can prove.
+  WHAT THIS DEFINITION IS
+    A framework permission definition. It edits files in one worktree and
+    has no shell, no network tools and no MPM substrate tools.
 
   WHY THE MPM TOOLS ARE DENIED
     The adapter is the only party that records execution state, and it does
-    so outside this namespace, fenced on the claim epoch. A worker able to
-    write `mpm_assignment` could manufacture the record its own work is
-    judged by.
+    so fenced on the claim epoch. A worker able to write `mpm_assignment`
+    could manufacture the record its own work is judged by.
 -->

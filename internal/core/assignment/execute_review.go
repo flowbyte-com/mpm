@@ -23,7 +23,7 @@ import (
 //  1. validates the REVIEWER assignment (role, claim, lease, and that its
 //     target exists and is reviewable);
 //  2. asks the runtime to run the reviewer, which itself refuses unless the
-//     reviewer definition and the `sandbox_exec` plugin are both available;
+//     reviewer definition is available;
 //  3. takes the reviewed revision and the findings digest FROM THE RESULT —
 //     never from a parameter;
 //  4. extracts the reviewer's own terminal verdict from the ASSISTANT-AUTHORED
@@ -213,11 +213,14 @@ func (s *Store) ExecuteReview(ctx context.Context, rt ReviewRuntime, p ExecuteRe
 		return nil, refuse(res.Outcome, fmt.Sprintf(
 			"the review ran model %q, want %q", res.Model, p.ExpectedModel))
 	}
-	// A SESSION-LEVEL GRANT IS A WIDENING. The real runtime refuses it
-	// before returning; this check covers a runtime that did not.
-	if len(res.Permissions) > 0 {
-		return nil, refuse(res.Outcome, "the review session carried a permission override")
-	}
+	// SESSION-LEVEL PERMISSION GRANTS ARE THE FRAMEWORK'S.
+	//
+	// A grant is the agent framework's own decision about what this
+	// session may do. MPM records the session's identity, its model and
+	// the review's evidence, and does not enforce — or second-guess — the
+	// framework's tool-permission policy. MPM provides no operating-system
+	// sandbox, so a permission list here is neither a widening of an MPM
+	// boundary nor an MPM responsibility.
 	if res.Outcome != "succeeded" {
 		return nil, refuse(res.Outcome, fmt.Sprintf(
 			"the reviewer's terminal outcome is %q, not %q", res.Outcome, "succeeded"))

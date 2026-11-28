@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	oc "github.com/flowbyte-com/mpm-core/opencode"
 )
 
 // The dispatcher's configuration.
@@ -118,13 +116,11 @@ type Config struct {
 
 	// ReviewerModel is the model a REVIEWER runs under.
 	//
-	// It is SEPARATE from the worker's model, and it has to be: the
-	// worker's model is the sidecar's local id ("mpm-sidecar/…"), which
-	// only means anything inside the worker's namespace with the
-	// sidecar's socket. The reviewer's sandbox has no provider and no
-	// sidecar, so it names a real provider/model — and naming the
-	// worker's id there would ask the reviewer for a model its own
-	// configuration does not define.
+	// It is SEPARATE from the worker's model, and it has to be: an
+	// implementer and an independent reviewer should not be the same
+	// agent, and a different model is part of that independence. Both are
+	// ordinary provider/model identifiers read by the agent framework
+	// from the operator's configuration.
 	ReviewerModel string `json:"reviewer_model"`
 
 	// ReviewRepoPath is the repository the reviewer examines. It must be
@@ -248,7 +244,7 @@ func (c Config) Validate() error {
 	// decision, made before anything is claimed.
 	if c.WorkerAgent != DefaultWorkerAgent {
 		return fmt.Errorf(
-			"dispatch: the worker agent is %q, and the containment's allow-list is pinned to %q",
+			"dispatch: the worker agent is %q, and the adapter's allow-list is pinned to %q",
 			c.WorkerAgent, DefaultWorkerAgent)
 	}
 	if c.ReviewerAgent != DefaultReviewerAgent {
@@ -267,15 +263,13 @@ func (c Config) Validate() error {
 	if c.ReviewRepoPath == "" {
 		return fmt.Errorf("dispatch: the configuration is enabled but names no repository to review")
 	}
-	// THE PATHS MUST BE ABSOLUTE, because the CONTAINMENT requires it.
-	//
-	// The sandbox's root and the workspace it contains are resolved
-	// against the filesystem, and a relative path would make the
-	// containment's own guarantee depend on the working directory. The
-	// worker path needs it too — the adapter refuses a relative
-	// workspace — but the reviewer path only found out at the factory,
-	// after the claim. Refusing it here is the same decision, made
-	// before anything is claimed.
+	// THE PATHS MUST BE ABSOLUTE. An absolute path is resolved once and
+	// means the same thing to the host, the worktree provisioner and the
+	// runtime; a relative one would depend on the working directory of
+	// whichever process read it. The worker path needs it too — the
+	// adapter refuses a relative workspace — but the reviewer path only
+	// found out at the factory, after the claim. Refusing it here is the
+	// same decision, made before anything is claimed.
 	if !filepath.IsAbs(c.WorkspaceRoot) {
 		return fmt.Errorf(
 			"dispatch: the workspace root %q is not an absolute path", c.WorkspaceRoot)
@@ -286,23 +280,14 @@ func (c Config) Validate() error {
 	}
 	// THE TWO PATHS MUST NOT CONTAIN ONE ANOTHER. A workspace root inside
 	// the repository would put worktrees in the source tree, and a
-	// repository inside the workspace root would expose the repository
-	// to the worker's writable bind.
-	// EQUALITY IS CONTAINMENT TOO: a root that IS the repository would
+	// repository inside the workspace root would entangle the source
+	// checkout with the worktrees.
+	// EQUALITY IS ENTANGLEMENT TOO: a root that IS the repository would
 	// create worktrees inside the source checkout.
 	if sameOrWithin(c.RepositoryPath, c.WorkspaceRoot) || sameOrWithin(c.WorkspaceRoot, c.RepositoryPath) {
 		return fmt.Errorf(
 			"dispatch: the workspace root %q and the source repository %q must not be the same or contain one another",
 			c.WorkspaceRoot, c.RepositoryPath)
-	}
-	// THE WORKER'S NAMESPACE BINDS /usr AND /usr/local READ-ONLY. A
-	// repository there would put its Git metadata inside the namespace.
-	for _, dir := range oc.RuntimeDirs() {
-		if sameOrWithin(dir, c.RepositoryPath) {
-			return fmt.Errorf(
-				"dispatch: the source repository %q is inside %q, which the worker's namespace binds",
-				c.RepositoryPath, dir)
-		}
 	}
 	if !filepath.IsAbs(c.ReviewRepoPath) {
 		return fmt.Errorf(

@@ -7,8 +7,8 @@
 //
 // # WHY THEY ARE CLI-ONLY
 //
-// `dispatch` starts a contained runtime process and spends real model
-// budget, exactly as PR 3's `execute` does. It is not an MCP action and
+// `dispatch` starts a runtime process and spends real model budget,
+// exactly as PR 3's `execute` does. It is not an MCP action and
 // it is not in the tool registry: an agent must not be able to start
 // inference on its own initiative. The operator's shell is the door.
 //

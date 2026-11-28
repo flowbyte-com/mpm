@@ -1,5 +1,13 @@
 # Continuity 001, PR 4 — the bounded autonomous dispatcher
 
+> **Superseded in part.** MPM-managed containment (bubblewrap, user/network
+> namespaces, the inference sidecar/relay and the reviewer `sandbox_exec`
+> path) has been **removed**. The dispatcher now launches the agent
+> framework natively, with the operator's environment. Read every
+> "containment", "sidecar" and "relay" statement below as historical; the
+> current contract is
+> [`continuity-001-containment-removal-amendment.md`](continuity-001-containment-removal-amendment.md).
+
 ## 1. What PR 4 is, and what it is not
 
 PR 3 gave MPM a way to RUN an assignment: it claims the work, mints a
@@ -89,7 +97,7 @@ There is no environment variable that turns it on by accident, and
   "reviewer_agent": "mpm-reviewer",
   "reviewer_model": "minimax-coding-plan/MiniMax-M3.1-Flash",
   "review_repo_path": "/srv/repo",
-  "model": "mpm-sidecar/permitted-model"
+  "model": "deepseek/deepseek-chat"
 }
 ```
 
@@ -156,22 +164,12 @@ while its live claim starved the tree's concurrency budget. Refusing the
 configuration is the same decision, made before anything is claimed.
 
 `model` is the WORKER's model and `reviewer_model` is the REVIEWER's,
-and they are different on purpose. The worker's model is the sidecar's
-local id, which only means anything inside the worker's namespace with
-the sidecar's socket. The reviewer names a real provider/model and
-authenticates through `MPM_OPENCODE_REVIEWER_KEY`, a DEDICATED credential
-separate from the worker's sidecar key. The key is read from the launch
-environment only; there is no fallback to `MINIMAX_API_KEY`,
-`DEEPSEEK_API_KEY`, the sidecar key or the operator's OpenCode auth store.
-For the measured model `minimax-coding-plan/MiniMax-M3.1-Flash` the
-dispatcher maps it to OpenCode's `MINIMAX_API_KEY` variable **inside the
-reviewer process only**. The plugin scrubs provider credentials from the
-`sandbox_exec` helper and bubblewrap clears the command environment, so
-the model-controlled command does not receive them. A model other than the
-measured `minimax-coding-plan/MiniMax-M3.1-Flash` is refused, not tried with
-another provider; the CN endpoint and other same-family models were not
-measured. The SESSION's own model is checked against the configured one
-before its result is accepted.
+and they are different on purpose: an implementer and an independent
+reviewer should not be the same agent, and a different model is part of
+that independence. Both are ordinary provider/model identifiers read by
+the agent framework from the operator's own configuration; MPM holds no
+provider credential. The SESSION's own reported model is checked against
+the configured one before its result is accepted.
 
 **AN UNKNOWN KEY IS AN ERROR.** A silently ignored key is a typo the
 operator cannot see: they wrote `lease_second` and the dispatcher used
@@ -181,11 +179,10 @@ a lease that covers the runtime window and one that does not. So is
 nothing about what follows it, and a configuration whose meaning depends
 on where the reader stopped is not a configuration.
 
-**THE PATHS MUST BE ABSOLUTE.** The sandbox roots are built from
-`workspace_root` and `review_repo_path`, and the containment resolves them
-against the filesystem — a relative path would make the containment's own
-guarantee depend on the working directory. The check is here, before
-anything is claimed, and not at the factory afterwards.
+**THE PATHS MUST BE ABSOLUTE.** An absolute path is resolved once and
+means the same thing to the host, the worktree provisioner and the
+runtime; a relative one would depend on the working directory of whichever
+process read it. The check is here, before anything is claimed.
 
 ## 5. The budgets are the service's business
 
@@ -205,7 +202,7 @@ created. The schema says it plainly: "what this assignment costs against
 the root's cumulative budget."
 
 It is NOT a measurement of provider spend. MPM does not meter tokens,
-and the sidecar's audit records request and response SIZES, not cost.
+and the agent framework's own usage reporting, where it exists, records request and response sizes, not cost.
 So this is a ceiling on the work the OPERATOR AUTHORISED, and it must
 not be described as a verified monetary or token-spend ceiling.
 
@@ -412,74 +409,29 @@ would be asserting a durable record that does not exist.
 
 ## 8. One runtime per assignment, per pass
 
-The sidecar takes an **exclusive lifetime lock** on its socket path, and
-the socket path is per assignment: `<mpmDir>/opencode/runs/<id>/sidecar.sock`.
-A second sidecar for the same assignment in the same process is therefore
-refused by the sidecar's own lock — "another sidecar holds …; refusing to
-take it over" — even though the first one is THIS process's own.
-
-And the dispatcher asks for the same assignment more than once per pass:
-the recovery pass inspects it, and the dispatch path may then launch it.
-Without a cache the second request is refused, the recovery pass can never
-reconcile an implementer, and an implementer with an outstanding attempt
-is refused FOREVER — a refusal that creates no attempt, so the
-dispatch-attempt cap never trips.
-
-So the factory builds **one runtime per assignment for the life of the
-pass**, and asking again returns the same one. One sidecar per assignment
-per pass is also what the sidecar was designed for: the socket path is
-stable per assignment, and the tree is stable per assignment, so a retry
-finds the same data store and the same relay.
+The dispatcher asks for the same assignment more than once per pass: the
+recovery pass inspects it, and the dispatch path may then launch it. The
+factory builds **one runtime per assignment for the life of the pass**, so
+the read path and the launch path agree about the state directory and the
+reviewer's snapshot. The MPM state directory is stable per assignment, so
+a retry finds the same data.
 
 ## 9. The reviewer is not the worker
 
 A reviewer runs through PR 3's REVIEW path, with the pinned
-`mpm-reviewer` definition, in its own sandbox, with the plugin that
-provides `sandbox_exec`. The reviewer never runs in the worker's
-context, and the implementer never gets to record a review's outcome.
+`mpm-reviewer` definition, and the reviewer never runs in the worker's
+workspace or under the worker's agent definition. The implementer never
+gets to record a review's outcome.
 
 The reviewer's boundary gained `Inspect`, because an interface that
 could not be inspected could only ever be reported, never recovered. Its
-MODEL is its own too: the worker's model is the sidecar's local id; the
-reviewer names the measured MiniMax model and carries only the dedicated
-`MPM_OPENCODE_REVIEWER_KEY` credential in its own process environment.
-It has no sidecar and never receives the worker's sidecar key.
+MODEL is its own: the reviewer names its configured provider/model and the
+session's reported model is checked against it. Tool permissions come from
+the agent framework's configuration; MPM does not sandbox the reviewer.
 
-The reviewer's sandbox TREE exists. The runtime's read-only commands run
-with their working directory at `<root>/home`, and the review path reads
-the reviewer's session through exactly that command — so without the
-tree, every inspection fails with `chdir …: no such file or directory`
-and a review can only ever be reported, never recovered.
-
-The dispatcher passes the review's expected revision and expected model into
-the review runtime. The runtime checks the controlled review checkout's HEAD
-and the SESSION's own model before returning, and the verdict transaction
-checks the captured revision again. The transcript carries the full audited
-exchange; the verdict is parsed ONLY from `AssistantFindings`
-(assistant-authored text), must be the final non-empty line, and must be one
-of `VERDICT: APPROVED` or `VERDICT: CHANGES REQUESTED`. User prompts, tool
-output and diagnostics are not verdict sources. The evidence COLUMNS and the
-fenced verdict write share one transaction, so a crash cannot persist one
-without the other; the on-disk transcript file is written first and retained
-for diagnosis, so it is an artifact rather than a third transactional fact.
-
-A review that STARTS but cannot be captured faithfully (message capture,
-session state, a session-level permission grant, a model mismatch, the
-evidence write) is `ErrReviewIncomplete`: the attempt is marked AMBIGUOUS and
-the dispatcher reports `recovery_required`. A second dispatch refuses rather
-than spend another review. Only a pre-launch refusal is marked FAILED and
-retryable. The public `mpm assignment record-review` verb remains an
-operator/agent API that accepts a caller-supplied verdict; it does not
-transcribe a terminal transcript and is not the dispatcher's path.
-
-Four facts stay apart, and the report never collapses them:
-
-| Fact | Whose it is |
-|---|---|
-| the runtime's outcome | the runtime's |
-| the review's evidence (revision, findings digest) | the HOST's capture |
-| the review's verdict | the reviewer's own terminal text, transcribed by the HOST under the reviewer's fence |
-| the approval | the OPERATOR's |
+The reviewer's state directory exists: the review path writes its captured
+evidence under `<root>/findings` and its disposable snapshot under
+`<root>/snapshot`.
 
 ## 10. The report
 

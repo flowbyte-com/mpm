@@ -160,28 +160,6 @@ func TestTheConfiguredPathsMustNotContainOneAnother(t *testing.T) {
 	}
 }
 
-// TestTheRepositoryMustNotBeInsideARuntimeDir proves the config refuses
-// a repository the worker's namespace would bind.
-func TestTheRepositoryMustNotBeInsideARuntimeDir(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Enabled = true
-	cfg.Concurrency = 1
-	cfg.LeaseSeconds = 900
-	cfg.RuntimeTimeoutSeconds = 600
-	cfg.LeaseMarginSeconds = 300
-	cfg.CandidateLimit = 10
-	cfg.WorkspaceRoot = "/srv/work"
-	cfg.RepositoryPath = "/usr/local/src/repo"
-	cfg.ReviewRepoPath = "/srv/repo"
-	if err := cfg.Validate(); err == nil {
-		t.Error("a repository inside /usr/local was accepted")
-	}
-	cfg.RepositoryPath = "/usr/src/repo"
-	if err := cfg.Validate(); err == nil {
-		t.Error("a repository inside /usr was accepted")
-	}
-}
-
 // TestTheLeaseMustCoverTheRuntimeWindow proves the refusal that keeps a
 // launch recordable.
 //

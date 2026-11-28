@@ -62,15 +62,15 @@ Measured against the running host (`opencode v2.3.0`, OpenAPI at
 sends one prompt, and reconciles the run's *events* back into durable state. The
 model, the tools and the agent loop stay OpenCode's.
 
-### 1.3 Charlie's boundary is host-enforced, and the adapter must route through it
+### 1.3 Charlie's boundary — SUPERSEDED
 
-`/home/v/.config/opencode/agents/mpm-reviewer.md` is **default-deny** with exactly
-one open action, `sandbox_exec`, which the plugin implements as a **bubblewrap
-mount namespace** (`agent_installation/mpm-opencode/src/sandbox-exec.ts`): the
-sandbox base and the repository copy are **HOST-resolved**, the command arrives
-as a JSON array (never through a command-line parser), and **if the sandbox
-cannot be established the command does not run** — there is no unsandboxed
-fallback and no degraded mode.
+The boundary this section recorded has been **removed**: the reviewer's
+`mpm-reviewer` definition is still default-deny, but its allowed actions
+are now the framework's READ tools (`read`, `grep`, `glob`, `list`), and
+there is no `sandbox_exec`, no bubblewrap and no MPM-managed namespace.
+MPM does not provide an OS boundary; the agent framework and the
+deployment environment own isolation. See
+[`continuity-001-containment-removal-amendment.md`](continuity-001-containment-removal-amendment.md).
 
 Two consequences for this work:
 

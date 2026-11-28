@@ -522,14 +522,12 @@ STAGE_LIBRARY="${SCRIPT_DIR}/../scripts/stage_runtime_package.sh"
 OPENCODE_RUNTIME_MANIFEST=(
     server.js
     dist/index.v2.js
-    dist/sandbox-exec.js
     dist/wake-context.js
     dist/event-envelope.js
     dist/event-mapper.js
     dist/event-subscriber.js
     dist/workspace.js
     dist/resolve-mpm-binary.js
-    scripts/reviewer_bwrap.py
     package.json
 )
 
@@ -711,12 +709,9 @@ refresh_agents_md() {
 # So the definition is installed here, from the canonical template, and
 # refreshed on every install. `--force` is used deliberately: the
 # installed copy is MPM-OWNED state, and a stale copy is exactly the
-# hazard (a weaker isolation in force than the one the repository
-# defines). The guard test
-# agent_installation/tests/test_reviewer_isolation.py fails when the
-# installed copy differs from the template, and the installer itself
-# refuses to install a definition that does not satisfy the isolation
-# policy.
+# hazard (a weaker permission surface in force than the one the repository
+# defines). The installer itself refuses to install a definition that does
+# not satisfy the policy, and verifies the installed copy byte-for-byte.
 #
 # THIS STEP FAILS CLOSED.  A deployment step that fails open is worse
 # than one that fails: it converts an error into a SILENT DOWNGRADE of

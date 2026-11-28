@@ -11,8 +11,7 @@ operator's LIVE MPM database through the `mpm_memory` tool, against
 an explicit instruction not to touch it.
 
 The fix is the PERMISSION layer: the reviewer agent definition denies
-every action by default and re-opens exactly one — the host-controlled
-sandboxed execution tool. A denied tool is REFUSED by the host on every
+every action by default and re-opens only the READ tools it needs. A denied tool is REFUSED by the host on every
 call; the plugin still registers the MPM tools for every agent, so the
 reviewer may see them listed and may not call them. The definition is
 only an isolation if it is
@@ -64,19 +63,16 @@ AGENT_NAME = "mpm-reviewer.md"
 FILE_MODE = 0o600
 DIR_MODE = 0o700
 
-# The host-side capabilities that must be CLOSED for a reviewer.
+# The capabilities that must be CLOSED for a reviewer.
 #
-# Every one of them runs in the HOST's process, outside the sandbox:
-# the sandbox confines code execution, and these are not code execution.
+# These are FRAMEWORK permissions, not an operating-system boundary:
+# MPM does not sandbox the reviewer, and this definition is the reviewer's
+# permission surface within whatever deployment the operator chose.
 REQUIRED_DENIED = (
     "shell",
-    "read",
     "write",
     "edit",
     "patch",
-    "grep",
-    "glob",
-    "list",
     "external_directory",
     "execute",
     "browser",
@@ -87,8 +83,8 @@ REQUIRED_DENIED = (
     "question",
 )
 
-# The ONE tool a reviewer may use.
-REQUIRED_ALLOWED = ("sandbox_exec",)
+# The tools a reviewer needs in order to READ the work it reviews.
+REQUIRED_ALLOWED = ("read", "grep", "glob", "list")
 
 
 class InstallRefused(SystemExit):
@@ -224,9 +220,7 @@ def check_policy(rules: list) -> list:
         return ["the definition declares no permission rules"]
 
     def allows(action: str) -> bool:
-        return any(
-            a == action and e == "allow" for (a, _r, e) in seen
-        )
+        return any(a == action and e == "allow" for (a, _r, e) in seen)
 
     def denies_all(action: str) -> bool:
         return any(a == action and r == "*" and e == "deny" for (a, r, e) in seen)
@@ -245,7 +239,7 @@ def check_policy(rules: list) -> list:
             problems.append(f"the definition ALLOWS `{action}` somewhere")
 
     for action in REQUIRED_ALLOWED:
-        if not any(a == action and r == "*" and e == "allow" for (a, r, e) in seen):
+        if not allows(action):
             problems.append(f"the definition does not allow `{action}`")
         if denies_all(action):
             problems.append(f"the definition denies `{action}` for every resource")
